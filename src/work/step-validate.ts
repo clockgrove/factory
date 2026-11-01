@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { Outcome, StepContext } from "../engine.js";
 import { runningBuild } from "../log.js";
 import { type SelectedMember, validationMembers } from "../media.js";
+import { packageBootstrap } from "../planning/facts.js";
 import {
   ACCEPTED_AT,
   acceptedInputs,
@@ -35,6 +36,7 @@ import {
 import { factoryCommit, VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import type { MergeResult } from "./merged.js";
+import { withRepros } from "./repros.js";
 import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { integrated, objectiveMerges } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -72,6 +74,8 @@ export async function validateStep(
   const commit = candidate(state, item.id);
   const blocks = acceptedInputs(state).shown.blocks;
   const media = validationMembers(plan, item, selection(state));
+  // Its confirmed refusals' repro commands run after its own (repros.ts).
+  const checked = withRepros(state, item);
   // The Objective's merges since this item started, which its candidate
   // doesn't hold: its commands run again on top of them (#2240). A native
   // stack's layer builds on the layer below and merges with its unit.
@@ -81,7 +85,7 @@ export async function validateStep(
   const key = validationKey({
     commit,
     plan: state.kept[ACCEPTED_AT] ?? null,
-    validation: item.validation,
+    validation: checked.validation,
     blocks,
     base: work.base,
     planBase: plan.base,
@@ -108,7 +112,7 @@ export async function validateStep(
     installStore: installStorePath(worktree),
     sharedInstallStore: sharedInstallStorePath(workDir),
     commit,
-    item,
+    item: checked,
     plan,
     blocks,
     base: work.base,
@@ -150,6 +154,7 @@ export async function validateStep(
         ...(result.artifacts ? { artifacts: result.artifacts } : {}),
         ...(result.regenerated ? { regenerated: result.regenerated } : {}),
         ...(result.formatted ? { formatted: result.formatted } : {}),
+        commandMs: ownCommandMs(item, result.results),
       };
       const integrated = earlier.length
         ? await integratedValidation({
@@ -223,6 +228,35 @@ export async function validateStep(
     default:
       return result;
   }
+}
+
+/**
+ * The item's own commands a mutant runs (review/mutants.ts): its
+ * validation without the exact install it may start with, which the
+ * review's checkout ran already, and without its repros.
+ */
+function ownCommands(item: WorkItem): string[] {
+  const commands = item.validation.map((check) => check.command);
+  return commands.length && packageBootstrap(commands[0]!) !== undefined
+    ? commands.slice(1)
+    : commands;
+}
+
+/** How long each of the item's own commands took in a passed run: what orders and bounds each mutant's. */
+function ownCommandMs(
+  item: WorkItem,
+  results: readonly {
+    command: string;
+    durationMs: number;
+    preparation?: true;
+  }[],
+): Record<string, number> {
+  const own = new Set(ownCommands(item));
+  return Object.fromEntries(
+    results
+      .filter((result) => !result.preparation && own.has(result.command))
+      .map((result) => [result.command, result.durationMs]),
+  );
 }
 
 /**

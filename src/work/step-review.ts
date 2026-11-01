@@ -1,11 +1,22 @@
 import { ACCEPT } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateRecord, InputRecord } from "../media.js";
+import { validationMembers } from "../media.js";
 import { ancestors } from "../planning/graph.js";
-import { ACCEPTED_AT, currentPlan } from "../planning/plan.js";
+import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
+import {
+  type PriorRefusals,
+  type ReviewLimits,
+  reviewNotes,
+  reviewResult,
+  ScratchUnavailable,
+  validationWorkspace,
+  type Workspace,
+} from "../review/item.js";
+import { mutantCommands } from "../review/mutants.js";
 import {
   type CriterionDecision,
   type DeliveryPosition,
@@ -13,7 +24,6 @@ import {
   decides,
   type RefusedCriterion,
   type ResultReview,
-  reviewResult,
 } from "../review/result.js";
 import {
   ALL,
@@ -21,16 +31,24 @@ import {
   type HoldOption,
   type ObjectiveState,
 } from "../state.js";
-import { hostGitExit, worktreePath } from "../worktree.js";
+import {
+  hostGitExit,
+  installStorePath,
+  sharedInstallStorePath,
+  worktreePath,
+} from "../worktree.js";
 import { fact, facts } from "./facts.js";
 import { mergeOf } from "./merged.js";
+import { addRepros, keptRepros } from "./repros.js";
 import { itemMemory, pinnedSources } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
 import { qaReviewStep } from "./step-qa.js";
-import { acceptedNotes, retained, secondLook, withKeep } from "./step-work.js";
+import { acceptedNotes, withKeep } from "./step-work.js";
 import {
   type BuildDeps,
   candidate,
+  commandTimeoutMs,
+  MINUTE,
   type PublishResult,
   type StackPlace,
   selection,
@@ -42,6 +60,14 @@ import {
 // ---------------------------------------------------------------------------
 // review
 
+/**
+ * A Work Item's result review (review/item.ts): in a workspace made as
+ * validation makes its checkout (`reviewWorkspace`), its mutation pass
+ * beside the reviewer, and, after a repair, the refusals the last review
+ * confirmed. A refusal keeps its repro for later validations
+ * (repros.ts) and repairs; a pass keeps its notes, for the PR body and
+ * final review.
+ */
 export async function reviewStep(
   item: WorkItem,
   context: StepContext,
@@ -78,13 +104,6 @@ export async function reviewStep(
     deps,
     work.base,
   );
-  const conversation = retained(
-    state,
-    deps,
-    `review-${item.id}`,
-    item,
-    secondLook(context) ? undefined : fact(state, "reviewSession", item.id),
-  );
   const dependencies = await dependencyResults(
     state,
     item,
@@ -93,47 +112,169 @@ export async function reviewStep(
     signal,
   );
   const candidates = reviewCandidates(state, plan.items, item, dependencies);
-  const review = await reviewResult({
-    planner: deps.planner,
-    plan,
-    item,
-    ...(conversation ? { conversation } : {}),
-    checkout: deps.config.checkout,
-    base: work.base,
-    commit: candidate(state, item.id),
-    validation: validated,
-    sources: await pinnedSources(state, deps, signal),
-    dir: `${worktree}.review`,
-    notes: JSON.stringify(work.notes),
-    ...(candidates.length ? { candidates } : {}),
-    inputs: workerInputs(state, [item.id]),
-    peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
-    ...(memory ? { memory } : {}),
-    ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
-    checkFailures: fact(state, "checkFailures", item.id) ?? [],
-    decisions: decided.decisions,
-    ...(decided.earlier ? { earlier: decided.earlier } : {}),
-    delivery: position,
-    dependencies,
-    signal,
-    log: context.log,
-  });
-  if (conversation?.kept !== undefined)
-    context.keep(facts({ reviewSession: conversation.kept }, item.id));
+  const prior = priorRefusals(state, item.id);
+  let review: ResultReview;
+  try {
+    review = await reviewResult({
+      planner: deps.planner,
+      plan,
+      item,
+      checkout: deps.config.checkout,
+      base: work.base,
+      commit: candidate(state, item.id),
+      validation: validated,
+      workspace: reviewWorkspace(item, context, deps, worktree),
+      mutation: {
+        commands: mutantCommands(item.validation, validated.commandMs),
+        ...(validated.commandMs && {
+          baselineMs: Object.values(validated.commandMs).reduce(
+            (sum, ms) => sum + ms,
+            0,
+          ),
+        }),
+        seed: item.id,
+      },
+      limits: reviewLimits(deps),
+      ...(prior ? { prior } : {}),
+      sources: await pinnedSources(state, deps, signal),
+      dir: `${worktree}.review`,
+      notes: JSON.stringify(work.notes),
+      ...(candidates.length ? { candidates } : {}),
+      inputs: workerInputs(state, [item.id]),
+      peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+      ...(memory ? { memory } : {}),
+      ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
+      checkFailures: fact(state, "checkFailures", item.id) ?? [],
+      decisions: decided.decisions,
+      ...(decided.earlier ? { earlier: decided.earlier } : {}),
+      delivery: position,
+      dependencies,
+      signal,
+      log: context.log,
+    });
+  } catch (error) {
+    if (error instanceof ScratchUnavailable)
+      return withKeep(error.outcome, decided.keep);
+    throw error;
+  }
   const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
-  return withKeep(
-    reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
-      repairOutcome(
-        item,
-        "review",
-        { kind: "review", tree: refusal.tree, refused: refusal.refused },
-        context.state,
-        place,
-        { keep: held(null) },
-      ),
+  const outcome = reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
+    repairOutcome(
+      item,
+      "review",
+      { kind: "review", tree: refusal.tree, refused: refusal.refused },
+      context.state,
+      place,
+      {
+        keep: {
+          ...held(null),
+          ...facts(
+            {
+              repros: addRepros(
+                state,
+                item.id,
+                refusal.refused.flatMap(({ criterion, detail, repro }) =>
+                  repro
+                    ? [{ criterion, tree: refusal.tree, detail, repro }]
+                    : [],
+                ),
+              ),
+            },
+            item.id,
+          ),
+        },
+      },
     ),
+  );
+  const notes = reviewNotes(review);
+  return withKeep(
+    outcome.kind === "done" && notes.length
+      ? { ...outcome, result: { ...(outcome.result as object), notes } }
+      : outcome,
     decided.keep,
   );
+}
+
+/** A Work Item's review step result: the tree it passed, and its notes. */
+export interface ReviewResult {
+  tree: string;
+  /** Each met criterion's non-blocking suggestion (review/item.ts `reviewNotes`). */
+  notes?: { criterion: string; note: string }[];
+}
+
+/**
+ * The re-review packet's refusals: those the item's latest refusing review
+ * confirmed, on the tree it refused (absent: none kept).
+ */
+function priorRefusals(
+  state: ObjectiveState,
+  itemId: string,
+): PriorRefusals | undefined {
+  const kept = keptRepros(state, itemId);
+  const tree = kept.at(-1)?.tree;
+  if (!tree) return undefined;
+  return {
+    tree,
+    refused: kept
+      .filter((entry) => entry.tree === tree)
+      .map(({ criterion, detail, repro }) => ({ criterion, detail, repro })),
+  };
+}
+
+/**
+ * The item's review workspace: a fresh validation checkout of the reviewed
+ * commit beside its worktree (review/item.ts `validationWorkspace`), set
+ * up as its validation is, on the item's warm package stores.
+ */
+function reviewWorkspace(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+  worktree: string,
+): Workspace {
+  const { state, signal } = context;
+  const { config } = deps;
+  const plan = currentPlan(state)!;
+  const work = state.done[stepKey(item.id, "work")] as WorkResult;
+  return validationWorkspace(
+    {
+      checkout: config.checkout,
+      repository: config.repository,
+      installStore: installStorePath(worktree),
+      sharedInstallStore: sharedInstallStorePath(deps.workDir(state.issue)),
+      commit: candidate(state, item.id),
+      item,
+      plan,
+      blocks: acceptedInputs(state).shown.blocks,
+      base: work.base,
+      ...(work.base !== plan.base ? { predecessor: work.base } : {}),
+      media: validationMembers(plan, item, selection(state)),
+      sandbox: config.sandbox,
+      commandTimeoutMs: commandTimeoutMs(deps),
+      signal,
+      log: context.log,
+      runFile: context.runFile,
+    },
+    `${worktree}.scratch`,
+  );
+}
+
+/** The installation's review bounds, in ms. */
+function reviewLimits(deps: BuildDeps): ReviewLimits {
+  const { review } = deps.config;
+  return {
+    mutants: review.mutants,
+    mutationMs: review.mutationSeconds * 1000,
+    measuredMutants: review.measuredMutants,
+    commands: review.commands,
+    commandBudgetMs: review.commandSeconds * 1000,
+    proofs: review.proofs,
+    proofCommands: review.proofCommands,
+    proofBudgetMs: review.proofSeconds * 1000,
+    commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
+    prepareMs: commandTimeoutMs(deps) + 5 * MINUTE,
+    network: deps.config.sandbox.network,
+  };
 }
 
 /** The head an item's PR delivered: its CI step's (GitHub may have updated the branch), else its published one. */

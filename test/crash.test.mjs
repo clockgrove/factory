@@ -361,12 +361,15 @@ process.exit(3);`,
     });
 
 // A validation's groups of commands (validate.ts `inGroups`) at their
-// checkouts' crash points: the next validation of the same directory
-// removes what the crashed one left, runs its groups again and passes,
-// leaving no checkout behind.
+// checkouts' crash points, and its `use` of the passed checkout and a copy
+// of it (the mutation pass, a review's commands): the next validation of
+// the same directory removes what the crashed one left, runs its groups
+// and its `use` again and passes, leaving no checkout behind.
 for (const point of [
   "validation:group-checkout:before",
   "validation:group-checkout:after",
+  "validation:use:before",
+  "validation:copy:after",
 ]) {
   test(`crash at ${point}, the next validation passes and leaves no checkout`, {
     skip: sandboxAvailable().available
@@ -424,7 +427,7 @@ for (const point of [
         `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
 import { validateTree } from ${JSON.stringify(dist("validate.js"))};
 const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-1", CAPTURE_OFF, []);
-await validateTree({ ...JSON.parse(process.env.INPUT), signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:validate#1." + kind) });
+await validateTree({ ...JSON.parse(process.env.INPUT), signal: AbortSignal.timeout(60_000), log: () => {}, runFile: (kind) => log.runFile(1, "item:a:validate#1." + kind), use: async (passed) => { await passed.copy("one"); } });
 process.exit(3);`,
       ],
       {
@@ -450,8 +453,12 @@ process.exit(3);`,
       `validation set to crash at ${point}`,
     );
     assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+    // What the crash left for the next validation to remove.
     assert.ok(
-      existsSync(`${checkout}.validation.groups`) || point.endsWith(":before"),
+      point === "validation:copy:after"
+        ? existsSync(`${checkout}.validation.copies/one`)
+        : existsSync(`${checkout}.validation.groups`) ||
+            point.endsWith(":before"),
     );
 
     const log = new RunLog(
@@ -461,16 +468,162 @@ process.exit(3);`,
       [],
     );
     const events = [];
+    let used;
+    let copied;
     const result = await validateTree({
       ...input,
       signal: AbortSignal.timeout(60_000),
       log: (event) => events.push(event),
       runFile: (kind) => log.runFile(1, `item:a:validate#2.${kind}`),
+      use: async (passed) => {
+        used = await passed.run("test -f a && test -f b", 10_000);
+        const copy = await passed.copy("one");
+        copied = await copy.run(
+          "test -f a && test -f b && git status --porcelain",
+          10_000,
+        );
+      },
     });
     assert.equal(result.kind, "passed", result.detail);
     assert.ok(events.some((event) => event.event === "validation-groups"));
+    assert.equal(used?.exitCode, 0, used?.output);
+    // A clean registered worktree of the same commit.
+    assert.equal(copied?.exitCode, 0, copied?.output);
+    assert.equal(copied.output.trim(), "");
     assert.equal(existsSync(`${checkout}.validation`), false);
     assert.equal(existsSync(`${checkout}.validation.groups`), false);
+    assert.equal(existsSync(`${checkout}.validation.copies`), false);
+    assert.equal(git("worktree", "list").split("\n").length, 1);
+  });
+}
+
+// A result review's scratch checkouts (review/item.ts): killed when the
+// workspace opens, when a copy for the reviewer's or a proof's commands is
+// made, or between a repro's run and the next, the next review of the
+// same candidate replaces what the crashed one left, confirms the refusal
+// again and leaves no checkout.
+for (const point of [
+  "review:scratch:open",
+  "review:scratch:copy",
+  "review:repro:before",
+  "review:repro:after",
+]) {
+  test(`crash at ${point}, the next review confirms the refusal and leaves no checkout`, {
+    skip: sandboxAvailable().available
+      ? false
+      : "needs the command sandbox (bubblewrap)",
+  }, async () => {
+    const checkout = tempDir("factory-review-crash-");
+    const git = (...args) =>
+      spawnSync(
+        "git",
+        [
+          "-C",
+          checkout,
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.com",
+          ...args,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+    git("init", "--quiet");
+    writeFileSync(join(checkout, "a"), "a\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "base");
+    const base = git("rev-parse", "HEAD");
+    writeFileSync(join(checkout, "b"), "b\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "candidate");
+    const head = git("rev-parse", "HEAD");
+    const inst = installation();
+    configured(inst, "http://127.0.0.1:1");
+    process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+    const { sandbox } = loadConfig(REPO);
+    delete process.env.FACTORY_CONFIG;
+    const work = item("a", {
+      acceptance: ["b says c."],
+      validation: [{ command: "test -f b" }],
+    });
+    const input = {
+      checkout,
+      repository: REPO,
+      commit: head,
+      item: work,
+      plan: plan([work], { base }),
+      blocks: [],
+      sandbox,
+      commandTimeoutMs: 60_000,
+    };
+    const review = {
+      base,
+      commit: head,
+      tree: git("rev-parse", "HEAD^{tree}"),
+      dir: `${checkout}.review`,
+    };
+    const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
+    // The reviewer runs a command and suspects b; the proof runs its repro, which fails.
+    const script = `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
+import { reviewCandidate, validationWorkspace } from ${JSON.stringify(dist("review/item.js"))};
+export async function run(input, review, attempt) {
+  const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-" + attempt, CAPTURE_OFF, []);
+  const signal = AbortSignal.timeout(60_000);
+  const workspace = validationWorkspace({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, input.checkout + ".scratch");
+  return reviewCandidate({
+    planner: { async answer(call) { await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return call.schema.properties.findings ? { value: { findings: [{ criterionIndex: 0, verdict: "pass", detail: "b says b", evidenceIndices: [], structural: "", scenarios: [{ case: "b", expected: "c", verdict: "suspect", basis: "b:1 says b" }, { case: "a", expected: "a", verdict: "holds", basis: "a.txt:1" }, { case: "c", expected: "c", verdict: "holds", basis: "c.txt:1" }] }] } } : { value: { outcome: { kind: "reproduced", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } },
+    checkout: input.checkout, base: review.base, commit: review.commit, criteria: input.item.acceptance,
+    validation: { tree: review.tree, commands: ["test -f b"] }, workspace, itemId: "a",
+    mutation: { commands: ["test -f b"], seed: "a" },
+    limits: { mutants: 20, mutationMs: 10_000, measuredMutants: 10, commands: 20, commandBudgetMs: 10_000, commandMs: 10_000, prepareMs: 60_000, proofs: 10, proofCommands: 8, proofBudgetMs: 10_000 },
+    dir: review.dir, signal, log: () => {},
+  });
+}`;
+    const module = join(tempDir("factory-review-crash-script-"), "run.mjs");
+    writeFileSync(module, script);
+    const child = spawnNode(
+      [
+        "--input-type=module",
+        "-e",
+        `const { run } = await import(${JSON.stringify(new URL(`file://${module}`).href)});
+await run(JSON.parse(process.env.INPUT), JSON.parse(process.env.REVIEW), 1);
+process.exit(3);`,
+      ],
+      {
+        env: {
+          ...process.env,
+          FACTORY_CRASH_AT: point,
+          INPUT: JSON.stringify(input),
+          REVIEW: JSON.stringify(review),
+          LOGS: inst.logs,
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    children.add(child);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const exit = new Promise((resolve) =>
+      child.on("exit", (code, signal) => resolve({ code, signal, stderr })),
+    );
+    const death = await exited(
+      { child, exit, stderr: () => stderr },
+      `review set to crash at ${point}`,
+    );
+    assert.equal(death.signal, "SIGKILL", `${point}: ${death.stderr}`);
+
+    process.env.LOGS = inst.logs;
+    const { run } = await import(new URL(`file://${module}`).href);
+    const outcome = await run(input, review, 2);
+    delete process.env.LOGS;
+    assert.equal(outcome.kind, "refused");
+    assert.equal(outcome.refused[0].repro.actual, "says b");
+    for (const left of [".scratch", ".scratch.copies"])
+      assert.equal(existsSync(`${checkout}${left}`), false, left);
+    // The evidence directory keeps no root.
+    assert.deepEqual(readdirSync(review.dir), []);
     assert.equal(git("worktree", "list").split("\n").length, 1);
   });
 }

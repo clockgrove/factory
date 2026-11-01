@@ -33,7 +33,7 @@ import type { Draft, Plan, Retirement } from "./planning/types.js";
 import { type StatusRecord, statusRecord } from "./progress.js";
 import { type QueueItem, readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
-import { type CriterionDecision, resultCriteria } from "./review/result.js";
+import type { CriterionDecision } from "./review/result.js";
 import {
   deadlineAt,
   type Frozen,
@@ -441,7 +441,7 @@ function restore(state: ObjectiveState, plan: Plan, rebuilt: Rebuilt): void {
 /**
  * The decisions and retirements `plan` can take, and what it can't, named
  * (`dropped`): a criterion decision only for a Work Item of the plan and a
- * criterion its review judges (review/result.ts `resultCriteria`), or for
+ * criterion its review judges (the item's own acceptance), or for
  * final review and a criterion of the plan's coverage; a retirement only
  * as final validation would take it now, replayed oldest first
  * (work/retire.ts `commandRefusal`). The record they came from can be
@@ -460,8 +460,7 @@ function restorable(
       ? plan.items.find((each) => each.id === entry.itemId)
       : undefined;
     const fits = entry.itemId
-      ? item !== undefined &&
-        resultCriteria(plan, item).includes(entry.criterion)
+      ? item !== undefined && item.acceptance.includes(entry.criterion)
       : judged.has(entry.criterion);
     if (!fits)
       dropped.push(

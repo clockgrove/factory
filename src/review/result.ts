@@ -1,22 +1,24 @@
 /**
- * Independent result review of one Work Item: a reviewer reads the exact
- * candidate tree and judges every criterion. The reviewer's working
- * directory is a private read-only evidence root with `candidate/` (the
- * exported result), `base/` (the base copy of each changed path),
+ * The independent review run that result and final review share: a reviewer
+ * reads the exact candidate tree and judges every criterion. The reviewer's
+ * working directory is a private read-only evidence root with `candidate/`
+ * (the exported result), `base/` (the base copy of each changed path),
  * `changes/` (each changed path's complete patch), `changes/INDEX.json`
  * and, when validation captured review artifacts, `artifacts/`; for an
  * item with candidate media sets, a controller candidate receipt and
  * `media-sets/` (media.ts candidateReceipts); when peers' handoff notes are
  * supplied, `peer-notes.json` and the cited bytes under `peer-sources/`.
  * The prompt carries the criteria and indexed evidence rows; the reviewer
- * cites rows by index. A refusal lists every refused criterion at once, for
- * repair (repair.ts); a needs-human verdict becomes a question for the
- * operator. An invalid answer is asked again once with the error; still
- * invalid, the criteria it left undecided go to the operator. A needs-human
- * finding that names files the evidence root holds, or cites a receipt
- * whose review copies it holds, is first sent back to the reviewer once,
- * naming them (`heldEvidence`, #2124). Provider
- * failures escape as `PlannerError` to the engine (workflow.ts `errorOutcome`).
+ * cites rows by index (`gatherEvidence`, which a Work Item's result review,
+ * review/item.ts, builds on too). Here, for final review and read-only QA:
+ * a refusal lists every refused criterion at once, for repair (repair.ts);
+ * a needs-human verdict becomes a question for the operator. An invalid
+ * answer is asked again once with the error; still invalid, the criteria it
+ * left undecided go to the operator. A needs-human finding that names files
+ * the evidence root holds, or cites a receipt whose review copies it holds,
+ * is first sent back to the reviewer once, naming them (`heldEvidence`,
+ * #2124). Provider failures escape as `PlannerError` to the engine
+ * (workflow.ts `errorOutcome`).
  */
 
 import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -31,7 +33,7 @@ import {
   inputReceipts,
 } from "../media.js";
 import { validPath } from "../objective.js";
-import { coverageCriterion, isRecord } from "../planning/graph.js";
+import { isRecord } from "../planning/graph.js";
 import { operatorAnswers } from "../planning/plan.js";
 import { TREE_READ_GUIDANCE } from "../planning/prompts.js";
 import {
@@ -39,7 +41,6 @@ import {
   REPOSITORY_DIRECTORY,
   repositoryView,
 } from "../planning/repository.js";
-import { DESIGN_CHECKLIST, ENGINEERING_STANDARD } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
 import type { Conversation, Session } from "../providers/session.js";
@@ -53,74 +54,6 @@ import {
   reviewArtifactEvidence,
 } from "./artifacts.js";
 import { unreachableModules } from "./orphans.js";
-
-/**
- * The criteria a result review judges: the item's own acceptance, then each
- * Objective criterion or source exit item the plan says this item's review
- * proves. A single-item plan's review also judges what final review proves.
- * The worker gets this same list, numbered the same (work/prompt.ts
- * `workItemContract`), so the indices match its notes, and an obligation
- * its acceptance only paraphrases reaches it word for word (#2197). One a
- * `result-command` proves is judged too: its command passing proves only
- * what the tests it runs assert, and the item may have written those tests
- * itself, so a stub they pass is caught here, not at final review (#2203).
- */
-export function resultCriteria(
-  plan: Pick<Plan, "items" | "coverage">,
-  item: Pick<WorkItem, "id" | "acceptance">,
-): string[] {
-  const whole = plan.items.length === 1 && plan.items[0]!.id === item.id;
-  const owned = plan.coverage
-    .filter(
-      (entry) =>
-        entry.itemId === item.id &&
-        (entry.proof.kind === "result-semantic" ||
-          entry.proof.kind === "result-command" ||
-          entry.proof.kind === "integrated-semantic" ||
-          (whole && entry.proof.kind === "final-review")),
-    )
-    .map(coverageCriterion)
-    .filter((criterion) => !item.acceptance.includes(criterion));
-  return [...item.acceptance, ...new Set(owned)];
-}
-
-/** A criterion of `resultCriteria` the plan proves by one of the item's validation commands. */
-export interface CommandProof {
-  criterionIndex: number;
-  /** The command's index in the item's validation, and in the validation passes row. */
-  validationIndex: number;
-  command: string;
-}
-
-/**
- * Each criterion of `resultCriteria` a `result-command` proof covers, with
- * the command it names, in criterion order: the review is told that the
- * command's pass is required evidence, not proof of the text (#2203).
- */
-export function commandProofs(
-  plan: Pick<Plan, "items" | "coverage">,
-  item: Pick<WorkItem, "id" | "acceptance" | "validation">,
-): CommandProof[] {
-  const criteria = resultCriteria(plan, item);
-  const proofs = new Map<string, CommandProof>();
-  for (const entry of plan.coverage) {
-    const { proof } = entry;
-    if (entry.itemId !== item.id || proof.kind !== "result-command") continue;
-    const criterionIndex = criteria.indexOf(coverageCriterion(entry));
-    const command = item.validation[proof.validationIndex]?.command;
-    if (criterionIndex < 0 || command === undefined) continue;
-    proofs.set(`${criterionIndex}:${proof.validationIndex}`, {
-      criterionIndex,
-      validationIndex: proof.validationIndex,
-      command,
-    });
-  }
-  return [...proofs.values()].sort(
-    (a, b) =>
-      a.criterionIndex - b.criterionIndex ||
-      a.validationIndex - b.validationIndex,
-  );
-}
 
 /** The commands Factory's validation ran, in order, each passing on `tree`. */
 export interface PassedValidation {
@@ -201,9 +134,22 @@ export type EvidenceCitation = Omit<ResultEvidence, "content" | "heading">;
 export interface ReviewedCriterion {
   criterionIndex: number;
   criterion: string;
-  verdict: "pass" | "human-accept";
+  /** `note`: met, with the reviewer's non-blocking suggestion in `detail` (review/item.ts). */
+  verdict: "pass" | "human-accept" | "note";
   detail: string;
   evidence: EvidenceCitation[];
+}
+
+/**
+ * How a Work Item's result review shows a refused criterion fails
+ * (review/item.ts): the input, the output expected and the actual one, and
+ * a command that exits non-zero on the candidate because of it.
+ */
+export interface Repro {
+  input: string;
+  expected: string;
+  actual: string;
+  command: string;
 }
 
 export interface RefusedCriterion {
@@ -215,6 +161,8 @@ export interface RefusedCriterion {
   /** The reviewer's question, when it asked one beside the refusal. */
   question: string;
   evidence: EvidenceCitation[];
+  /** A Work Item review's refusal: the repro its refusal check confirmed. */
+  repro?: Repro;
 }
 
 export interface ReviewQuestion {
@@ -343,35 +291,6 @@ const PATCH_FILE_BYTES = 32 * 1024 * 1024;
 const BASE_FILE_BYTES = 1_048_576;
 const BASE_TOTAL_BYTES = 67_108_864;
 
-/** Review one result. See the module comment for the outcomes. */
-export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
-  const { item } = input;
-  const criteria = resultCriteria(input.plan, item);
-  return runReview({
-    ...input,
-    itemId: input.item.id,
-    phase: "result-review",
-    criteria,
-    unreachableScope: item.ownedPaths,
-    instructions: resultInstructions(
-      item,
-      criteria,
-      commandProofs(input.plan, item),
-    ),
-    design: [
-      {
-        origin: "controller",
-        path: "Accepted Work Item design",
-        content: JSON.stringify(workItemDesign(item)),
-        complete: true,
-      },
-      ...deliveryRows(input),
-      ...checkFailureRows(input.checkFailures ?? []),
-    ],
-    artifacts: [{ artifacts: input.artifacts ?? [] }],
-  });
-}
-
 /**
  * The CI check failures an item was repaired for, as a controller
  * row: what such a check demands is the repository's enforced convention,
@@ -397,7 +316,7 @@ export function checkFailureRows(
 
 /**
  * Review a read-only QA item's check of the integrated result: its own
- * acceptance and the obligations its review proves, on the commit it
+ * acceptance (final review judges the Objective's criteria), on the commit it
  * validated, over this Objective's merges, with the named CI checks it
  * observed.
  */
@@ -412,7 +331,7 @@ export function reviewQa(
     ...input,
     itemId: input.item.id,
     phase: "result-review",
-    criteria: resultCriteria(input.plan, input.item),
+    criteria: input.item.acceptance,
     instructions: QA_INSTRUCTIONS,
     design: [
       {
@@ -454,7 +373,9 @@ export function qaObservationRow(observation: QaObservation): ResultEvidence {
 }
 
 /** The item's delivery position and its dependencies' completed results. */
-function deliveryRows(input: ResultReviewInput): ResultEvidence[] {
+export function deliveryRows(
+  input: Pick<ResultReviewInput, "delivery" | "dependencies" | "item" | "base">,
+): ResultEvidence[] {
   const { delivery, dependencies } = input;
   return [
     ...(delivery
@@ -492,114 +413,178 @@ function deliveryRows(input: ResultReviewInput): ResultEvidence[] {
   ];
 }
 
+/** What `gatherEvidence` reads: a review's candidate, its context and its evidence directory. */
+export type EvidenceInput = Pick<
+  ResultReviewInput,
+  | "checkout"
+  | "base"
+  | "commit"
+  | "validation"
+  | "sources"
+  | "notes"
+  | "peerNotes"
+  | "memory"
+  | "candidates"
+  | "inputs"
+  | "decisions"
+  | "signal"
+  | "log"
+> & {
+  /** The accepted plan, whose operator planning decisions are evidence. */
+  plan?: Pick<Plan, "decisions">;
+  phase: "result-review" | "objective-review";
+  /** The accepted Work Item design rows, after the pinned sources. */
+  design: readonly ResultEvidence[];
+  artifacts: readonly ReviewArtifactGroup[];
+  /** See materialize. */
+  merges?: readonly string[];
+  /** Owned-path scopes whose files the change left unreachable are evidence (orphans.ts). */
+  unreachableScope?: readonly string[];
+  /** Rows a review adds after the validation row (review/item.ts: its mutation pass and re-review packet). */
+  after?: readonly ResultEvidence[];
+};
+
+/** A review's evidence: the rows, the images and which kinds were supplied. */
+export interface GatheredEvidence {
+  evidence: ResultEvidence[];
+  images: string[];
+  /** The controller candidate and input receipts, which a send-back reads. */
+  receipts: ResultEvidence[];
+  /** The evidence kinds supplied, each with its own guidance. */
+  kinds: {
+    unreachable: boolean;
+    artifacts: boolean;
+    candidates: boolean;
+    inputs: boolean;
+    knowledge: boolean;
+    memory: boolean;
+  };
+}
+
 /**
- * One independent review, shared by the result and the final review: build
- * the evidence root and indexed evidence, ask the reviewer, decode and judge
- * the answer, ask again once with the error when it is invalid, and log the
- * outcome. The evidence root is removed when the review ends.
+ * Build the evidence root under `root` (candidate/, base/, changes/ and the
+ * supplied media, inputs, captures and peer sources) and the indexed rows
+ * that describe it: the pinned sources, the design, the decisions, the
+ * change index, the validation and the rest, in a fixed order, so reviews
+ * of one item's candidates share a provider-cache prefix.
  */
-export async function runReview(
-  run: Pick<
-    ResultReviewInput,
-    | "planner"
-    | "plan"
-    | "checkout"
-    | "base"
-    | "commit"
-    | "validation"
-    | "sources"
-    | "dir"
-    | "notes"
-    | "peerNotes"
-    | "memory"
-    | "candidates"
-    | "inputs"
-    | "decisions"
-    | "earlier"
-    | "conversation"
-    | "signal"
-    | "log"
-  > & {
-    /** The Work Item reviewed; absent: final review. Decisions of this scope settle criteria. */
-    itemId?: string;
-    phase: "result-review" | "objective-review";
-    criteria: readonly string[];
-    /** The fixed instructions; guidance for supplied evidence kinds follows. */
-    instructions: readonly string[];
-    /** The accepted Work Item design rows, after the pinned sources. */
-    design: readonly ResultEvidence[];
-    artifacts: readonly ReviewArtifactGroup[];
-    /** See materialize. */
-    merges?: readonly string[];
-    /** Owned-path scopes whose files the change left unreachable are evidence (orphans.ts). */
-    unreachableScope?: readonly string[];
-  },
-): Promise<ResultReview> {
-  const { criteria, phase } = run;
+export async function gatherEvidence(
+  run: EvidenceInput,
+  root: string,
+): Promise<GatheredEvidence> {
   const tree = run.validation.tree;
+  const { changes, rows } = await materialize(run, root);
+  const captured = await reviewArtifactEvidence(run.artifacts, tree, root);
+  const receipts = await candidateRows(root, run.candidates);
+  const given = await inputRows(root, run.inputs);
+  const knowledge = await knowledgeRows(run, root);
+  const unreachable = await unreachableRows(run, changes);
+  const evidence: ResultEvidence[] = [
+    ...sourceRows(run.sources),
+    ...run.design,
+    ...decisionRows(run.plan, run.decisions),
+    changeIndexRow(run.base, run.commit, tree, changes, run.merges),
+    ...unreachable,
+    validationRow(run.validation),
+    ...(run.after ?? []),
+    ...(run.notes
+      ? [
+          {
+            origin: "worker" as const,
+            path: "Worker handoff and verification notes",
+            content: run.notes,
+            complete: true,
+          },
+        ]
+      : []),
+    ...knowledge,
+    // Bounded and advisory: incomplete, so it never supports a pass,
+    // and a finding needs another row besides it (decodeFinding).
+    ...(run.memory
+      ? [
+          {
+            origin: "memory" as const,
+            path: "Repository memory (advisory)",
+            content: run.memory,
+            complete: false,
+          },
+        ]
+      : []),
+    ...given,
+    ...receipts,
+    ...captured.rows,
+    ...rows,
+  ];
+  return {
+    evidence,
+    images: captured.images,
+    receipts: [...receipts, ...given],
+    kinds: {
+      unreachable: unreachable.length > 0,
+      artifacts: captured.rows.length > 0,
+      candidates: receipts.length > 0,
+      inputs: given.length > 0,
+      knowledge: knowledge.length > 0,
+      memory: Boolean(run.memory),
+    },
+  };
+}
+
+/**
+ * What settles a criterion of a review of `tree` without the reviewer, for
+ * the Work Item `itemId` (absent: final review): the operator's latest
+ * decision of it on this tree, else the verdict `earlier` reached on it.
+ */
+export function settledBy(
+  run: Pick<ResultReviewInput, "decisions" | "earlier">,
+  itemId: string | undefined,
+  tree: string,
+): (criterion: string) => Settled | undefined {
   const decided = (criterion: string) =>
     [...(run.decisions ?? [])]
       .reverse()
       .find(
-        (entry) =>
-          entry.itemId === run.itemId && decides(entry, criterion, tree),
+        (entry) => entry.itemId === itemId && decides(entry, criterion, tree),
       );
   const prior = earlierVerdicts(run.earlier, tree);
-  const settled = (criterion: string) =>
-    decided(criterion) ?? prior.get(criterion);
+  return (criterion) => decided(criterion) ?? prior.get(criterion);
+}
+
+/**
+ * One independent review, for final review and read-only QA: build the
+ * evidence root and indexed evidence, ask the reviewer, decode and judge
+ * the answer, ask again once with the error when it is invalid, and log the
+ * outcome. The evidence root is removed when the review ends.
+ */
+export async function runReview(
+  run: EvidenceInput &
+    Pick<ResultReviewInput, "planner" | "dir" | "earlier" | "conversation"> & {
+      /** The Work Item reviewed; absent: final review. Decisions of this scope settle criteria. */
+      itemId?: string;
+      criteria: readonly string[];
+      /** The fixed instructions; guidance for supplied evidence kinds follows. */
+      instructions: readonly string[];
+    },
+): Promise<ResultReview> {
+  const { criteria, phase } = run;
+  const tree = run.validation.tree;
+  const settled = settledBy(run, run.itemId, tree);
   if (criteria.every(settled))
     return judge(criteria, undefined, [], settled, tree, false);
   const root = await evidenceRoot(run.dir, tree);
   try {
-    const { changes, rows } = await materialize(run, root);
-    const captured = await reviewArtifactEvidence(run.artifacts, tree, root);
-    const receipts = await candidateRows(root, run.candidates);
-    const given = await inputRows(root, run.inputs);
-    const knowledge = await knowledgeRows(run, root);
-    const unreachable = await unreachableRows(run, changes);
-    const evidence: ResultEvidence[] = [
-      ...sourceRows(run.sources),
-      ...run.design,
-      ...decisionRows(run.plan, run.decisions),
-      changeIndexRow(run.base, run.commit, tree, changes, run.merges),
-      ...unreachable,
-      validationRow(run.validation),
-      ...(run.notes
-        ? [
-            {
-              origin: "worker" as const,
-              path: "Worker handoff and verification notes",
-              content: run.notes,
-              complete: true,
-            },
-          ]
-        : []),
-      ...knowledge,
-      // Bounded and advisory: incomplete, so it never supports a pass,
-      // and a finding needs another row besides it (decodeFinding).
-      ...(run.memory
-        ? [
-            {
-              origin: "memory" as const,
-              path: "Repository memory (advisory)",
-              content: run.memory,
-              complete: false,
-            },
-          ]
-        : []),
-      ...given,
-      ...receipts,
-      ...captured.rows,
-      ...rows,
-    ];
+    const { evidence, images, receipts, kinds } = await gatherEvidence(
+      run,
+      root,
+    );
     const instructions = [
       ...run.instructions,
-      ...(unreachable.length ? [UNREACHABLE_GUIDANCE] : []),
-      ...(captured.rows.length ? [REVIEW_ARTIFACT_GUIDANCE] : []),
-      ...(receipts.length ? [CANDIDATE_GUIDANCE] : []),
-      ...(given.length ? [INPUT_GUIDANCE] : []),
-      ...(knowledge.length ? [KNOWLEDGE_GUIDANCE] : []),
-      ...(run.memory ? [MEMORY_GUIDANCE] : []),
+      ...(kinds.unreachable ? [UNREACHABLE_GUIDANCE] : []),
+      ...(kinds.artifacts ? [REVIEW_ARTIFACT_GUIDANCE] : []),
+      ...(kinds.candidates ? [CANDIDATE_GUIDANCE] : []),
+      ...(kinds.inputs ? [INPUT_GUIDANCE] : []),
+      ...(kinds.knowledge ? [KNOWLEDGE_GUIDANCE] : []),
+      ...(kinds.memory ? [MEMORY_GUIDANCE] : []),
     ].join("\n");
     const kept = run.conversation;
     const ask = async (followUp?: string) => {
@@ -621,7 +606,7 @@ export async function runReview(
         prompt,
         schema: resultReviewSchema(evidence),
         readDir: root,
-        ...(captured.images.length ? { images: captured.images } : {}),
+        ...(images.length ? { images } : {}),
         ...(kept
           ? {
               conversation: {
@@ -662,10 +647,15 @@ export async function runReview(
       review.kind === "needs-human" && !decoded.invalid
         ? await heldEvidence(
             root,
-            criteria,
-            decoded,
-            settled,
-            [...receipts, ...given],
+            criteria.flatMap((criterion, criterionIndex) => {
+              const finding = decoded.invalid
+                ? undefined
+                : decoded.findings[criterionIndex];
+              return finding?.verdict === "needs-human" && !settled(criterion)
+                ? [{ criterionIndex, criterion, ...finding }]
+                : [];
+            }),
+            receipts,
             evidence,
           )
         : [];
@@ -675,7 +665,9 @@ export async function runReview(
         criteria: asked.map((entry) => entry.criterionIndex),
         paths: asked.reduce((sum, entry) => sum + entry.paths.length, 0),
       });
-      const again = await ask(sendBackNote(asked, receipts.length > 0));
+      const again = await ask(
+        sendBackNote(asked, kinds.candidates, "needs-human"),
+      );
       decoded = sentBack(decoded, again, asked);
       review = judge(criteria, decoded, evidence, settled, tree, final);
     }
@@ -710,7 +702,7 @@ type Decoded =
  * What settles a criterion without the reviewer: the operator's decision,
  * or the verdict an earlier review of the same tree reached.
  */
-type Settled =
+export type Settled =
   | CriterionDecision
   | { earlier: ReviewedCriterion | RefusedCriterion | ReviewQuestion };
 
@@ -722,7 +714,7 @@ function earlierVerdicts(
   const verdicts = new Map<string, Settled>();
   if (earlier?.tree !== tree) return verdicts;
   for (const entry of [
-    ...earlier.verdicts.filter((verdict) => verdict.verdict === "pass"),
+    ...earlier.verdicts.filter((verdict) => verdict.verdict !== "human-accept"),
     ...(earlier.kind === "refused"
       ? earlier.refused.filter((refusal) => refusal.source === "model")
       : []),
@@ -1069,7 +1061,7 @@ interface ChangeEntry {
  * A fresh root for this tree. Roots a crash left behind are removed, so the
  * directory holds at most one.
  */
-async function evidenceRoot(dir: string, tree: string): Promise<string> {
+export async function evidenceRoot(dir: string, tree: string): Promise<string> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   for (const entry of await readdir(dir))
     if (entry.startsWith("review-"))
@@ -1374,10 +1366,10 @@ export function workItemDesign(item: WorkItem): Record<string, unknown> {
 
 /** The operator's planning decisions, when there are any. */
 function decisionRows(
-  plan: Plan,
+  plan: Pick<Plan, "decisions"> | undefined,
   criteria: readonly CriterionDecision[] = [],
 ): ResultEvidence[] {
-  const planning = operatorAnswers(plan.decisions);
+  const planning = plan ? operatorAnswers(plan.decisions) : [];
   return [
     ...(planning.length
       ? [
@@ -1669,54 +1661,10 @@ const MEMORY_GUIDANCE =
 const INPUT_GUIDANCE =
   "Worker inputs: the Controller input receipt lists every file Factory gave the worker read-only (Objective source assets, including private local files and GitHub attachments, and dependencies' selected media), each with the sha256 and size Factory recorded when it fetched it. Where an input has a reviewCopy, inputs/ holds Factory's digest-checked copy of those exact bytes: judge a criterion about using, quoting or matching an input against that copy and the receipt. Never ask the operator to supply or confirm an input's bytes when the receipt has them.";
 
-/**
- * The result-review instructions, limited to the evidence result review gets
- * (no receipts, bindings or historical references). Instructions
- * and evidence that don't depend on the candidate come first, so reviews of
- * one item's candidates share a provider-cache prefix.
- */
-function resultInstructions(
-  item: WorkItem,
-  criteria: readonly string[],
-  commands: readonly CommandProof[],
-): string[] {
-  const itemCriteria = item.acceptance.length;
-  const proven = commands
-    .map(
-      ({ criterionIndex, validationIndex, command }) =>
-        `criterion ${criterionIndex} by validation command ${validationIndex} (${JSON.stringify(command)})`,
-    )
-    .join(", ");
-  return [
-    REVIEW_GUIDANCE.judge,
-    "The worker's handoff and verification notes come from this unaccepted candidate: they are advisory investigation leads, not semantic claims, requirements, validation or acceptance. Check relevant claims against complete current evidence. A verification note is the implementer's claimed map from one criterionIndex's sub-clauses to candidate file:line locations: use it as a starting index, verify each cited location yourself, and judge the criterion from candidate evidence. A wrong, incomplete or absent map proves nothing either way, and a cited source unavailable in the candidate is a lead to investigate, not proof of absence.",
-    REVIEW_GUIDANCE.asyncWork,
-    ...(itemCriteria < criteria.length
-      ? [
-          `Criteria ${itemCriteria} to ${criteria.length - 1} are the Objective's acceptance criteria and pinned-source exit items this Work Item's result proves, quoted verbatim; the criteria before them are its own acceptance. Final review judges these same texts again with the same standard, so judge each now as it will: every enumerated sub-clause, each proven by the verification standard below. A fact only the integrated tree, a sibling Work Item or final validation can show belongs to final review and is not missing here; pass when this result delivers its own part. Existing tests are protected by default: changing or removing an existing assertion, golden or baseline, or skipping or deselecting an existing test, is acceptable only when one of this item's own acceptance entries states that behaviour change and why; otherwise refuse it under the criterion the change was made for, citing the changed file/lines.`,
-        ]
-      : []),
-    ...(commands.length
-      ? [
-          `Command-proven criteria: the plan proves ${proven} of this Work Item; the Validation command passes row lists each command at that index, and it passed on this tree. When a criterion states only what that command's own exit decides (a lint, type-check or build passing, or a check script or exact-output comparison the command itself makes), the pass establishes it: pass it, unless this Work Item weakened the command's configuration or check to make it pass, which you judge as a change to existing verification. Otherwise that pass is required, not sufficient: it proves only what the tests the command runs assert, and this Work Item may have written those tests itself. Judge each such criterion from its own text as written, like any other: find the tests the command runs in candidate/, and pass it only when their assertions establish every sub-clause by the verification standard below. A test that asserts less than the text (a weaker restatement of it, or a fixture that only stores and echoes its input where the criterion requires a real consumer or producer), or a test the command does not run, leaves the criterion unproven: refuse it as missing verification, citing the validation row and the test's file/lines.`,
-        ]
-      : []),
-    REVIEW_GUIDANCE.behaviour,
-    `The engineering standard below is the repository's quality bar for code this result adds or changes, on top of the criteria. A violation in changed code is a semantic defect even when every criterion passes: refuse the criterion whose implementation or tests contain it, naming the rule and citing the file/lines, so the worker fixes it. Unchanged existing code is no finding. This judges code quality, not a mechanism the plan described, so the rule above still holds. A presence, type or tautological assertion proves no sub-clause. A test this result adds that proves again a claim another test in the tree already proves, or a harness or fixture setup it copies instead of importing, is a test-economy violation: refuse it, citing both locations.\n${ENGINEERING_STANDARD}`,
-    `The design checklist below is part of that bar. The worker answered each question in a design note (designRisk names the question) citing file:line evidence. Verify each answer against the candidate code yourself: a wrong or unsupported answer is no proof, and an absent note proves nothing either way. A design defect in code this result adds or changes (a new action gated only by a broader existing grant, new state with no enforced bound or retention, attribution to a principal that did not act, avoidable per-request work, a reference test whose expected side runs the code under test, a numeric limit with no origin) is a semantic defect: refuse the criterion whose implementation contains it, naming the question and citing the file/lines. Where the repository declares its own design checklist (its AGENTS.md or a document it maps), apply it too.\n${DESIGN_CHECKLIST}`,
-    REVIEW_GUIDANCE.findings,
-    REVIEW_GUIDANCE.quantified,
-    REVIEW_GUIDANCE.precedent,
-    REVIEW_GUIDANCE.design,
-    REVIEW_GUIDANCE.labels,
-    REVIEW_GUIDANCE.evidenceRoot,
-  ];
-}
-
 /** The read-only QA review instructions: the shared standard, with no worker or repair. */
 const QA_INSTRUCTIONS = [
   REVIEW_GUIDANCE.judge,
-  "This Work Item is read-only QA: no worker changed anything, and a refusal goes to the operator, not to a repair. candidate/ is the commit it checked: the default branch after this Objective's merges, or, for an Objective made only of QA, the planned base, whose existing bytes it qualifies. The change index lists what this Objective's Work Items merged, each merge's first-parent diff; other work on the default branch is context, not under review. The criteria are its own acceptance, then the Objective's acceptance criteria and pinned-source exit items its review proves, quoted verbatim: judge each on the integrated tree with the validation commands that passed on it and the named CI checks supplied, every enumerated sub-clause proven by the verification standard below. Its brief promises nothing it did not execute.",
+  "This Work Item is read-only QA: no worker changed anything, and a refusal goes to the operator, not to a repair. candidate/ is the commit it checked: the default branch after this Objective's merges, or, for an Objective made only of QA, the planned base, whose existing bytes it qualifies. The change index lists what this Objective's Work Items merged, each merge's first-parent diff; other work on the default branch is context, not under review. The criteria are its own acceptance (final review judges the Objective's criteria): judge each on the integrated tree with the validation commands that passed on it and the named CI checks supplied, every enumerated sub-clause proven by the verification standard below. Its brief promises nothing it did not execute.",
   REVIEW_GUIDANCE.asyncWork,
   REVIEW_GUIDANCE.behaviour,
   REVIEW_GUIDANCE.findings,
@@ -1730,7 +1678,7 @@ const QA_INSTRUCTIONS = [
  * rows, the base and the reviewed tree, and the previous answer's error when
  * the reviewer is asked again.
  */
-function reviewPrompt(
+export function reviewPrompt(
   instructions: string,
   criteria: readonly string[],
   evidence: readonly ResultEvidence[],
@@ -1757,7 +1705,7 @@ function reviewPrompt(
 // Send-back: needs-human questions about what the evidence root holds
 
 /** One needs-human finding sent back, with the evidence-root files its text names. */
-interface SentBack {
+export interface SentBack {
   criterionIndex: number;
   question: string;
   paths: string[];
@@ -1792,20 +1740,19 @@ const SHORTEST_IDENTIFIER = 4;
  * asked about, is settled, and a question Factory asked for an invalid
  * answer is no finding.
  */
-async function heldEvidence(
+export async function heldEvidence(
   root: string,
-  criteria: readonly string[],
-  decoded: Extract<Decoded, { invalid: false }>,
-  settled: (criterion: string) => Settled | undefined,
+  /** The answer's questions: each criterion asked, with its finding's text and cited rows. */
+  asking: readonly {
+    criterionIndex: number;
+    criterion: string;
+    detail: string;
+    question: string;
+    evidence: readonly number[];
+  }[],
   receipts: readonly ResultEvidence[],
   evidence: readonly ResultEvidence[],
 ): Promise<SentBack[]> {
-  const asking = criteria.flatMap((criterion, criterionIndex) => {
-    const finding = decoded.findings[criterionIndex];
-    return finding?.verdict === "needs-human" && !settled(criterion)
-      ? [{ criterionIndex, criterion, finding }]
-      : [];
-  });
   if (!asking.length) return [];
   const aliases = copyAliases(receipts);
   const listed = await evidenceFiles(root);
@@ -1814,7 +1761,7 @@ async function heldEvidence(
     path,
     names: fileNames(path, aliases),
   }));
-  return asking.flatMap(({ criterionIndex, criterion, finding }) => {
+  return asking.flatMap(({ criterionIndex, criterion, ...finding }) => {
     const cited = finding.evidence.flatMap((index) => {
       const row = evidence[index];
       return row && receipts.includes(row) ? receiptCopies(row) : [];
@@ -2009,13 +1956,18 @@ function namedFiles(
  * sends it as the delta). The reviewer answers those criteria again; a
  * needs-human answer then reaches the operator.
  */
-function sendBackNote(asked: readonly SentBack[], media: boolean): string {
+export function sendBackNote(
+  asked: readonly SentBack[],
+  media: boolean,
+  /** The verdict that asks the operator: needs-human, or the item review's question. */
+  asks: "needs-human" | "question",
+): string {
   const lines = asked.map(
     (entry) =>
       `criterion ${entry.criterionIndex}: you asked ${JSON.stringify(entry.question.slice(0, 600))}; the evidence root holds ${entry.paths.map((path) => JSON.stringify(path)).join(", ")}`,
   );
   return [
-    "Evidence check: your needs-human questions name or cite files the evidence root holds.",
+    `Evidence check: your ${asks === "question" ? "" : "needs-human "}questions name or cite files the evidence root holds.`,
     "The operator is asked only for decisions, authority and facts the evidence root lacks, never for repository contents, patches or media bytes it holds. Read these files in your working directory, the evidence root, and judge these criteria again from them:",
     ...lines,
     ...(media
@@ -2023,7 +1975,7 @@ function sendBackNote(asked: readonly SentBack[], media: boolean): string {
           "A file under media-sets/ or inputs/ is Factory's digest-checked copy of the bytes its receipt names. The operator viewed every candidate set before choosing, so the selection is the human judgment of their appearance: never ask the operator to confirm it again.",
         ]
       : []),
-    `Give one finding for each of criteria ${asked.map((entry) => entry.criterionIndex).join(", ")}, in the answer format, citing evidence indices as before (the exact-tree inventory or change entry naming a file you read, or its receipt). Keep needs-human only for what these files and the rest of the evidence root cannot establish. Your findings for the other criteria stand.`,
+    `Give one finding for each of criteria ${asked.map((entry) => entry.criterionIndex).join(", ")}, in the answer format, citing evidence indices as before (the exact-tree inventory or change entry naming a file you read, or its receipt). Keep ${asks === "question" ? "a question" : "needs-human"} only for what these files and the rest of the evidence root cannot establish. Your findings for the other criteria stand.`,
   ].join("\n");
 }
 

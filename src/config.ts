@@ -141,6 +141,28 @@ export interface CoreConfig {
      */
     formatCommand?: string;
   };
+  /**
+   * A Work Item's result review (review/item.ts, #2344): its mutation pass
+   * seeds at most `mutants` mutants of the lines the result added to
+   * product files (0 turns the pass off) and takes at most
+   * `mutationSeconds` of wall time (review/mutants.ts), and the reviewer
+   * sees its survivors once it measured `measuredMutants`; the reviewer's
+   * `run_command` runs at most `commands` commands in at most
+   * `commandSeconds` in all; at most `proofs` suspicions are proved (0:
+   * none, so the review refuses nothing), each with at most
+   * `proofCommands` commands in at most `proofSeconds`. Operational: a
+   * change applies from the next review.
+   */
+  review: {
+    mutants: number;
+    mutationSeconds: number;
+    measuredMutants: number;
+    commandSeconds: number;
+    commands: number;
+    proofs: number;
+    proofCommands: number;
+    proofSeconds: number;
+  };
   finalValidation: {
     /** Commands every Objective's result must pass. */
     requiredCommands: string[];
@@ -771,6 +793,16 @@ export function loadConfig(repository: string): CoreConfig {
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
         formatCommand: optional(text()),
+      }),
+      review: object({
+        mutants: whole(0, 20, 1000),
+        mutationSeconds: whole(0, 90, 24 * 60 * 60),
+        measuredMutants: whole(0, 10, 1000),
+        commandSeconds: whole(0, 60, 24 * 60 * 60),
+        commands: whole(0, 20, 1000),
+        proofs: whole(0, 10, 1000),
+        proofCommands: whole(0, 8, 1000),
+        proofSeconds: whole(0, 120, 24 * 60 * 60),
       }),
       finalValidation: object({
         requiredCommands: strings,

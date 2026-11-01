@@ -279,6 +279,8 @@ export const OPERATIONAL: readonly string[] = [
   "tracking",
   // A validation command's time limit.
   "validation.commandTimeoutSeconds",
+  // The result review's mutation pass bounds: evidence for the reviewer, never a verdict.
+  "review",
   // A worker run's time, idle and turn limits.
   "provider.worker.timeoutSeconds",
   "provider.worker.idleSeconds",

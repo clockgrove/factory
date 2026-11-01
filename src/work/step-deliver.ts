@@ -32,6 +32,7 @@ import { fact, facts, type KeptSelection, written } from "./facts.js";
 import { type MergeResult, mergeOf } from "./merged.js";
 import { refusedFact } from "./refused.js";
 import { integrated, objectiveEdited } from "./shared.js";
+import type { ReviewResult } from "./step-review.js";
 import { validateBeforeMerge } from "./step-validate.js";
 import {
   type BuildDeps,
@@ -90,6 +91,9 @@ export async function publishStep(
     };
   const rerun = fact(state, "flaky", item.id);
   const flaky = rerun?.tree === validated.tree ? rerun : undefined;
+  const reviewed = state.done[stepKey(item.id, "review")] as
+    | ReviewResult
+    | undefined;
   const commit = candidate(state, item.id);
   const branch = baseBranch(state.issue, place);
   // As the item's comment shows it: as of its last finished step (review).
@@ -117,6 +121,7 @@ export async function publishStep(
       ? { itemIssue: itemIssueOf(state, item.id) }
       : {}),
     ...(spent ? { telemetry: summaryLine(spent) } : {}),
+    ...(reviewed?.notes?.length ? { reviewNotes: reviewed.notes } : {}),
     secrets: deps.config.secrets,
     // The operator's `publish` counts only for the finding it answered:
     // the digest kept when the hold was raised, never the hold's text,
@@ -774,7 +779,6 @@ export function repairOutcome(
           refused: null,
           diagnosis: null,
           workSession: null,
-          reviewSession: null,
           diagnosisSession: null,
         },
         item.id,

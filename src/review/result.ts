@@ -152,11 +152,29 @@ export interface Repro {
   command: string;
 }
 
+/**
+ * What a Work Item finder's refusal rests on (review/item.ts routes on it):
+ * the product's behaviour or a missing verification goes to a proof; test
+ * economy, placement and the engineering standard are notes; a change to
+ * an existing test is Factory's protected-test check's.
+ */
+export const GROUNDS = [
+  "behaviour",
+  "verification-gap",
+  "test-economy",
+  "placement",
+  "standard",
+  "protected-change",
+] as const;
+export type Ground = (typeof GROUNDS)[number];
+
 export interface RefusedCriterion {
   criterionIndex: number;
   criterion: string;
   /** The reviewer, or an operator's `refuse` on this tree. */
   source: "model" | "operator";
+  /** A Work Item finder's refusal: what it rests on. */
+  ground?: Ground;
   detail: string;
   /** The reviewer's question, when it asked one beside the refusal. */
   question: string;
@@ -565,6 +583,11 @@ export async function runReview(
       /** The fixed instructions; guidance for supplied evidence kinds follows. */
       instructions: readonly string[];
       /**
+       * A refusal names its `ground` (a Work Item's finder, review/item.ts):
+       * its schema requires one of GROUNDS.
+       */
+      grounds?: true;
+      /**
        * This call already asks again (review/item.ts `find`): an invalid
        * answer isn't asked again, and the criteria it leaves without a
        * valid verdict are the operator's questions, beside any refusal.
@@ -610,7 +633,7 @@ export async function runReview(
         role: "reviewer",
         phase,
         prompt,
-        schema: resultReviewSchema(evidence),
+        schema: resultReviewSchema(evidence, run.grounds),
         readDir: root,
         ...(images.length ? { images } : {}),
         ...(kept
@@ -632,6 +655,7 @@ export async function runReview(
         answer.value,
         criteria.length,
         evidence,
+        run.grounds,
       );
       if (decoded.invalid) logRefused(run.log, answer.callId, decoded.reason);
       return decoded;
@@ -693,6 +717,8 @@ export async function runReview(
 
 interface DecodedFinding {
   verdict: "pass" | "needs-human" | "refuse";
+  /** A refusal's, when the review asks for grounds. */
+  ground?: Ground;
   evidence: number[];
   detail: string;
   question: string;
@@ -833,6 +859,7 @@ function judge(
         criterionIndex,
         criterion,
         source: "model",
+        ...(finding.ground && { ground: finding.ground }),
         detail: finding.detail,
         question: finding.question.trim(),
         evidence: cite(finding.evidence),
@@ -864,9 +891,13 @@ const FINDING_FIELDS = [
   "question",
 ];
 
-/** One finding per criterion; a pass may cite only complete evidence rows. */
+/**
+ * One finding per criterion; a pass may cite only complete evidence rows;
+ * with `grounds`, a refusal names its ground.
+ */
 function resultReviewSchema(
   evidence: readonly ResultEvidence[],
+  grounds?: true,
 ): Record<string, unknown> {
   // Index membership stays decoder-enforced, so the schema is stable across
   // candidates and the provider cache keeps its prefix.
@@ -901,8 +932,15 @@ function resultReviewSchema(
             }
           : {}),
       },
+      ...(grounds &&
+        verdict === "refuse" && {
+          ground: { type: "string", enum: [...GROUNDS] },
+        }),
     },
-    required: FINDING_FIELDS,
+    required: [
+      ...FINDING_FIELDS,
+      ...(grounds && verdict === "refuse" ? ["ground"] : []),
+    ],
     additionalProperties: false,
   });
   return {
@@ -942,6 +980,7 @@ function decodeResultReview(
   value: unknown,
   criteria: number,
   evidence: readonly ResultEvidence[],
+  grounds?: true,
 ): Decoded {
   if (
     !isRecord(value) ||
@@ -970,7 +1009,7 @@ function decodeResultReview(
   }
   const errors: (string | undefined)[] = [];
   const findings = Array.from({ length: criteria }, (_, index) => {
-    const decoded = decodeFinding(grouped.get(index) ?? [], evidence);
+    const decoded = decodeFinding(grouped.get(index) ?? [], evidence, grounds);
     if (typeof decoded === "string") {
       errors[index] = decoded;
       return undefined;
@@ -988,6 +1027,7 @@ function decodeResultReview(
 function decodeFinding(
   candidates: readonly unknown[],
   evidence: readonly ResultEvidence[],
+  grounds?: true,
 ): DecodedFinding | string {
   if (candidates.length !== 1)
     return candidates.length
@@ -995,17 +1035,22 @@ function decodeFinding(
       : "The answer omitted this criterion; give exactly one finding for it.";
   const raw = candidates[0];
   if (!isRecord(raw)) return "The finding must be an object.";
-  const unknown = Object.keys(raw).filter(
-    (key) => !FINDING_FIELDS.includes(key),
-  );
-  if (unknown.length)
-    return `The finding has unknown fields ${unknown.join(", ")}; use only ${FINDING_FIELDS.join(", ")}.`;
   const verdict = raw.verdict;
+  const fields = [
+    ...FINDING_FIELDS,
+    ...(grounds && verdict === "refuse" ? ["ground"] : []),
+  ];
+  const unknown = Object.keys(raw).filter((key) => !fields.includes(key));
+  if (unknown.length)
+    return `The finding has unknown fields ${unknown.join(", ")}; use only ${fields.join(", ")}.`;
   if (
     typeof verdict !== "string" ||
     !VERDICTS.includes(verdict as DecodedFinding["verdict"])
   )
     return "The verdict must be pass, needs-human or refuse.";
+  const ground = raw.ground;
+  if (grounds && verdict === "refuse" && !GROUNDS.includes(ground as Ground))
+    return `A refusal needs its ground: one of ${GROUNDS.join(", ")}.`;
   const indices = raw.evidenceIndices;
   if (
     !Array.isArray(indices) ||
@@ -1040,6 +1085,7 @@ function decodeFinding(
       : "question must be text (it may be empty).";
   return {
     verdict: verdict as DecodedFinding["verdict"],
+    ...(grounds && verdict === "refuse" && { ground: ground as Ground }),
     evidence: indices as number[],
     detail: raw.detail,
     question: raw.question,

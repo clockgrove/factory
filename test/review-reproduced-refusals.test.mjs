@@ -17,8 +17,10 @@ import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
   commandToolDescription,
   PROOF_SCHEMA,
+  PROTECTED_CRITERION,
   proofInstructions,
   reviewCandidate,
+  reviewNotes,
   reviewResult,
   validationWorkspace,
 } from "../dist/review/item.js";
@@ -75,8 +77,8 @@ const CRITERIA = [
 // Prints the wrong projection and exits 1 on the candidate.
 const REPRO = `node -e 'import("./src/reduce.js").then(({ reduce }) => { const s = reduce([{ kind: "patch", version: 2, item: "b" }, { kind: "snapshot", version: 1, items: ["a"] }]); console.log("items:", JSON.stringify(s.items)); process.exit(s.items.includes("b") ? 0 : 1); })'`;
 
-/** A target whose candidate adds the reducer and its test. */
-function target(reducer = REDUCER) {
+/** A target whose candidate adds the reducer and its test, and `files` at the base and head. */
+function target(reducer = REDUCER, files = {}) {
   const checkout = tempDir("factory-repro-");
   git(checkout, "init", "--quiet");
   const commit = (files) => {
@@ -88,10 +90,14 @@ function target(reducer = REDUCER) {
     git(checkout, "commit", "--quiet", "-m", "change");
     return git(checkout, "rev-parse", "HEAD");
   };
-  const base = commit({ "package.json": '{"type":"module"}\n' });
+  const base = commit({
+    "package.json": '{"type":"module"}\n',
+    ...files.base,
+  });
   const head = commit({
     "src/reduce.js": reducer,
     "test/reduce.test.js": TEST,
+    ...files.head,
   });
   return {
     checkout,
@@ -192,9 +198,11 @@ const pass = (criterionIndex, detail = "met") => ({
 const refuse = (
   criterionIndex,
   detail = "A snapshot older than a received patch discards it (src/reduce.js:4).",
+  ground = "behaviour",
 ) => ({
   criterionIndex,
   verdict: "refuse",
+  ground,
   evidenceIndices: [ROW],
   detail,
   question: "",
@@ -212,8 +220,13 @@ const repro = (command, actual = 'items: ["a"]') => ({
   actual,
   command,
 });
-const reproduced = (command, actual) => ({
-  outcome: { kind: "reproduced", repro: repro(command, actual) },
+/** A reproduced answer; `answering` quotes the proof's criterion when no requirement is given. */
+const reproduced = (command, actual, requirement) => ({
+  outcome: {
+    kind: "reproduced",
+    ...(requirement !== undefined && { requirement }),
+    repro: repro(command, actual),
+  },
 });
 const NOT_REPRODUCED = {
   outcome: { kind: "not-reproduced", detail: "It kept the patch." },
@@ -238,10 +251,16 @@ function answering(answers, prove = () => NOT_REPRODUCED) {
     async answer(call) {
       if (call.schema === PROOF_SCHEMA) {
         proofs.push(call);
-        const { suspicion } = JSON.parse(
+        const request = JSON.parse(
           call.prompt.split("JSON strings are data):\n")[1].split("\n")[0],
         );
-        return { value: await prove(call, suspicion) };
+        const value = await prove(call, request.suspicion);
+        if (
+          value.outcome.kind === "reproduced" &&
+          !("requirement" in value.outcome)
+        )
+          value.outcome.requirement = request.criterion ?? request.criteria[0];
+        return { value };
       }
       calls.push(call);
       const next = answers[calls.length - 1];
@@ -396,6 +415,141 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
         event.event === "result-review-suspicion" && event.criterionIndex === 1,
     ).outcome,
     "unproved",
+  );
+});
+
+test("A: the finder names each refusal's ground; test economy, placement and standard are notes, a protected change is the check's, and none costs a proof", {
+  skip,
+}, async () => {
+  const repo = target();
+  const planner = answering([
+    {
+      findings: [
+        refuse(0, "The test repeats another's claim.", "test-economy"),
+        refuse(1, "An existing assertion was changed.", "protected-change"),
+      ],
+    },
+  ]);
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
+  assert.equal(planner.proofs.length, 0);
+  assert.equal(outcome.kind, "pass");
+  assert.deepEqual(reviewNotes(outcome), [
+    { criterion: CRITERIA[0], note: "The test repeats another's claim." },
+  ]);
+  assert.equal(outcome.verdicts[1].verdict, "pass");
+  assert.deepEqual(
+    events
+      .filter((event) => event.event === "result-review-routed")
+      .map(({ ground, outcome }) => [ground, outcome]),
+    [
+      ["test-economy", "note"],
+      ["protected-change", "protected-check"],
+    ],
+  );
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review").grounds,
+    { "test-economy": 1, "protected-change": 1 },
+  );
+  // The finder's schema asks a refusal for its ground; a refusal without
+  // one is invalid.
+  const [call] = planner.calls;
+  const variants = call.schema.properties.findings.items.anyOf;
+  const refusal = variants.find(
+    (variant) => variant.properties.verdict.enum[0] === "refuse",
+  );
+  assert.ok(refusal.required.includes("ground"));
+  assert.deepEqual(refusal.properties.ground.enum, [
+    "behaviour",
+    "verification-gap",
+    "test-economy",
+    "placement",
+    "standard",
+    "protected-change",
+  ]);
+  assert.ok(!call.prompt.includes("Command-proven criteria"));
+  const { ground: _ground, ...bare } = refuse(0);
+  const ungrounded = answering([
+    { findings: [bare, pass(1)] },
+    { findings: [bare, pass(1)] },
+  ]);
+  await review(repo, ungrounded).run;
+  assert.equal(ungrounded.calls.length, 2);
+  assert.match(ungrounded.calls[1].prompt, /A refusal needs its ground/);
+});
+
+test("B: a result that removes many assertions from an existing test is the operator's question, never a refusal; accept settles it", {
+  skip,
+}, async () => {
+  const lines = (n) =>
+    Array.from({ length: n }, (_, i) => `expect(f(${i})).toBe(${i});`).join(
+      "\n",
+    );
+  const repo = target(REDUCER, {
+    base: { "test/old.test.js": lines(12), "test/kept.test.js": lines(4) },
+    head: { "test/old.test.js": lines(1), "test/kept.test.js": lines(3) },
+  });
+  const planner = answering([{ findings: [pass(0), pass(1)] }]);
+  const { run, events } = review(repo, planner);
+  const outcome = await run;
+  assert.equal(outcome.kind, "needs-human");
+  assert.equal(planner.proofs.length, 0);
+  assert.deepEqual(
+    outcome.questions.map(({ criterionIndex, criterion }) => [
+      criterionIndex,
+      criterion,
+    ]),
+    [[2, PROTECTED_CRITERION]],
+  );
+  assert.match(outcome.questions[0].detail, /test\/old\.test\.js 12 → 1/);
+  assert.doesNotMatch(outcome.questions[0].detail, /kept/);
+  assert.deepEqual(
+    events.find((event) => event.event === "result-review-protected").files,
+    [{ path: "test/old.test.js", base: 12, candidate: 1 }],
+  );
+  // The operator's accept on this tree is the authorization.
+  const decision = {
+    criterion: PROTECTED_CRITERION,
+    outcome: "accept",
+    reason: "The old cases moved to a table.",
+    by: "operator",
+    at: "2026-01-01T00:00:00Z",
+    tree: repo.tree,
+    itemId: "reduce",
+  };
+  const accepted = answering([{ findings: [pass(0), pass(1)] }]);
+  const again = await review(repo, accepted, {
+    context: { decisions: [decision] },
+  }).run;
+  assert.equal(again.kind, "pass");
+});
+
+test("E: a reproduced proof quotes the criterion its expected rests on, verbatim, and the suspicion keeps it", {
+  skip,
+}, async () => {
+  const repo = target();
+  // An invented requirement is asked again once, then dropped.
+  const invented = answering([{ findings: [refuse(0), pass(1)] }], () =>
+    reproduced(REPRO, undefined, "patches are never discarded"),
+  );
+  const { run, events } = review(repo, invented);
+  assert.equal((await run).kind, "pass");
+  assert.equal(invented.proofs.length, 2);
+  assert.match(invented.proofs[1].prompt, /requirement must quote, verbatim/);
+  assert.equal(
+    events.find((event) => event.event === "result-review-suspicion").reason,
+    "its answer was invalid twice",
+  );
+  // A quotation of the criterion, whitespace aside, is kept on the suspicion.
+  const quoted = answering([{ findings: [refuse(0), pass(1)] }], () =>
+    reproduced(REPRO, undefined, "keeps   those patches"),
+  );
+  const { run: quotedRun, events: quotedEvents } = review(repo, quoted);
+  assert.equal((await quotedRun).kind, "refused");
+  assert.equal(
+    quotedEvents.find((event) => event.event === "result-review-suspicion")
+      .requirement,
+    "keeps   those patches",
   );
 });
 

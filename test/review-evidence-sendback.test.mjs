@@ -117,6 +117,7 @@ function finding(criterionIndex, verdict, question = "") {
   return {
     criterionIndex,
     verdict,
+    ...(verdict === "refuse" && { ground: "behaviour" }),
     evidenceIndices: [CHANGE_INDEX_ROW],
     detail: `${verdict} detail`,
     question,

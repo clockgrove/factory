@@ -24,7 +24,8 @@
  * `tokens`) and each one (`suspicionList`, from the build's
  * `result-review-suspicion` events: its criterion, `case`, `expected`,
  * `basis`, `outcome`, the `reason` one was dropped, its repro, commands,
- * tokens and time).
+ * tokens and time), the finder's refusals by ground (`grounds`) and the
+ * protected-test check's files that fired (`protectedTests`).
  *
  * Verdicts are scored at their criterion's index in the record, by its
  * text: the finder also judges the Objective criteria the item proves
@@ -266,6 +267,10 @@ export async function review({
         scratchPrepareMs: phases?.prepareMs ?? null,
         proofsMs: phases?.proofsMs ?? 0,
       },
+      grounds: tally?.grounds ?? null,
+      protectedTests:
+        events.find((e) => e.event === "result-review-protected")?.files ??
+        null,
       suspicions: tally?.suspicions ?? null,
       suspicionList,
       unmapped,

@@ -56,16 +56,12 @@ import {
   validateTree,
 } from "../validate.js";
 import { hostGit } from "../worktree.js";
-import {
-  type CommandProof,
-  commandProofs,
-  finderInstructions,
-  resultCriteria,
-} from "./finder.js";
+import { finderInstructions, resultCriteria } from "./finder.js";
 import {
   checkFailureRows,
   deliveryRows,
   type EvidenceInput,
+  type Ground,
   type PassedValidation,
   type RefusedCriterion,
   type Repro,
@@ -73,7 +69,9 @@ import {
   type ResultReview,
   type ResultReviewInput,
   type ReviewedCriterion,
+  type ReviewQuestion,
   runReview,
+  type Settled,
   settledBy,
   workItemDesign,
 } from "./result.js";
@@ -177,8 +175,6 @@ export interface CandidateReview {
   criteria: readonly string[];
   /** How many of `criteria` are the item's own acceptance; absent: all. */
   itemCriteria?: number;
-  /** The criteria the plan proves by one of the item's commands (finder.ts `commandProofs`). */
-  commandProofs?: readonly CommandProof[];
   /** The validation that passed on the candidate's tree. */
   validation: PassedValidation;
   workspace: Workspace;
@@ -223,7 +219,6 @@ export function reviewResult(input: ItemReviewInput): Promise<ResultReview> {
     itemId: item.id,
     criteria: resultCriteria(input.plan, item),
     itemCriteria: item.acceptance.length,
-    commandProofs: commandProofs(input.plan, item),
     context: {
       plan: input.plan,
       sources: input.sources,
@@ -273,6 +268,7 @@ export async function reviewCandidate(
   const started = Date.now();
   const tally: Tally = {
     verdicts: { pass: 0, suspect: 0, question: 0 },
+    grounds: {},
     suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
     repros: { confirmed: 0, dropped: 0 },
     calls: 0,
@@ -295,8 +291,10 @@ export async function reviewCandidate(
     input.itemId,
     tree,
   );
+  const guard = await protectedQuestion(input, settled);
   // Settled criteria need no model and no workspace.
-  if (criteria.every(settled)) return done(await find(input, tally));
+  if (criteria.every(settled))
+    return done(withProtected(await find(input, tally), guard));
   // The workspace starts installing beside the finder; only the proofs use it.
   const workspace = openWorkspace(input.workspace);
   void workspace.ready.then(
@@ -319,7 +317,7 @@ export async function reviewCandidate(
     }).finally(() => {
       phases.proofsMs = Date.now() - proving;
     });
-    return done(review);
+    return done(withProtected(review, guard));
   } finally {
     await workspace.close();
   }
@@ -364,17 +362,8 @@ async function find(
       instructions: finderInstructions(
         asked.filter((index) => index < own).length,
         asked.map((index) => criteria[index]!),
-        (input.commandProofs ?? []).flatMap((proof) =>
-          asked.includes(proof.criterionIndex)
-            ? [
-                {
-                  ...proof,
-                  criterionIndex: asked.indexOf(proof.criterionIndex),
-                },
-              ]
-            : [],
-        ),
       ),
+      grounds: true,
       after,
       ...(lastChance && { lastChance }),
       signal: input.signal,
@@ -469,14 +458,24 @@ function renumber(
 const REFUSAL_BASIS =
   "The reviewer refused the criterion for this. Show the failure on the product, or report that it holds.";
 
+/** The grounds whose refusals become notes, with no proof. */
+const NOTE_GROUNDS: ReadonlySet<Ground> = new Set([
+  "test-economy",
+  "placement",
+  "standard",
+]);
+
 /**
- * The finder's review with each of its own refusals proved: each is one
- * suspicion (its detail the case, its criterion the expectation), and
+ * The finder's review with its own refusals routed by their ground: a
+ * test-economy, placement or standard one is a note (the PR body and
+ * final review), a protected-change one is left to Factory's
+ * protected-test check (`protectedQuestion`), and each other is proved:
+ * one suspicion (its detail the case, its criterion the expectation),
  * refusals of different criteria that cite overlapping lines of one file
- * are one suspicion (`mergedRefusals`), proved as `proveSuspicions` does,
- * reading the workspace's checkout. A confirmed one refuses each of its
- * criteria, with its repro; any other is a pass for each, seen in the run
- * log only. Operator refusals, passes and questions stand.
+ * being one suspicion (`mergedRefusals`), proved as `proveSuspicions`
+ * does, reading the workspace's checkout. A confirmed one refuses each of
+ * its criteria, with its repro; any other is a pass for each, seen in the
+ * run log only. Operator refusals, passes and questions stand.
  */
 async function proveRefusals(
   input: CandidateReview,
@@ -488,9 +487,32 @@ async function proveRefusals(
     if (verdict.verdict === "pass") tally.verdicts.pass += 1;
   if (found.kind !== "pass") tally.verdicts.question += found.questions.length;
   if (found.kind !== "refused") return found;
-  const model = found.refused.filter((entry) => entry.source === "model");
+  const routed: ReviewedCriterion[] = [];
+  const model = found.refused.filter((entry) => {
+    if (entry.source !== "model") return false;
+    const ground = entry.ground ?? "behaviour";
+    tally.grounds[ground] = (tally.grounds[ground] ?? 0) + 1;
+    if (ground === "behaviour" || ground === "verification-gap") return true;
+    const note = NOTE_GROUNDS.has(ground);
+    input.log({
+      event: "result-review-routed",
+      criterionIndex: entry.criterionIndex,
+      ground,
+      outcome: note ? "note" : "protected-check",
+      detail: entry.detail,
+    });
+    routed.push({
+      criterionIndex: entry.criterionIndex,
+      criterion: entry.criterion,
+      verdict: note ? "note" : "pass",
+      detail: note
+        ? entry.detail
+        : "The reviewer's refusal was of a change to an existing test, which Factory's protected-test check judges.",
+      evidence: entry.evidence,
+    });
+    return false;
+  });
   tally.verdicts.suspect += model.length;
-  if (!model.length) return found;
   const groups = mergedRefusals(model);
   // Each criterion's finding is its group's first criterion's.
   const lead = new Map(
@@ -528,18 +550,19 @@ async function proveRefusals(
       ...(!one && { merged: group.map((entry) => entry.criterionIndex) }),
     };
   }
-  await proveSuspicions(
-    input,
-    {
-      ...context,
-      // A find-only review (no proofs) needs no workspace.
-      readDir: input.limits.proofs
-        ? (await context.workspace.ready).directory
-        : "",
-    },
-    findings,
-    groups.map((group) => group[0]!.criterionIndex),
-  );
+  if (groups.length)
+    await proveSuspicions(
+      input,
+      {
+        ...context,
+        // A find-only review (no proofs) needs no workspace.
+        readDir: input.limits.proofs
+          ? (await context.workspace.ready).directory
+          : "",
+      },
+      findings,
+      groups.map((group) => group[0]!.criterionIndex),
+    );
   const repro = (index: number) => findings[lead.get(index) ?? index]?.repro;
   const refused = found.refused.flatMap((entry) =>
     entry.source !== "model"
@@ -550,6 +573,7 @@ async function proveRefusals(
   );
   const verdicts: ReviewedCriterion[] = [
     ...found.verdicts,
+    ...routed,
     ...model
       .filter((entry) => !repro(entry.criterionIndex))
       .map((entry) => ({
@@ -632,6 +656,157 @@ function mergedRefusals(
 }
 
 // ---------------------------------------------------------------------------
+// Protected tests
+
+/**
+ * The criterion Factory's protected-test check asks about, after the
+ * review's own: the operator's `accept` of it on a tree is the
+ * authorization, `refuse` sends the result back.
+ */
+export const PROTECTED_CRITERION =
+  "Assertions removed from existing tests are authorized (Factory's protected-test check).";
+
+/** A test file by its path: under a test directory, or a `.test.` or `.spec.` name. */
+const TEST_PATH = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\./;
+
+/**
+ * A line that asserts, in the JS, TS and Python test styles the check
+ * knows: `expect(`, `assert(` or Python's `assert `, `.rejects.`,
+ * `.resolves.`. A heuristic: other styles count nothing.
+ */
+const ASSERTION = /expect\(|\bassert[( ]|\.rejects\.|\.resolves\./;
+
+const assertions = (text: string) =>
+  text.split("\n").filter((line) => ASSERTION.test(line)).length;
+
+/**
+ * Factory's protected-test check, with no model: each test file that
+ * existed at the base and that the result modified, renamed or deleted,
+ * with its assertion lines at the base and in the result. It fires on a
+ * file left with fewer than half its assertions, or 10 fewer.
+ */
+export async function protectedTests(
+  input: Pick<CandidateReview, "checkout" | "base" | "commit" | "signal">,
+): Promise<{ path: string; base: number; candidate: number }[]> {
+  const git = (args: string[]) =>
+    hostGit(input.checkout, args, { signal: input.signal }).then((out) =>
+      out.toString("utf8"),
+    );
+  const entries = (
+    await git([
+      "diff",
+      "--name-status",
+      "-z",
+      "-M",
+      "--no-ext-diff",
+      input.base,
+      input.commit,
+      "--",
+    ])
+  ).split("\0");
+  const changed: { path: string; now?: string }[] = [];
+  for (let index = 0; index < entries.length - 1; ) {
+    const status = entries[index]!;
+    if (status.startsWith("R")) {
+      changed.push({ path: entries[index + 1]!, now: entries[index + 2]! });
+      index += 3;
+    } else if (status.startsWith("C")) index += 3;
+    else {
+      if (status === "M" || status === "D" || status === "T")
+        changed.push({
+          path: entries[index + 1]!,
+          ...(status !== "D" && { now: entries[index + 1]! }),
+        });
+      index += 2;
+    }
+  }
+  const count = async (commit: string, path: string) =>
+    assertions(await git(["show", `${commit}:${path}`]));
+  const fired: { path: string; base: number; candidate: number }[] = [];
+  for (const { path, now } of changed) {
+    if (!TEST_PATH.test(path)) continue;
+    const base = await count(input.base, path);
+    const candidate = now === undefined ? 0 : await count(input.commit, now);
+    if (candidate * 2 < base || base - candidate >= 10)
+      fired.push({ path, base, candidate });
+  }
+  return fired;
+}
+
+/**
+ * The check's question for this review, at the index after the review's
+ * criteria, or the operator's decision of it on this tree: none once
+ * accepted, a refusal once refused. Undefined when it doesn't fire. A
+ * review whose criteria are all settled reviewed this tree before, so the
+ * check's question stands as that review asked it, and nothing runs.
+ */
+async function protectedQuestion(
+  input: CandidateReview,
+  settled: (criterion: string) => Settled | undefined,
+): Promise<ReviewQuestion | RefusedCriterion | undefined> {
+  const criterionIndex = input.criteria.length;
+  const decision = settled(PROTECTED_CRITERION);
+  if (decision && !("earlier" in decision))
+    return decision.outcome === "refuse"
+      ? {
+          criterionIndex,
+          criterion: PROTECTED_CRITERION,
+          source: "operator",
+          detail: `Refused by ${decision.by} at ${decision.at}: ${decision.reason}`,
+          question: "",
+          evidence: [],
+        }
+      : undefined;
+  if (input.criteria.every(settled))
+    // Only a question: the check never refuses by itself.
+    return decision &&
+      !("source" in decision.earlier) &&
+      !("verdict" in decision.earlier)
+      ? { ...decision.earlier, criterionIndex }
+      : undefined;
+  const fired = await protectedTests(input);
+  input.log({ event: "result-review-protected", files: fired });
+  if (!fired.length) return undefined;
+  return {
+    criterionIndex,
+    criterion: PROTECTED_CRITERION,
+    detail: `Assertion lines, at the base and in this result: ${fired
+      .map(({ path, base, candidate }) => `${path} ${base} → ${candidate}`)
+      .join(", ")}.`,
+    question:
+      "This result removed many assertions from existing tests. Accept when this Work Item may remove them; refuse to send it back.",
+  };
+}
+
+/** `review` with the protected-test check's question or refusal beside its own. */
+function withProtected(
+  review: ResultReview,
+  guard: ReviewQuestion | RefusedCriterion | undefined,
+): ResultReview {
+  if (!guard) return review;
+  if ("source" in guard)
+    return {
+      kind: "refused",
+      tree: review.tree,
+      refused: [...(review.kind === "refused" ? review.refused : []), guard],
+      verdicts: review.verdicts,
+      questions: review.kind === "pass" ? [] : review.questions,
+    };
+  const questions = [
+    ...(review.kind === "pass" ? [] : review.questions),
+    guard,
+  ];
+  return review.kind === "refused"
+    ? { ...review, questions }
+    : {
+        kind: "needs-human",
+        tree: review.tree,
+        questions,
+        verdicts: review.verdicts,
+      };
+}
+
+// ---------------------------------------------------------------------------
 // Workspace
 
 /**
@@ -683,7 +858,7 @@ export function proofInstructions(
   return [
     "You check one suspicion about a Work Item's result for Factory: show the failure with a command, or report that it doesn't reproduce. The request gives the acceptance criterion (criteria, when one suspicion stands for the refusals of several) and the suspicion: a case, what the criterion requires there, and the reviewer's basis for suspecting it. Your working directory is a read-only copy of the candidate.",
     `Write a self-contained repro: a shell command that runs the product on that case (inline any script: node -e, python3 -c, a heredoc; build only what it needs; write only temporary files), prints the output and exits non-zero because that output is wrong. Run it with run_command (${limits.proofCommands} commands, ${Math.round(limits.proofBudgetMs / 1000)} s in all). You may vary the case's input to reach the failure the suspicion describes, but a repro of another behaviour, or of a test rather than the product, is no proof.`,
-    "reproduced: it failed that way. Give input, expected, actual (copied verbatim from its output) and command. Factory runs the command again in a fresh copy and confirms it only when it exits non-zero (not 126, 127 or at its limit) with actual in its output. After a repair it runs as validation, so it must pass on a correct result.",
+    "reproduced: it failed that way. requirement quotes, verbatim, the words of the criterion your expected rests on (at least 12 characters, or the whole criterion); Factory checks they are there. Give input, expected, actual (copied verbatim from its output) and command. Factory runs the command again in a fresh copy and confirms it only when it exits non-zero (not 126, 127 or at its limit) with actual in its output. After a repair it runs as validation, so it must pass on a correct result.",
     "not-reproduced: the candidate behaves as the criterion requires there, or you could not show the failure within the budget; say what you saw.",
   ].join("\n");
 }
@@ -846,6 +1021,8 @@ const complete = (value: unknown, fields: readonly string[]) =>
 interface Tally {
   /** The finder's verdicts; `suspect`: a criterion it refused, a suspicion. */
   verdicts: { pass: number; suspect: number; question: number };
+  /** The finder's refusals by ground (result.ts GROUNDS). */
+  grounds: Partial<Record<Ground, number>>;
   /**
    * Suspicions raised; of those, proved (their repro confirmed) and
    * dropped (not reproduced, not confirmed, or past the review's proofs);
@@ -878,6 +1055,9 @@ export const PROOF_SCHEMA: Record<string, unknown> = {
           type: "object",
           properties: {
             kind: { type: "string", enum: ["reproduced"] },
+            requirement: text(
+              "The words of the criterion the expected output rests on, quoted verbatim.",
+            ),
             repro: {
               type: "object",
               properties: {
@@ -894,7 +1074,7 @@ export const PROOF_SCHEMA: Record<string, unknown> = {
               additionalProperties: false,
             },
           },
-          required: ["kind", "repro"],
+          required: ["kind", "requirement", "repro"],
           additionalProperties: false,
         },
         {
@@ -913,10 +1093,21 @@ export const PROOF_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
 };
 
-/** A proof's answer decoded: its repro, none, or why the answer is invalid. */
+/** The shortest quotation that can name a requirement. */
+const REQUIREMENT_CHARS = 12;
+
+/**
+ * A proof's answer decoded: its repro with the requirement it quotes
+ * verbatim from one of `criteria` (at least REQUIREMENT_CHARS long, or
+ * that whole criterion), none, or why the answer is invalid.
+ */
 function decodeProof(
   value: unknown,
-): { repro: Repro } | { detail: string } | { invalid: string } {
+  criteria: readonly string[],
+):
+  | { repro: Repro; requirement: string }
+  | { detail: string }
+  | { invalid: string } {
   const outcome = isRecord(value) ? value.outcome : undefined;
   if (isRecord(outcome) && outcome.kind === "reproduced") {
     if (!complete(outcome.repro, REPRO_FIELDS))
@@ -924,11 +1115,29 @@ function decodeProof(
         invalid:
           "A reproduced outcome needs a repro: input, expected, actual and command.",
       };
+    const quoted =
+      typeof outcome.requirement === "string"
+        ? squeezed(outcome.requirement)
+        : "";
+    if (
+      !criteria.some((criterion) => {
+        const whole = squeezed(criterion);
+        return (
+          quoted.length >= Math.min(REQUIREMENT_CHARS, whole.length) &&
+          whole.includes(quoted)
+        );
+      })
+    )
+      return {
+        invalid:
+          "requirement must quote, verbatim, the words of the criterion your expected output rests on: at least 12 characters of it, or the whole criterion.",
+      };
     const repro = outcome.repro as Record<string, unknown>;
     return {
       repro: Object.fromEntries(
         REPRO_FIELDS.map((field) => [field, String(repro[field])]),
       ) as unknown as Repro,
+      requirement: String(outcome.requirement),
     };
   }
   if (
@@ -939,7 +1148,7 @@ function decodeProof(
     return { detail: outcome.detail };
   return {
     invalid:
-      'The answer must be {"outcome": {"kind": "reproduced", "repro": {...}}} or {"outcome": {"kind": "not-reproduced", "detail": "..."}}.',
+      'The answer must be {"outcome": {"kind": "reproduced", "requirement": "...", "repro": {...}}} or {"outcome": {"kind": "not-reproduced", "detail": "..."}}.',
   };
 }
 
@@ -1100,7 +1309,10 @@ async function proveOne(
           input.log({ ...event, proof: entry.proof });
         },
       });
-      result = decodeProof(answer.value);
+      result = decodeProof(
+        answer.value,
+        entry.criteria.map((index) => input.criteria[index]!),
+      );
       if ("invalid" in result) {
         logRefused(input.log, answer.callId, result.invalid);
         followUp = `\n\nYour previous answer was rejected: ${result.invalid}\nAnswer again, correcting that error.`;
@@ -1127,7 +1339,10 @@ async function proveOne(
     outcome: dropped ? "dropped" : "proved",
     ...(dropped && { reason: dropped }),
     ...("detail" in result && { detail: result.detail }),
-    ...("repro" in result && { repro: result.repro }),
+    ...("repro" in result && {
+      requirement: result.requirement,
+      repro: result.repro,
+    }),
     commands: spent.count,
     tokens,
     ms: Date.now() - started,

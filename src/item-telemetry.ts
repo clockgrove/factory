@@ -103,14 +103,15 @@ export interface ItemTelemetry {
   reviews: Record<string, number>;
   /**
    * The result reviews' own telemetry (#2344), summed over them: the
-   * finder's verdicts by kind; the suspicions raised, and of those proved
-   * and dropped, with the proofs' tokens; the
+   * finder's verdicts by kind and its refusals by ground; the suspicions
+   * raised, and of those proved and dropped, with the proofs' tokens; the
    * proofs' repros confirmed or dropped by the refusal check; questions;
    * the review calls' tokens (the proofs' among them) and the reviews' time.
    */
   reviewer: {
     reviews: number;
     verdicts: Record<string, number>;
+    grounds: Record<string, number>;
     suspicions: {
       raised: number;
       proved: number;
@@ -311,6 +312,9 @@ export class ItemTelemetries {
         for (const [kind, n] of Object.entries(of(event.verdicts)))
           reviewer.verdicts[kind] =
             (reviewer.verdicts[kind] ?? 0) + (num(n) ?? 0);
+        for (const [ground, n] of Object.entries(of(event.grounds)))
+          reviewer.grounds[ground] =
+            (reviewer.grounds[ground] ?? 0) + (num(n) ?? 0);
         const suspicions = of(event.suspicions);
         for (const key of ["raised", "proved", "dropped", "tokens"] as const)
           reviewer.suspicions[key] += num(suspicions[key]) ?? 0;
@@ -411,6 +415,7 @@ export class ItemTelemetries {
         reviewer: {
           reviews: 0,
           verdicts: {},
+          grounds: {},
           suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
           repros: { confirmed: 0, dropped: 0 },
           questions: 0,
@@ -703,6 +708,13 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
   return [
     plural(reviewer.reviews, "review"),
     `verdicts ${verdicts}`,
+    ...(Object.keys(reviewer.grounds).length
+      ? [
+          `refusals by ground ${Object.entries(reviewer.grounds)
+            .map(([ground, n]) => `${n} ${ground}`)
+            .join(", ")}`,
+        ]
+      : []),
     `suspicions ${suspicions.raised} raised, ${suspicions.proved} proved, ${suspicions.dropped} dropped (proofs ${count(suspicions.tokens)} tokens)`,
     `repros ${reviewer.repros.confirmed} confirmed, ${reviewer.repros.dropped} dropped`,
     plural(reviewer.questions, "question"),

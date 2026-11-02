@@ -1,10 +1,13 @@
 /**
  * The result review's finder (#2344, variant B): the per-Work-Item result
  * reviewer as it was before the reproduced-refusal review, its criteria
- * (the item's own acceptance, then the Objective criteria it proves), its
- * command proofs and its instructions, run through result.ts `runReview`
- * on the same evidence. Its refusals are not verdicts: review/item.ts
- * proves each one with a repro before it can cost a repair.
+ * (the item's own acceptance, then the Objective criteria it proves) and
+ * its instructions, run through result.ts `runReview` on the same
+ * evidence. No criterion is bound to one validation command (R6): any
+ * test the item's validation runs can prove any criterion. Its refusals
+ * are not verdicts: each names its ground, and review/item.ts routes on
+ * it, proving a behaviour or verification refusal with a repro before it
+ * can cost a repair.
  */
 import { coverageCriterion } from "../planning/graph.js";
 import { DESIGN_CHECKLIST, ENGINEERING_STANDARD } from "../planning/rubric.js";
@@ -41,43 +44,16 @@ export function resultCriteria(
   return [...item.acceptance, ...new Set(owned)];
 }
 
-/** A criterion of `resultCriteria` the plan proves by one of the item's validation commands. */
-export interface CommandProof {
-  criterionIndex: number;
-  /** The command's index in the item's validation, and in the validation passes row. */
-  validationIndex: number;
-  command: string;
-}
-
-/**
- * Each criterion of `resultCriteria` a `result-command` proof covers, with
- * the command it names, in criterion order: the review is told that the
- * command's pass is required evidence, not proof of the text (#2203).
- */
-export function commandProofs(
-  plan: Pick<Plan, "items" | "coverage">,
-  item: Pick<WorkItem, "id" | "acceptance" | "validation">,
-): CommandProof[] {
-  const criteria = resultCriteria(plan, item);
-  const proofs = new Map<string, CommandProof>();
-  for (const entry of plan.coverage) {
-    const { proof } = entry;
-    if (entry.itemId !== item.id || proof.kind !== "result-command") continue;
-    const criterionIndex = criteria.indexOf(coverageCriterion(entry));
-    const command = item.validation[proof.validationIndex]?.command;
-    if (criterionIndex < 0 || command === undefined) continue;
-    proofs.set(`${criterionIndex}:${proof.validationIndex}`, {
-      criterionIndex,
-      validationIndex: proof.validationIndex,
-      command,
-    });
-  }
-  return [...proofs.values()].sort(
-    (a, b) =>
-      a.criterionIndex - b.criterionIndex ||
-      a.validationIndex - b.validationIndex,
-  );
-}
+/** What each refusal's `ground` means (result.ts GROUNDS): Factory routes on it. */
+const GROUND_GUIDANCE = [
+  "Give every refuse finding its ground, the one that fits best; Factory acts on it:",
+  "- behaviour: the product does the wrong thing on an input or case the criterion covers;",
+  "- verification-gap: the criterion's behaviour is unproven: a test it needs is missing or asserts less than it states;",
+  "- test-economy: a test proves again what another proves, or copies a setup it could import;",
+  "- placement: right code or test in the wrong file, module or validation command;",
+  "- standard: an engineering-standard or design-checklist rule broken in changed code, the behaviour itself right;",
+  "- protected-change: the result changed or removed an existing test, assertion, golden or baseline.",
+].join("\n");
 
 /**
  * The result-review instructions, limited to the evidence result review gets
@@ -89,14 +65,7 @@ export function finderInstructions(
   /** How many of `criteria` are the item's own acceptance, first. */
   itemCriteria: number,
   criteria: readonly string[],
-  commands: readonly CommandProof[],
 ): string[] {
-  const proven = commands
-    .map(
-      ({ criterionIndex, validationIndex, command }) =>
-        `criterion ${criterionIndex} by validation command ${validationIndex} (${JSON.stringify(command)})`,
-    )
-    .join(", ");
   return [
     REVIEW_GUIDANCE.judge,
     "The worker's handoff and verification notes come from this unaccepted candidate: they are advisory investigation leads, not semantic claims, requirements, validation or acceptance. Check relevant claims against complete current evidence. A verification note is the implementer's claimed map from one criterionIndex's sub-clauses to candidate file:line locations: use it as a starting index, verify each cited location yourself, and judge the criterion from candidate evidence. A wrong, incomplete or absent map proves nothing either way, and a cited source unavailable in the candidate is a lead to investigate, not proof of absence.",
@@ -104,11 +73,6 @@ export function finderInstructions(
     ...(itemCriteria < criteria.length
       ? [
           `Criteria ${itemCriteria} to ${criteria.length - 1} are the Objective's acceptance criteria and pinned-source exit items this Work Item's result proves, quoted verbatim; the criteria before them are its own acceptance. Final review judges these same texts again with the same standard, so judge each now as it will: every enumerated sub-clause, each proven by the verification standard below. A fact only the integrated tree, a sibling Work Item or final validation can show belongs to final review and is not missing here; pass when this result delivers its own part. Existing tests are protected by default: changing or removing an existing assertion, golden or baseline, or skipping or deselecting an existing test, is acceptable only when one of this item's own acceptance entries states that behaviour change and why; otherwise refuse it under the criterion the change was made for, citing the changed file/lines.`,
-        ]
-      : []),
-    ...(commands.length
-      ? [
-          `Command-proven criteria: the plan proves ${proven} of this Work Item; the Validation command passes row lists each command at that index, and it passed on this tree. When a criterion states only what that command's own exit decides (a lint, type-check or build passing, or a check script or exact-output comparison the command itself makes), the pass establishes it: pass it, unless this Work Item weakened the command's configuration or check to make it pass, which you judge as a change to existing verification. Otherwise that pass is required, not sufficient: it proves only what the tests the command runs assert, and this Work Item may have written those tests itself. Judge each such criterion from its own text as written, like any other: find the tests the command runs in candidate/, and pass it only when their assertions establish every sub-clause by the verification standard below. A test that asserts less than the text (a weaker restatement of it, or a fixture that only stores and echoes its input where the criterion requires a real consumer or producer), or a test the command does not run, leaves the criterion unproven: refuse it as missing verification, citing the validation row and the test's file/lines.`,
         ]
       : []),
     REVIEW_GUIDANCE.behaviour,
@@ -120,5 +84,6 @@ export function finderInstructions(
     REVIEW_GUIDANCE.design,
     REVIEW_GUIDANCE.labels,
     REVIEW_GUIDANCE.evidenceRoot,
+    GROUND_GUIDANCE,
   ];
 }

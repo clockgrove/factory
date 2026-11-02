@@ -144,9 +144,10 @@ export interface ReviewLimits {
   /** The longest one command of a proof, or a repro, may run. */
   commandMs: number;
   /**
-   * Most suspicions proved in one review, after merging (configured: at
-   * least 1; the bench's find-only replay gives 0, so nothing is
-   * refused), and each proof's commands and their summed time.
+   * Most proofs of one review at once, after merging; the others wait
+   * for a lane (configured: at least 1; the bench's find-only replay
+   * gives 0, so nothing is proved or refused), and each proof's commands
+   * and their summed time.
    */
   proofs: number;
   proofCommands: number;
@@ -599,10 +600,14 @@ async function proveRefusals(
 const CITATION =
   /(?<![\w./@+-])([\w.@+-][\w./@+-]*)(?::|#L)(\d+(?:-L?\d+)?(?:,\s*L?\d+(?:-L?\d+)?)*)(?![\w-])/g;
 
-/** The line spans `detail` cites, each by its file's basename. */
+/**
+ * The line spans `detail` cites: each by its file's path, `candidate/` or
+ * `./` aside, and its basename.
+ */
 function citedSpans(detail: string) {
-  return [...detail.matchAll(CITATION)].flatMap(([, path, ranges]) => {
-    const file = path!.split("/").pop()!;
+  return [...detail.matchAll(CITATION)].flatMap(([, cited, ranges]) => {
+    const path = cited!.replace(/^(\.\/|candidate\/)+/, "");
+    const file = path.split("/").pop()!;
     // A bare number with a colon ("note:3") names no file.
     if (!file.includes(".")) return [];
     return ranges!.split(",").map((range) => {
@@ -611,15 +616,24 @@ function citedSpans(detail: string) {
         .split("-")
         .map((n) => Number(n.trim()));
       const [from, to] = [start!, end ?? start!].sort((a, b) => a - b);
-      return { file, start: from!, end: to! };
+      return { path, file, start: from!, end: to! };
     });
   });
 }
 
+/** Whether two cited spans are of one file: the same path, or the same basename when either names no directory. */
+const sameFile = (
+  one: ReturnType<typeof citedSpans>[number],
+  other: ReturnType<typeof citedSpans>[number],
+) =>
+  one.path.includes("/") && other.path.includes("/")
+    ? one.path === other.path
+    : one.file === other.file;
+
 /**
  * The finder's refusals, grouped: two refusals of different criteria whose
- * details cite overlapping line spans of files with the same basename are
- * one group, transitively, so one proof shows the one defect behind them.
+ * details cite overlapping line spans of one file (`sameFile`) are one
+ * group, transitively, so one proof shows the one defect behind them.
  * Each group in criterion order, the groups by their first.
  */
 function mergedRefusals(
@@ -637,7 +651,7 @@ function mergedRefusals(
         spans[a]!.some((one) =>
           spans[b]!.some(
             (other) =>
-              one.file === other.file &&
+              sameFile(one, other) &&
               one.start <= other.end &&
               other.start <= one.end,
           ),
@@ -660,21 +674,63 @@ function mergedRefusals(
 
 /**
  * The criterion Factory's protected-test check asks about, after the
- * review's own: the operator's `accept` of it on a tree is the
- * authorization, `refuse` sends the result back.
+ * review's own, with the files it fired on (`protectedCriterion`): the
+ * operator's `accept` of it authorizes those reductions for the Work Item
+ * (`protectedQuestion`), `refuse` sends the result back.
  */
 export const PROTECTED_CRITERION =
-  "Assertions removed from existing tests are authorized (Factory's protected-test check).";
+  "Assertions removed from existing tests are authorized (Factory's protected-test check):";
+
+/** A test file the check fired on: its assertion lines at the base and in the result. */
+export interface ProtectedTest {
+  path: string;
+  base: number;
+  candidate: number;
+}
+
+/** The check's criterion for `files`: its text names each one's counts, as JSON. */
+export function protectedCriterion(files: readonly ProtectedTest[]): string {
+  return `${PROTECTED_CRITERION} ${JSON.stringify(files.map(({ path, base, candidate }) => ({ path, base, candidate })))}`;
+}
+
+/** The files a check criterion names; none for another criterion. */
+function protectedFiles(criterion: string): ProtectedTest[] {
+  if (!criterion.startsWith(`${PROTECTED_CRITERION} `)) return [];
+  try {
+    const files: unknown = JSON.parse(
+      criterion.slice(PROTECTED_CRITERION.length + 1),
+    );
+    return Array.isArray(files)
+      ? files.filter(
+          (file): file is ProtectedTest =>
+            isRecord(file) &&
+            typeof file.path === "string" &&
+            typeof file.base === "number" &&
+            typeof file.candidate === "number",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+const sameTest = (one: ProtectedTest, other: ProtectedTest) =>
+  one.path === other.path &&
+  one.base === other.base &&
+  one.candidate === other.candidate;
 
 /** A test file by its path: under a test directory, or a `.test.` or `.spec.` name. */
 const TEST_PATH = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\./;
 
 /**
  * A line that asserts, in the JS, TS and Python test styles the check
- * knows: `expect(`, `assert(` or Python's `assert `, `.rejects.`,
- * `.resolves.`. A heuristic: other styles count nothing.
+ * knows: `expect(`, `assert(` or Python's `assert `, a method of node's
+ * or chai's `assert` (`assert.equal(`), unittest's `self.assertEqual(`
+ * (any `.assert…(`), `pytest.raises(`, `.rejects.`, `.resolves.`. A
+ * heuristic: other styles count nothing.
  */
-const ASSERTION = /expect\(|\bassert[( ]|\.rejects\.|\.resolves\./;
+const ASSERTION =
+  /expect\(|\bassert[( ]|\bassert\.\w+\(|\.assert\w*\(|\bpytest\.raises\(|\.rejects\.|\.resolves\./;
 
 const assertions = (text: string) =>
   text.split("\n").filter((line) => ASSERTION.test(line)).length;
@@ -687,7 +743,7 @@ const assertions = (text: string) =>
  */
 export async function protectedTests(
   input: Pick<CandidateReview, "checkout" | "base" | "commit" | "signal">,
-): Promise<{ path: string; base: number; candidate: number }[]> {
+): Promise<ProtectedTest[]> {
   const git = (args: string[]) =>
     hostGit(input.checkout, args, { signal: input.signal }).then((out) =>
       out.toString("utf8"),
@@ -722,7 +778,7 @@ export async function protectedTests(
   }
   const count = async (commit: string, path: string) =>
     assertions(await git(["show", `${commit}:${path}`]));
-  const fired: { path: string; base: number; candidate: number }[] = [];
+  const fired: ProtectedTest[] = [];
   for (const { path, now } of changed) {
     if (!TEST_PATH.test(path)) continue;
     const base = await count(input.base, path);
@@ -735,41 +791,57 @@ export async function protectedTests(
 
 /**
  * The check's question for this review, at the index after the review's
- * criteria, or the operator's decision of it on this tree: none once
- * accepted, a refusal once refused. Undefined when it doesn't fire. A
- * review whose criteria are all settled reviewed this tree before, so the
- * check's question stands as that review asked it, and nothing runs.
+ * criteria, or the operator's decision of it. An `accept` of the Work
+ * Item's, on any tree, authorizes each file it named with those same
+ * counts, so a repaired result with the same reduction isn't asked again;
+ * other counts are asked again. A `refuse` on this tree is a refusal.
+ * Undefined when nothing is left to ask. A review whose criteria are all
+ * settled reviewed this tree before, so the question stands as that
+ * review asked it, and nothing runs.
  */
 async function protectedQuestion(
   input: CandidateReview,
   settled: (criterion: string) => Settled | undefined,
 ): Promise<ReviewQuestion | RefusedCriterion | undefined> {
   const criterionIndex = input.criteria.length;
-  const decision = settled(PROTECTED_CRITERION);
-  if (decision && !("earlier" in decision))
-    return decision.outcome === "refuse"
-      ? {
-          criterionIndex,
-          criterion: PROTECTED_CRITERION,
-          source: "operator",
-          detail: `Refused by ${decision.by} at ${decision.at}: ${decision.reason}`,
-          question: "",
-          evidence: [],
-        }
-      : undefined;
-  if (input.criteria.every(settled))
-    // Only a question: the check never refuses by itself.
-    return decision &&
-      !("source" in decision.earlier) &&
-      !("verdict" in decision.earlier)
-      ? { ...decision.earlier, criterionIndex }
-      : undefined;
-  const fired = await protectedTests(input);
-  input.log({ event: "result-review-protected", files: fired });
+  const tree = input.validation.tree;
+  const decisions = (input.context?.decisions ?? []).filter(
+    (entry) =>
+      entry.itemId === input.itemId &&
+      entry.criterion.startsWith(PROTECTED_CRITERION),
+  );
+  const here = decisions.filter((entry) => entry.tree === tree).at(-1);
+  if (here?.outcome === "refuse")
+    return {
+      criterionIndex,
+      criterion: here.criterion,
+      source: "operator",
+      detail: `Refused by ${here.by} at ${here.at}: ${here.reason}`,
+      question: "",
+      evidence: [],
+    };
+  const authorized = decisions
+    .filter((entry) => entry.outcome === "accept")
+    .flatMap((entry) => protectedFiles(entry.criterion));
+  const asked = input.criteria.every(settled)
+    ? // Only the earlier review's question: the check never refuses by itself.
+      input.earlier &&
+      input.earlier.kind !== "pass" &&
+      input.earlier.tree === tree
+      ? input.earlier.questions.flatMap((entry) =>
+          protectedFiles(entry.criterion),
+        )
+      : []
+    : await protectedTests(input);
+  if (!input.criteria.every(settled))
+    input.log({ event: "result-review-protected", files: asked });
+  const fired = asked.filter(
+    (file) => !authorized.some((each) => sameTest(each, file)),
+  );
   if (!fired.length) return undefined;
   return {
     criterionIndex,
-    criterion: PROTECTED_CRITERION,
+    criterion: protectedCriterion(fired),
     detail: `Assertion lines, at the base and in this result: ${fired
       .map(({ path, base, candidate }) => `${path} ${base} → ${candidate}`)
       .join(", ")}.`,
@@ -1164,10 +1236,12 @@ interface ProofContext {
 }
 
 /**
- * Prove the suspicions of the suspect findings among `indices`, at most
- * the review's `proofs` in all, taken in turn across the criteria (each
- * criterion's first, then each one's second, …), each in its own task as
- * many at once as the host has planner slots free (`atOnce`). Each finding
+ * Prove every suspicion of the suspect findings among `indices`, taken in
+ * turn across the criteria (each criterion's first, then each one's
+ * second, …), each in its own task, at most the review's `proofs` at once
+ * and no more than the host's proof pool has free (`atOnce`): one past
+ * them waits for a lane to free, never passes unproved. Only a find-only
+ * review (`proofs` 0, the bench's) proves none. Each finding
  * becomes a refusal with its first confirmed repro (the others confirmed
  * in its detail), or, with none, stays as the reviewer gave it.
  */
@@ -1203,7 +1277,7 @@ async function proveSuspicions(
   }
   const { tally } = context;
   tally.suspicions.raised += queued.length;
-  const room = Math.max(0, input.limits.proofs - context.proofs.next);
+  const room = input.limits.proofs ? queued.length : 0;
   for (const { criterionIndex, suspicion, criteria } of queued.slice(room)) {
     tally.suspicions.dropped += 1;
     input.log({
@@ -1212,15 +1286,19 @@ async function proveSuspicions(
       ...(criteria.length > 1 && { criteria }),
       ...suspicion,
       outcome: "unproved",
-      reason: `past the review's ${input.limits.proofs} proofs`,
+      reason: "a find-only review proves nothing",
     });
   }
   const taken = queued.slice(0, room).map((entry) => ({
     ...entry,
     proof: context.proofs.next++,
   }));
-  const proved = await atOnce(taken, "proof", input.signal, (entry, signal) =>
-    proveOne(input, context, entry, signal),
+  const proved = await atOnce(
+    taken,
+    "proof",
+    input.limits.proofs,
+    input.signal,
+    (entry, signal) => proveOne(input, context, entry, signal),
   );
   for (const index of suspect) {
     const finding = findings[index]!;
@@ -1396,17 +1474,20 @@ async function checkRepro(
 /**
  * `run` over `items`, one at a time plus one more at once for each slot of
  * `resource` the host has free now (engine.ts `hostLimits`), never
- * waiting for one; results in `items`' order. The first failure stops the
+ * waiting for one, at most `most` at once; each lane takes the next item
+ * when it ends one. Results in `items`' order. The first failure stops the
  * rest (their `signal`) and is thrown once all have ended.
  */
 async function atOnce<T, R>(
   items: readonly T[],
   resource: "cpu" | "proof",
+  most: number,
   signal: AbortSignal,
   run: (item: T, signal: AbortSignal) => Promise<R>,
 ): Promise<R[]> {
+  const bound = Math.min(items.length, Math.max(1, most));
   let lanes = Math.min(1, items.length);
-  while (lanes < items.length && hostLimits.acquire(resource)) lanes += 1;
+  while (lanes < bound && hostLimits.acquire(resource)) lanes += 1;
   const stop = new AbortController();
   const each = AbortSignal.any([signal, stop.signal]);
   const results: R[] = [];

@@ -7,6 +7,7 @@ import type { PlanningDeps } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
+import { resultCriteria } from "../review/finder.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import {
@@ -219,6 +220,7 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
       deps,
       place,
       phase === "merge" && !place && unvalidatedMerges(state, plan, item.id),
+      resultCriteria(plan, item).length,
     );
   };
   const steps: Step[] = [];
@@ -380,7 +382,9 @@ export function candidate(state: ObjectiveState, id: string): string {
  * Item step `phase`. `revalidates`: its merge step validates the candidate
  * again on Objective merges its validation didn't count
  * (step-validate.ts `validateBeforeMerge`), so it takes a CPU slot and
- * the commands' time, as the validate step does.
+ * the commands' time, as the validate step does. `criteria`: how many
+ * its result review judges (review/finder.ts `resultCriteria`), each at
+ * most one proof.
  */
 export function itemStep(
   item: WorkItem,
@@ -388,6 +392,7 @@ export function itemStep(
   deps: BuildDeps,
   place: StackPlace | undefined,
   revalidates = false,
+  criteria = item.acceptance.length,
 ): Step {
   const key = stepKey(item.id, phase);
   const run = {
@@ -429,13 +434,13 @@ export function itemStep(
                   (place ? 0 : item.validation.length * commandTimeoutMs(deps)))
             : phase === "review"
               ? // The finder, beside one warm install for the review's
-                // checkout, then the proofs, each a model call, its commands
-                // and its refusal check, one after another at worst
-                // (review/item.ts).
+                // checkout, then the proofs, at most one a criterion, one
+                // after another at worst (the proof pool full): each a model
+                // call, its commands and its refusal check (review/item.ts).
                 45 * MINUTE +
                 2 * commandTimeoutMs(deps) +
                 15 * MINUTE +
-                deps.config.review.proofs *
+                criteria *
                   (10 * MINUTE +
                     deps.config.review.proofSeconds * 1000 +
                     commandTimeoutMs(deps)) +

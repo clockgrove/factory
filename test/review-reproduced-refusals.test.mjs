@@ -19,6 +19,7 @@ import {
   PROOF_SCHEMA,
   PROTECTED_CRITERION,
   proofInstructions,
+  protectedCriterion,
   reviewCandidate,
   reviewNotes,
   reviewResult,
@@ -397,24 +398,62 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
       .criteria,
     [0, 1],
   );
-  // Past the review's proofs, a suspicion is dropped unproved.
+  // Past the review's proofs at once, a suspicion waits for a lane and is
+  // proved: none passes unproved.
+  let running = 0;
+  let most = 0;
   const capped = answering(
     [{ findings: [refuse(0), refuse(1, "A patch may be dropped.")] }],
-    () => reproduced(REPRO),
+    async () => {
+      most = Math.max(most, ++running);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      running -= 1;
+      return reproduced(REPRO);
+    },
   );
   const { run: cappedRun, events: cappedEvents } = review(repo, capped, {
     limits: { ...LIMITS, proofs: 1 },
   });
   assert.deepEqual(
     (await cappedRun).refused.map((entry) => entry.criterionIndex),
-    [0],
+    [0, 1],
+  );
+  assert.equal(most, 1);
+  assert.deepEqual(
+    cappedEvents
+      .filter((event) => event.event === "result-review-suspicion")
+      .map((event) => event.outcome),
+    ["proved", "proved"],
+  );
+});
+
+test("D: refusals citing one file merge on its full path when both name a directory, on its basename when one doesn't", {
+  skip,
+}, async () => {
+  const repo = target();
+  const proofs = async (first, second) => {
+    const planner = answering(
+      [{ findings: [refuse(0, first), refuse(1, second)] }],
+      () => NOT_REPRODUCED,
+    );
+    await review(repo, planner).run;
+    return planner.proofs.length;
+  };
+  assert.equal(
+    await proofs("Wrong (src/a/index.js:3).", "Lost (src/b/index.js:3)."),
+    2,
   );
   assert.equal(
-    cappedEvents.find(
-      (event) =>
-        event.event === "result-review-suspicion" && event.criterionIndex === 1,
-    ).outcome,
-    "unproved",
+    await proofs("Wrong (src/a/index.js:3).", "Lost (./src/a/index.js:2-4)."),
+    1,
+  );
+  assert.equal(
+    await proofs("Wrong (index.js:3).", "Lost (src/a/index.js:3)."),
+    1,
+  );
+  assert.equal(
+    await proofs("Wrong (src/a/index.js:3).", "Lost (src/a/index.js:9)."),
+    2,
   );
 });
 
@@ -485,31 +524,50 @@ test("B: a result that removes many assertions from an existing test is the oper
     Array.from({ length: n }, (_, i) => `expect(f(${i})).toBe(${i});`).join(
       "\n",
     );
-  const repo = target(REDUCER, {
-    base: { "test/old.test.js": lines(12), "test/kept.test.js": lines(4) },
-    head: { "test/old.test.js": lines(1), "test/kept.test.js": lines(3) },
+  // Each style the heuristic knows: expect(, node's assert methods,
+  // unittest's assert methods and pytest.raises.
+  const styled = (n, line) => Array.from({ length: n }, () => line).join("\n");
+  const files = (old, node, unit) => ({
+    "test/old.test.js": lines(old),
+    "test/kept.test.js": lines(old === 12 ? 4 : 3),
+    "test/node.test.js": styled(node, "  assert.equal(f(1), 1);"),
+    "tests/test_unit.py": `${styled(unit, "        self.assertEqual(f(1), 1)")}\n${styled(unit, "    with pytest.raises(ValueError):")}`,
   });
+  const reduced = (old, node, unit) =>
+    target(REDUCER, { base: files(12, 12, 6), head: files(old, node, unit) });
+  const repo = reduced(1, 12, 0);
   const planner = answering([{ findings: [pass(0), pass(1)] }]);
   const { run, events } = review(repo, planner);
   const outcome = await run;
   assert.equal(outcome.kind, "needs-human");
   assert.equal(planner.proofs.length, 0);
+  const fired = [
+    { path: "test/old.test.js", base: 12, candidate: 1 },
+    { path: "tests/test_unit.py", base: 12, candidate: 0 },
+  ];
   assert.deepEqual(
     outcome.questions.map(({ criterionIndex, criterion }) => [
       criterionIndex,
       criterion,
     ]),
-    [[2, PROTECTED_CRITERION]],
+    [[2, protectedCriterion(fired)]],
   );
+  assert.ok(outcome.questions[0].criterion.startsWith(PROTECTED_CRITERION));
   assert.match(outcome.questions[0].detail, /test\/old\.test\.js 12 → 1/);
-  assert.doesNotMatch(outcome.questions[0].detail, /kept/);
+  assert.doesNotMatch(outcome.questions[0].detail, /kept|node/);
   assert.deepEqual(
     events.find((event) => event.event === "result-review-protected").files,
-    [{ path: "test/old.test.js", base: 12, candidate: 1 }],
+    fired,
   );
-  // The operator's accept on this tree is the authorization.
+  // node's assert methods count: removing them fires too.
+  const node = await review(
+    reduced(12, 0, 6),
+    answering([{ findings: [pass(0), pass(1)] }]),
+  ).run;
+  assert.match(node.questions[0].detail, /test\/node\.test\.js 12 → 0/);
+  // The operator's accept authorizes those files with those counts.
   const decision = {
-    criterion: PROTECTED_CRITERION,
+    criterion: outcome.questions[0].criterion,
     outcome: "accept",
     reason: "The old cases moved to a table.",
     by: "operator",
@@ -517,11 +575,29 @@ test("B: a result that removes many assertions from an existing test is the oper
     tree: repo.tree,
     itemId: "reduce",
   };
-  const accepted = answering([{ findings: [pass(0), pass(1)] }]);
-  const again = await review(repo, accepted, {
-    context: { decisions: [decision] },
-  }).run;
-  assert.equal(again.kind, "pass");
+  const settledBy = (repo) =>
+    review(repo, answering([{ findings: [pass(0), pass(1)] }]), {
+      context: { decisions: [decision] },
+    }).run;
+  assert.equal((await settledBy(repo)).kind, "pass");
+  // A repaired result, another tree with the same reduction: not asked again.
+  const repaired = target(`${REDUCER}// repaired\n`, {
+    base: files(12, 12, 6),
+    head: files(1, 12, 0),
+  });
+  assert.notEqual(repaired.tree, repo.tree);
+  assert.equal((await settledBy(repaired)).kind, "pass");
+  // Other counts are asked again, for that file only.
+  const other = await settledBy(reduced(2, 12, 0));
+  assert.equal(other.kind, "needs-human");
+  assert.deepEqual(
+    other.questions.map((entry) => entry.criterion),
+    [
+      protectedCriterion([
+        { path: "test/old.test.js", base: 12, candidate: 2 },
+      ]),
+    ],
+  );
 });
 
 test("E: a reproduced proof quotes the criterion its expected rests on, verbatim, and the suspicion keeps it", {

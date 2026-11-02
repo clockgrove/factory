@@ -251,7 +251,7 @@ test("5: a criterion refused on an earlier attempt that now passes with no suspi
   );
 });
 
-test("6: a refusal routed to a note escalates when its detail cites product code or its criterion names no test; a test-economy note on tests about tests doesn't", {
+test("6: a refusal routed to a note escalates only when its detail cites product code; one citing tests alone doesn't, whatever its criterion", {
   skip,
 }, async () => {
   const repo = target();
@@ -279,7 +279,7 @@ test("6: a refusal routed to a note escalates when its detail cites product code
   );
   assert.deepEqual(escalated(events)[0].triggers, ["note-on-behaviour"]);
 
-  const about = "test/reduce.test.js proves a patch adds its item.";
+  // The criterion names no test, but the note cites tests only.
   const untouched = answering([]);
   const { run: noted, events: notedEvents } = escalating(
     repo,
@@ -291,12 +291,11 @@ test("6: a refusal routed to a note escalates when its detail cites product code
             "It repeats test/reduce.test.js:3 (test/other.test.js:2).",
             "test-economy",
           ),
+          pass(1),
         ],
       },
     ]),
     untouched,
-    {},
-    { criteria: [about] },
   );
   assert.equal((await noted).kind, "pass");
   assert.equal(untouched.calls.length, 0);
@@ -314,7 +313,7 @@ test("safeguards: past the Objective's cap, at its deadline, or on an error, the
     repo,
     standard(),
     untouched,
-    { capped: true },
+    { left: 0 },
   );
   const cappedOutcome = await capped;
   assert.equal(cappedOutcome.kind, "pass");
@@ -347,4 +346,62 @@ test("safeguards: past the Objective's cap, at its deadline, or on an error, the
   const failed = await escalating(repo, standard(), broken).run;
   assert.equal(failed.kind, "pass");
   assert.equal(failed.escalation.outcome, "error");
+});
+
+test("the Objective's last escalation is kept for a dropped proof, a nearly spent allowance or a finder question; the other triggers log capped", {
+  skip,
+}, async () => {
+  const repo = target();
+  const noted = (proved) =>
+    answering(
+      [
+        {
+          findings: [
+            refuse(
+              0,
+              "Past the test-line budget (src/reduce.js:4).",
+              "test-economy",
+            ),
+            proved ? refuse(1, "A patch may be dropped.") : pass(1),
+          ],
+        },
+      ],
+      () => NOT_REPRODUCED,
+    );
+  // A note on product code alone: the last escalation isn't spent on it.
+  const untouched = answering([]);
+  const { run, events } = escalating(repo, noted(false), untouched, {
+    left: 1,
+  });
+  const outcome = await run;
+  assert.equal(outcome.kind, "pass");
+  assert.equal(outcome.escalation, undefined);
+  assert.equal(untouched.calls.length, 0);
+  assert.deepEqual(
+    escalated(events).map(({ triggers, outcome }) => ({ triggers, outcome })),
+    [{ triggers: ["note-on-behaviour"], outcome: "capped" }],
+  );
+
+  // Beside a dropped proof, it runs for that proof's criterion alone.
+  const upper = answering([{ findings: [pass(0)] }]);
+  const { run: both, events: bothEvents } = escalating(
+    repo,
+    noted(true),
+    upper,
+    { left: 1 },
+  );
+  assert.equal((await both).escalation.outcome, "done");
+  assert.ok(judges(upper.calls[0], CRITERIA[1]));
+  assert.ok(!judges(upper.calls[0], CRITERIA[0]));
+  assert.deepEqual(
+    escalated(bothEvents).map(({ triggers, criteria, outcome }) => ({
+      triggers,
+      criteria,
+      outcome,
+    })),
+    [
+      { triggers: ["note-on-behaviour"], criteria: [0], outcome: "capped" },
+      { triggers: ["proof-dropped"], criteria: [1], outcome: "done" },
+    ],
+  );
 });

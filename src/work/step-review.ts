@@ -210,9 +210,8 @@ export interface ReviewResult {
 
 /**
  * What the item's review may escalate to (review/escalation.ts): the
- * provider's `top` tier, within `review.escalation`, capped once the
- * Objective's escalations are spent, with the item's history its
- * triggers read: whether its repair allowance has at most one repair
+ * provider's `top` tier, within `review.escalation`, with the
+ * Objective's escalations left and the item's history its triggers read: whether its repair allowance has at most one repair
  * left after one at least (its path's, or the Objective's), and the
  * criteria its kept repros refused. None when `perObjective` is 0.
  */
@@ -235,9 +234,7 @@ function reviewEscalation(
   return {
     top: deps.top,
     deadlineMs: deadlineSeconds * 1000,
-    ...((fact(state, "review:escalations") ?? 0) >= perObjective && {
-      capped: true as const,
-    }),
+    left: perObjective - (fact(state, "review:escalations") ?? 0),
     ...(nearlySpent && { repairsNearlySpent: true as const }),
     ...(earlierRefused.length && { earlierRefused }),
   };

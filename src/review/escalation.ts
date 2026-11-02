@@ -17,9 +17,12 @@
  * 5. `earlier-refusal-passes`: a criterion refused on an earlier attempt
  *    (a kept repro) now passes with no suspicion;
  * 6. `note-on-behaviour`: a refusal routed to a note (test economy,
- *    placement or the standard) on a criterion that names no test file,
- *    or whose detail cites product code (a path not a test's,
- *    citations.ts `TEST_PATH`, the protected check's rule).
+ *    placement or the standard) whose detail cites product code: a path
+ *    not a test's (citations.ts `TEST_PATH`, the protected check's rule).
+ *
+ * Their value is in that order, but for 6 coming before 4 and 5
+ * (`TRIGGERS`). When the Objective has one escalation left, only 1, 2 and
+ * 3 may use it (`LAST_ESCALATION`); the others are logged as capped.
  *
  * Every trigger that fires joins one escalation, the review's only one: the
  * finder again on the `top` tier (review/item.ts `escalate`), on every
@@ -31,7 +34,7 @@
  * tier couldn't judge it either. It never removes a confirmed refusal.
  */
 import type { Planner } from "../providers/planner.js";
-import { citedSpans, namesTestPath, sameFile, TEST_PATH } from "./citations.js";
+import { citedSpans, sameFile, TEST_PATH } from "./citations.js";
 import type {
   Ground,
   RefusedCriterion,
@@ -40,15 +43,23 @@ import type {
   ReviewQuestion,
 } from "./result.js";
 
+/** The triggers, the most valuable first. */
 export const TRIGGERS = [
   "proof-dropped",
   "repairs-nearly-spent",
   "finder-question",
+  "note-on-behaviour",
   "repro-shares-file",
   "earlier-refusal-passes",
-  "note-on-behaviour",
 ] as const;
 export type Trigger = (typeof TRIGGERS)[number];
+
+/** The triggers the Objective's last escalation is kept for. */
+export const LAST_ESCALATION: ReadonlySet<Trigger> = new Set([
+  "proof-dropped",
+  "repairs-nearly-spent",
+  "finder-question",
+]);
 
 /** What a review may escalate to, and the item's history its triggers read. */
 export interface Escalation {
@@ -61,8 +72,12 @@ export interface Escalation {
   };
   /** The longest the escalation may take, its proofs included. */
   deadlineMs: number;
-  /** The Objective's escalations are spent: a firing is logged, and nothing runs. */
-  capped?: true;
+  /**
+   * The Objective's escalations left (`review.escalation.perObjective`
+   * less those run); absent: no cap. At 0 a firing is logged, and nothing
+   * runs; at 1 only `LAST_ESCALATION`'s triggers run.
+   */
+  left?: number;
   /** Trigger 2: the item has at most one repair left. */
   repairsNearlySpent?: true;
   /** Trigger 5: the criteria the item's earlier results were refused on. */
@@ -101,7 +116,10 @@ const NOTED: ReadonlySet<Ground> = new Set([
 
 /** The triggers that fired, and the criteria the top tier judges: all, or the named ones. */
 export interface Fired {
+  /** The most valuable first (`TRIGGERS`). */
   triggers: Trigger[];
+  /** The criteria each trigger names. */
+  named: Partial<Record<Trigger, number[]>>;
   /** The criteria it judges, by index, in order. */
   criteria: number[];
   /** The finder questions among them, which its verdict can settle. */
@@ -181,19 +199,30 @@ export function escalationTriggers(
         (entry) =>
           entry.ground !== undefined &&
           NOTED.has(entry.ground) &&
-          (!namesTestPath(entry.criterion) ||
-            citedSpans(entry.detail).some(
-              (span) => !TEST_PATH.test(span.path),
-            )),
+          citedSpans(entry.detail).some((span) => !TEST_PATH.test(span.path)),
       )
       .map((entry) => entry.criterionIndex),
   );
-  const triggers = TRIGGERS.filter((trigger) => named.has(trigger));
-  const judged = named.get("finder-question") ?? [];
+  return firedOf(Object.fromEntries(named));
+}
+
+/** `fired` with only the triggers `keep` holds. */
+export function firedOnly(fired: Fired, keep: ReadonlySet<Trigger>): Fired {
+  return firedOf(
+    Object.fromEntries(
+      Object.entries(fired.named).filter(([trigger]) =>
+        keep.has(trigger as Trigger),
+      ),
+    ),
+  );
+}
+
+function firedOf(named: Partial<Record<Trigger, number[]>>): Fired {
   return {
-    triggers,
-    criteria: [...new Set([...named.values()].flat())].sort((a, b) => a - b),
-    judged,
+    triggers: TRIGGERS.filter((trigger) => named[trigger]),
+    named,
+    criteria: [...new Set(Object.values(named).flat())].sort((a, b) => a - b),
+    judged: named["finder-question"] ?? [],
   };
 }
 
@@ -279,7 +308,7 @@ const TRIGGER_WORDS: Record<Trigger, string> = {
   "finder-question": "the reviewer asked the operator",
   "repro-shares-file": "a confirmed repro cites a file a pass cites",
   "earlier-refusal-passes": "an earlier refusal now passes",
-  "note-on-behaviour": "a refusal of behaviour became a note",
+  "note-on-behaviour": "a note cites product code",
 };
 
 /** One escalation as a line of words and numbers: the PR body's review notes. */

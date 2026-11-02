@@ -45,7 +45,3 @@ export const sameFile = (
 
 /** A test file by its path: under a test directory, or a `.test.` or `.spec.` name. */
 export const TEST_PATH = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\./;
-
-/** Whether a word of `text` is a test file's path (`TEST_PATH`). */
-export const namesTestPath = (text: string) =>
-  text.split(/[\s`'"(),;<>[\]]+/).some((word) => TEST_PATH.test(word));

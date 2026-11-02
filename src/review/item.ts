@@ -65,7 +65,9 @@ import {
   type Escalation,
   type EscalationRecord,
   escalationTriggers,
+  firedOnly,
   joinEscalation,
+  LAST_ESCALATION,
 } from "./escalation.js";
 import { finderInstructions, resultCriteria } from "./finder.js";
 import {
@@ -640,8 +642,9 @@ async function proveRefusals(
  * the finder again on the `top` tier, on the criteria they name (each
  * finder question with the standard reviewer's words beside it), then
  * the proofs of its refusals, as the standard ones are proved, joined
- * with `review`. One a review, within its deadline. Capped, timed out or
- * failed, `review` stands; only the service's own stop escapes. Logged
+ * with `review`. One a review, within its deadline; the Objective's last
+ * one only for `LAST_ESCALATION`'s triggers, the others logged as capped.
+ * Capped, timed out or failed, `review` stands; only the service's own stop escapes. Logged
  * as `result-review-escalation`; its calls' `model-usage` events count
  * toward the Objective's spend like any other.
  */
@@ -652,25 +655,41 @@ async function escalate(
   review: ResultReview,
   context: Omit<ProofContext, "readDir">,
 ): Promise<{ review: ResultReview; record?: EscalationRecord }> {
-  const fired = escalationTriggers(found, review, escalation, input.criteria);
-  if (!fired.triggers.length) return { review };
-  const { top } = escalation;
-  const named = {
-    triggers: fired.triggers,
+  const all = escalationTriggers(found, review, escalation, input.criteria);
+  if (!all.triggers.length) return { review };
+  const { top, left } = escalation;
+  const tier = {
     tier: "top" as const,
     provider: top.provider,
     model: top.model,
     effort: top.effort,
-    criteria: fired.criteria,
   };
-  if (escalation.capped) {
+  // The Objective's last escalation is kept for the most valuable triggers.
+  const fired =
+    left === undefined || left > 1
+      ? all
+      : left === 1
+        ? firedOnly(all, LAST_ESCALATION)
+        : firedOnly(all, new Set());
+  const skipped = all.triggers.filter(
+    (trigger) => !fired.triggers.includes(trigger),
+  );
+  if (skipped.length) {
+    const capped = firedOnly(all, new Set(skipped));
     input.log({
       event: "result-review-escalation",
-      ...named,
+      triggers: capped.triggers,
+      ...tier,
+      criteria: capped.criteria,
       outcome: "capped",
     });
-    return { review };
   }
+  if (!fired.triggers.length) return { review };
+  const named = {
+    triggers: fired.triggers,
+    ...tier,
+    criteria: fired.criteria,
+  };
   const started = Date.now();
   const tally = newTally();
   let tokens = 0;

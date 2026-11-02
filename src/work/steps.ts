@@ -22,7 +22,7 @@ import { mergeOf } from "./merged.js";
 import { refusedOf, refusedResult } from "./refused.js";
 import { ciStep, mergeStep, publishStep } from "./step-deliver.js";
 import { settleStep } from "./step-qa.js";
-import { reviewStep } from "./step-review.js";
+import { reproLimitMs, reviewStep } from "./step-review.js";
 import { selectStep } from "./step-select.js";
 import { unvalidatedMerges, validateStep } from "./step-validate.js";
 import { withKeep, workStep } from "./step-work.js";
@@ -443,7 +443,7 @@ export function itemStep(
                 criteria *
                   (10 * MINUTE +
                     deps.config.review.proofSeconds * 1000 +
-                    commandTimeoutMs(deps)) +
+                    reproLimitMs(deps)) +
                 (revalidates
                   ? validationDeadlineMs(item, commandTimeoutMs(deps))
                   : 0)

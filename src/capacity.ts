@@ -77,8 +77,9 @@ export function hostCapacity(
       worker: reservations.worker,
       cpu: reservations.validation,
       planner: reservations.planner,
-      // A proof is a planner call with a few short commands.
-      proof: reservations.planner,
+      // A proof's commands and refusal checks run the product, as a
+      // validation's do.
+      proof: reservations.validation,
       github: 0,
     } satisfies Record<HostResource, number>,
     budgetMiB: execution.memoryMiB,

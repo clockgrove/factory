@@ -445,9 +445,10 @@ export interface Workflow {
  * instead of fanning out.
  */
 /**
- * `proof`: a result review's proof calls beyond its own slot (review/item.ts),
- * a pool apart from `planner`, so proofs never queue behind planning and
- * the reviews running beside workers.
+ * `proof`: a result review's proof lanes, each a model call with commands
+ * and refusal checks (review/item.ts), a pool apart from `planner`, so
+ * proofs never queue behind planning and the reviews running beside
+ * workers.
  */
 export type HostResource = "worker" | "cpu" | "planner" | "proof" | "github";
 
@@ -509,10 +510,11 @@ export class HostLimiter {
   acquire(resource: HostResource): boolean {
     const { caps, reserveMiB, budgetMiB } = this.capacity;
     if (this.used[resource] >= caps[resource]) return false;
-    // A planner or proof call leaves room for every free worker and
-    // validation slot, so memory never holds those below their caps.
+    // A planner call leaves room for every free worker and validation
+    // slot, so memory never holds those below their caps. A proof reserves
+    // a validation's memory and competes as one does.
     const room =
-      resource === "planner" || resource === "proof"
+      resource === "planner"
         ? (["worker", "cpu"] as const).reduce(
             (sum, each) =>
               sum +

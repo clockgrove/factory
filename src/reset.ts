@@ -34,6 +34,7 @@ import { type StatusRecord, statusRecord } from "./progress.js";
 import { type QueueItem, readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
 import { resultCriteria } from "./review/finder.js";
+import { protectedFiles } from "./review/item.js";
 import type { CriterionDecision } from "./review/result.js";
 import {
   deadlineAt,
@@ -460,9 +461,13 @@ function restorable(
     const item = entry.itemId
       ? plan.items.find((each) => each.id === entry.itemId)
       : undefined;
+    const criteria = item ? resultCriteria(plan, item) : [];
+    // An item's decision of a criterion its review judges, or of its
+    // protected-test check's question (review/item.ts).
     const fits = entry.itemId
       ? item !== undefined &&
-        resultCriteria(plan, item).includes(entry.criterion)
+        (criteria.includes(entry.criterion) ||
+          protectedFiles(entry.criterion, criteria).length > 0)
       : judged.has(entry.criterion);
     if (!fits)
       dropped.push(

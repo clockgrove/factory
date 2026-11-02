@@ -248,6 +248,11 @@ function reviewWorkspace(
   );
 }
 
+/** The longest one command of a proof, or a repro, may run, in ms. */
+export function reproLimitMs(deps: BuildDeps): number {
+  return Math.min(commandTimeoutMs(deps), 10 * MINUTE);
+}
+
 /** The installation's review bounds, in ms. */
 function reviewLimits(deps: BuildDeps): ReviewLimits {
   const { review } = deps.config;
@@ -255,7 +260,7 @@ function reviewLimits(deps: BuildDeps): ReviewLimits {
     proofs: review.proofs,
     proofCommands: review.proofCommands,
     proofBudgetMs: review.proofSeconds * 1000,
-    commandMs: Math.min(commandTimeoutMs(deps), 10 * MINUTE),
+    commandMs: reproLimitMs(deps),
     prepareMs: commandTimeoutMs(deps) + 5 * MINUTE,
     network: deps.config.sandbox.network,
   };

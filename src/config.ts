@@ -90,8 +90,8 @@ export interface CoreConfig {
     /** Planner calls (planning rounds and reviews) at once across the host. */
     planners: number;
     /**
-     * Result review proof calls at once across the host, beyond each
-     * review's own planner slot: a pool of their own (engine.ts `proof`).
+     * Result review proof lanes at once across the host, each reserving a
+     * validation's memory: a pool of their own (engine.ts `proof`).
      */
     proofs: number;
     /** MiB the running steps may reserve together (capacity.ts). */

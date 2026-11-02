@@ -336,7 +336,7 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
   const logged = events.find((event) => event.event === "result-review");
   assert.deepEqual(
     { ...logged.suspicions, tokens: undefined },
-    { raised: 2, proved: 1, dropped: 1, tokens: undefined },
+    { raised: 2, proved: 1, dropped: 1, unjudged: 0, tokens: undefined },
   );
   assert.deepEqual(logged.verdicts, { pass: 0, suspect: 2, question: 0 });
   assert.equal(
@@ -427,7 +427,7 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
   );
 });
 
-test("D: refusals citing one file merge on its full path when both name a directory, on its basename when one doesn't", {
+test("D: refusals citing one file merge on its full path, on its basename only when neither names a directory", {
   skip,
 }, async () => {
   const repo = target();
@@ -449,8 +449,9 @@ test("D: refusals citing one file merge on its full path when both name a direct
   );
   assert.equal(
     await proofs("Wrong (index.js:3).", "Lost (src/a/index.js:3)."),
-    1,
+    2,
   );
+  assert.equal(await proofs("Wrong (index.js:3).", "Lost (index.js:2-4)."), 1);
   assert.equal(
     await proofs("Wrong (src/a/index.js:3).", "Lost (src/a/index.js:9)."),
     2,
@@ -604,18 +605,37 @@ test("E: a reproduced proof quotes the criterion its expected rests on, verbatim
   skip,
 }, async () => {
   const repo = target();
-  // An invented requirement is asked again once, then dropped.
+  // An invented requirement is asked again once; still invalid, Factory
+  // couldn't check the refusal, which is the operator's question.
   const invented = answering([{ findings: [refuse(0), pass(1)] }], () =>
     reproduced(REPRO, undefined, "patches are never discarded"),
   );
   const { run, events } = review(repo, invented);
-  assert.equal((await run).kind, "pass");
+  const asked = await run;
+  assert.equal(asked.kind, "needs-human");
+  assert.deepEqual(
+    asked.questions.map((entry) => entry.criterionIndex),
+    [0],
+  );
+  assert.match(asked.questions[0].detail, /its answer was invalid twice/);
   assert.equal(invented.proofs.length, 2);
   assert.match(invented.proofs[1].prompt, /requirement must quote, verbatim/);
   assert.equal(
     events.find((event) => event.event === "result-review-suspicion").reason,
     "its answer was invalid twice",
   );
+  assert.equal(
+    events.find((event) => event.event === "result-review").suspicions.unjudged,
+    1,
+  );
+  // A repro that never ran (127) is Factory's to ask about too; one that
+  // ran and exited 0 is a pass (R2).
+  const missing = answering([{ findings: [refuse(0), pass(1)] }], () =>
+    reproduced("no-such-command-xyz", "anything"),
+  );
+  const notRun = await review(repo, missing).run;
+  assert.equal(notRun.kind, "needs-human");
+  assert.match(notRun.questions[0].detail, /it did not run/);
   // A quotation of the criterion, whitespace aside, is kept on the suspicion.
   const quoted = answering([{ findings: [refuse(0), pass(1)] }], () =>
     reproduced(REPRO, undefined, "keeps   those patches"),
@@ -968,7 +988,13 @@ test("R9: a proof's instructions with its tool's description fit in 5,000 charac
 test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros, questions, tokens and time, as text and JSON", () => {
   const telemetry = new ItemTelemetries();
   const at = "2026-01-01T00:00:00.000Z";
-  const suspicions = { raised: 4, proved: 1, dropped: 3, tokens: 900 };
+  const suspicions = {
+    raised: 4,
+    proved: 1,
+    dropped: 2,
+    unjudged: 1,
+    tokens: 900,
+  };
   for (const event of [
     { event: "start", step: "item:reduce:review", at },
     {
@@ -1014,6 +1040,6 @@ test("R11: the item's telemetry shows the reviews' verdicts, suspicions, repros,
   );
   assert.match(
     telemetryText(item, "Work Item reduce"),
-    /Reviewer: 1 review, verdicts 1 pass, 4 suspect, 0 question, suspicions 4 raised, 1 proved, 3 dropped \(proofs 900 tokens\), repros 1 confirmed, 1 dropped, 1 question, 1,200 tokens/,
+    /Reviewer: 1 review, verdicts 1 pass, 4 suspect, 0 question, suspicions 4 raised, 1 proved, 2 dropped, 1 unjudged \(proofs 900 tokens\), repros 1 confirmed, 1 dropped, 1 question, 1,200 tokens/,
   );
 });

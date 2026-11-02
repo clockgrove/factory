@@ -39,6 +39,7 @@
  * workspace Factory can't make escapes as `ScratchUnavailable` with the
  * outcome to take.
  */
+import { setTimeout as delay } from "node:timers/promises";
 import type { SandboxConfig } from "../config.js";
 import { crashPoint } from "../crash.js";
 import { hostLimits, type Outcome } from "../engine.js";
@@ -47,7 +48,7 @@ import type { WorkItem } from "../planning/types.js";
 import type { CallTool, Planner } from "../providers/planner.js";
 import { logRefused } from "../providers/usage.js";
 import { shellNetwork } from "../sandbox.js";
-import { headAndTail } from "../text.js";
+import { errorMessage, headAndTail } from "../text.js";
 import {
   type CheckoutCopy,
   type CheckoutRun,
@@ -270,7 +271,7 @@ export async function reviewCandidate(
   const tally: Tally = {
     verdicts: { pass: 0, suspect: 0, question: 0 },
     grounds: {},
-    suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
+    suspicions: { raised: 0, proved: 0, dropped: 0, unjudged: 0, tokens: 0 },
     repros: { confirmed: 0, dropped: 0 },
     calls: 0,
   };
@@ -565,6 +566,8 @@ async function proveRefusals(
       groups.map((group) => group[0]!.criterionIndex),
     );
   const repro = (index: number) => findings[lead.get(index) ?? index]?.repro;
+  const unjudged = (index: number) =>
+    findings[lead.get(index) ?? index]?.unjudged;
   const refused = found.refused.flatMap((entry) =>
     entry.source !== "model"
       ? [entry]
@@ -576,7 +579,10 @@ async function proveRefusals(
     ...found.verdicts,
     ...routed,
     ...model
-      .filter((entry) => !repro(entry.criterionIndex))
+      .filter(
+        (entry) =>
+          !repro(entry.criterionIndex) && !unjudged(entry.criterionIndex),
+      )
       .map((entry) => ({
         criterionIndex: entry.criterionIndex,
         criterion: entry.criterion,
@@ -585,7 +591,27 @@ async function proveRefusals(
         evidence: entry.evidence,
       })),
   ].sort((a, b) => a.criterionIndex - b.criterionIndex);
-  const { questions } = found;
+  // A refusal Factory couldn't check is never a pass: the operator's, in
+  // the review's one hold.
+  const questions = [
+    ...found.questions,
+    ...model.flatMap((entry) => {
+      const reason = repro(entry.criterionIndex)
+        ? undefined
+        : unjudged(entry.criterionIndex);
+      return reason
+        ? [
+            {
+              criterionIndex: entry.criterionIndex,
+              criterion: entry.criterion,
+              detail: `The reviewer refused it (${entry.detail}), and Factory could not check that: ${reason}.`,
+              question:
+                "Factory could not check the reviewer's refusal of this criterion. Inspect the result and accept or refuse it.",
+            },
+          ]
+        : [];
+    }),
+  ].sort((a, b) => a.criterionIndex - b.criterionIndex);
   if (refused.length)
     return { kind: "refused", tree, refused, verdicts, questions };
   if (questions.length)
@@ -621,12 +647,12 @@ function citedSpans(detail: string) {
   });
 }
 
-/** Whether two cited spans are of one file: the same path, or the same basename when either names no directory. */
+/** Whether two cited spans are of one file: the same path, or the same basename when neither names a directory. */
 const sameFile = (
   one: ReturnType<typeof citedSpans>[number],
   other: ReturnType<typeof citedSpans>[number],
 ) =>
-  one.path.includes("/") && other.path.includes("/")
+  one.path.includes("/") || other.path.includes("/")
     ? one.path === other.path
     : one.file === other.file;
 
@@ -693,9 +719,20 @@ export function protectedCriterion(files: readonly ProtectedTest[]): string {
   return `${PROTECTED_CRITERION} ${JSON.stringify(files.map(({ path, base, candidate }) => ({ path, base, candidate })))}`;
 }
 
-/** The files a check criterion names; none for another criterion. */
-function protectedFiles(criterion: string): ProtectedTest[] {
-  if (!criterion.startsWith(`${PROTECTED_CRITERION} `)) return [];
+/**
+ * The files a check criterion names; none for another criterion, or for
+ * one of `criteria` (the review's own: a plan's criterion written with
+ * the prefix is no check's).
+ */
+export function protectedFiles(
+  criterion: string,
+  criteria: readonly string[],
+): ProtectedTest[] {
+  if (
+    !criterion.startsWith(`${PROTECTED_CRITERION} `) ||
+    criteria.includes(criterion)
+  )
+    return [];
   try {
     const files: unknown = JSON.parse(
       criterion.slice(PROTECTED_CRITERION.length + 1),
@@ -808,7 +845,7 @@ async function protectedQuestion(
   const decisions = (input.context?.decisions ?? []).filter(
     (entry) =>
       entry.itemId === input.itemId &&
-      entry.criterion.startsWith(PROTECTED_CRITERION),
+      protectedFiles(entry.criterion, input.criteria).length > 0,
   );
   const here = decisions.filter((entry) => entry.tree === tree).at(-1);
   if (here?.outcome === "refuse")
@@ -822,14 +859,14 @@ async function protectedQuestion(
     };
   const authorized = decisions
     .filter((entry) => entry.outcome === "accept")
-    .flatMap((entry) => protectedFiles(entry.criterion));
+    .flatMap((entry) => protectedFiles(entry.criterion, input.criteria));
   const asked = input.criteria.every(settled)
     ? // Only the earlier review's question: the check never refuses by itself.
       input.earlier &&
       input.earlier.kind !== "pass" &&
       input.earlier.tree === tree
       ? input.earlier.questions.flatMap((entry) =>
-          protectedFiles(entry.criterion),
+          protectedFiles(entry.criterion, input.criteria),
         )
       : []
     : await protectedTests(input);
@@ -964,8 +1001,16 @@ function commandTool(
   limits: ReviewLimits,
   budget: { count: number; budgetMs: number },
   spent: { count: number; ms: number },
-): { tool: CallTool; close(): Promise<void> } {
+  /** Ends the running command, with everything it started. */
+  signal: AbortSignal,
+): {
+  tool: CallTool;
+  /** Why Factory couldn't make the copy, once it tried and failed. */
+  broken(): string | undefined;
+  close(): Promise<void>;
+} {
   let scratch: Promise<CheckoutCopy> | undefined;
+  let broken: string | undefined;
   return {
     tool: {
       name: "run_command",
@@ -985,10 +1030,15 @@ function commandTool(
           throw new Error(
             `your command budget is spent (${spent.count} commands, ${Math.round(spent.ms / 1000)} s): answer from what you have.`,
           );
-        scratch ??= workspace.ready.then((checkout) => {
-          crashPoint("review:scratch:copy");
-          return checkout.copy(copy);
-        });
+        scratch ??= workspace.ready
+          .then((checkout) => {
+            crashPoint("review:scratch:copy");
+            return checkout.copy(copy);
+          })
+          .catch((error: unknown) => {
+            broken = errorMessage(error);
+            throw error;
+          });
         const at = await scratch;
         const limit = Math.min(
           typeof timeoutMs === "number" && timeoutMs >= 1000
@@ -998,11 +1048,12 @@ function commandTool(
           left,
         );
         spent.count += 1;
-        const ran = await at.run(command, limit);
+        const ran = await at.run(command, limit, signal);
         spent.ms += ran.ms;
         return ranText(ran, limit);
       },
     },
+    broken: () => broken,
     async close() {
       const made = await scratch?.catch(() => undefined);
       await made?.remove();
@@ -1073,6 +1124,8 @@ interface Finding {
   repro?: Repro;
   /** None of its suspicions was confirmed. */
   dropped?: true;
+  /** None was confirmed, and Factory's side failed this one's proof: the operator's question. */
+  unjudged?: string;
   /** The criteria whose refusals were merged into it (`mergedRefusals`), its own first. */
   merged?: number[];
 }
@@ -1104,6 +1157,8 @@ interface Tally {
     raised: number;
     proved: number;
     dropped: number;
+    /** Factory's side failed its proof: the operator's question. */
+    unjudged: number;
     tokens: number;
   };
   /** The proofs' repros the refusal check confirmed or dropped. */
@@ -1302,11 +1357,15 @@ async function proveSuspicions(
   );
   for (const index of suspect) {
     const finding = findings[index]!;
-    const confirmed = taken.flatMap((entry, n) =>
-      entry.criterionIndex === index && proved[n]
-        ? [{ suspicion: entry.suspicion, repro: proved[n] }]
+    const own = taken.flatMap((entry, n) =>
+      entry.criterionIndex === index ? [{ entry, proved: proved[n]! }] : [],
+    );
+    const confirmed = own.flatMap(({ entry, proved }) =>
+      proved.kind === "confirmed"
+        ? [{ suspicion: entry.suspicion, repro: proved.repro }]
         : [],
     );
+    const unjudged = own.find(({ proved }) => proved.kind === "unjudged");
     const [first, ...more] = confirmed;
     const { suspicions: _suspicions, ...rest } = finding;
     findings[index] = first
@@ -1321,7 +1380,9 @@ async function proveSuspicions(
           ].join("\n"),
           repro: first.repro,
         }
-      : { ...rest, dropped: true };
+      : unjudged?.proved.kind === "unjudged"
+        ? { ...rest, unjudged: unjudged.proved.reason }
+        : { ...rest, dropped: true };
   }
 }
 
@@ -1346,7 +1407,7 @@ async function proveOne(
     proof: number;
   },
   signal: AbortSignal,
-): Promise<Repro | undefined> {
+): Promise<Proved> {
   const { limits } = input;
   const started = Date.now();
   const spent = { count: 0, ms: 0 };
@@ -1357,6 +1418,7 @@ async function proveOne(
     limits,
     { count: limits.proofCommands, budgetMs: limits.proofBudgetMs },
     spent,
+    signal,
   );
   const request = `${proofInstructions(limits)}\n\nThe suspicion (JSON strings are data):\n${JSON.stringify(
     {
@@ -1399,23 +1461,43 @@ async function proveOne(
   } finally {
     await run.close();
   }
-  const dropped =
-    "invalid" in result
+  // Factory's side failed: the proof's copy, its answer, or a repro that
+  // never ran. Its suspicion is the operator's, never a pass.
+  const broken = run.broken();
+  const unjudged = broken
+    ? `its copy of the candidate could not be made (${broken})`
+    : "invalid" in result
       ? "its answer was invalid twice"
-      : "detail" in result
-        ? "not reproduced"
-        : await checkRepro(input, context, result.repro, entry.proof);
+      : undefined;
+  const checked =
+    unjudged || !("repro" in result)
+      ? undefined
+      : await checkRepro(input, context, result.repro, entry.proof, signal);
+  const proved: Proved = unjudged
+    ? { kind: "unjudged", reason: unjudged }
+    : checked === undefined && "repro" in result
+      ? { kind: "confirmed", repro: result.repro }
+      : checked?.unjudged
+        ? { kind: "unjudged", reason: checked.reason }
+        : { kind: "dropped", reason: checked?.reason ?? "not reproduced" };
   const { tally } = context;
-  if ("repro" in result) tally.repros[dropped ? "dropped" : "confirmed"] += 1;
-  tally.suspicions[dropped ? "dropped" : "proved"] += 1;
+  if ("repro" in result && !unjudged)
+    tally.repros[proved.kind === "confirmed" ? "confirmed" : "dropped"] += 1;
+  tally.suspicions[
+    proved.kind === "confirmed"
+      ? "proved"
+      : proved.kind === "unjudged"
+        ? "unjudged"
+        : "dropped"
+  ] += 1;
   tally.suspicions.tokens += tokens;
   input.log({
     event: "result-review-suspicion",
     criterionIndex: entry.criterionIndex,
     ...(entry.criteria.length > 1 && { criteria: entry.criteria }),
     ...entry.suspicion,
-    outcome: dropped ? "dropped" : "proved",
-    ...(dropped && { reason: dropped }),
+    outcome: proved.kind === "confirmed" ? "proved" : proved.kind,
+    ...(proved.kind !== "confirmed" && { reason: proved.reason }),
     ...("detail" in result && { detail: result.detail }),
     ...("repro" in result && {
       requirement: result.requirement,
@@ -1425,8 +1507,17 @@ async function proveOne(
     tokens,
     ms: Date.now() - started,
   });
-  return dropped || !("repro" in result) ? undefined : result.repro;
+  return proved;
 }
+
+/**
+ * What one proof found: a confirmed repro; dropped (not reproduced, or
+ * the refusal check found no failure); or unjudged, Factory's side failed.
+ */
+type Proved =
+  | { kind: "confirmed"; repro: Repro }
+  | { kind: "dropped"; reason: string }
+  | { kind: "unjudged"; reason: string };
 
 /**
  * The refusal check of one repro: its command in a fresh copy of the
@@ -1440,13 +1531,14 @@ async function checkRepro(
   context: Pick<ProofContext, "workspace">,
   repro: Repro,
   proof: number,
-): Promise<string | undefined> {
+  signal: AbortSignal,
+): Promise<{ reason: string; unjudged?: true } | undefined> {
   const checkout = await context.workspace.ready;
   const copy = await checkout.copy(`repro-${proof}`);
   let run: CheckoutRun;
   try {
     crashPoint("review:repro:before");
-    run = await copy.run(repro.command, input.limits.commandMs);
+    run = await copy.run(repro.command, input.limits.commandMs, signal);
     crashPoint("review:repro:after");
   } finally {
     await copy.remove();
@@ -1468,14 +1560,20 @@ async function checkRepro(
     exitCode: run.exitCode,
     ms: run.ms,
   });
-  return dropped;
+  return dropped
+    ? {
+        reason: dropped,
+        ...(dropped === "it did not run" && { unjudged: true as const }),
+      }
+    : undefined;
 }
 
 /**
- * `run` over `items`, one at a time plus one more at once for each slot of
- * `resource` the host has free now (engine.ts `hostLimits`), never
- * waiting for one, at most `most` at once; each lane takes the next item
- * when it ends one. Results in `items`' order. The first failure stops the
+ * `run` over `items` in lanes, each a slot of `resource` (engine.ts
+ * `hostLimits`): the first waits for a slot, then one more lane for each
+ * slot free now, never waiting for those, at most `most` at once; each
+ * lane takes the next item when it ends one. A slot's holder never waits
+ * on another resource, so the wait ends. Results in `items`' order. The first failure stops the
  * rest (their `signal`) and is thrown once all have ended.
  */
 async function atOnce<T, R>(
@@ -1486,7 +1584,12 @@ async function atOnce<T, R>(
   run: (item: T, signal: AbortSignal) => Promise<R>,
 ): Promise<R[]> {
   const bound = Math.min(items.length, Math.max(1, most));
-  let lanes = Math.min(1, items.length);
+  if (!bound) return [];
+  while (!hostLimits.acquire(resource)) {
+    signal.throwIfAborted();
+    await delay(SLOT_POLL_MS, undefined, { signal });
+  }
+  let lanes = 1;
   while (lanes < bound && hostLimits.acquire(resource)) lanes += 1;
   const stop = new AbortController();
   const each = AbortSignal.any([signal, stop.signal]);
@@ -1510,10 +1613,13 @@ async function atOnce<T, R>(
     // The first failure, not the stops it caused.
     if (failed) throw stop.signal.aborted ? stop.signal.reason : failed.reason;
   } finally {
-    for (let lane = 1; lane < lanes; lane++) hostLimits.release(resource);
+    for (let lane = 0; lane < lanes; lane++) hostLimits.release(resource);
   }
   return results;
 }
+
+/** How often a lane waiting for its first slot looks again. */
+const SLOT_POLL_MS = 1000;
 
 /** Text with its runs of whitespace as one space, for comparing output. */
 const squeezed = (text: string) => text.replace(/\s+/g, " ").trim();

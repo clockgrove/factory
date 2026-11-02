@@ -507,6 +507,8 @@ for (const point of [
   "review:scratch:copy",
   "review:repro:before",
   "review:repro:after",
+  "review:escalation:before",
+  "review:escalation:after",
 ]) {
   test(`crash at ${point}, the next review confirms the refusal and leaves no checkout`, {
     skip: sandboxAvailable().available
@@ -563,15 +565,19 @@ for (const point of [
       dir: `${checkout}.review`,
     };
     const dist = (path) => new URL(`../dist/${path}`, import.meta.url).href;
-    // The finder refuses; the proof runs a command and its repro, which fails.
+    // The finder refuses; the proof runs a command and its repro, which
+    // fails. With the repair allowance nearly spent, the top tier (the same
+    // answers) reviews it again.
     const script = `import { CAPTURE_OFF, RunLog } from ${JSON.stringify(dist("log.js"))};
 import { reviewCandidate, validationWorkspace } from ${JSON.stringify(dist("review/item.js"))};
 export async function run(input, review, attempt) {
   const log = new RunLog(process.env.LOGS, "2026-01-01T00-00-00-000Z-" + attempt, CAPTURE_OFF, []);
   const signal = AbortSignal.timeout(60_000);
   const workspace = validationWorkspace({ ...input, signal, log: () => {}, runFile: (kind) => log.runFile(1, "item:a:review#" + attempt + "." + kind) }, input.checkout + ".scratch");
+  const planner = { async answer(call) { if (call.schema.properties.findings) return { value: { findings: [{ criterionIndex: 0, verdict: "refuse", ground: "behaviour", evidenceIndices: [0], detail: "b says b, not c", question: "" }] } }; await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return { value: { outcome: { kind: "reproduced", requirement: "b says c.", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } };
   return reviewCandidate({
-    planner: { async answer(call) { if (call.schema.properties.findings) return { value: { findings: [{ criterionIndex: 0, verdict: "refuse", ground: "behaviour", evidenceIndices: [0], detail: "b says b, not c", question: "" }] } }; await call.tools.find((tool) => tool.name === "run_command").run({ command: "cat b" }); return { value: { outcome: { kind: "reproduced", requirement: "b says c.", repro: { input: "b", expected: "c", actual: "says b", command: "echo says $(cat b); grep -q c b" } } } }; } },
+    planner,
+    escalation: { top: { planner, provider: "codex", model: "m", effort: "max" }, deadlineMs: 60_000, repairsNearlySpent: true },
     checkout: input.checkout, base: review.base, commit: review.commit, criteria: input.item.acceptance,
     validation: { tree: review.tree, commands: ["test -f b"] }, workspace, itemId: "a",
     limits: { commandMs: 10_000, prepareMs: 60_000, proofs: 10, proofCommands: 8, proofBudgetMs: 10_000 },

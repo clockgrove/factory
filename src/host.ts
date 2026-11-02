@@ -37,6 +37,7 @@ import {
   providerPlanner,
   providerWorker,
   providerWorkflow,
+  topTier,
 } from "./providers/selection.js";
 import { projectRepositories } from "./queue.js";
 import {
@@ -178,6 +179,7 @@ export async function serveInstallation(
           provider: settings,
           github,
           planner: providerPlanner(settings),
+          top: topTier(config.providers, each),
           workDir: (issue) => join(paths.root, "work", String(issue)),
           objectives: paths.objectives,
           logs: paths.logs,

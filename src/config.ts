@@ -156,6 +156,12 @@ export interface CoreConfig {
     proofs: number;
     proofCommands: number;
     proofSeconds: number;
+    /**
+     * Escalation to the provider's `top` tier on structural triggers
+     * (review/escalation.ts, #2364): at most `perObjective` an Objective
+     * (0: never), one a review, each within `deadlineSeconds`.
+     */
+    escalation: { perObjective: number; deadlineSeconds: number };
   };
   finalValidation: {
     /** Commands every Objective's result must pass. */
@@ -794,6 +800,10 @@ export function loadConfig(repository: string): CoreConfig {
         proofs: whole(1, 4, 1000),
         proofCommands: whole(0, 8, 1000),
         proofSeconds: whole(0, 120, 24 * 60 * 60),
+        escalation: object({
+          perObjective: whole(0, 4, 100),
+          deadlineSeconds: whole(1, 600, 60 * 60),
+        }),
       }),
       finalValidation: object({
         requiredCommands: strings,

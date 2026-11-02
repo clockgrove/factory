@@ -6,6 +6,7 @@ import { rank, resourceGate, type ScheduleView } from "../planning/schedule.js";
 import type { PlanningDeps } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { type DeliveryUnit, unitOf, units } from "../planning/units.js";
+import type { TopTier } from "../providers/selection.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { resultCriteria } from "../review/finder.js";
 import type { ObjectiveBlock } from "../shown.js";
@@ -47,6 +48,8 @@ export const KEPT_OUTPUT_CHARS = 128_000;
 
 /** What execution needs from the installation, beyond planning. */
 export interface BuildDeps extends PlanningDeps {
+  /** The provider's `top` tier, which its result reviews escalate to (providers/selection.ts `topTier`); absent: none. */
+  top?: TopTier;
   /** The worker for an Objective's plan, on the item's execution profile when it has one. */
   worker(
     plan: Plan,
@@ -444,6 +447,10 @@ export function itemStep(
                   (10 * MINUTE +
                     deps.config.review.proofSeconds * 1000 +
                     reproLimitMs(deps)) +
+                // An escalation, its proofs included, ends by its own deadline.
+                (deps.top && deps.config.review.escalation.perObjective
+                  ? deps.config.review.escalation.deadlineSeconds * 1000
+                  : 0) +
                 (revalidates
                   ? validationDeadlineMs(item, commandTimeoutMs(deps))
                   : 0)

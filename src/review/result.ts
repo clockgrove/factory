@@ -53,6 +53,7 @@ import {
   type ReviewArtifactGroup,
   reviewArtifactEvidence,
 } from "./artifacts.js";
+import type { EscalationRecord } from "./escalation.js";
 import { unreachableModules } from "./orphans.js";
 
 /** The commands Factory's validation ran, in order, each passing on `tree`. */
@@ -195,7 +196,7 @@ export interface ReviewQuestion {
  * of the same tree after the operator decides some criteria reuses them
  * (`earlier`) and asks the reviewer only about the rest.
  */
-export type ResultReview =
+export type ResultReview = (
   | { kind: "pass"; tree: string; verdicts: ReviewedCriterion[] }
   /** Every refused criterion; the step repairs with them. */
   | {
@@ -211,7 +212,11 @@ export type ResultReview =
       tree: string;
       questions: ReviewQuestion[];
       verdicts: ReviewedCriterion[];
-    };
+    }
+) & {
+  /** A Work Item review's escalation to the top tier, when one ran (review/escalation.ts). */
+  escalation?: EscalationRecord;
+};
 
 export interface ResultReviewInput {
   planner: Planner;

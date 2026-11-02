@@ -98,14 +98,44 @@ export type WorkerConfig =
  * `hedgeSeconds` replaces a phase's hedge threshold (planner.ts
  * DEFAULT_HEDGE_SECONDS); absent, every phase has its default.
  */
-export type ProviderConfig = {
+export interface ProviderConfig {
+  planner: PlannerKind;
+  models?: ConfiguredModels;
   worker: WorkerConfig;
   hedgeSeconds?: HedgeSeconds;
-} & (
-  | { planner: "claude"; models?: Partial<ClaudePlannerOptions> }
-  | { planner: "codex"; models?: Partial<PlannerModels<CodexEffort>> }
-  | { planner: "copilot"; models?: Partial<PlannerModels> }
-);
+}
+
+/**
+ * A provider's model tiers (#2364): `standard` is the adapter's default
+ * for a role, `top` the strongest model, which a result review escalates
+ * to (review/escalation.ts) and a role may name.
+ */
+export const TIERS = ["standard", "top"] as const;
+export type Tier = (typeof TIERS)[number];
+
+/** A role's model: a tier of its provider's, or a model and effort. */
+export type RoleChoice = ModelChoice | { tier: Tier };
+
+/**
+ * The `top` tier: a model and effort of this provider's planner kind, or
+ * of `provider`'s, another configured provider, which runs it with its
+ * own login, limits and hedging, for escalation only. Without a model it
+ * is that provider's own top tier. Operational (selection.ts OPERATIONAL).
+ */
+export interface TopTierConfig {
+  provider?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** The planner and reviewer models as configured: either may name a tier. */
+export type ConfiguredModels = Partial<
+  Omit<ClaudePlannerOptions, "planner" | "reviewer">
+> & {
+  planner?: RoleChoice;
+  reviewer?: RoleChoice;
+  top?: TopTierConfig;
+};
 
 export const CLAUDE_EFFORTS = [
   "low",
@@ -221,6 +251,7 @@ export function providersConfig(
   }
   const names = Object.keys(given);
   if (!names.length) problems.push("providers must name at least one provider");
+  topProblems(providers, names, problems);
   const defaultProvider = optional(text())(
     raw.defaultProvider,
     "defaultProvider",
@@ -231,6 +262,56 @@ export function providersConfig(
       `defaultProvider ${JSON.stringify(defaultProvider)} is not one of providers (${names.join(", ")})`,
     );
   return { providers, defaultProvider: defaultProvider ?? names[0] ?? "" };
+}
+
+/** Each planner kind's efforts; Copilot's are its own and aren't checked. */
+const EFFORTS: Record<PlannerKind, readonly string[] | undefined> = {
+  claude: CLAUDE_EFFORTS,
+  codex: CODEX_EFFORTS,
+  copilot: undefined,
+};
+
+/**
+ * Problems with each provider's `models.top` once every provider is
+ * known: its provider is configured; it names a model and effort together,
+ * the effort one of that provider's planner kind; and a role names tier
+ * `top` only when the tier runs on its own provider, since another's is
+ * for escalation only.
+ */
+function topProblems(
+  providers: Readonly<Record<string, ProviderConfig>>,
+  names: readonly string[],
+  problems: string[],
+): void {
+  for (const [name, provider] of Object.entries(providers)) {
+    const top = provider.models?.top;
+    if (!top) continue;
+    const path = `providers.${name}.models.top`;
+    const on = top.provider ?? name;
+    if (!names.includes(on)) {
+      problems.push(
+        `${path}.provider ${JSON.stringify(on)} is not one of providers (${names.join(", ")})`,
+      );
+      continue;
+    }
+    if ((top.model === undefined) !== (top.effort === undefined))
+      problems.push(
+        `${path} names a model and an effort together, or neither (the provider's own top tier)`,
+      );
+    const efforts = providers[on] && EFFORTS[providers[on].planner];
+    if (top.effort !== undefined && efforts && !efforts.includes(top.effort))
+      problems.push(
+        `${path}.effort must be one of ${efforts.join(", ")} (provider ${on}'s ${providers[on]!.planner} planner)`,
+      );
+    if (on === name) continue;
+    for (const role of ["planner", "reviewer"] as const) {
+      const choice = provider.models?.[role];
+      if (choice && "tier" in choice && choice.tier === "top")
+        problems.push(
+          `providers.${name}.models.${role} names tier top, which runs on provider ${on}: a top tier on another provider is for escalation only`,
+        );
+    }
+  }
 }
 
 function providerConfig(
@@ -297,18 +378,32 @@ function modelsSpec(planner: PlannerKind): Spec {
         ? CODEX_EFFORTS
         : undefined;
   const effort = efforts ? oneOf(efforts) : text();
-  const choice = optional(
-    object({
-      model: text(),
-      effort,
-      ...(planner === "codex"
-        ? { serviceTier: optional(oneOf(["standard", "fast"] as const)) }
-        : {}),
-    }),
-  );
+  const model = object({
+    model: text(),
+    effort,
+    ...(planner === "codex"
+      ? { serviceTier: optional(oneOf(["standard", "fast"] as const)) }
+      : {}),
+  });
+  const tier = object({ tier: oneOf(TIERS) });
+  // A role names a tier, or a model and effort.
+  const choice: Check<unknown> = (value, path, problems) =>
+    value === undefined
+      ? undefined
+      : isObject(value) && "tier" in value
+        ? tier(value, path, problems)
+        : model(value, path, problems);
   return {
     planner: choice,
     reviewer: choice,
+    // Its effort is checked against its provider's kind (`topProblems`).
+    top: optional(
+      object({
+        provider: optional(text()),
+        model: optional(text()),
+        effort: optional(text()),
+      }),
+    ),
     // Only review phases: a planner phase runs on models.planner.
     reviewEffort: optional(
       object(

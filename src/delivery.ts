@@ -54,6 +54,7 @@ import {
 } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
 import type { FailureIdentity } from "./repair.js";
+import { type EscalationRecord, escalationLine } from "./review/escalation.js";
 import { errorMessage } from "./text.js";
 import { FACTORY_EMAIL } from "./work/collect.js";
 import { hostGit, isAncestor } from "./worktree.js";
@@ -316,6 +317,8 @@ export interface PublishInput {
   telemetry?: string;
   /** The result review's notes: non-blocking suggestions on met criteria (review/item.ts). */
   reviewNotes?: readonly { criterion: string; note: string }[];
+  /** The result review's escalation to the top tier, when one ran (review/escalation.ts). */
+  reviewEscalation?: EscalationRecord;
 }
 
 /**
@@ -845,6 +848,12 @@ export async function pullRequestBody(
                 `- ${prose(inert(safe(criterion).slice(0, 300)))}: ${prose(inert(safe(note).slice(0, 1200)))}`,
             )
             .join("\n")}`,
+        ]
+      : []),
+    // Factory's words and numbers, with the configured model's name.
+    ...(input.reviewEscalation
+      ? [
+          `Review escalation: ${prose(inert(safe(escalationLine(input.reviewEscalation))))}`,
         ]
       : []),
   );

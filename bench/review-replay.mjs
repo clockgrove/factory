@@ -17,6 +17,12 @@
  *   --provider codex|claude|copilot  the planner kind (default: codex)
  *   --model NAME, --effort LEVEL     the reviewer's model and effort
  *                               (default: the build's for the provider)
+ *   --top-provider codex|claude|copilot, --top-model NAME, --top-effort LEVEL
+ *                               the top tier a review escalates to (#2364;
+ *                               default: the set's config.json, else the
+ *                               build's top tier for --provider), so a
+ *                               replay can compare two top tiers
+ *   --no-escalation             never escalate
  *   --runs N                    reviews of each record (default: 1)
  *   --concurrency N             reviews at once (default: 1, so reviews
  *                               don't stretch each other's wall time;
@@ -76,6 +82,10 @@ const { values } = parseArgs({
     provider: { type: "string" },
     model: { type: "string" },
     effort: { type: "string" },
+    "top-provider": { type: "string" },
+    "top-model": { type: "string" },
+    "top-effort": { type: "string" },
+    "no-escalation": { type: "boolean" },
     runs: { type: "string" },
     concurrency: { type: "string" },
     "prepare-concurrency": { type: "string" },
@@ -131,13 +141,26 @@ function buildCommit(dir) {
     return null;
   }
 }
+const top =
+  values["top-provider"] || values["top-model"] || values["top-effort"]
+    ? {
+        planner: values["top-provider"] ?? values.provider ?? "codex",
+        ...(values["top-model"] ? { model: values["top-model"] } : {}),
+        ...(values["top-effort"] ? { effort: values["top-effort"] } : {}),
+      }
+    : undefined;
+if (top && values["no-escalation"])
+  usage("--no-escalation takes no --top-provider, --top-model or --top-effort");
 const provider = {
   planner: values.provider ?? "codex",
   ...(values.model ? { model: values.model } : {}),
   ...(values.effort ? { effort: values.effort } : {}),
+  // The adapter's top tier: the flags', none, or (absent) the set's.
+  ...(top ? { top } : values["no-escalation"] ? { top: false } : {}),
 };
-if (!["codex", "claude", "copilot"].includes(provider.planner))
-  usage("--provider takes codex, claude or copilot");
+for (const kind of [provider.planner, top?.planner])
+  if (kind && !["codex", "claude", "copilot"].includes(kind))
+    usage("--provider and --top-provider take codex, claude or copilot");
 
 let adapter;
 /** The reviewer setting asked for: the flags, else the build's default for the provider. */
@@ -174,6 +197,8 @@ else {
         : provider.model || provider.effort
           ? "flags, the rest the build's default"
           : "the build's default",
+    // The top tier the flags ask for; absent, the set's configuration's.
+    ...(top ? { top } : values["no-escalation"] ? { top: "none" } : {}),
   };
 }
 
@@ -193,7 +218,14 @@ const label =
   values.label ??
   (adapter === recorded
     ? "recorded"
-    : [adapter.id, provider.planner, provider.model, provider.effort]
+    : [
+        adapter.id,
+        provider.planner,
+        provider.model,
+        provider.effort,
+        ...(top ? ["top", top.planner, top.model, top.effort] : []),
+        values["no-escalation"] ? "no-escalation" : undefined,
+      ]
         .filter(Boolean)
         .join("-"));
 const out = join(setDir, "results", label);

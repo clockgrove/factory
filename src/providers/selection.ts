@@ -33,7 +33,7 @@ import {
   DEFAULT_CODEX_MODELS,
 } from "./codex.js";
 import { CodexWorker, DEFAULT_CODEX_WORKER_MODEL } from "./codex-worker.js";
-import type { ProviderConfig } from "./config.js";
+import type { ProviderConfig, RoleChoice } from "./config.js";
 import {
   CopilotPlanner,
   CopilotWorker,
@@ -58,15 +58,56 @@ export function defaultModels(planner: string): PlannerModels {
 }
 
 /**
+ * A planner kind's `top` tier (#2364), the model a result review
+ * escalates to: Claude's Fable at high effort (Opus at max is the
+ * alternative), Codex's model at max, Copilot's at high.
+ */
+export function defaultTop(planner: string): ModelChoice {
+  return planner === "claude"
+    ? { model: "claude-fable-5-1", effort: "high" }
+    : planner === "copilot"
+      ? { model: "gpt-6.1-sol", effort: "high" }
+      : { model: "gpt-6.1-sol", effort: "max" };
+}
+
+/** The provider's own `top` tier: its configured model and effort, else its kind's. */
+function ownTop(provider: ProviderConfig): ModelChoice {
+  const top = provider.models?.top;
+  return top?.model && top.effort
+    ? { model: top.model, effort: top.effort }
+    : defaultTop(provider.planner);
+}
+
+/**
  * The provider's settings with every adapter default filled in: what its
  * planner and worker run with, and what an Objective freezes, so an
- * upgrade that changes a default holds a running Objective too.
+ * upgrade that changes a default holds a running Objective too. A role
+ * naming tier `standard` is the adapter's default for it; one naming
+ * `top` stays so (`providerPlanner` runs it on the top tier, which is
+ * operational), and the default review efforts don't apply to it.
  */
 export function resolvedProvider(provider: ProviderConfig): ProviderConfig {
   const worker = provider.worker;
+  const defaults = defaultModels(provider.planner);
+  const given = provider.models ?? {};
+  const role = (name: "planner" | "reviewer") => {
+    const choice = given[name];
+    return !choice || ("tier" in choice && choice.tier === "standard")
+      ? defaults[name]
+      : choice;
+  };
+  const reviewer = role("reviewer");
   return {
     ...provider,
-    models: { ...defaultModels(provider.planner), ...provider.models },
+    models: {
+      ...defaults,
+      ...given,
+      planner: role("planner"),
+      reviewer,
+      ...("tier" in reviewer && !given.reviewEffort
+        ? { reviewEffort: undefined }
+        : {}),
+    },
     worker:
       worker.kind === "claude"
         ? {
@@ -143,27 +184,79 @@ export function profileWorker(
   }
 }
 
-/** The provider's planner, hedged against stalled calls in the phases its `hedgeSeconds` (or the default) hedges. */
+/**
+ * The provider's planner, hedged against stalled calls in the phases its
+ * `hedgeSeconds` (or the default) hedges, a role naming tier `top` on its
+ * top tier.
+ */
 export function providerPlanner(provider: ProviderConfig): Planner {
   const resolved = resolvedProvider(provider);
   const policy = hedgePolicy(resolved.hedgeSeconds);
+  const role = (choice: RoleChoice | undefined) =>
+    choice && "tier" in choice ? ownTop(provider) : choice;
+  const models = {
+    ...resolved.models,
+    planner: role(resolved.models?.planner),
+    reviewer: role(resolved.models?.reviewer),
+  };
   switch (resolved.planner) {
     case "claude":
       return new HedgedPlanner(
-        new ClaudePlanner(resolved.models as ClaudePlannerOptions),
+        new ClaudePlanner(models as ClaudePlannerOptions),
         policy,
       );
     case "copilot":
       return new HedgedPlanner(
-        new CopilotPlanner(resolved.models as PlannerModels),
+        new CopilotPlanner(models as PlannerModels),
         policy,
       );
     default:
       return new HedgedPlanner(
-        new CodexPlanner(resolved.models as PlannerModels<CodexEffort>),
+        new CodexPlanner(models as PlannerModels<CodexEffort>),
         policy,
       );
   }
+}
+
+/** The `top` tier a provider's result reviews escalate to (review/escalation.ts). */
+export interface TopTier {
+  /** The configured provider it runs on: the reviewing one's, or the one its `top` names. */
+  provider: string;
+  model: string;
+  effort: string;
+  /** That provider's planner, its reviewer on the tier at every review phase. */
+  planner: Planner;
+}
+
+/**
+ * Provider `name`'s top tier, as its `models.top` names it (checked by
+ * providers/config.ts): its own, or another configured provider's, on
+ * that provider's login, limits and hedging. Its model and effort when
+ * given, else the provider it runs on's own top tier.
+ */
+export function topTier(
+  providers: Readonly<Record<string, ProviderConfig>>,
+  name: string,
+): TopTier | undefined {
+  const top = providers[name]?.models?.top;
+  const on = top?.provider ?? name;
+  const settings = providers[on];
+  if (!settings) return undefined;
+  const choice =
+    top?.model && top.effort
+      ? { model: top.model, effort: top.effort }
+      : // Another's own top may name a third provider: its kind's default then.
+        on === name || (settings.models?.top?.provider ?? on) === on
+        ? ownTop(settings)
+        : defaultTop(settings.planner);
+  return {
+    provider: on,
+    ...choice,
+    planner: providerPlanner({
+      ...settings,
+      models: { ...settings.models, reviewer: choice, reviewEffort: {} },
+    }),
+  };
 }
 
 /**
@@ -290,6 +383,8 @@ export const OPERATIONAL: readonly string[] = [
   "provider.hedgeSeconds",
   // A review phase's Codex service tier: how fast an answer comes, never its terms.
   "provider.models.reviewServiceTier",
+  // The top tier a result review escalates to (#2364); a role naming it stays frozen.
+  "provider.models.top",
   // Content capture observes calls; it changes no run.
   "capture",
   // Who Factory acts as on GitHub, and whom its holds notify. What an

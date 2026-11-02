@@ -12,8 +12,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewResult } from "../dist/review/result.js";
-import { tempDir } from "./helpers.mjs";
+import { reviewResult } from "../dist/review/item.js";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -102,6 +102,7 @@ function review(repo, item, planner, extra = {}) {
       validation: { tree: repo.tree, commands: ["npm test"] },
       sources: [],
       dir: tempDir("factory-sendback-root-"),
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: (event) => events.push(event),
       ...extra,
@@ -116,6 +117,7 @@ function finding(criterionIndex, verdict, question = "") {
   return {
     criterionIndex,
     verdict,
+    ...(verdict === "refuse" && { ground: "behaviour" }),
     evidenceIndices: [CHANGE_INDEX_ROW],
     detail: `${verdict} detail`,
     question,
@@ -547,7 +549,7 @@ test("a refusal in the answer to the send-back never replaces a question that wa
   );
 });
 
-test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back", async () => {
+test("a refusal in the answer to the send-back replaces an earlier pass of a criterion that was not sent back, as a suspicion to prove", async () => {
   const repo = sharedMain();
   const item = workItem(
     "SharedQwfwq",
@@ -577,7 +579,10 @@ test("a refusal in the answer to the send-back replaces an earlier pass of a cri
       };
     },
   };
-  const { run, events } = review(repo, item, planner);
+  // Find only: the refusal is a suspicion no proof confirms.
+  const { run, events } = review(repo, item, planner, {
+    limits: { ...NO_WORKSPACE.limits, proofs: 0 },
+  });
   const outcome = await run;
   assert.equal(calls.length, 2);
   assert.deepEqual(
@@ -585,15 +590,17 @@ test("a refusal in the answer to the send-back replaces an earlier pass of a cri
       ?.criteria,
     [0],
   );
-  assert.equal(outcome.kind, "refused");
-  assert.deepEqual(
-    outcome.refused.map((refused) => refused.criterionIndex),
-    [1],
+  assert.equal(
+    events.find((event) => event.event === "result-review-find")?.outcome,
+    "refused",
   );
   assert.deepEqual(
-    outcome.verdicts.map((verdict) => verdict.criterionIndex),
-    [0],
+    events
+      .filter((event) => event.event === "result-review-suspicion")
+      .map(({ criterionIndex, outcome }) => [criterionIndex, outcome]),
+    [[1, "unproved"]],
   );
+  assert.equal(outcome.kind, "pass");
 });
 
 test("a question an earlier review of the same tree asked, which the operator is answering, is not sent back again", async () => {

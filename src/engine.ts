@@ -444,7 +444,13 @@ export interface Workflow {
  * has a slot: a burst of queued issues waits its turn, in queue order,
  * instead of fanning out.
  */
-export type HostResource = "worker" | "cpu" | "planner" | "github";
+/**
+ * `proof`: a result review's proof lanes, each a model call with commands
+ * and refusal checks (review/item.ts), a pool apart from `planner`, so
+ * proofs never queue behind planning and the reviews running beside
+ * workers.
+ */
+export type HostResource = "worker" | "cpu" | "planner" | "proof" | "github";
 
 /** The limiter's settings (config.ts `execution`): slots, and memory each step reserves. */
 export interface HostCapacity {
@@ -491,6 +497,7 @@ export class HostLimiter {
     worker: 0,
     cpu: 0,
     planner: 0,
+    proof: 0,
     github: 0,
   };
   private reservedMiB = 0;
@@ -503,8 +510,9 @@ export class HostLimiter {
   acquire(resource: HostResource): boolean {
     const { caps, reserveMiB, budgetMiB } = this.capacity;
     if (this.used[resource] >= caps[resource]) return false;
-    // A planner call leaves room for every free worker and validation slot,
-    // so memory never holds those below their caps.
+    // A planner call leaves room for every free worker and validation
+    // slot, so memory never holds those below their caps. A proof reserves
+    // a validation's memory and competes as one does.
     const room =
       resource === "planner"
         ? (["worker", "cpu"] as const).reduce(
@@ -541,8 +549,8 @@ export class HostLimiter {
 
 /** The service's limiter; `serve` sets it from configuration. */
 export const hostLimits = new HostLimiter({
-  caps: { worker: 2, cpu: 2, planner: 4, github: 2 },
-  reserveMiB: { worker: 0, cpu: 0, planner: 0, github: 0 },
+  caps: { worker: 2, cpu: 2, planner: 4, proof: 2, github: 2 },
+  reserveMiB: { worker: 0, cpu: 0, planner: 0, proof: 0, github: 0 },
   budgetMiB: Number.MAX_SAFE_INTEGER,
 });
 

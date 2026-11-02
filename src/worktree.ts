@@ -701,7 +701,9 @@ async function completeWorktree(
 }
 
 /**
- * Remove a worktree and its private `.shell`, `.validation` and `.packages`
+ * Remove a worktree and its private `.shell`, `.validation`, `.scratch`
+ * (the review's checkout, work/step-review.ts), `.scratch.copies` (its
+ * copies, validate.ts `ValidatedCheckout.copy`) and `.packages`
  * (validation's kept package store) directories, then prune the
  * registration. A missing worktree is fine. The files go
  * first, so a worktree Git refuses to remove still frees its space.
@@ -735,6 +737,8 @@ export async function removeWorktree(
       worktree,
       `${worktree}.shell`,
       `${worktree}.validation`,
+      `${worktree}.scratch`,
+      `${worktree}.scratch.copies`,
       installStorePath(worktree),
     ].map(forceRemove),
   );

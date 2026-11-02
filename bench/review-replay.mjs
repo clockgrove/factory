@@ -228,7 +228,7 @@ async function pool(items, width, task) {
 }
 
 // Each record's preparation, once, before any review: what its runs
-// share, such as a warm install store and a mutation pass. It isn't
+// share, such as a warm install store. It isn't
 // review time, so it is timed apart.
 const prepared = new Map();
 if (adapter.prepare)

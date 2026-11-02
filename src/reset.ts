@@ -33,7 +33,9 @@ import type { Draft, Plan, Retirement } from "./planning/types.js";
 import { type StatusRecord, statusRecord } from "./progress.js";
 import { type QueueItem, readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
-import { type CriterionDecision, resultCriteria } from "./review/result.js";
+import { resultCriteria } from "./review/finder.js";
+import { protectedFiles } from "./review/item.js";
+import type { CriterionDecision } from "./review/result.js";
 import {
   deadlineAt,
   type Frozen,
@@ -441,7 +443,7 @@ function restore(state: ObjectiveState, plan: Plan, rebuilt: Rebuilt): void {
 /**
  * The decisions and retirements `plan` can take, and what it can't, named
  * (`dropped`): a criterion decision only for a Work Item of the plan and a
- * criterion its review judges (review/result.ts `resultCriteria`), or for
+ * criterion its review judges (review/finder.ts `resultCriteria`), or for
  * final review and a criterion of the plan's coverage; a retirement only
  * as final validation would take it now, replayed oldest first
  * (work/retire.ts `commandRefusal`). The record they came from can be
@@ -459,9 +461,13 @@ function restorable(
     const item = entry.itemId
       ? plan.items.find((each) => each.id === entry.itemId)
       : undefined;
+    const criteria = item ? resultCriteria(plan, item) : [];
+    // An item's decision of a criterion its review judges, or of its
+    // protected-test check's question (review/item.ts).
     const fits = entry.itemId
       ? item !== undefined &&
-        resultCriteria(plan, item).includes(entry.criterion)
+        (criteria.includes(entry.criterion) ||
+          protectedFiles(entry.criterion, criteria).length > 0)
       : judged.has(entry.criterion);
     if (!fits)
       dropped.push(

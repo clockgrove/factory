@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   HookCallback,
+  McpSdkServerConfigWithInstance,
   Options,
   Query,
   SDKAssistantMessageError,
@@ -25,6 +26,7 @@ import { errorMessage } from "../text.js";
 import { workerEnvironment } from "../worktree.js";
 import type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 import {
+  type CallTool,
   callImages,
   detail,
   freshOnOverflow,
@@ -37,6 +39,8 @@ import {
   type PlannerAnswer,
   type PlannerCall,
   PlannerError,
+  toolRunner,
+  toolsLimitMs,
 } from "./planner.js";
 import {
   type ModelCounts,
@@ -99,6 +103,12 @@ const CLAUDE_PLANNING_MAX_TURNS = 4;
 const CLAUDE_TREE_REVIEW_MAX_TURNS = 100;
 /** Read-only tools a session gets over its exact tree. */
 const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
+/** The in-process MCP server that offers a call's `tools` (planner.ts). */
+const TOOL_SERVER = "factory-review";
+/** A call tool's name as the Claude CLI names it to the model. */
+export function claudeToolId(name: string): string {
+  return `mcp__${TOOL_SERVER}__${name}`;
+}
 
 /** Stable system context shared by every Claude planning call. */
 const CLAUDE_PLANNING_SYSTEM_PROMPT = [
@@ -114,6 +124,70 @@ const CLAUDE_TREE_REVIEW_SYSTEM_PROMPT = [
   "Your working directory holds the exact files the request names, and your tools can only read them.",
   "Return exactly the requested result through the structured output.",
 ].join(" ");
+
+/** The system prompt when the session also has Factory's tools (`PlannerCall.tools`). */
+const CLAUDE_TOOL_REVIEW_SYSTEM_PROMPT = [
+  "You are the planning and review model for Clockgrove Factory.",
+  "The user message is the complete request; you have no network.",
+  "Your working directory holds the exact files the request names, and your file tools can only read them; Factory's own tools act where their descriptions say.",
+  "Return exactly the requested result through the structured output.",
+].join(" ");
+
+type SdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
+type Zod = typeof import("zod").z;
+
+/**
+ * A call tool as the Claude SDK tool its session gets: its name, its own
+ * description and the input its JSON Schema states, run through
+ * `toolRunner`.
+ */
+export function claudeCallTool(
+  sdk: Pick<SdkModule, "tool">,
+  z: Zod,
+  callTool: CallTool,
+) {
+  const run = toolRunner(callTool);
+  const shape = (
+    z.fromJSONSchema(
+      callTool.input as unknown as Parameters<Zod["fromJSONSchema"]>[0],
+    ) as unknown as { shape: Record<string, import("zod").ZodType> }
+  ).shape;
+  return sdk.tool(
+    callTool.name,
+    callTool.description,
+    shape,
+    async (args) => {
+      const reply = await run(args);
+      return {
+        content: [{ type: "text" as const, text: reply.text }],
+        ...(reply.error && { isError: true }),
+      };
+    },
+    {
+      alwaysLoad: true,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+  );
+}
+
+/** The MCP server that offers `tools`, with its calls' wall-clock limit above the longest tool's own. */
+function claudeToolServer(
+  sdk: Pick<SdkModule, "tool" | "createSdkMcpServer">,
+  z: Zod,
+  tools: readonly CallTool[],
+): McpSdkServerConfigWithInstance {
+  return sdk.createSdkMcpServer({
+    name: TOOL_SERVER,
+    version: "1.0.0",
+    tools: tools.map((callTool) => claudeCallTool(sdk, z, callTool)),
+    timeout: toolsLimitMs(tools) + 60_000,
+  });
+}
 
 // Structured outputs reject these JSON Schema keywords. Factory decoders
 // still enforce every bound, so the schema only loses grammar guidance.
@@ -535,7 +609,7 @@ export async function claudeLoginProbe(): Promise<
  * An isolated Agent SDK session for one structured answer, authenticated by
  * the operator's Claude login.
  */
-function claudePlanningOptions(input: {
+export function claudePlanningOptions(input: {
   choice: ModelChoice<ClaudeEffort>;
   schema: unknown;
   cwd: string;
@@ -545,6 +619,8 @@ function claudePlanningOptions(input: {
   abortController: AbortController;
   /** `cwd` is the exact tree to read: allow read-only tools over it. */
   tree: boolean;
+  /** The server offering the call's `tools`, with each tool's model-facing id: allowed beside the read tools. */
+  tools?: { server: McpSdkServerConfigWithInstance; ids: readonly string[] };
   /** A retained conversation's turn in `dir`: the transcript is kept there, and continued when it resumes one. */
   retained?: { turn: Turn; dir: string };
   log: PlannerCall["log"];
@@ -564,16 +640,17 @@ function claudePlanningOptions(input: {
     // (a symlink out of the tree is denied too), and told where cwd is when
     // it reads outside.
     tools: input.tree ? TREE_REVIEW_TOOLS : [],
-    allowedTools: input.tree
-      ? TREE_REVIEW_TOOLS.map((tool) => `${tool}(./**)`)
-      : [],
+    allowedTools: [
+      ...(input.tree ? TREE_REVIEW_TOOLS.map((tool) => `${tool}(./**)`) : []),
+      ...(input.tools?.ids ?? []),
+    ],
     ...(input.tree && {
       hooks: {
         PreToolUse: [{ hooks: [treeReadCheck(input.cwd, input.log)] }],
       },
     }),
     permissionMode: "dontAsk",
-    mcpServers: {},
+    mcpServers: input.tools ? { [TOOL_SERVER]: input.tools.server } : {},
     strictMcpConfig: true,
     agents: {},
     plugins: [],
@@ -586,17 +663,20 @@ function claudePlanningOptions(input: {
       disableBundledSkills: true,
       claudeMdExcludes: ["**"],
     },
-    systemPrompt: input.tree
-      ? CLAUDE_TREE_REVIEW_SYSTEM_PROMPT
-      : CLAUDE_PLANNING_SYSTEM_PROMPT,
+    systemPrompt: input.tools
+      ? CLAUDE_TOOL_REVIEW_SYSTEM_PROMPT
+      : input.tree
+        ? CLAUDE_TREE_REVIEW_SYSTEM_PROMPT
+        : CLAUDE_PLANNING_SYSTEM_PROMPT,
     // Assistant messages arrive only per completed block, so a long answer
     // would be silent while it streams. Deltas keep the idle clock live.
     includePartialMessages: true,
     // Prompts carry untrusted source text; never expand @paths or commands.
     verbatimPrompts: true,
-    maxTurns: input.tree
-      ? CLAUDE_TREE_REVIEW_MAX_TURNS
-      : CLAUDE_PLANNING_MAX_TURNS,
+    maxTurns:
+      input.tree || input.tools
+        ? CLAUDE_TREE_REVIEW_MAX_TURNS
+        : CLAUDE_PLANNING_MAX_TURNS,
     ...sessionOptions(input.retained?.turn),
     env: {
       ...claudeEnvironment(
@@ -801,6 +881,8 @@ function checkInitialization(
   choice: ModelChoice<ClaudeEffort>,
   cwd: string,
   tree: boolean,
+  /** The call's tools' model-facing ids: their one MCP server is expected too. */
+  tools: readonly string[] = [],
 ): void {
   if (resolve(message.cwd) !== resolve(cwd))
     throw new PlannerError(
@@ -825,6 +907,7 @@ function checkInitialization(
   const allowed = new Set([
     STRUCTURED_OUTPUT_TOOL,
     ...(tree ? TREE_REVIEW_TOOLS : []),
+    ...tools,
   ]);
   const tool = message.tools.find((name) => !allowed.has(name));
   if (tool)
@@ -832,7 +915,11 @@ function checkInitialization(
       "fail",
       `Claude SDK exposed unconfigured tool ${tool}`,
     );
-  if (message.mcp_servers.length)
+  if (
+    message.mcp_servers.some(
+      (server) => !tools.length || server.name !== TOOL_SERVER,
+    )
+  )
     throw new PlannerError(
       "fail",
       "Claude SDK initialized an unconfigured MCP server",
@@ -1057,7 +1144,7 @@ export function usageOf(
  * content is the prompt text and a base64 PNG image block per image. With
  * no images the prompt stays a plain string.
  */
-function claudePrompt(
+export function claudePrompt(
   text: string,
   images: string[],
 ): string | AsyncIterable<SDKUserMessage> {
@@ -1124,9 +1211,18 @@ export class ClaudePlanner implements Planner {
     live: LiveCall,
   ): Promise<Omit<PlannerAnswer, "ms">> {
     call.signal.throwIfAborted();
-    let query: typeof import("@anthropic-ai/claude-agent-sdk").query;
+    let query: SdkModule["query"];
+    let factory:
+      | { server: McpSdkServerConfigWithInstance; ids: string[] }
+      | undefined;
     try {
-      ({ query } = await import("@anthropic-ai/claude-agent-sdk"));
+      const sdk = await import("@anthropic-ai/claude-agent-sdk");
+      ({ query } = sdk);
+      if (call.tools?.length)
+        factory = {
+          server: claudeToolServer(sdk, (await import("zod")).z, call.tools),
+          ids: call.tools.map((callTool) => claudeToolId(callTool.name)),
+        };
     } catch (error) {
       throw new PlannerError(
         "hold",
@@ -1160,7 +1256,8 @@ export class ClaudePlanner implements Planner {
     const watchdog = new IdleWatchdog(
       modelResponseTimeoutMs(choice.effort),
       call.signal,
-      ACTIVE_TOOL_IDLE_MS,
+      // A running Factory tool may be quiet for as long as it may take.
+      Math.max(ACTIVE_TOOL_IDLE_MS, toolsLimitMs(call.tools)),
     );
     // Aborting the SDK's controller kills its child process.
     const abortController = new AbortController();
@@ -1205,6 +1302,7 @@ export class ClaudePlanner implements Planner {
           login,
           abortController,
           tree,
+          ...(factory && { tools: factory }),
           ...(retained ? { retained } : {}),
           log: call.log,
         }),
@@ -1286,7 +1384,8 @@ export class ClaudePlanner implements Planner {
               }
               if (
                 block.type === "tool_use" &&
-                TREE_REVIEW_TOOLS.includes(block.name)
+                (TREE_REVIEW_TOOLS.includes(block.name) ||
+                  factory?.ids.includes(block.name))
               )
                 watchdog.progress(`tool_use:${block.name}`, {
                   id: block.id,
@@ -1314,7 +1413,7 @@ export class ClaudePlanner implements Planner {
         if (message.type === "system" && message.subtype === "init") {
           record.session = message.session_id;
           record.reportedModel = message.model;
-          checkInitialization(message, choice, cwd, tree);
+          checkInitialization(message, choice, cwd, tree, factory?.ids);
           facts.initialized = true;
         }
         if (message.type === "result") {

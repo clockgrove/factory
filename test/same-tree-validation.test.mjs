@@ -15,6 +15,7 @@ import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import { newObjective } from "../dist/state.js";
+import { refusalOffers } from "../dist/work/step-review.js";
 import { validateStep, validationKey } from "../dist/work/step-validate.js";
 import {
   configured,
@@ -184,6 +185,59 @@ test("a failed validation of a commit stands again for that same commit, with no
   assert.equal(asked.ran.length, 1);
   assert.deepEqual(asked.reused, []);
   assert.equal(asked.outcome.kind, "repair");
+});
+
+test("a kept repro that fails again is its review refusal again, so the operator can accept the criterion and drop it", async () => {
+  const served = workDone(["true"]);
+  const criterion = "src/a.js holds 3.";
+  served.item.acceptance = [criterion];
+  served.state.done.plan.items[0].acceptance = [criterion];
+  const accepted = "2026-01-01T00:00:00.000Z";
+  served.state.kept["plan:acceptedAt"] = accepted;
+  const repro = {
+    input: "src/a.js",
+    expected: "3",
+    actual: "2",
+    command: "grep -qx 3 src/a.js",
+  };
+  served.state.kept["item:a:repros"] = {
+    plan: accepted,
+    entries: [
+      { criterion, tree: "refused-tree", detail: "It holds 2.", repro },
+    ],
+  };
+  const first = await attempt(served);
+  assert.equal(first.outcome.kind, "repair", JSON.stringify(first.outcome));
+  const finding = first.outcome.keep["item:a:finding"];
+  assert.equal(finding.kind, "review");
+  assert.equal(finding.tree, "refused-tree");
+  assert.deepEqual(
+    finding.refused.map((entry) => [entry.criterionIndex, entry.repro.command]),
+    [[0, repro.command]],
+  );
+  // Its repair's questions offer accept for the criterion.
+  assert.ok(
+    refusalOffers(finding).options.some(
+      (option) => option.answer === "accept" && option.arg === "1",
+    ),
+  );
+  // Accepted on the tree it was refused on, the repro no longer runs.
+  served.state.kept["item:a:decisions"] = [
+    {
+      criterion,
+      outcome: "accept",
+      reason: "The reviewer was wrong.",
+      by: "operator",
+      at: accepted,
+      tree: "refused-tree",
+      itemId: "a",
+      holdId: "h",
+      plan: accepted,
+    },
+  ];
+  again(served.state);
+  const second = await attempt(served);
+  assert.equal(second.outcome.kind, "done", JSON.stringify(second.outcome));
 });
 
 test("a passed validation of a commit stands again for that same commit", async () => {

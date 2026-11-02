@@ -1,12 +1,13 @@
-// A worker is held to every criterion its result review judges, so it gets
-// them all, numbered as the review numbers them (#2197). Live, a plan's
-// acceptance for a counter item paraphrased the Objective criterion as
-// "including the pinned examples for ..." without the values, and covered
-// the criterion itself with a result-semantic proof. The worker's prompt
-// listed only the paraphrase, so it never saw one pinned example's exact
-// arguments: it tested others, and final review refused the Objective
-// criterion. Its verification notes couldn't even name that criterion: the
-// collector bounded criterionIndex by the item's own acceptance.
+// A worker gets the Objective criteria its item proves word for word
+// (#2197). Live, a plan's acceptance for a counter item paraphrased the
+// Objective criterion as "including the pinned examples for ..." without the
+// values, and covered the criterion itself with a result-semantic proof. The
+// worker's prompt listed only the paraphrase, so it never saw one pinned
+// example's exact arguments: it tested others, and final review refused the
+// Objective criterion. A Work Item's result review now judges its own
+// acceptance only (#2344): final review judges the Objective's criteria, so
+// the worker's Acceptance numbers the item's own and quotes the Objective's
+// after it, unnumbered, and its verification notes name its own criteria.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -15,7 +16,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { correction } from "../dist/repair.js";
-import { resultCriteria } from "../dist/review/result.js";
 import {
   collect,
   handoffPeers,
@@ -111,6 +111,18 @@ function covered(acceptance = counter.acceptance, fields = {}) {
   };
 }
 
+/** The contract's quote of the Objective's criteria the item proves. */
+const QUOTED =
+  "The Objective also requires this of your result, quoted exactly as its source states it; final review judges it on the integrated result. Meet each as written, every value and example included; where an entry above restates one in other words, the quoted text is what is judged:";
+
+const REPRO = {
+  input: 'tallyChar("Level", "l")',
+  expected: "1",
+  actual: "2",
+  command:
+    'node -e \'const { tallyChar } = require("./src/tallyChar.js"); const n = tallyChar("Level", "l"); console.log(n); process.exit(n === 1 ? 0 : 1)\'',
+};
+
 const note = (criterionIndex) => ({
   kind: "verification",
   criterionIndex,
@@ -119,16 +131,10 @@ const note = (criterionIndex) => ({
   consumerIndices: [],
 });
 
-test("the worker's Acceptance is every criterion its result review judges, the Objective's own text after the item's (#2197)", async () => {
+test("the worker's Acceptance is the item's own criteria, the Objective's own text quoted after them (#2197)", async () => {
   const { worktree, base } = repository();
   const { work, accepted } = covered();
   accepted.base = base;
-  // The review judges the paraphrase and the Objective criterion it stands for.
-  assert.deepEqual(resultCriteria(accepted, work), [
-    PARAPHRASE,
-    TESTS,
-    CRITERION,
-  ]);
   const prepared = await prepareWorkPrompt({
     checkout: worktree,
     worktree,
@@ -145,27 +151,27 @@ test("the worker's Acceptance is every criterion its result review judges, the O
   assert.ok(prepared.prompt.includes(contract));
   assert.ok(
     contract.includes(
-      `Acceptance:\n[0] ${PARAPHRASE}\n[1] ${TESTS}\n[2] ${CRITERION}\nCriterion [2] is also judged by this item's result review for the Objective, quoted exactly as the source states it: meet it as written, every value and example included. Where an entry before restates it in other words, the quoted text is what is judged.\nOwned paths:\n`,
+      `Acceptance:\n[0] ${PARAPHRASE}\n[1] ${TESTS}\n${QUOTED}\n- ${CRITERION}\nOwned paths:\n`,
     ),
     contract,
   );
   // The pinned example the paraphrase dropped reaches the worker.
   assert.ok(prepared.prompt.includes('`tallyChar("Level", "l")` is `1`'));
-  // Its handoff schema and file bound count all three.
+  // Its handoff schema and file bound count the criteria its review judges.
   assert.ok(
     prepared.prompt.includes(
-      JSON.stringify(workHandoffSchema(handoffPeers(accepted, work).length, 3)),
+      JSON.stringify(workHandoffSchema(handoffPeers(accepted, work).length, 2)),
     ),
     "the handoff schema counts the review's criteria",
   );
   assert.ok(
     prepared.prompt.includes(
-      `All notes together may cite at most ${maxHandoffSources(3)} distinct files.`,
+      `All notes together may cite at most ${maxHandoffSources(2)} distinct files.`,
     ),
   );
 });
 
-test("more than one covered criterion is named as a range (#2197)", () => {
+test("every covered criterion is quoted, each on its own line (#2197)", () => {
   const second =
     "`tallyChar` throws a `TypeError` when `ch` is not one character.";
   const { work, accepted } = covered();
@@ -177,40 +183,39 @@ test("more than one covered criterion is named as a range (#2197)", () => {
   });
   assert.ok(
     workItemContract(accepted, work).includes(
-      `[2] ${CRITERION}\n[3] ${second}\nCriteria [2] to [3] are also judged by this item's result review for the Objective, quoted exactly as the source states them: meet each as written`,
+      `[1] ${TESTS}\n${QUOTED}\n- ${CRITERION}\n- ${second}\nOwned paths:`,
     ),
   );
 });
 
 test("an item whose acceptance states the covered criterion word for word keeps its contract as it was (#2197)", () => {
   const { work, accepted } = covered([CRITERION, TESTS]);
-  assert.deepEqual(resultCriteria(accepted, work), [CRITERION, TESTS]);
   assert.equal(
     workItemContract(accepted, work),
     `Title: ${work.title}\nGoal: ${work.goal}\nAcceptance:\n[0] ${CRITERION}\n[1] ${TESTS}\nOwned paths:\n${work.ownedPaths.join("\n")}`,
   );
 });
 
-test("a verification note for a covered Objective criterion decodes at its review's index, and one past it is refused (#2197)", async () => {
+test("verification notes name the item's own criteria, and one for the quoted Objective criterion is refused (#2197)", async () => {
   const { worktree } = repository();
   const { work, accepted } = covered();
   const manifest = join(worktree, ".factory-handoff.json");
-  writeFileSync(manifest, JSON.stringify({ notes: [0, 1, 2].map(note) }));
+  writeFileSync(manifest, JSON.stringify({ notes: [0, 1].map(note) }));
   const notes = await readHandoffNotes(worktree, accepted, work);
   assert.ok(Array.isArray(notes), JSON.stringify(notes));
   assert.deepEqual(
     notes.map((decoded) => decoded.criterionIndex),
-    [0, 1, 2],
+    [0, 1],
   );
-  writeFileSync(manifest, JSON.stringify({ notes: [0, 1, 2, 3].map(note) }));
+  writeFileSync(manifest, JSON.stringify({ notes: [0, 1, 2].map(note) }));
   const refused = await readHandoffNotes(worktree, accepted, work);
   assert.match(
     refused.problem,
-    /criterionIndex 3 names no acceptance criterion of this Work Item \(it has 3\)/,
+    /criterionIndex 2 names no acceptance criterion of this Work Item \(it has 2\)/,
   );
 });
 
-test("collection keeps a verification note for a covered Objective criterion at its review's index, and refuses one past it (#2197)", async () => {
+test("collection keeps the item's verification notes, and refuses one past its own criteria (#2197)", async () => {
   const { sandbox, playbook } = loaded();
   const { work, accepted } = covered();
   const collectIn = async (indices) => {
@@ -241,22 +246,22 @@ test("collection keeps a verification note for a covered Objective criterion at 
       signal: AbortSignal.timeout(60_000),
     });
   };
-  const collected = await collectIn([0, 1, 2]);
+  const collected = await collectIn([0, 1]);
   assert.equal(collected.kind, "collected", JSON.stringify(collected));
   assert.deepEqual(
     collected.notes.map((kept) => kept.criterionIndex),
-    [0, 1, 2],
+    [0, 1],
   );
-  const refused = await collectIn([0, 1, 2, 3]);
+  const refused = await collectIn([0, 1, 2]);
   assert.equal(refused.kind, "repair", JSON.stringify(refused));
   assert.equal(refused.staging, "handoff");
   assert.match(
     refused.finding,
-    /criterionIndex 3 names no acceptance criterion of this Work Item \(it has 3\)/,
+    /criterionIndex 2 names no acceptance criterion of this Work Item \(it has 2\)/,
   );
 });
 
-test("Validate's criterion map sets the covered Objective criterion's exact text beside its note (#2197)", async () => {
+test("Validate's criterion map sets each of the item's criteria beside its note (#2197)", async () => {
   const { worktree } = repository();
   const { work, accepted } = covered();
   const signal = new AbortController().signal;
@@ -266,28 +271,30 @@ test("Validate's criterion map sets the covered Objective criterion's exact text
     signal,
   );
   const none = await validation.checkHandoff();
-  assert.match(none.text, /for each of the 3 acceptance criteria/);
+  assert.match(none.text, /for each of the 2 acceptance criteria/);
   assert.ok(
     none
       .criteria(Number.POSITIVE_INFINITY)
-      .includes(`[2] ${CRITERION}\nnote [2]: none recorded`),
+      .includes(`[1] ${TESTS}\nnote [1]: none recorded`),
   );
   writeFileSync(
     join(worktree, ".factory-handoff.json"),
-    JSON.stringify({ notes: [0, 1].map(note) }),
+    JSON.stringify({ notes: [0].map(note) }),
   );
   const partial = await validation.checkHandoff();
   assert.equal(partial.passed, true, partial.text);
   assert.match(
     partial.text,
-    /verification notes for 2 of 3 acceptance criteria/,
+    /verification notes for 1 of 2 acceptance criteria/,
   );
   const map = partial.criteria(Number.POSITIVE_INFINITY);
-  assert.match(map, /No note yet for criteria 2\./);
-  assert.ok(map.includes(`[2] ${CRITERION}\nnote [2]: none recorded`), map);
+  assert.match(map, /No note yet for criteria 1\./);
+  assert.ok(map.includes(`[1] ${TESTS}\nnote [1]: none recorded`), map);
+  // The quoted Objective criterion is final review's: no note is asked for it.
+  assert.ok(!map.includes(CRITERION), map);
 });
 
-test("a review refusal of the covered Objective criterion reaches the repair at its Acceptance number (#2197)", async () => {
+test("a review refusal reaches the repair at its Acceptance number, with its confirmed repro (#2197, #2344)", async () => {
   const { work, accepted } = covered();
   const result = await correction({
     planner: {
@@ -302,10 +309,10 @@ test("a review refusal of the covered Objective criterion reaches the repair at 
       tree: "a".repeat(40),
       refused: [
         {
-          criterionIndex: 2,
-          criterion: CRITERION,
+          criterionIndex: 0,
+          criterion: PARAPHRASE,
           source: "model",
-          detail: 'no test asserts tallyChar("Level", "l") is 1',
+          detail: 'tallyChar("Level", "l") returns 2',
           question: "",
           evidence: [
             {
@@ -314,6 +321,7 @@ test("a review refusal of the covered Objective criterion reaches the repair at 
               complete: true,
             },
           ],
+          repro: REPRO,
         },
       ],
     },
@@ -334,10 +342,15 @@ test("a review refusal of the covered Objective criterion reaches the repair at 
     ),
   );
   assert.deepEqual(
-    findings.map(({ criterionIndex, criterion }) => [
+    findings.map(({ criterionIndex, criterion, repro }) => [
       criterionIndex,
       criterion,
+      repro,
     ]),
-    [[2, CRITERION]],
+    [[0, PARAPHRASE, REPRO]],
+  );
+  assert.match(
+    result.correction.correction,
+    /Fix the product so that command passes/,
   );
 });

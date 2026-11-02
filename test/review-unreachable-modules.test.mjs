@@ -6,8 +6,9 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { reviewResult, UNREACHABLE_GUIDANCE } from "../dist/review/result.js";
-import { tempDir } from "./helpers.mjs";
+import { reviewResult } from "../dist/review/item.js";
+import { UNREACHABLE_GUIDANCE } from "../dist/review/result.js";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -87,6 +88,7 @@ async function reviewPrompt(specifier, change) {
       },
       sources: [],
       dir: tempDir("factory-review-unreachable-root-"),
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: () => {},
     }),

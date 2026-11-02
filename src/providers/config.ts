@@ -317,6 +317,20 @@ function modelsSpec(planner: PlannerKind): Spec {
         ),
       ),
     ),
+    ...(planner === "codex"
+      ? {
+          reviewServiceTier: optional(
+            object(
+              Object.fromEntries(
+                REVIEW_PHASES.map((phase) => [
+                  phase,
+                  optional(oneOf(["standard", "fast"] as const)),
+                ]),
+              ),
+            ),
+          ),
+        }
+      : {}),
     ...(planner === "claude" ? { maxOutputTokens: optional(whole(1)) } : {}),
   };
 }

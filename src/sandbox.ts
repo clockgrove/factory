@@ -556,6 +556,12 @@ function probeSandbox(): SandboxAvailability {
   };
 }
 
+/** A sandboxed shell's network, as a model is told it: validation's, after the install. */
+export const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
+  sandbox.network === "host"
+    ? "it shares the host's network, so services on the host's loopback are reachable"
+    : "the network is off and only loopback works";
+
 /**
  * Under a root controller bubblewrap's user namespace maps to the host's
  * root, which owns root-only files (`/etc/shadow`, SSH host keys): dropped
@@ -1174,6 +1180,15 @@ export interface SandboxOptions {
    * LFS files that are hard links to the operator's LFS store).
    */
   readOnlyFiles?: readonly string[];
+  /**
+   * Where the checkout appears in the sandbox, its working directory there;
+   * absent: at its own path. A copy of another checkout (validate.ts
+   * `ValidatedCheckout.copy`) appears at that checkout's path, so the
+   * absolute paths its install recorded (pnpm's workspace state, a
+   * package manager's links) hold there as they did. Each sandbox has its
+   * own mounts, so copies at one path never meet.
+   */
+  at?: string;
   signal: AbortSignal;
   timeoutMs: number;
   /** Each decoded chunk as it arrives. */
@@ -1508,10 +1523,16 @@ function launch(
     "--tmpfs",
     path,
   ];
+  // Where a mount appears: the checkout and what is in it at `at`.
+  const shown = (path: string) =>
+    options.at && within(path, checkout)
+      ? join(options.at, relative(checkout, path))
+      : path;
   // Parents before children, so a nested mount lands inside its parent.
   const ordered = [...mounts.entries()].sort(
     ([a], [b]) =>
-      a.split(sep).length - b.split(sep).length || a.localeCompare(b),
+      shown(a).split(sep).length - shown(b).split(sep).length ||
+      shown(a).localeCompare(shown(b)),
   );
   return {
     file: found.executable,
@@ -1537,7 +1558,7 @@ function launch(
             `${path} now leads to ${source}, which would show sandboxed commands runtime sockets or the shared temporary directory`,
             "Keep the PATH's links pointing at toolchain directories while Factory runs",
           );
-        return [access === "rw" ? "--bind" : "--ro-bind", source, path];
+        return [access === "rw" ? "--bind" : "--ro-bind", source, shown(path)];
       }),
       ...(resolver
         ? pasta
@@ -1549,7 +1570,7 @@ function launch(
       "--remount-ro",
       "/",
       "--chdir",
-      checkout,
+      shown(checkout),
       "--",
       ...(pasta ? RELEASE_GATE : []),
       prlimit,

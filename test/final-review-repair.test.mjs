@@ -77,6 +77,7 @@ const deps = (delivery = "regular") => ({
   config: {
     delivery: { kind: delivery },
     validation: { commandTimeoutSeconds: 60 },
+    review: { mutants: 20, mutationSeconds: 300 },
   },
 });
 

@@ -11,7 +11,12 @@ import {
   currentPlan,
 } from "../planning/plan.js";
 import type { Plan, WorkItem } from "../planning/types.js";
-import { FAILURE_CHARS, type FailureIdentity } from "../repair.js";
+import {
+  FAILURE_CHARS,
+  type FailureIdentity,
+  type RepairFinding,
+} from "../repair.js";
+import { resultCriteria } from "../review/finder.js";
 import type { ObjectiveBlock } from "../shown.js";
 import type { ObjectiveState } from "../state.js";
 import { failureExcerpt } from "../text.js";
@@ -35,6 +40,7 @@ import {
 import { factoryCommit, VALIDATE_STEP_LOG } from "./collect.js";
 import { fact, facts, type KeptValidation } from "./facts.js";
 import type { MergeResult } from "./merged.js";
+import { keptRepros, withRepros } from "./repros.js";
 import { boundedValidateLog, failedCommandLog } from "./self-validate.js";
 import { integrated, objectiveMerges } from "./shared.js";
 import { repairOutcome } from "./step-deliver.js";
@@ -72,6 +78,8 @@ export async function validateStep(
   const commit = candidate(state, item.id);
   const blocks = acceptedInputs(state).shown.blocks;
   const media = validationMembers(plan, item, selection(state));
+  // Its confirmed refusals' repro commands run after its own (repros.ts).
+  const checked = withRepros(state, item);
   // The Objective's merges since this item started, which its candidate
   // doesn't hold: its commands run again on top of them (#2240). A native
   // stack's layer builds on the layer below and merges with its unit.
@@ -81,7 +89,7 @@ export async function validateStep(
   const key = validationKey({
     commit,
     plan: state.kept[ACCEPTED_AT] ?? null,
-    validation: item.validation,
+    validation: checked.validation,
     blocks,
     base: work.base,
     planBase: plan.base,
@@ -108,7 +116,7 @@ export async function validateStep(
     installStore: installStorePath(worktree),
     sharedInstallStore: sharedInstallStorePath(workDir),
     commit,
-    item,
+    item: checked,
     plan,
     blocks,
     base: work.base,
@@ -531,7 +539,10 @@ export function validationIdentity(
 /**
  * A validation failure as the work step's repair, with its identity
  * (`validationIdentity`). One on the Objective's merges (`integrated`)
- * moves the item onto the current default branch, which holds them.
+ * moves the item onto the current default branch, which holds them. A
+ * failed kept repro (repros.ts) is the review refusal it confirmed,
+ * refused again (`reproRefusal`), so the operator can still `accept` its
+ * criterion when the reviewer was wrong.
  */
 function failedOutcome(
   item: WorkItem,
@@ -544,7 +555,7 @@ function failedOutcome(
   return repairOutcome(
     item,
     "validate",
-    {
+    reproRefusal(state, item, failed) ?? {
       kind: "failure",
       detail: failed.detail,
       ...(failed.output ? { output: failed.output } : {}),
@@ -561,6 +572,41 @@ function failedOutcome(
       },
     },
   );
+}
+
+/**
+ * A failed command that is a kept repro's, as the review refusal it
+ * confirmed: each criterion refused with it, on the tree it was refused
+ * on (where an `accept <n>` drops it), its detail saying it failed again.
+ * Undefined for any other failure, or one whose criteria the item's
+ * review no longer judges.
+ */
+function reproRefusal(
+  state: ObjectiveState,
+  item: WorkItem,
+  failed: KeptFailure,
+): Extract<RepairFinding, { kind: "review" }> | undefined {
+  const failing = keptRepros(state, item.id).filter(
+    (entry) => entry.repro.command === failed.command,
+  );
+  if (!failing.length) return undefined;
+  // One tree, the latest refused with it: an accept decides a criterion on
+  // the tree it was refused on, and a repro left standing fails again.
+  const tree = failing.at(-1)!.tree;
+  const criteria = resultCriteria(currentPlan(state)!, item);
+  const refused = failing
+    .filter((entry) => entry.tree === tree)
+    .map((entry) => ({
+      criterionIndex: criteria.indexOf(entry.criterion),
+      criterion: entry.criterion,
+      source: "model" as const,
+      detail: `${entry.detail}\nIts repro failed again on this result: ${failed.detail}`,
+      question: "",
+      evidence: [],
+      repro: entry.repro,
+    }));
+  if (refused.some((entry) => entry.criterionIndex < 0)) return undefined;
+  return { kind: "review", tree, refused };
 }
 
 /**

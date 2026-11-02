@@ -43,7 +43,7 @@ import { errored, hold } from "../engine.js";
 import { openParent, pathInsideRoot, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
 import type { WorkItem } from "../planning/types.js";
-import { runSandboxed, sandboxAvailable } from "../sandbox.js";
+import { runSandboxed, sandboxAvailable, shellNetwork } from "../sandbox.js";
 import { BoundedText, errorMessage, headAndTail } from "../text.js";
 import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
@@ -189,10 +189,6 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 /** What the shell's network is, for its prompt and tool description. */
-const shellNetwork = (sandbox: Pick<SandboxConfig, "network">) =>
-  sandbox.network === "host"
-    ? "it shares the host's network, so services on the host's loopback are reachable"
-    : "the network is off and only loopback works";
 
 /**
  * How a worker with a shell edits files (#2283), as a Codex worker is told

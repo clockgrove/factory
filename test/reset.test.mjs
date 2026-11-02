@@ -6,6 +6,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { statusComment, statusRecord } from "../dist/progress.js";
 import { pullBranches, rebuildFrom, resetRecord } from "../dist/reset.js";
+import {
+  PROTECTED_CRITERION,
+  protectedCriterion,
+} from "../dist/review/item.js";
 
 const recorded = JSON.parse(
   readFileSync(new URL("fixtures/reset-394.json", import.meta.url), "utf8"),
@@ -175,9 +179,25 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
     criterion: "Anything goes.",
     holdId: "item:badge-helper:review@2026-10-24T02:44:00.000Z",
   };
-  const shown = status([earlier, decision, foreign], [retired]);
+  // The protected-test check's accept stands too; a look-alike that names
+  // no files doesn't.
+  const authorized = {
+    ...decision,
+    criterion: protectedCriterion([
+      { path: "test/badge.test.js", base: 12, candidate: 1 },
+    ]),
+    holdId: "item:badge-helper:review@2026-10-24T02:46:00.000Z",
+  };
+  const lookalike = {
+    ...authorized,
+    criterion: `${PROTECTED_CRITERION} not json`,
+  };
+  const shown = status(
+    [earlier, decision, foreign, authorized, lookalike],
+    [retired],
+  );
   assert.deepEqual(statusRecord(shown.body), {
-    decisions: [earlier, decision, foreign],
+    decisions: [earlier, decision, foreign, authorized, lookalike],
     retired: [retired],
   });
   const open = {
@@ -222,7 +242,7 @@ test("a mid-build Objective keeps its plan for review, its merged item, open PR 
     assert.ok(since >= rebuiltAt, since);
   assert.deepEqual(Object.keys(kept.merged), ["badge-image"]);
   assert.equal(kept.merged["badge-image"].pr, 401);
-  assert.deepEqual(kept.decisions, [decision]);
+  assert.deepEqual(kept.decisions, [decision, authorized]);
   assert.deepEqual(kept.retired, []);
   assert.match(found.message, /retirement of `npm test`/);
   assert.match(found.message, /Anything goes/);

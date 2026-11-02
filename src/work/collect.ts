@@ -38,7 +38,6 @@ import {
 import { isRecord, ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
-import { resultCriteria } from "../review/result.js";
 import { candidateBounds } from "../sandbox.js";
 import { errorMessage } from "../text.js";
 import {
@@ -475,9 +474,9 @@ function noChangeDetail(finalResponse: string): string {
 
 /**
  * The handoff notes, or undefined when the worker left none. A
- * verification note may name any criterion `item`'s result review judges
- * (`resultCriteria`), not only the item's own acceptance; collection and
- * Validate both read through here, so they share that bound.
+ * verification note names a criterion `item`'s result review judges, its
+ * own acceptance; collection and Validate both read through here, so they
+ * share that bound.
  */
 async function readHandoff(
   path: string,
@@ -505,7 +504,7 @@ async function readHandoff(
   const decoded = decodeHandoff(
     value,
     handoffPeers(plan, item),
-    resultCriteria(plan, item).length,
+    item.acceptance.length,
   );
   if (!Array.isArray(decoded))
     throw new WorkFinding(decoded.problem, "handoff");

@@ -1563,7 +1563,12 @@ async function checkRepro(
   return dropped
     ? {
         reason: dropped,
-        ...(dropped === "it did not run" && { unjudged: true as const }),
+        // A repro that never ran, or hung (which may be the product's
+        // fault), shows nothing either way.
+        ...((dropped === "it did not run" ||
+          dropped === "it reached its time limit") && {
+          unjudged: true as const,
+        }),
       }
     : undefined;
 }

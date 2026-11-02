@@ -636,6 +636,15 @@ test("E: a reproduced proof quotes the criterion its expected rests on, verbatim
   const notRun = await review(repo, missing).run;
   assert.equal(notRun.kind, "needs-human");
   assert.match(notRun.questions[0].detail, /it did not run/);
+  // So is one that hangs past its limit: the hang may be the product's.
+  const hangs = answering([{ findings: [refuse(0), pass(1)] }], () =>
+    reproduced("sleep 30; exit 1", "anything"),
+  );
+  const hung = await review(repo, hangs, {
+    limits: { ...LIMITS, commandMs: 2000 },
+  }).run;
+  assert.equal(hung.kind, "needs-human");
+  assert.match(hung.questions[0].detail, /it reached its time limit/);
   // A quotation of the criterion, whitespace aside, is kept on the suspicion.
   const quoted = answering([{ findings: [refuse(0), pass(1)] }], () =>
     reproduced(REPRO, undefined, "keeps   those patches"),

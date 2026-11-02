@@ -87,6 +87,16 @@ Tool and source lists are comma-separated. A worker option for another worker ki
 - `memory`: `true` by default. `false` turns repository memory off in every role, and the planner's memory lookups with it; the planning context and the other lookups stay.
 - `bounds`: `maxRounds` (4), `maxRequestsPerRound` (8), `maxResults` (64), `maxBytes` (262144), `maxElapsedMs` (30000) and `maxProviderCalls` (5).
 
+### Model tiers
+
+A provider's models have two tiers. `standard` is the planner kind's default for each role. `top` is the strongest model, which a result review escalates to when a structural trigger fires (see Result review in [Steps](steps.md#steps)): Claude's `claude-fable-5-1` at `high` effort (`claude-opus-5-5` at `max` is the alternative), Codex's `gpt-6.1-sol` at `max`, and Copilot's `gpt-6.1-sol` at `high`. In the configuration file:
+
+- `models.planner` and `models.reviewer` each take `{ "tier": "standard" }` or `{ "tier": "top" }`, or a model and effort as before.
+- `models.top` sets the tier: `{ "model": ..., "effort": ... }` of the provider's planner kind, or `{ "provider": NAME }` with a model and effort or neither (that provider's own top tier). Another configured provider runs it with its own login, limits and hedging, for escalation only: a role can't name `top` then. Setup checks the provider exists, names a model and effort together, and that the effort is one of that provider's kind; readiness checks that provider's login as `provider NAME: KIND top tier (provider OTHER)`.
+- `review.escalation.perObjective` (4; 0 turns escalation off) and `review.escalation.deadlineSeconds` (600) bound it.
+
+`models.top` and `review.escalation` are operational: changing them never holds a running Objective. A role that names a tier is frozen, as any model choice is, and the `standard` tier is frozen with it.
+
 ### GitHub identity
 
 Factory acts on GitHub as its own GitHub App (github-app.ts), `github.app.id`. Registering and installing it is setup's required preflight step, before a repository is configured: register, generate the key, install, then set up with the App. As an App, Factory is `<slug>[bot]`, its holds notify the operators it mentions, on the web, by email and in GitHub's mobile app, where a `/factory` comment answers them, and its installation tokens last an hour and carry only the permissions below. The GitHub CLI's login is still needed on the host for the operator's own commands and setup's; Factory acts as the App.

@@ -126,6 +126,21 @@ export interface ItemTelemetry {
     ms: number;
     /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the finder, the proofs. */
     phases: { prepareMs: number; modelMs: number; proofsMs: number };
+    /**
+     * The reviews' escalations to the top tier (review/escalation.ts),
+     * summed: by outcome (`capped` ran none) and by trigger; their
+     * suspicions raised and proved, the criteria they refused and the
+     * questions they settled, their tokens and time.
+     */
+    escalations: {
+      outcomes: Record<string, number>;
+      triggers: Record<string, number>;
+      suspicions: { raised: number; proved: number };
+      refused: number;
+      settled: number;
+      tokens: number;
+      ms: number;
+    };
   };
   /** CI step attempts, its polls (retries while checks run) and the failed jobs it reran. */
   ci: { attempts: number; polls: number; reruns: number };
@@ -336,6 +351,27 @@ export class ItemTelemetries {
         reviewer.phases.proofsMs += num(phases.proofsMs) ?? 0;
         return;
       }
+      case "result-review-escalation": {
+        if (!id) return;
+        const { escalations } = this.record(id, event.at).reviewer;
+        const outcome = str(event.outcome) ?? "done";
+        escalations.outcomes[outcome] =
+          (escalations.outcomes[outcome] ?? 0) + 1;
+        for (const trigger of Array.isArray(event.triggers)
+          ? event.triggers
+          : [])
+          if (typeof trigger === "string")
+            escalations.triggers[trigger] =
+              (escalations.triggers[trigger] ?? 0) + 1;
+        const suspicions = (event.suspicions ?? {}) as Record<string, unknown>;
+        escalations.suspicions.raised += num(suspicions.raised) ?? 0;
+        escalations.suspicions.proved += num(suspicions.proved) ?? 0;
+        escalations.refused += num(event.refused) ?? 0;
+        escalations.settled += num(event.settled) ?? 0;
+        escalations.tokens += num(event.tokens) ?? 0;
+        escalations.ms += num(event.ms) ?? 0;
+        return;
+      }
       case "published": {
         if (!id) return;
         const changes = changesOf(event);
@@ -436,6 +472,15 @@ export class ItemTelemetries {
           tokens: reported(),
           ms: 0,
           phases: { prepareMs: 0, modelMs: 0, proofsMs: 0 },
+          escalations: {
+            outcomes: {},
+            triggers: {},
+            suspicions: { raised: 0, proved: 0 },
+            refused: 0,
+            settled: 0,
+            tokens: 0,
+            ms: 0,
+          },
         },
         ci: { attempts: 0, polls: 0, reruns: 0 },
         changes: null,
@@ -718,7 +763,7 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
   const verdicts = ["pass", "suspect", "question"]
     .map((kind) => `${reviewer.verdicts[kind] ?? 0} ${kind}`)
     .join(", ");
-  const { suspicions } = reviewer;
+  const { suspicions, escalations } = reviewer;
   return [
     plural(reviewer.reviews, "review"),
     `verdicts ${verdicts}`,
@@ -734,6 +779,17 @@ function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
     plural(reviewer.questions, "question"),
     `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,
     `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, finder ${duration(reviewer.phases.modelMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
+    ...(Object.keys(escalations.outcomes).length
+      ? [
+          `escalations ${Object.entries(escalations.outcomes)
+            .map(([outcome, n]) => `${n} ${outcome}`)
+            .join(", ")} (${Object.entries(escalations.triggers)
+            .map(([trigger, n]) => `${n} ${trigger}`)
+            .join(
+              ", ",
+            )}; suspicions ${escalations.suspicions.raised} raised, ${escalations.suspicions.proved} proved; ${escalations.refused} refused, ${escalations.settled} settled; ${count(escalations.tokens)} tokens, ${duration(escalations.ms)})`,
+        ]
+      : []),
   ].join(", ");
 }
 

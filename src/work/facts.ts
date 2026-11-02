@@ -261,6 +261,11 @@ export interface ObjectiveFacts {
   /** The commands the operator retired from final validation (planning/plan.ts reads them). */
   "final:retired": Retirement[];
   /**
+   * The result reviews' escalations to the top tier so far, which
+   * `review.escalation.perObjective` caps (step-review.ts, #2364).
+   */
+  "review:escalations": number;
+  /**
    * The validation commands the operator authorized an amendment to
    * replace (`replace-validation`), oldest first (planning/amendments.ts
    * `authorizeReplacement`).

@@ -28,7 +28,10 @@
  * non-zero by itself (not 126, 127 or at its limit) and its output holds
  * the claimed actual output. A confirmed refusal stands, with its repro;
  * any other becomes a pass, logged (`result-review-suspicion`) and seen by
- * nobody. The finder's passes and questions stand.
+ * nobody. The finder's passes and questions stand. When a structural
+ * trigger fires, the review then escalates once to the provider's `top`
+ * tier (review/escalation.ts, `escalate`), which can only add refusals it
+ * proved or settle the finder's questions.
  *
  * Confirmed refusals go to repair with their repros (work/repros.ts keeps
  * their commands as extra validation); otherwise the questions ask the
@@ -57,6 +60,15 @@ import {
   validateTree,
 } from "../validate.js";
 import { hostGit } from "../worktree.js";
+import { citedSpans, sameFile, TEST_PATH } from "./citations.js";
+import {
+  type Escalation,
+  type EscalationRecord,
+  escalationTriggers,
+  firedOnly,
+  joinEscalation,
+  LAST_ESCALATION,
+} from "./escalation.js";
 import { finderInstructions, resultCriteria } from "./finder.js";
 import {
   checkFailureRows,
@@ -203,6 +215,8 @@ export interface CandidateReview {
   /** The review the operator is answering: its verdicts on this tree stand. */
   earlier?: ResultReview;
   prior?: PriorRefusals;
+  /** The `top` tier the review may escalate to (review/escalation.ts); absent: none. */
+  escalation?: Escalation;
   /** A private directory for the evidence root. */
   dir: string;
   signal: AbortSignal;
@@ -211,7 +225,7 @@ export interface CandidateReview {
 
 /** What Factory's review step gives: a result review's input, with its workspace. */
 export type ItemReviewInput = Omit<ResultReviewInput, "conversation"> &
-  Pick<CandidateReview, "workspace" | "limits" | "prior">;
+  Pick<CandidateReview, "workspace" | "limits" | "prior" | "escalation">;
 
 /** Review one Work Item's result: its own acceptance, with Factory's evidence. */
 export function reviewResult(input: ItemReviewInput): Promise<ResultReview> {
@@ -259,6 +273,8 @@ interface Phases {
   modelMs: number;
   /** The proofs' wall time, their refusal checks inside. */
   proofsMs: number;
+  /** The escalation's, its finder and proofs; absent: none ran. */
+  escalationMs?: number;
 }
 
 /** Review the candidate. See the module comment for the outcomes. */
@@ -268,13 +284,7 @@ export async function reviewCandidate(
   const { validation, criteria } = input;
   const tree = validation.tree;
   const started = Date.now();
-  const tally: Tally = {
-    verdicts: { pass: 0, suspect: 0, question: 0 },
-    grounds: {},
-    suspicions: { raised: 0, proved: 0, dropped: 0, unjudged: 0, tokens: 0 },
-    repros: { confirmed: 0, dropped: 0 },
-    calls: 0,
-  };
+  const tally = newTally();
   const phases: Phases = { modelMs: 0, proofsMs: 0 };
   const done = (review: ResultReview) => {
     input.log({
@@ -311,15 +321,18 @@ export async function reviewCandidate(
       phases.modelMs = Date.now() - finding;
     });
     const proving = Date.now();
-    const review = await proveRefusals(input, found, {
-      workspace,
-      tree,
-      tally,
-      proofs: { next: 0 },
-    }).finally(() => {
+    const context = { workspace, tree, tally, proofs: { next: 0 } };
+    const review = await proveRefusals(input, found, context).finally(() => {
       phases.proofsMs = Date.now() - proving;
     });
-    return done(withProtected(review, guard));
+    const escalated = input.escalation
+      ? await escalate(input, input.escalation, found, review, context)
+      : { review };
+    if (escalated.record) phases.escalationMs = escalated.record.ms;
+    return done({
+      ...withProtected(escalated.review, guard),
+      ...(escalated.record && { escalation: escalated.record }),
+    });
   } finally {
     await workspace.close();
   }
@@ -337,13 +350,19 @@ export async function reviewCandidate(
 async function find(
   input: CandidateReview,
   tally: Tally,
+  /** The criteria it judges, by index: all of them by default. */
+  judging: readonly number[] = input.criteria.map((_, index) => index),
+  /** Evidence rows after the re-review packet (an escalation's questions). */
+  extra: readonly ResultEvidence[] = [],
 ): Promise<ResultReview> {
   const { criteria, validation } = input;
   const tree = validation.tree;
-  const after =
-    input.prior && input.prior.tree !== tree
+  const after = [
+    ...(input.prior && input.prior.tree !== tree
       ? [await priorRow(input, input.prior)]
-      : [];
+      : []),
+    ...extra,
+  ];
   const own = input.itemCriteria ?? criteria.length;
   const ask = (asked: readonly number[], lastChance?: true) =>
     runReview({
@@ -378,9 +397,8 @@ async function find(
         );
       },
     }).then((review) => renumber(review, asked));
-  const all = criteria.map((_, index) => index);
-  const first = await ask(all);
-  const missing = all.filter((index) => !judged(first, index));
+  const first = await ask(judging);
+  const missing = judging.filter((index) => !judged(first, index));
   if (!missing.length) return first;
   input.log({ event: "result-review-missing", criteria: missing });
   const again = await ask(missing, true);
@@ -620,41 +638,143 @@ async function proveRefusals(
 }
 
 /**
- * A file:line citation in a refusal's detail: `path:N`, `path:N-M`, or a
- * list `path:N-M,P-Q`, a `#L` anchor too (`path#L3-L5`).
+ * The review's escalation (review/escalation.ts): when its triggers fire,
+ * the finder again on the `top` tier, on the criteria they name (each
+ * finder question with the standard reviewer's words beside it), then
+ * the proofs of its refusals, as the standard ones are proved, joined
+ * with `review`. One a review, within its deadline; the Objective's last
+ * one only for `LAST_ESCALATION`'s triggers, the others logged as capped.
+ * Capped, timed out or failed, `review` stands; only the service's own stop escapes. Logged
+ * as `result-review-escalation`; its calls' `model-usage` events count
+ * toward the Objective's spend like any other.
  */
-const CITATION =
-  /(?<![\w./@+-])([\w.@+-][\w./@+-]*)(?::|#L)(\d+(?:-L?\d+)?(?:,\s*L?\d+(?:-L?\d+)?)*)(?![\w-])/g;
-
-/**
- * The line spans `detail` cites: each by its file's path, `candidate/` or
- * `./` aside, and its basename.
- */
-function citedSpans(detail: string) {
-  return [...detail.matchAll(CITATION)].flatMap(([, cited, ranges]) => {
-    const path = cited!.replace(/^(\.\/|candidate\/)+/, "");
-    const file = path.split("/").pop()!;
-    // A bare number with a colon ("note:3") names no file.
-    if (!file.includes(".")) return [];
-    return ranges!.split(",").map((range) => {
-      const [start, end] = range
-        .replace(/L/g, "")
-        .split("-")
-        .map((n) => Number(n.trim()));
-      const [from, to] = [start!, end ?? start!].sort((a, b) => a - b);
-      return { path, file, start: from!, end: to! };
+async function escalate(
+  input: CandidateReview,
+  escalation: Escalation,
+  found: ResultReview,
+  review: ResultReview,
+  context: Omit<ProofContext, "readDir">,
+): Promise<{ review: ResultReview; record?: EscalationRecord }> {
+  const all = escalationTriggers(found, review, escalation, input.criteria);
+  if (!all.triggers.length) return { review };
+  const { top, left } = escalation;
+  const tier = {
+    tier: "top" as const,
+    provider: top.provider,
+    model: top.model,
+    effort: top.effort,
+  };
+  // The Objective's last escalation is kept for the most valuable triggers.
+  const fired =
+    left === undefined || left > 1
+      ? all
+      : left === 1
+        ? firedOnly(all, LAST_ESCALATION)
+        : firedOnly(all, new Set());
+  const skipped = all.triggers.filter(
+    (trigger) => !fired.triggers.includes(trigger),
+  );
+  if (skipped.length) {
+    const capped = firedOnly(all, new Set(skipped));
+    input.log({
+      event: "result-review-escalation",
+      triggers: capped.triggers,
+      ...tier,
+      criteria: capped.criteria,
+      outcome: "capped",
     });
+  }
+  if (!fired.triggers.length) return { review };
+  const named = {
+    triggers: fired.triggers,
+    ...tier,
+    criteria: fired.criteria,
+  };
+  const started = Date.now();
+  const tally = newTally();
+  let tokens = 0;
+  const deadline = AbortSignal.timeout(escalation.deadlineMs);
+  const escalated: CandidateReview = {
+    ...input,
+    planner: top.planner,
+    signal: AbortSignal.any([input.signal, deadline]),
+    // Judged afresh: only the operator's decisions settle a criterion.
+    earlier: undefined,
+    log: (event) => {
+      if (event.event === "model-usage" && isRecord(event.tokens))
+        tokens +=
+          typeof event.tokens.total === "number" ? event.tokens.total : 0;
+      input.log({ ...event, escalation: true });
+    },
+  };
+  const asked = (found.kind === "pass" ? [] : found.questions).filter((entry) =>
+    fired.judged.includes(entry.criterionIndex),
+  );
+  const record = (
+    outcome: EscalationRecord["outcome"],
+    joined?: { refused: number; settled: number },
+  ): EscalationRecord => ({
+    ...named,
+    outcome,
+    suspicions: {
+      raised: tally.suspicions.raised,
+      proved: tally.suspicions.proved,
+    },
+    refused: joined?.refused ?? 0,
+    settled: joined?.settled ?? 0,
+    tokens,
+    ms: Date.now() - started,
   });
+  crashPoint("review:escalation:before");
+  try {
+    const answer = await find(
+      escalated,
+      tally,
+      fired.criteria,
+      asked.length
+        ? [
+            {
+              origin: "controller",
+              path: "The standard reviewer's questions",
+              content: JSON.stringify({
+                scope:
+                  "The standard reviewer asked the operator about these criteria instead of judging them. Judge each yourself under the same standard: pass, refuse with its ground, or ask only when the evidence can't decide it.",
+                questions: asked.map(({ criterion, detail, question }) => ({
+                  criterion,
+                  detail,
+                  question,
+                })),
+              }),
+              complete: true,
+            },
+          ]
+        : [],
+    );
+    const proved = await proveRefusals(escalated, answer, {
+      ...context,
+      tally,
+    });
+    const joined = joinEscalation(
+      review,
+      proved,
+      fired.judged,
+      `${top.model} at ${top.effort}`,
+    );
+    crashPoint("review:escalation:after");
+    const done = record("done", joined);
+    input.log({ event: "result-review-escalation", ...done });
+    return { review: joined.review, record: done };
+  } catch (error) {
+    if (input.signal.aborted) throw error;
+    const failed = record(deadline.aborted ? "timeout" : "error");
+    input.log({
+      event: "result-review-escalation",
+      ...failed,
+      error: errorMessage(error),
+    });
+    return { review, record: failed };
+  }
 }
-
-/** Whether two cited spans are of one file: the same path, or the same basename when neither names a directory. */
-const sameFile = (
-  one: ReturnType<typeof citedSpans>[number],
-  other: ReturnType<typeof citedSpans>[number],
-) =>
-  one.path.includes("/") || other.path.includes("/")
-    ? one.path === other.path
-    : one.file === other.file;
 
 /**
  * The finder's refusals, grouped: two refusals of different criteria whose
@@ -755,9 +875,6 @@ const sameTest = (one: ProtectedTest, other: ProtectedTest) =>
   one.path === other.path &&
   one.base === other.base &&
   one.candidate === other.candidate;
-
-/** A test file by its path: under a test directory, or a `.test.` or `.spec.` name. */
-const TEST_PATH = /(^|\/)(test|tests|__tests__)\/|\.(test|spec)\./;
 
 /**
  * A line that asserts, in the JS, TS and Python test styles the check
@@ -1142,6 +1259,15 @@ const complete = (value: unknown, fields: readonly string[]) =>
   fields.every(
     (field) => typeof value[field] === "string" && String(value[field]).trim(),
   );
+
+/** A review's tally before it starts. */
+const newTally = (): Tally => ({
+  verdicts: { pass: 0, suspect: 0, question: 0 },
+  grounds: {},
+  suspicions: { raised: 0, proved: 0, dropped: 0, unjudged: 0, tokens: 0 },
+  repros: { confirmed: 0, dropped: 0 },
+  calls: 0,
+});
 
 interface Tally {
   /** The finder's verdicts; `suspect`: a criterion it refused, a suspicion. */

@@ -1,3 +1,4 @@
+import { implementationRepairs, perPath } from "../allowances.js";
 import { ACCEPT } from "../delivery.js";
 import { hold, itemOf, type Outcome, type StepContext } from "../engine.js";
 import type { CandidateRecord, InputRecord } from "../media.js";
@@ -7,6 +8,7 @@ import { ACCEPTED_AT, acceptedInputs, currentPlan } from "../planning/plan.js";
 import { peerNotes } from "../planning/schedule.js";
 import type { WorkItem } from "../planning/types.js";
 import type { RepairFinding } from "../repair.js";
+import type { Escalation, EscalationRecord } from "../review/escalation.js";
 import {
   type PriorRefusals,
   type ReviewLimits,
@@ -112,6 +114,7 @@ export async function reviewStep(
   );
   const candidates = reviewCandidates(state, plan.items, item, dependencies);
   const prior = priorRefusals(state, item.id);
+  const escalation = reviewEscalation(state, item, deps);
   let review: ResultReview;
   try {
     review = await reviewResult({
@@ -125,6 +128,7 @@ export async function reviewStep(
       workspace: reviewWorkspace(item, context, deps, worktree),
       limits: reviewLimits(deps),
       ...(prior ? { prior } : {}),
+      ...(escalation ? { escalation } : {}),
       sources: await pinnedSources(state, deps, signal),
       dir: `${worktree}.review`,
       notes: JSON.stringify(work.notes),
@@ -176,19 +180,64 @@ export async function reviewStep(
     ),
   );
   const notes = reviewNotes(review);
+  const shown = {
+    ...(notes.length && { notes }),
+    ...(review.escalation && { escalation: review.escalation }),
+  };
   return withKeep(
-    outcome.kind === "done" && notes.length
-      ? { ...outcome, result: { ...(outcome.result as object), notes } }
+    outcome.kind === "done" && Object.keys(shown).length
+      ? { ...outcome, result: { ...(outcome.result as object), ...shown } }
       : outcome,
-    decided.keep,
+    {
+      ...decided.keep,
+      // Every escalation that ran counts, one that timed out or failed too.
+      ...(review.escalation &&
+        facts({
+          "review:escalations": (fact(state, "review:escalations") ?? 0) + 1,
+        })),
+    },
   );
 }
 
-/** A Work Item's review step result: the tree it passed, and its notes. */
+/** A Work Item's review step result: the tree it passed, its notes and its escalation. */
 export interface ReviewResult {
   tree: string;
   /** Each met criterion's non-blocking suggestion (review/item.ts `reviewNotes`). */
   notes?: { criterion: string; note: string }[];
+  /** The review's escalation to the top tier, when one ran (review/escalation.ts). */
+  escalation?: EscalationRecord;
+}
+
+/**
+ * What the item's review may escalate to (review/escalation.ts): the
+ * provider's `top` tier, within `review.escalation`, with the
+ * Objective's escalations left and the item's history its triggers read: whether its repair allowance has at most one repair
+ * left after one at least (its path's, or the Objective's), and the
+ * criteria its kept repros refused. None when `perObjective` is 0.
+ */
+function reviewEscalation(
+  state: ObjectiveState,
+  item: WorkItem,
+  deps: BuildDeps,
+): Escalation | undefined {
+  const { perObjective, deadlineSeconds } = deps.config.review.escalation;
+  if (!deps.top || !perObjective) return undefined;
+  const path = perPath(state)[stepKey(item.id, "work")];
+  const total = implementationRepairs(state);
+  const nearlySpent =
+    path !== undefined &&
+    path.used > 0 &&
+    (path.allowed - path.used <= 1 || total.allowed - total.used <= 1);
+  const earlierRefused = [
+    ...new Set(keptRepros(state, item.id).map((entry) => entry.criterion)),
+  ];
+  return {
+    top: deps.top,
+    deadlineMs: deadlineSeconds * 1000,
+    left: perObjective - (fact(state, "review:escalations") ?? 0),
+    ...(nearlySpent && { repairsNearlySpent: true as const }),
+    ...(earlierRefused.length && { earlierRefused }),
+  };
 }
 
 /**

@@ -628,6 +628,17 @@ async function providerChecks(
         worker.kind,
         kinds.has(worker.kind) ? "planner and worker" : "worker",
       );
+    // Its top tier on another provider escalates on that provider's login.
+    const top = provider.models?.top?.provider;
+    const escalates =
+      top !== undefined && top !== name && config.providers[top];
+    if (escalates && escalates.planner in SDK)
+      kinds.set(
+        escalates.planner,
+        kinds.has(escalates.planner)
+          ? `${kinds.get(escalates.planner)} and top tier`
+          : `top tier (provider ${top})`,
+      );
     for (const [kind, role] of kinds) {
       const at = `provider ${name}: ${kind} ${role}`;
       if (!installed(SDK[kind]!)) {

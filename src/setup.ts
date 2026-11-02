@@ -736,7 +736,10 @@ function providerOptions(
     set(
       `models.${role}`,
       {
-        ...(isObject(choice) ? choice : defaultModels(kind)[role]),
+        // A tier the flags replace leaves no model to keep.
+        ...(isObject(choice) && !("tier" in choice)
+          ? choice
+          : defaultModels(kind)[role]),
         ...(model !== undefined && { model }),
         ...(effort !== undefined && { effort }),
       },

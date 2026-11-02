@@ -32,9 +32,21 @@
  * (review/finder.ts), and those score in the objective scope; a criterion
  * the record doesn't list is left out, in `extra.unmapped`.
  *
- * `FIND_ONLY=1` in the environment proves nothing (`review.proofs` 0)
- * and returns each criterion the finder refused as a refusal: the
- * scorecard's recall and precision are then the finder's alone.
+ * A review escalates to the top tier as Factory's does (#2364), once
+ * (there is no Objective to cap it, unless the set's
+ * `review.escalation.perObjective` is 0): the tier `provider.top` names
+ * (the replay's --top-* flags; `false`: none), else the set's
+ * configuration's for a provider of the replay's planner kind, else the
+ * build's top tier for that kind. The record has no repair history, so
+ * the repair-allowance and earlier-refusal triggers don't fire.
+ * `extra.escalations` has each `result-review-escalation` event: its
+ * triggers, tier, criteria, outcome, suspicions, tokens and time; the
+ * escalation's own suspicions in `suspicionList` carry `escalation`.
+ *
+ * `FIND_ONLY=1` in the environment proves nothing (`review.proofs` 0),
+ * escalates never, and returns each criterion the finder refused as a
+ * refusal: the scorecard's recall and precision are then the finder's
+ * alone.
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -94,6 +106,49 @@ function installation(factory, set) {
     if (saved === undefined) delete process.env.FACTORY_CONFIG;
     else process.env.FACTORY_CONFIG = saved;
   }
+}
+
+/**
+ * The top tier the review escalates to: the flags' (`provider.top`, its
+ * missing model and effort the build's top tier for its kind), the set's
+ * configuration's for a provider of the replay's planner kind (its
+ * `models.top`), or the build's top tier for that kind. Undefined:
+ * `provider.top` is false, or the build has no tiers.
+ */
+function topFor(factory, config, provider) {
+  const { selection } = factory;
+  if (provider.top === false || !selection.topTier) return undefined;
+  if (provider.top) {
+    const fallback = selection.defaultTop(provider.top.planner);
+    const choice = {
+      model: provider.top.model ?? fallback.model,
+      effort: provider.top.effort ?? fallback.effort,
+    };
+    return {
+      provider: provider.top.planner,
+      ...choice,
+      planner: selection.providerPlanner(
+        plannerConfig(
+          { planner: provider.top.planner, ...choice },
+          selection.defaultModels(provider.top.planner),
+        ),
+      ),
+    };
+  }
+  const named = [config.defaultProvider, ...Object.keys(config.providers)].find(
+    (name) => config.providers[name]?.planner === provider.planner,
+  );
+  return selection.topTier(
+    named
+      ? config.providers
+      : {
+          [provider.planner]: {
+            planner: provider.planner,
+            worker: { kind: "codex" },
+          },
+        },
+    named ?? provider.planner,
+  );
 }
 
 /** A run file's growth matters to Factory's run log only. */
@@ -171,6 +226,10 @@ export async function review({
   const at = { checkout, cache, files: join(dir, "files") };
   const item = record.plan.items.find((entry) => entry.id === record.item);
   const { candidate, validation } = record;
+  const top =
+    findOnly || !config.review.escalation?.perObjective
+      ? undefined
+      : topFor(factory, config, provider);
   const answer = await factory.item.reviewResult({
     planner: factory.selection.providerPlanner(
       plannerConfig(
@@ -205,6 +264,14 @@ export async function review({
       ),
       prepareMs: config.validation.commandTimeoutSeconds * 1000 + 5 * MINUTE,
     },
+    ...(top
+      ? {
+          escalation: {
+            top,
+            deadlineMs: config.review.escalation.deadlineSeconds * 1000,
+          },
+        }
+      : {}),
     signal,
     log: logged,
   });
@@ -266,8 +333,12 @@ export async function review({
       phases: {
         scratchPrepareMs: phases?.prepareMs ?? null,
         proofsMs: phases?.proofsMs ?? 0,
+        escalationMs: phases?.escalationMs ?? 0,
       },
       grounds: tally?.grounds ?? null,
+      escalations: events
+        .filter((e) => e.event === "result-review-escalation")
+        .map(({ event: _event, step: _step, at: _at, ...entry }) => entry),
       protectedTests:
         events.find((e) => e.event === "result-review-protected")?.files ??
         null,

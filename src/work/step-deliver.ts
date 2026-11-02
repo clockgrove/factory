@@ -122,6 +122,7 @@ export async function publishStep(
       : {}),
     ...(spent ? { telemetry: summaryLine(spent) } : {}),
     ...(reviewed?.notes?.length ? { reviewNotes: reviewed.notes } : {}),
+    ...(reviewed?.escalation ? { reviewEscalation: reviewed.escalation } : {}),
     secrets: deps.config.secrets,
     // The operator's `publish` counts only for the finding it answered:
     // the digest kept when the hold was raised, never the hold's text,

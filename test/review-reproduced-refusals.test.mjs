@@ -7,28 +7,43 @@
 // acceptance tests, on real Git repositories and the real sandbox, the
 // reviewer's and the proofs' answers given as fixtures at the planner seam.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../dist/config.js";
 import { ItemTelemetries, telemetryText } from "../dist/item-telemetry.js";
-import { CAPTURE_OFF, RunLog } from "../dist/log.js";
 import {
   commandToolDescription,
-  PROOF_SCHEMA,
   PROTECTED_CRITERION,
   proofInstructions,
   protectedCriterion,
   reviewCandidate,
   reviewNotes,
   reviewResult,
-  validationWorkspace,
 } from "../dist/review/item.js";
-import { sandboxAvailable } from "../dist/sandbox.js";
 import { validateTree } from "../dist/validate.js";
 import { withRepros } from "../dist/work/repros.js";
 import { REFUSES_ITEM, reviewOutcome } from "../dist/work/step-review.js";
+import {
+  answering,
+  ask,
+  COMMANDS,
+  CRITERIA,
+  command,
+  git,
+  LIMITS,
+  NOT_REPRODUCED,
+  pass,
+  REDUCER,
+  REPRO,
+  refuse,
+  repro,
+  reproduced,
+  review,
+  setup,
+  skip,
+  TEST,
+  target,
+  tool,
+} from "./helpers/review.mjs";
 import {
   configured,
   installation,
@@ -37,238 +52,6 @@ import {
   REPO,
   tempDir,
 } from "./helpers.mjs";
-
-const skip = sandboxAvailable().available
-  ? false
-  : "needs the command sandbox (bubblewrap)";
-
-const git = (cwd, ...args) => {
-  const result = spawnSync(
-    "git",
-    ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args],
-    { encoding: "utf8" },
-  );
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
-};
-
-// The snapshot-late defect, reduced: a snapshot older than the patches
-// already received must not discard them.
-const REDUCER = `export function reduce(events) {
-  let state = { version: 0, items: [] };
-  for (const event of events) {
-    if (event.kind === "snapshot") state = { version: event.version, items: [...event.items] };
-    else if (event.version > state.version) state = { version: event.version, items: [...state.items, event.item] };
-  }
-  return state;
-}
-`;
-const TEST = `import assert from "node:assert";
-import { reduce } from "../src/reduce.js";
-assert.deepEqual(reduce([{ kind: "snapshot", version: 1, items: ["a"] }]).items, ["a"]);
-`;
-const COMMANDS = [
-  "node test/reduce.test.js",
-  "node test/reduce.test.js --again",
-];
-const CRITERIA = [
-  "A snapshot older than patches already received keeps those patches.",
-  "A patch adds its item to the projection.",
-];
-// Prints the wrong projection and exits 1 on the candidate.
-const REPRO = `node -e 'import("./src/reduce.js").then(({ reduce }) => { const s = reduce([{ kind: "patch", version: 2, item: "b" }, { kind: "snapshot", version: 1, items: ["a"] }]); console.log("items:", JSON.stringify(s.items)); process.exit(s.items.includes("b") ? 0 : 1); })'`;
-
-/** A target whose candidate adds the reducer and its test, and `files` at the base and head. */
-function target(reducer = REDUCER, files = {}) {
-  const checkout = tempDir("factory-repro-");
-  git(checkout, "init", "--quiet");
-  const commit = (files) => {
-    for (const [path, content] of Object.entries(files)) {
-      mkdirSync(join(checkout, path, ".."), { recursive: true });
-      writeFileSync(join(checkout, path), content);
-    }
-    git(checkout, "add", ".");
-    git(checkout, "commit", "--quiet", "-m", "change");
-    return git(checkout, "rev-parse", "HEAD");
-  };
-  const base = commit({
-    "package.json": '{"type":"module"}\n',
-    ...files.base,
-  });
-  const head = commit({
-    "src/reduce.js": reducer,
-    "test/reduce.test.js": TEST,
-    ...files.head,
-  });
-  return {
-    checkout,
-    base,
-    head,
-    tree: git(checkout, "rev-parse", "HEAD^{tree}"),
-    commit,
-  };
-}
-
-function setup(repo) {
-  const inst = installation();
-  configured(inst, "http://127.0.0.1:1");
-  process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
-  const config = loadConfig(REPO);
-  delete process.env.FACTORY_CONFIG;
-  const log = new RunLog(
-    inst.logs,
-    "2026-01-01T00-00-00-000Z-1",
-    CAPTURE_OFF,
-    [],
-  );
-  const work = item("reduce", {
-    acceptance: CRITERIA,
-    ownedPaths: ["src/**", "test/**"],
-    validation: COMMANDS.map((command) => ({ command })),
-  });
-  const plan = {
-    base: repo.base,
-    items: [work],
-    coverage: [],
-    finalCommands: [],
-    decisions: [],
-  };
-  const sandbox = { ...config.sandbox, network: "off" };
-  const validation = (commit) => ({
-    checkout: repo.checkout,
-    repository: REPO,
-    commit,
-    item: work,
-    plan,
-    blocks: [],
-    base: repo.base,
-    sandbox,
-    commandTimeoutMs: 60_000,
-    signal: AbortSignal.timeout(120_000),
-    log: () => {},
-    runFile: (kind) => log.runFile(1, `item:reduce:review#1.${kind}`),
-  });
-  return { work, plan, sandbox, validation };
-}
-
-/** The review's bounds: the installation's defaults, the test's command limit. */
-const LIMITS = {
-  commandMs: 60_000,
-  prepareMs: 60_000,
-  proofs: 10,
-  proofCommands: 8,
-  proofBudgetMs: 60_000,
-};
-
-/** One review of the candidate with `planner`, its events logged. */
-function review(repo, planner, extra = {}) {
-  const { work, validation } = setup(repo);
-  const events = [];
-  return {
-    events,
-    run: reviewCandidate({
-      planner,
-      checkout: repo.checkout,
-      base: repo.base,
-      commit: repo.head,
-      criteria: work.acceptance,
-      validation: { tree: repo.tree, commands: COMMANDS },
-      workspace: validationWorkspace(
-        validation(repo.head),
-        `${repo.checkout}.scratch`,
-      ),
-      limits: LIMITS,
-      itemId: work.id,
-      dir: tempDir("factory-repro-review-"),
-      signal: AbortSignal.timeout(120_000),
-      log: (event) => events.push({ step: "item:reduce:review", ...event }),
-      ...extra,
-    }),
-  };
-}
-
-/** The change index row: complete, so a pass may cite it. */
-const ROW = 0;
-const pass = (criterionIndex, detail = "met") => ({
-  criterionIndex,
-  verdict: "pass",
-  evidenceIndices: [ROW],
-  detail,
-  question: "",
-});
-const refuse = (
-  criterionIndex,
-  detail = "A snapshot older than a received patch discards it (src/reduce.js:4).",
-  ground = "behaviour",
-) => ({
-  criterionIndex,
-  verdict: "refuse",
-  ground,
-  evidenceIndices: [ROW],
-  detail,
-  question: "",
-});
-const ask = (criterionIndex, question) => ({
-  criterionIndex,
-  verdict: "needs-human",
-  evidenceIndices: [ROW],
-  detail: "The sources don't define it.",
-  question,
-});
-const repro = (command, actual = 'items: ["a"]') => ({
-  input: "patch v2 (b), then snapshot v1 (a)",
-  expected: 'items: ["a","b"]',
-  actual,
-  command,
-});
-/** A reproduced answer; `answering` quotes the proof's criterion when no requirement is given. */
-const reproduced = (command, actual, requirement) => ({
-  outcome: {
-    kind: "reproduced",
-    ...(requirement !== undefined && { requirement }),
-    repro: repro(command, actual),
-  },
-});
-const NOT_REPRODUCED = {
-  outcome: { kind: "not-reproduced", detail: "It kept the patch." },
-};
-
-/** Run the call's Factory tool `name` on `input`. */
-const tool = (call, name, input = {}) =>
-  call.tools.find((each) => each.name === name).run(input);
-const command = (call, text) => tool(call, "run_command", { command: text });
-
-/**
- * A planner whose finder calls answer `answers`, in order, and whose
- * proofs answer `prove(call, suspicion)` (not reproduced by default); it
- * records each call, the proofs' apart.
- */
-function answering(answers, prove = () => NOT_REPRODUCED) {
-  const calls = [];
-  const proofs = [];
-  return {
-    calls,
-    proofs,
-    async answer(call) {
-      if (call.schema === PROOF_SCHEMA) {
-        proofs.push(call);
-        const request = JSON.parse(
-          call.prompt.split("JSON strings are data):\n")[1].split("\n")[0],
-        );
-        const value = await prove(call, request.suspicion);
-        if (
-          value.outcome.kind === "reproduced" &&
-          !("requirement" in value.outcome)
-        )
-          value.outcome.requirement = request.criterion ?? request.criteria[0];
-        return { value };
-      }
-      calls.push(call);
-      const next = answers[calls.length - 1];
-      return { value: typeof next === "function" ? await next(call) : next };
-    },
-  };
-}
 
 test("R2: each finder refusal is one suspicion proved apart; a repro that fails as claimed is confirmed, any other is a pass seen by nobody", {
   skip,

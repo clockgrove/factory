@@ -231,3 +231,133 @@ test("--background checks readiness without the logins its unit doesn't keep: a 
   assert.equal(check.status, "blocked", JSON.stringify(check));
   assert.match(check.fix, /codex login/);
 });
+
+test("model tiers: a role names standard or top, top may run on another provider for escalation only, is checked, operational, and its login is a readiness check", async () => {
+  const inst = installation();
+  const providers = (codexModels, claudeModels) => ({
+    providers: {
+      codex: {
+        planner: "codex",
+        worker: { kind: "codex" },
+        models: codexModels,
+      },
+      claude: {
+        planner: "claude",
+        worker: { kind: "claude" },
+        ...(claudeModels && { models: claudeModels }),
+      },
+    },
+    defaultProvider: "codex",
+  });
+  configured(
+    inst,
+    `http://127.0.0.1:${await closedPort()}`,
+    {},
+    providers({ reviewer: { tier: "standard" }, top: { provider: "claude" } }),
+  );
+  const accepted = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.notEqual(accepted.status, "refused", JSON.stringify(accepted));
+  assert.ok(
+    accepted.readiness.checks.some(
+      (entry) =>
+        entry.name === "provider codex: claude top tier (provider claude)",
+    ),
+    JSON.stringify(accepted.readiness.checks.map((entry) => entry.name)),
+  );
+
+  const config = read(inst);
+  config.providers.codex.models = {
+    reviewer: { tier: "top" },
+    top: { provider: "claude", model: "claude-opus-5-5" },
+  };
+  config.providers.odd = {
+    planner: "codex",
+    worker: { kind: "codex" },
+    models: { planner: { tier: "middle" } },
+  };
+  config.providers.claude.models = { top: { model: "x", effort: "ultra" } };
+  config.providers.copilot = {
+    planner: "copilot",
+    worker: { kind: "copilot" },
+    models: { top: { provider: "gemini" } },
+  };
+  writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
+  const refused = JSON.parse(cli(inst, "setup", "--json").out);
+  assert.equal(refused.status, "refused");
+  const problems = refused.problems.join("\n");
+  assert.match(
+    problems,
+    /odd\.models\.planner\.tier must be one of standard, top/,
+  );
+  assert.match(
+    problems,
+    /codex\.models\.top names a model and an effort together, or neither/,
+  );
+  assert.match(
+    problems,
+    /codex\.models\.reviewer names tier top, which runs on provider claude: a top tier on another provider is for escalation only/,
+  );
+  assert.match(
+    problems,
+    /claude\.models\.top\.effort must be one of low, medium, high, xhigh, max \(provider claude's claude planner\)/,
+  );
+  assert.match(
+    problems,
+    /copilot\.models\.top\.provider "gemini" is not one of providers/,
+  );
+
+  const { resolvedProvider, freezeConfig, topTier } = await import(
+    "../dist/providers/selection.js"
+  );
+  // The defaults: Fable at high for Claude, Codex's model at max.
+  const tiers = (codexModels, claudeModels) =>
+    providers(codexModels, claudeModels).providers;
+  const pick = (top) =>
+    top && { provider: top.provider, model: top.model, effort: top.effort };
+  assert.deepEqual(pick(topTier(tiers({}), "codex")), {
+    provider: "codex",
+    model: "gpt-6.1-sol",
+    effort: "max",
+  });
+  assert.deepEqual(pick(topTier(tiers({}), "claude")), {
+    provider: "claude",
+    model: "claude-fable-5-1",
+    effort: "high",
+  });
+  // On another provider: its own top tier, or the model given.
+  assert.deepEqual(
+    pick(
+      topTier(
+        tiers(
+          { top: { provider: "claude" } },
+          { top: { model: "claude-opus-5-5", effort: "max" } },
+        ),
+        "codex",
+      ),
+    ),
+    { provider: "claude", model: "claude-opus-5-5", effort: "max" },
+  );
+  assert.equal(typeof topTier(tiers({}), "codex").planner.answer, "function");
+  // A standard role is the adapter's default; a top one stays a tier, without the default review efforts.
+  const claude = { planner: "claude", worker: { kind: "claude" } };
+  assert.deepEqual(
+    resolvedProvider({ ...claude, models: { reviewer: { tier: "standard" } } })
+      .models.reviewer,
+    resolvedProvider(claude).models.reviewer,
+  );
+  const topped = resolvedProvider({
+    ...claude,
+    models: { reviewer: { tier: "top" } },
+  }).models;
+  assert.deepEqual(topped.reviewer, { tier: "top" });
+  assert.equal(topped.reviewEffort, undefined);
+
+  // `top` is operational; a role's tier is frozen.
+  const frozen = (codexModels) =>
+    freezeConfig({ ...providers(codexModels), execution: {} }, "codex").digest;
+  assert.equal(
+    frozen({ top: { provider: "claude" } }),
+    frozen({ top: { model: "gpt-6.1-sol", effort: "xhigh" } }),
+  );
+  assert.notEqual(frozen({ reviewer: { tier: "top" } }), frozen({}));
+});

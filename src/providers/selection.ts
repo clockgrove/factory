@@ -262,6 +262,7 @@ export const OPERATIONAL: readonly string[] = [
   "execution.workers",
   "execution.validations",
   "execution.planners",
+  "execution.proofs",
   "execution.memoryMiB",
   "execution.reservations",
   // The sandbox's resource caps and the package cache's place on the host.
@@ -287,6 +288,8 @@ export const OPERATIONAL: readonly string[] = [
   "provider.worker.settings.maxTurns",
   // When a stalled planner call is hedged: a duplicate call, never the answer's terms.
   "provider.hedgeSeconds",
+  // A review phase's Codex service tier: how fast an answer comes, never its terms.
+  "provider.models.reviewServiceTier",
   // Content capture observes calls; it changes no run.
   "capture",
   // Who Factory acts as on GitHub, and whom its holds notify. What an

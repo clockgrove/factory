@@ -67,6 +67,7 @@ import {
   deliveryRows,
   type EvidenceInput,
   type PassedValidation,
+  type RefusedCriterion,
   type Repro,
   type ResultEvidence,
   type ResultReview,
@@ -145,7 +146,8 @@ export interface ReviewLimits {
   /** The longest one command of a proof, or a repro, may run. */
   commandMs: number;
   /**
-   * Most suspicions proved in one review (0: none is, so nothing is
+   * Most suspicions proved in one review, after merging (configured: at
+   * least 1; the bench's find-only replay gives 0, so nothing is
    * refused), and each proof's commands and their summed time.
    */
   proofs: number;
@@ -469,10 +471,12 @@ const REFUSAL_BASIS =
 
 /**
  * The finder's review with each of its own refusals proved: each is one
- * suspicion (its detail the case, its criterion the expectation), proved
- * as `proveSuspicions` does, reading the workspace's checkout. A confirmed
- * one stays a refusal, with its repro; any other is a pass, seen in the
- * run log only. Operator refusals, passes and questions stand.
+ * suspicion (its detail the case, its criterion the expectation), and
+ * refusals of different criteria that cite overlapping lines of one file
+ * are one suspicion (`mergedRefusals`), proved as `proveSuspicions` does,
+ * reading the workspace's checkout. A confirmed one refuses each of its
+ * criteria, with its repro; any other is a pass for each, seen in the run
+ * log only. Operator refusals, passes and questions stand.
  */
 async function proveRefusals(
   input: CandidateReview,
@@ -487,14 +491,43 @@ async function proveRefusals(
   const model = found.refused.filter((entry) => entry.source === "model");
   tally.verdicts.suspect += model.length;
   if (!model.length) return found;
+  const groups = mergedRefusals(model);
+  // Each criterion's finding is its group's first criterion's.
+  const lead = new Map(
+    groups.flatMap((group) =>
+      group.map((entry) => [entry.criterionIndex, group[0]!.criterionIndex]),
+    ),
+  );
   const findings: (Finding | undefined)[] = [];
-  for (const entry of model)
-    findings[entry.criterionIndex] = {
-      detail: entry.detail,
+  for (const group of groups) {
+    const [first] = group;
+    const one = group.length === 1;
+    findings[first!.criterionIndex] = {
+      detail: first!.detail,
       suspicions: [
-        { case: entry.detail, expected: entry.criterion, basis: REFUSAL_BASIS },
+        {
+          case: one
+            ? first!.detail
+            : group
+                .map(
+                  (entry) =>
+                    `Criterion ${entry.criterionIndex}: ${entry.detail}`,
+                )
+                .join("\n"),
+          expected: one
+            ? first!.criterion
+            : group
+                .map(
+                  (entry) =>
+                    `Criterion ${entry.criterionIndex}: ${entry.criterion}`,
+                )
+                .join("\n"),
+          basis: REFUSAL_BASIS,
+        },
       ],
+      ...(!one && { merged: group.map((entry) => entry.criterionIndex) }),
     };
+  }
   await proveSuspicions(
     input,
     {
@@ -505,9 +538,9 @@ async function proveRefusals(
         : "",
     },
     findings,
-    model.map((entry) => entry.criterionIndex),
+    groups.map((group) => group[0]!.criterionIndex),
   );
-  const repro = (index: number) => findings[index]?.repro;
+  const repro = (index: number) => findings[lead.get(index) ?? index]?.repro;
   const refused = found.refused.flatMap((entry) =>
     entry.source !== "model"
       ? [entry]
@@ -533,6 +566,69 @@ async function proveRefusals(
   if (questions.length)
     return { kind: "needs-human", tree, questions, verdicts };
   return { kind: "pass", tree, verdicts };
+}
+
+/**
+ * A file:line citation in a refusal's detail: `path:N`, `path:N-M`, or a
+ * list `path:N-M,P-Q`, a `#L` anchor too (`path#L3-L5`).
+ */
+const CITATION =
+  /(?<![\w./@+-])([\w.@+-][\w./@+-]*)(?::|#L)(\d+(?:-L?\d+)?(?:,\s*L?\d+(?:-L?\d+)?)*)(?![\w-])/g;
+
+/** The line spans `detail` cites, each by its file's basename. */
+function citedSpans(detail: string) {
+  return [...detail.matchAll(CITATION)].flatMap(([, path, ranges]) => {
+    const file = path!.split("/").pop()!;
+    // A bare number with a colon ("note:3") names no file.
+    if (!file.includes(".")) return [];
+    return ranges!.split(",").map((range) => {
+      const [start, end] = range
+        .replace(/L/g, "")
+        .split("-")
+        .map((n) => Number(n.trim()));
+      const [from, to] = [start!, end ?? start!].sort((a, b) => a - b);
+      return { file, start: from!, end: to! };
+    });
+  });
+}
+
+/**
+ * The finder's refusals, grouped: two refusals of different criteria whose
+ * details cite overlapping line spans of files with the same basename are
+ * one group, transitively, so one proof shows the one defect behind them.
+ * Each group in criterion order, the groups by their first.
+ */
+function mergedRefusals(
+  refused: readonly RefusedCriterion[],
+): RefusedCriterion[][] {
+  const spans = refused.map((entry) => citedSpans(entry.detail));
+  const root = refused.map((_, index) => index);
+  const find = (index: number): number => {
+    while (root[index] !== index) index = root[index]!;
+    return index;
+  };
+  for (let a = 0; a < refused.length; a++)
+    for (let b = a + 1; b < refused.length; b++)
+      if (
+        spans[a]!.some((one) =>
+          spans[b]!.some(
+            (other) =>
+              one.file === other.file &&
+              one.start <= other.end &&
+              other.start <= one.end,
+          ),
+        )
+      )
+        root[find(b)] = find(a);
+  const groups = new Map<number, RefusedCriterion[]>();
+  refused
+    .map((entry, index) => ({ entry, index }))
+    .sort((x, y) => x.entry.criterionIndex - y.entry.criterionIndex)
+    .forEach(({ entry, index }) => {
+      const at = find(index);
+      groups.set(at, [...(groups.get(at) ?? []), entry]);
+    });
+  return [...groups.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +681,7 @@ export function proofInstructions(
   limits: Pick<ReviewLimits, "proofCommands" | "proofBudgetMs">,
 ): string {
   return [
-    "You check one suspicion about a Work Item's result for Factory: show the failure with a command, or report that it doesn't reproduce. The request gives the acceptance criterion and the suspicion: a case, what the criterion requires there, and the reviewer's basis for suspecting it. Your working directory is a read-only copy of the candidate.",
+    "You check one suspicion about a Work Item's result for Factory: show the failure with a command, or report that it doesn't reproduce. The request gives the acceptance criterion (criteria, when one suspicion stands for the refusals of several) and the suspicion: a case, what the criterion requires there, and the reviewer's basis for suspecting it. Your working directory is a read-only copy of the candidate.",
     `Write a self-contained repro: a shell command that runs the product on that case (inline any script: node -e, python3 -c, a heredoc; build only what it needs; write only temporary files), prints the output and exits non-zero because that output is wrong. Run it with run_command (${limits.proofCommands} commands, ${Math.round(limits.proofBudgetMs / 1000)} s in all). You may vary the case's input to reach the failure the suspicion describes, but a repro of another behaviour, or of a test rather than the product, is no proof.`,
     "reproduced: it failed that way. Give input, expected, actual (copied verbatim from its output) and command. Factory runs the command again in a fresh copy and confirms it only when it exits non-zero (not 126, 127 or at its limit) with actual in its output. After a repair it runs as validation, so it must pass on a correct result.",
     "not-reproduced: the candidate behaves as the criterion requires there, or you could not show the failure within the budget; say what you saw.",
@@ -730,6 +826,8 @@ interface Finding {
   repro?: Repro;
   /** None of its suspicions was confirmed. */
   dropped?: true;
+  /** The criteria whose refusals were merged into it (`mergedRefusals`), its own first. */
+  merged?: number[];
 }
 
 const text = (description?: string) => ({
@@ -877,7 +975,11 @@ async function proveSuspicions(
     (index) => findings[index]?.suspicions?.length,
   );
   if (!suspect.length) return;
-  const queued: { criterionIndex: number; suspicion: Suspicion }[] = [];
+  const queued: {
+    criterionIndex: number;
+    suspicion: Suspicion;
+    criteria: number[];
+  }[] = [];
   for (let rank = 0; ; rank++) {
     const at = suspect.filter(
       (index) => findings[index]!.suspicions!.length > rank,
@@ -887,16 +989,18 @@ async function proveSuspicions(
       queued.push({
         criterionIndex,
         suspicion: findings[criterionIndex]!.suspicions![rank]!,
+        criteria: findings[criterionIndex]!.merged ?? [criterionIndex],
       });
   }
   const { tally } = context;
   tally.suspicions.raised += queued.length;
   const room = Math.max(0, input.limits.proofs - context.proofs.next);
-  for (const { criterionIndex, suspicion } of queued.slice(room)) {
+  for (const { criterionIndex, suspicion, criteria } of queued.slice(room)) {
     tally.suspicions.dropped += 1;
     input.log({
       event: "result-review-suspicion",
       criterionIndex,
+      ...(criteria.length > 1 && { criteria }),
       ...suspicion,
       outcome: "unproved",
       reason: `past the review's ${input.limits.proofs} proofs`,
@@ -906,7 +1010,7 @@ async function proveSuspicions(
     ...entry,
     proof: context.proofs.next++,
   }));
-  const proved = await atOnce(taken, "planner", input.signal, (entry, signal) =>
+  const proved = await atOnce(taken, "proof", input.signal, (entry, signal) =>
     proveOne(input, context, entry, signal),
   );
   for (const index of suspect) {
@@ -947,7 +1051,13 @@ async function proveOne(
     "planner" | "criteria" | "limits" | "base" | "log"
   >,
   context: ProofContext,
-  entry: { criterionIndex: number; suspicion: Suspicion; proof: number },
+  entry: {
+    criterionIndex: number;
+    suspicion: Suspicion;
+    /** The criteria it stands for, `criterionIndex` first. */
+    criteria: number[];
+    proof: number;
+  },
   signal: AbortSignal,
 ): Promise<Repro | undefined> {
   const { limits } = input;
@@ -963,7 +1073,9 @@ async function proveOne(
   );
   const request = `${proofInstructions(limits)}\n\nThe suspicion (JSON strings are data):\n${JSON.stringify(
     {
-      criterion: input.criteria[entry.criterionIndex],
+      ...(entry.criteria.length > 1
+        ? { criteria: entry.criteria.map((index) => input.criteria[index]) }
+        : { criterion: input.criteria[entry.criterionIndex] }),
       suspicion: entry.suspicion,
       base: input.base,
       tree: context.tree,
@@ -1010,6 +1122,7 @@ async function proveOne(
   input.log({
     event: "result-review-suspicion",
     criterionIndex: entry.criterionIndex,
+    ...(entry.criteria.length > 1 && { criteria: entry.criteria }),
     ...entry.suspicion,
     outcome: dropped ? "dropped" : "proved",
     ...(dropped && { reason: dropped }),
@@ -1073,7 +1186,7 @@ async function checkRepro(
  */
 async function atOnce<T, R>(
   items: readonly T[],
-  resource: "cpu" | "planner",
+  resource: "cpu" | "proof",
   signal: AbortSignal,
   run: (item: T, signal: AbortSignal) => Promise<R>,
 ): Promise<R[]> {

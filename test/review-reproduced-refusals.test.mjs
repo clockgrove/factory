@@ -344,9 +344,44 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
     const dropped = answering([{ findings: [refuse(0), pass(1)] }], prove);
     assert.equal((await review(repo, dropped).run).kind, "pass");
   }
+  // Refusals of two criteria citing overlapping lines of one tracked file
+  // are one proof, and its confirmed repro refuses both.
+  const merged = answering(
+    [
+      {
+        findings: [
+          refuse(0),
+          refuse(1, "The patch is lost (candidate/src/reduce.js:3-5)."),
+        ],
+      },
+    ],
+    () => reproduced(REPRO),
+  );
+  const { run: mergedRun, events: mergedEvents } = review(repo, merged);
+  const both = await mergedRun;
+  assert.equal(merged.proofs.length, 1);
+  assert.deepEqual(
+    both.refused.map((entry) => [entry.criterionIndex, entry.repro.command]),
+    [
+      [0, REPRO],
+      [1, REPRO],
+    ],
+  );
+  const request = JSON.parse(
+    merged.proofs[0].prompt
+      .split("JSON strings are data):\n")[1]
+      .split("\n")[0],
+  );
+  assert.deepEqual(request.criteria, CRITERIA);
+  assert.deepEqual(
+    mergedEvents.find((event) => event.event === "result-review-suspicion")
+      .criteria,
+    [0, 1],
+  );
   // Past the review's proofs, a suspicion is dropped unproved.
-  const capped = answering([{ findings: [refuse(0), refuse(1)] }], () =>
-    reproduced(REPRO),
+  const capped = answering(
+    [{ findings: [refuse(0), refuse(1, "A patch may be dropped.")] }],
+    () => reproduced(REPRO),
   );
   const { run: cappedRun, events: cappedEvents } = review(repo, capped, {
     limits: { ...LIMITS, proofs: 1 },
@@ -361,6 +396,24 @@ test("R2: each finder refusal is one suspicion proved apart; a repro that fails 
         event.event === "result-review-suspicion" && event.criterionIndex === 1,
     ).outcome,
     "unproved",
+  );
+});
+
+test("review.proofs is at least 1 and 4 by default: a review that proved nothing could refuse nothing", () => {
+  const load = (fields) => {
+    const inst = installation();
+    configured(inst, "http://127.0.0.1:1", {}, fields);
+    process.env.FACTORY_CONFIG = inst.env.FACTORY_CONFIG;
+    try {
+      return loadConfig(REPO);
+    } finally {
+      delete process.env.FACTORY_CONFIG;
+    }
+  };
+  assert.equal(load({}).review.proofs, 4);
+  assert.throws(
+    () => load({ review: { proofs: 0 } }),
+    /review\.proofs must be a whole number from 1/,
   );
 });
 

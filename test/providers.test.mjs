@@ -116,7 +116,9 @@ test("a Codex result review asks for the priority tier unless models.reviewServi
   assert.doesNotMatch(refused.problems.join("\n"), /providers\.codex\./);
 
   const { modelChoice } = await import("../dist/providers/planner.js");
-  const { resolvedProvider } = await import("../dist/providers/selection.js");
+  const { resolvedProvider, freezeConfig } = await import(
+    "../dist/providers/selection.js"
+  );
   const tier = (provider, phase) =>
     modelChoice(resolvedProvider(provider).models, { role: "reviewer", phase })
       .serviceTier;
@@ -130,6 +132,23 @@ test("a Codex result review asks for the priority tier unless models.reviewServi
   assert.equal(tier(standard, "result-review"), "standard");
   assert.equal(
     tier({ planner: "claude", worker: { kind: "claude" } }, "result-review"),
+    undefined,
+  );
+
+  // Operational: a running Objective doesn't hold over it, an upgrade's
+  // new default included.
+  const frozen = (provider) =>
+    freezeConfig(
+      {
+        providers: { codex: provider },
+        defaultProvider: "codex",
+        execution: {},
+      },
+      "codex",
+    );
+  assert.equal(frozen(standard).digest, frozen(codex).digest);
+  assert.equal(
+    frozen(codex).config.provider.models.reviewServiceTier,
     undefined,
   );
 });

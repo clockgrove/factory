@@ -247,6 +247,7 @@ Host-wide limits apply across all Objectives:
 - worker runs (`execution.workers`, half the CPUs);
 - validations (`execution.validations`, a quarter);
 - planner calls (`execution.planners`);
+- result review proofs (`execution.proofs`, as many as validations), a pool of their own;
 - a memory reservation per step.
 
 `factory status --capacity` shows what's in use and how the limits fit the host.

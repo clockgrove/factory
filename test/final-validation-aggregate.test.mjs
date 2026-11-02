@@ -547,6 +547,7 @@ async function finalHarness() {
     config: {
       delivery: { kind: "regular" },
       validation: { commandTimeoutSeconds: 60 },
+      review: { mutants: 20, mutationSeconds: 300 },
     },
   };
   const runner = new ObjectiveRunner(

@@ -29,7 +29,7 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { cp, mkdtemp } from "node:fs/promises";
+import { cp, mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -99,7 +99,12 @@ import {
 import { runSandboxed, sandboxAvailable } from "./sandbox.js";
 import { StoreClaims, sharedStore } from "./shared-install-store.js";
 import type { ObjectiveBlock } from "./shown.js";
-import { errorMessage, failureExcerpt, headAndTail } from "./text.js";
+import {
+  BoundedText,
+  errorMessage,
+  failureExcerpt,
+  headAndTail,
+} from "./text.js";
 import { factoryCommit, privateStagingPath } from "./work/collect.js";
 import { AttemptServices, servicesHold } from "./work/services.js";
 import {
@@ -481,7 +486,77 @@ export interface ValidateInput {
    * failed, and its `validation-result` names it by `output`.
    */
   runFile(kind: string): RunFile;
+  /**
+   * Factory's own checks of a passed result (#2344): with every command
+   * that ran passed, before cleanup, this runs in the validation checkout
+   * while its HOME, TMPDIR and services exist, and its commands run as the
+   * validation's ran (`ValidatedCheckout`): the result review's
+   * workspace and its refusal checks (review/item.ts). Never in a group's checkout: after
+   * groups, in this run's own, which ran the install. What it throws
+   * escapes `validateTree`. Absent: nothing runs after the commands.
+   */
+  use?: (checkout: ValidatedCheckout) => Promise<void>;
 }
+
+/** A passed validation's checkout, for `ValidateInput.use`. */
+export interface ValidatedCheckout {
+  /** The checkout of the exact commit validated, its Git LFS files restored and its commands run. */
+  directory: string;
+  /** The commands that passed there (or in its groups), in run order. */
+  results: readonly CommandResult[];
+  /** Whether this run started throwaway services, which its copies share. */
+  services: boolean;
+  /**
+   * Run one command in the checkout as validation runs a command after
+   * the install: in the sandbox, with no network unless `sandbox.network`
+   * is `host`, no secrets, the run's HOME, TMPDIR and services and
+   * FACTORY_BASE_SHA, for at most `timeoutMs`. A command the sandbox
+   * can't run throws; `signal` (beside the validation's own) stops it,
+   * with everything it started, and it rejects.
+   */
+  run(
+    command: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<CheckoutRun>;
+  /**
+   * A copy of this checkout as it is now, for commands run beside it: its
+   * own linked worktree of the same commit at `<directory>.copies/<name>`,
+   * with every file the checkout holds that Git doesn't (the install's
+   * output, restored Git LFS bytes, anything else ignored or untracked)
+   * copied from it (`cp -a --reflink=auto`), so nothing is installed
+   * again; its own HOME (a copy of this run's) and TMPDIR; the same
+   * environment, network rule and services. Several copies' commands may
+   * run at once. Removed by `remove()`, and with this checkout when the
+   * run ends.
+   */
+  copy(name: string): Promise<CheckoutCopy>;
+}
+
+/** A copy of a `ValidatedCheckout`: its commands run as the checkout's do. */
+export interface CheckoutCopy {
+  directory: string;
+  /** As `ValidatedCheckout.run`: `signal` stops the command, which then rejects. */
+  run(
+    command: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<CheckoutRun>;
+  remove(): Promise<void>;
+}
+
+/** How a `ValidatedCheckout` command ended: its output interleaved, start and end kept. */
+export interface CheckoutRun {
+  /** null when a signal ended it, such as the time limit. */
+  exitCode: number | null;
+  timedOut: boolean;
+  output: string;
+  ms: number;
+}
+
+/** What a `ValidatedCheckout` command's output keeps: its start and its end. */
+const CHECKOUT_OUTPUT_HEAD = 16_000;
+const CHECKOUT_OUTPUT_TAIL = 48_000;
 
 export interface CommandResult {
   command: string;
@@ -630,6 +705,26 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   };
 }
 
+/** Remove every copy of a validation checkout under `root`, and their registrations. */
+async function removeCopies(
+  checkout: string,
+  root: string,
+  signal: AbortSignal,
+): Promise<void> {
+  let names: string[] = [];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names)
+    await removeWorktree(checkout, join(root, name), signal).catch(
+      () => undefined,
+    );
+  await execFileAsync("rm", ["-rf", "--", root]).catch(() => undefined);
+  await forceRemove(root);
+}
+
 /**
  * With `group`, one group of a Work Item's commands, from the run that
  * made the formatter's and the lockfile's commits (`inGroups`, #2290): no
@@ -727,9 +822,14 @@ async function validateCandidate(
   const checkoutStarted = Date.now();
   // A kept checkout holds files earlier runs produced: only this run's go back.
   const producedSince = keep ? checkoutStarted : undefined;
+  // The copies of its checkout an earlier run left (`ValidatedCheckout.copy`).
+  const copiesRoot = `${worktree}.copies`;
   try {
     if (group) crashPoint("validation:group-checkout:before");
-    else await forceRemove(groupsRoot);
+    else {
+      await forceRemove(groupsRoot);
+      await removeCopies(checkout, copiesRoot, input.signal);
+    }
     // The attempt's kept checkout, brought to this commit in place; one
     // that can't be is made fresh, with nothing it held.
     let kept = false;
@@ -844,7 +944,7 @@ async function validateCandidate(
     // whatever sandbox.network says (the formatter's).
     const sandboxed = async (
       command: string,
-      whole: RunFile,
+      whole: Pick<RunFile, "append">,
       grant: {
         install: boolean;
         network: boolean;
@@ -852,13 +952,24 @@ async function validateCandidate(
         offline?: true;
         /** The exact install's kept package store (`installStore`). */
         store?: string;
+        /** Its own limit, not `commandTimeoutMs` (`ValidatedCheckout.run`). */
+        timeoutMs?: number;
+        /** A copy's checkout, HOME and TMPDIR (`ValidatedCheckout.copy`), not this run's. */
+        at?: { cwd: string; home: string; temporary: string };
+        /** Stops this command too (`ValidatedCheckout.run`). */
+        signal?: AbortSignal;
       },
     ) =>
       runSandboxed(command, {
-        cwd: worktree,
-        home: grant.install ? await made("factory-install-home-") : home,
+        cwd: grant.at?.cwd ?? worktree,
+        // A copy appears at this checkout's path: the absolute paths the
+        // install recorded (pnpm's workspace state) hold in it as here.
+        ...(grant.at && { at: worktree }),
+        home: grant.install
+          ? await made("factory-install-home-")
+          : (grant.at?.home ?? home),
         ...(grant.install && grant.store && { installStore: grant.store }),
-        temporary,
+        temporary: grant.at?.temporary ?? temporary,
         env: {
           ...validationEnvironment(credentials),
           ...(!grant.install && services?.environment),
@@ -876,13 +987,178 @@ async function validateCandidate(
           : input.sandbox,
         packageInstall: grant.install,
         network: grant.network,
-        readOnlyFiles: linked.map((file) => file.path),
+        // A copy holds its own copies of the linked files.
+        readOnlyFiles: grant.at ? [] : linked.map((file) => file.path),
         ...(!grant.install && services && { services: services.root }),
         ...(grant.outputLimit ? { outputLimit: grant.outputLimit } : {}),
         onOutput: (stream, text) => whole.append(text, stream),
-        signal: input.signal,
-        timeoutMs: input.commandTimeoutMs,
+        signal: grant.signal
+          ? AbortSignal.any([input.signal, grant.signal])
+          : input.signal,
+        timeoutMs: grant.timeoutMs ?? input.commandTimeoutMs,
       });
+    /**
+     * `input.use` on the passed result, in this checkout: after groups,
+     * with services of its own again (inGroups stopped this run's).
+     */
+    const used = async (
+      passed: Extract<Validation, { kind: "passed" }>,
+    ): Promise<Validation> => {
+      if (!input.use || group) return passed;
+      if (!services) {
+        const up = await validationServices(input);
+        if (up && !(up instanceof AttemptServices)) return up;
+        services = up;
+      }
+      crashPoint("validation:use:before");
+      const run = async (
+        command: string,
+        timeoutMs: number,
+        stop: AbortSignal | undefined,
+        at?: { cwd: string; home: string; temporary: string },
+      ): Promise<CheckoutRun> => {
+        const output = new BoundedText(
+          CHECKOUT_OUTPUT_HEAD,
+          CHECKOUT_OUTPUT_TAIL,
+        );
+        const started = Date.now();
+        const ran = await sandboxed(
+          command,
+          { append: (text) => output.add(text) },
+          {
+            install: false,
+            network: false,
+            timeoutMs,
+            ...(at && { at }),
+            ...(stop && { signal: stop }),
+          },
+        );
+        if (ran.kind === "fault")
+          throw new Error(
+            `The command sandbox could not run \`${command}\`: ${ran.detail}. ${ran.fix}.`,
+          );
+        return {
+          exitCode: ran.exitCode,
+          timedOut: ran.timedOut,
+          output: `${output.toString()}${ran.diskOverflow ? `\n${ran.diskOverflow}` : ""}`,
+          ms: Date.now() - started,
+        };
+      };
+      const copies = new Set<string>();
+      // One `git worktree add` at a time: they share the checkout's metadata.
+      let making: Promise<unknown> = Promise.resolve();
+      const copy = async (name: string): Promise<CheckoutCopy> => {
+        const next = making.then(() => copyCheckout(name));
+        making = next.catch(() => undefined);
+        return next;
+      };
+      const copyCheckout = async (name: string): Promise<CheckoutCopy> => {
+        const directory = join(copiesRoot, name);
+        copies.add(directory);
+        await mkdir(copiesRoot, { recursive: true });
+        await addWorktree(checkout, directory, commit, signal, input.log);
+        // Its tracked files keep this checkout's times, so they are no
+        // newer than the install: a package manager that checks its
+        // install against its manifests' times (pnpm's
+        // verify-deps-before-run) finds it current, as here.
+        const tracked = (
+          await hostGit(worktree, ["ls-files", "-z"], { signal })
+        )
+          .toString("utf8")
+          .split("\0")
+          .filter(Boolean);
+        for (let at = 0; at < tracked.length; at += 500)
+          await execFileAsync(
+            "cp",
+            [
+              "-a",
+              "--attributes-only",
+              "--parents",
+              "-t",
+              directory,
+              "--",
+              ...tracked.slice(at, at + 500),
+            ],
+            { cwd: worktree, signal, maxBuffer: 1 << 24 },
+          );
+        // What the checkout holds that its commit doesn't: the install's
+        // output, restored LFS bytes and anything else Git ignores.
+        const listed = (
+          await hostGit(
+            worktree,
+            [
+              "status",
+              "--porcelain=v1",
+              "-z",
+              "--ignored=traditional",
+              "--untracked-files=normal",
+              "--no-renames",
+            ],
+            { signal },
+          )
+        )
+          .toString("utf8")
+          .split("\0")
+          .filter(
+            (entry) => entry.length > 3 && entry[0] !== "D" && entry[1] !== "D",
+          )
+          .map((entry) => entry.slice(3).replace(/\/$/, ""))
+          .filter((path) => path && path !== ".git");
+        for (let at = 0; at < listed.length; at += 500)
+          await execFileAsync(
+            "cp",
+            [
+              "-a",
+              "--reflink=auto",
+              "--parents",
+              "-t",
+              directory,
+              "--",
+              ...listed.slice(at, at + 500),
+            ],
+            { cwd: worktree, signal, maxBuffer: 1 << 24 },
+          );
+        const own = {
+          cwd: directory,
+          home: await made("factory-home-"),
+          temporary: await made("factory-validation-"),
+        };
+        await cp(home, own.home, { recursive: true, verbatimSymlinks: true });
+        crashPoint("validation:copy:after");
+        return {
+          directory,
+          run: (command, timeoutMs, stop) => run(command, timeoutMs, stop, own),
+          remove: async () => {
+            copies.delete(directory);
+            await removeWorktree(checkout, directory, signal).catch(
+              () => undefined,
+            );
+            await forceRemove(own.home);
+            await forceRemove(own.temporary);
+          },
+        };
+      };
+      try {
+        await input.use({
+          directory: worktree,
+          results: passed.results,
+          services: services !== undefined,
+          run: (command, timeoutMs, stop) => run(command, timeoutMs, stop),
+          copy,
+        });
+      } finally {
+        await making;
+        for (const directory of copies)
+          await removeWorktree(checkout, directory, signal).catch(
+            () => undefined,
+          );
+        await execFileAsync("rm", ["-rf", "--", copiesRoot]).catch(
+          () => undefined,
+        );
+        await forceRemove(copiesRoot);
+      }
+      return passed;
+    };
     // The repository's formatter runs once, on a Work Item's validation:
     // after the exact install when the sequence starts with one (the
     // formatter is usually a dependency), else before the first command
@@ -1178,7 +1454,8 @@ async function validateCandidate(
       if (position === setup && groups.length > 1 && !grouped) {
         grouped = true;
         const decided = await inGroups();
-        if (decided) return decided;
+        if (decided)
+          return decided.kind === "passed" ? await used(decided) : decided;
       }
       const index = order[position]!;
       if (group) group.at = index;
@@ -1633,7 +1910,7 @@ async function validateCandidate(
         ...(formatted && { formatted }),
       };
     }
-    return {
+    return await used({
       kind: "passed",
       tree,
       commands: ran,
@@ -1642,7 +1919,7 @@ async function validateCandidate(
       ...(capture && { artifacts }),
       ...(regenerated && { regenerated }),
       ...(formatted && { formatted }),
-    };
+    });
   } finally {
     await services?.stop();
     await Promise.all(scratch.map((path) => forceRemove(path)));

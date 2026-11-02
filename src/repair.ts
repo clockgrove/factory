@@ -77,11 +77,11 @@ import {
 } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
 import type { Planner } from "./providers/planner.js";
+import { resultCriteria } from "./review/finder.js";
 import {
   type RefusedCriterion,
   type ReviewConversation,
   receiptPath,
-  resultCriteria,
 } from "./review/result.js";
 import { failureExcerpt } from "./text.js";
 import {
@@ -412,9 +412,9 @@ export function failureIdentity(
 }
 
 /**
- * The criteria a review judges for the item: the result review's, numbered
- * as the worker's Acceptance list numbers them (`resultCriteria`), or with
- * `final`, the ones the plan's coverage gives it, whatever proves them.
+ * The criteria a review judges for the item: the result review's
+ * (review/finder.ts `resultCriteria`), or with `final`,
+ * the ones the plan's coverage gives it, whatever proves them.
  */
 function reviewedCriteria(
   { plan, item }: Pick<CorrectionInput, "plan" | "item">,
@@ -580,8 +580,10 @@ const bounded = (text: string) => failureExcerpt(text, FAILURE_CHARS);
  * review's refusal (`final`) is taken once per item too, apart from the
  * result review's: its criteria are the ones the plan's coverage gives this
  * item, whatever proves them. Either way a finding's criterionIndex is its
- * criterion's number in the worker's Acceptance list (`resultCriteria`,
- * #2197); a criterion only final review proves has none.
+ * criterion's number in the worker's Acceptance list, its own acceptance;
+ * a criterion only final review proves has none. A result review's
+ * refusal carries the repro its refusal check confirmed: the repair must
+ * make its command pass, which validation then runs (work/repros.ts).
  */
 function reviewFindingsCorrection(
   input: CorrectionInput,
@@ -590,9 +592,9 @@ function reviewFindingsCorrection(
   if (finding.kind !== "review") return undefined;
   const source = finding.final ? "final-review" : "review-findings";
   if (prior.some((tried) => tried.source === source)) return undefined;
-  // Numbered as the worker's Acceptance list numbers them (resultCriteria).
-  const numbered = resultCriteria(input.plan, item);
-  const reviewed = finding.final ? reviewedCriteria(input, true) : numbered;
+  // Numbered as the worker's Acceptance list numbers them.
+  const numbered = item.acceptance;
+  const reviewed = reviewedCriteria(input, finding.final === true);
   const identity = failureIdentity(input);
   if (
     !finding.refused.length ||
@@ -612,9 +614,9 @@ function reviewFindingsCorrection(
     ...(identity && { identity }),
     diagnosis: finding.final
       ? `Final review refused ${count} Objective ${criteria} this Work Item owns on the integrated default branch (tree ${finding.tree}) after final validation passed. This repair starts from the current default branch, which holds this Work Item's merged result. Each finding states the gap to close.`
-      : `The independent result review refused ${count} acceptance ${criteria} of candidate tree ${finding.tree} after its validation commands passed. Each finding states the gap the candidate must close.`,
-    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list, which quotes each Objective criterion this Work Item proves verbatim after its own.${finding.final ? " A finding without one refuses an Objective criterion only final review judges, on the integrated result, quoted verbatim." : ""} evidence is what the reviewer cited.\n${JSON.stringify(
-      finding.refused.map(({ criterion, detail, evidence }) => ({
+      : `The independent result review refused ${count} acceptance ${criteria} of candidate tree ${finding.tree} after its validation commands passed, each with a failure Factory reproduced. Each finding states the failure the candidate must fix.`,
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's bracketed number [n] in the Work Item's Acceptance list.${finding.final ? " A finding without one refuses an Objective criterion only final review judges, on the integrated result, quoted verbatim." : ""} evidence is what the reviewer cited.${finding.final ? "" : " repro is the failure Factory reproduced on the refused candidate: its input, the expected and the actual output, and the command that exited non-zero there. Fix the product so that command passes: Factory runs it as part of this item's validation from now on, after the exact install alone, and a result it fails is repaired again. Don't change or delete it, and don't special-case its input."}\n${JSON.stringify(
+      finding.refused.map(({ criterion, detail, evidence, repro }) => ({
         // The worker's Acceptance numbering (#2197); a criterion only final
         // review proves is not in that list, so it has no number.
         ...(numbered.includes(criterion) && {
@@ -627,6 +629,7 @@ function reviewFindingsCorrection(
           origin,
           complete,
         })),
+        ...(repro && { repro }),
       })),
     )}`,
   });
@@ -1488,7 +1491,7 @@ function renderDiagnosis(
         title: entry.title,
         goal: entry.goal,
       })),
-      reviewedCriteria: resultCriteria(input.plan, item),
+      reviewedCriteria: item.acceptance,
     }),
     part(`The failed result ${input.commit.slice(0, 12)}`, {
       base: input.base,

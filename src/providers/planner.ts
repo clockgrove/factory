@@ -69,6 +69,61 @@ export interface PlannerCall {
    * Absent: a fresh call that keeps nothing.
    */
   conversation?: Conversation;
+  /**
+   * Factory's own tools for this call (a result review proof's
+   * run_command, review/item.ts): every provider offers each by its name, with
+   * exactly its description and input schema, and never hedges the call,
+   * so no two turns share what the tools act on. Absent: none.
+   */
+  tools?: readonly CallTool[];
+}
+
+/**
+ * A Factory tool a planning or review call offers (review/item.ts makes
+ * them): every provider offers each by `name` with exactly its
+ * description and input schema.
+ */
+export interface CallTool {
+  name: string;
+  description: string;
+  /** JSON Schema of its input: an object. */
+  input: Record<string, unknown>;
+  /**
+   * Run it on the model's input: the text the model gets back. It checks
+   * its own input, and throws only when it can't run, which the model is
+   * told as an error reply.
+   */
+  run(input: unknown): Promise<string>;
+  /** The longest one call may take: idle bounds wait at least this long while one runs. */
+  limitMs: number;
+}
+
+/**
+ * `tool` as one call's providers run it: its calls one at a time in call
+ * order (a tool's calls share what it acts on), and one that can't run
+ * answers with the error instead of failing the turn.
+ */
+export function toolRunner(
+  tool: CallTool,
+): (input: unknown) => Promise<{ text: string; error: boolean }> {
+  let queue: Promise<unknown> = Promise.resolve();
+  return async (input) => {
+    const ran = queue.then(() => tool.run(input));
+    queue = ran.catch(() => undefined);
+    try {
+      return { text: await ran, error: false };
+    } catch (error) {
+      return {
+        text: `Tool not run: ${error instanceof Error ? error.message : String(error)}`,
+        error: true,
+      };
+    }
+  };
+}
+
+/** The longest any of `tools` may take for one call: 0 for none. */
+export function toolsLimitMs(tools: readonly CallTool[] | undefined): number {
+  return Math.max(0, ...(tools ?? []).map((tool) => tool.limitMs));
 }
 
 export interface PlannerAnswer {
@@ -188,22 +243,31 @@ export interface ModelChoice<Effort extends string = string> {
   serviceTier?: "standard" | "fast";
 }
 
-/** Planner and reviewer models, with the reviewer's effort per review phase. */
+/** Planner and reviewer models, with the reviewer's effort and tier per review phase. */
 export interface PlannerModels<Effort extends string = string> {
   planner: ModelChoice<Effort>;
   reviewer: ModelChoice<Effort>;
   /** A review phase's effort; an omitted one uses `reviewer.effort`. */
   reviewEffort?: Partial<Record<ReviewPhase, Effort>>;
+  /** A review phase's tier (Codex); an omitted one uses `reviewer.serviceTier`. */
+  reviewServiceTier?: Partial<
+    Record<ReviewPhase, NonNullable<ModelChoice["serviceTier"]>>
+  >;
 }
 
-/** The model a call uses: the planner, or the reviewer at its phase's effort. */
+/** The model a call uses: the planner, or the reviewer at its phase's effort and tier. */
 export function modelChoice<Effort extends string>(
   models: PlannerModels<Effort>,
   call: Pick<PlannerCall, "role" | "phase">,
 ): ModelChoice<Effort> {
   if (call.role === "planner") return models.planner;
   const effort = models.reviewEffort?.[call.phase as ReviewPhase];
-  return effort ? { ...models.reviewer, effort } : models.reviewer;
+  const serviceTier = models.reviewServiceTier?.[call.phase as ReviewPhase];
+  return {
+    ...models.reviewer,
+    ...(effort && { effort }),
+    ...(serviceTier && { serviceTier }),
+  };
 }
 
 /** A bounded provider detail for a reason or the log. */
@@ -532,7 +596,8 @@ export function hedgePolicy(seconds: HedgeSeconds = {}): HedgePolicy {
  * goes silent past the policy, an identical second call starts; the first
  * answer wins and the other is aborted. Each phase has its own threshold
  * (DEFAULT_HEDGE_SECONDS), above its healthy calls' silence; a phase set
- * to 0 isn't hedged, and its call goes straight to the inner planner.
+ * to 0 isn't hedged, nor is a call with tools, and its call goes
+ * straight to the inner planner.
  */
 export class HedgedPlanner implements Planner {
   constructor(
@@ -542,7 +607,9 @@ export class HedgedPlanner implements Planner {
 
   answer(call: PlannerCall): Promise<PlannerAnswer> {
     const silenceMs = this.policy.silenceMs[call.phase] ?? 0;
-    if (silenceMs <= 0) return this.inner.answer(call);
+    // A call with tools acts on what they share (a scratch checkout),
+    // which a second turn must never share.
+    if (silenceMs <= 0 || call.tools?.length) return this.inner.answer(call);
     const wallMs = Math.max(this.policy.wallMs, silenceMs);
     const controllers = [new AbortController(), new AbortController()];
     const started = Date.now();

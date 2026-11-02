@@ -1015,7 +1015,7 @@ export function capacityText(
     : "In use: the service isn't running.";
   if (use) {
     const { caps, used, reserveMiB } = use;
-    line = `In use: ${used.worker}/${caps.worker} workers, ${used.cpu}/${caps.cpu} validations, ${used.planner}/${caps.planner} planner calls, ${used.github}/${caps.github} queue checks; ${use.reservedMiB}/${use.budgetMiB} MiB reserved (worker ${reserveMiB.worker}, validation ${reserveMiB.cpu}, planner ${reserveMiB.planner} MiB each).`;
+    line = `In use: ${used.worker}/${caps.worker} workers, ${used.cpu}/${caps.cpu} validations, ${used.planner}/${caps.planner} planner calls, ${used.proof}/${caps.proof} proofs, ${used.github}/${caps.github} queue checks; ${use.reservedMiB}/${use.budgetMiB} MiB reserved (worker ${reserveMiB.worker}, validation ${reserveMiB.cpu}, planner ${reserveMiB.planner} MiB each).`;
   }
   return `${line}\n${recommendation ? recommendationText(recommendation) : ""}`;
 }

@@ -89,6 +89,11 @@ export interface CoreConfig {
     validations: number;
     /** Planner calls (planning rounds and reviews) at once across the host. */
     planners: number;
+    /**
+     * Result review proof calls at once across the host, beyond each
+     * review's own planner slot: a pool of their own (engine.ts `proof`).
+     */
+    proofs: number;
     /** MiB the running steps may reserve together (capacity.ts). */
     memoryMiB: number;
     /** MiB a worker run, a validation and a planner call each reserve. */
@@ -140,6 +145,17 @@ export interface CoreConfig {
      * (the default): nothing is formatted. Frozen with an Objective.
      */
     formatCommand?: string;
+  };
+  /**
+   * A Work Item's result review (review/item.ts, #2344): at most `proofs`
+   * proofs (at least 1) of the finder's refusals, merged, each with at most
+   * `proofCommands` commands in at most `proofSeconds`. Operational: a
+   * change applies from the next review.
+   */
+  review: {
+    proofs: number;
+    proofCommands: number;
+    proofSeconds: number;
   };
   finalValidation: {
     /** Commands every Objective's result must pass. */
@@ -739,6 +755,7 @@ export function loadConfig(repository: string): CoreConfig {
         workers: whole(1, host.workers),
         validations: whole(1, host.validations),
         planners: optional(whole(1)),
+        proofs: optional(whole(1)),
         memoryMiB: whole(256, host.budgetMiB),
         reservations: object(
           Object.fromEntries(
@@ -771,6 +788,12 @@ export function loadConfig(repository: string): CoreConfig {
       validation: object({
         commandTimeoutSeconds: whole(1, DEFAULT_COMMAND_TIMEOUT_SECONDS),
         formatCommand: optional(text()),
+      }),
+      review: object({
+        // 0 would let no refusal through: at least one is proved.
+        proofs: whole(1, 4, 1000),
+        proofCommands: whole(0, 8, 1000),
+        proofSeconds: whole(0, 120, 24 * 60 * 60),
       }),
       finalValidation: object({
         requiredCommands: strings,
@@ -832,6 +855,8 @@ export function loadConfig(repository: string): CoreConfig {
     reservations: { ...checked.execution.reservations },
     // Two planner calls per worker: each Work Item is reviewed beside its work.
     planners: checked.execution.planners ?? 2 * checked.execution.workers,
+    // A proof runs a few short commands: sized as validations are.
+    proofs: checked.execution.proofs ?? checked.execution.validations,
   };
   // A default reservation fits a small budget; one the operator set must.
   const given =

@@ -81,6 +81,8 @@ export function reviewObjective(input: {
   earlier?: ResultReview;
   /** What each accepted read-only QA item observed. */
   qa?: readonly QaObservation[];
+  /** Each Work Item's result review notes: suggestions on criteria it met (review/item.ts). */
+  reviewNotes?: readonly { item: string; criterion: string; note: string }[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<ResultReview> {
@@ -98,6 +100,20 @@ export function reviewObjective(input: {
         complete: true,
       })),
       ...(input.qa ?? []).map(qaObservationRow),
+      ...(input.reviewNotes?.length
+        ? [
+            {
+              origin: "controller" as const,
+              path: "Work Item review notes",
+              content: JSON.stringify({
+                scope:
+                  "Non-blocking suggestions each Work Item's result reviewer made on criteria it judged met: leads to check on the integrated tree, never proof or a verdict.",
+                notes: input.reviewNotes,
+              }),
+              complete: true,
+            },
+          ]
+        : []),
       ...retiredRows(input.plan),
       ...skippedRows(input.skipped),
     ],

@@ -101,6 +101,30 @@ export interface ItemTelemetry {
   repairs: { from: string; target: string }[];
   /** The result review's verdicts: accepted, refused (a repair) or held. */
   reviews: Record<string, number>;
+  /**
+   * The result reviews' own telemetry (#2344), summed over them: the
+   * finder's verdicts by kind and its refusals by ground; the suspicions
+   * raised, and of those proved and dropped, with the proofs' tokens; the
+   * proofs' repros confirmed or dropped by the refusal check; questions;
+   * the review calls' tokens (the proofs' among them) and the reviews' time.
+   */
+  reviewer: {
+    reviews: number;
+    verdicts: Record<string, number>;
+    grounds: Record<string, number>;
+    suspicions: {
+      raised: number;
+      proved: number;
+      dropped: number;
+      tokens: number;
+    };
+    repros: { confirmed: number; dropped: number };
+    questions: number;
+    tokens: Reported;
+    ms: number;
+    /** Each phase's time, summed over the reviews (review/item.ts): the workspace's install, the finder, the proofs. */
+    phases: { prepareMs: number; modelMs: number; proofsMs: number };
+  };
   /** CI step attempts, its polls (retries while checks run) and the failed jobs it reran. */
   ci: { attempts: number; polls: number; reruns: number };
   /** Null until its candidate is published. */
@@ -234,6 +258,11 @@ export class ItemTelemetries {
           item.childTokens.sum += num(children?.total) ?? 0;
           item.childTokens.threads += num(children?.threads) ?? 0;
         }
+        const total = num(counts.total);
+        if (str(event.phase) === "result-review" && total !== undefined) {
+          item.reviewer.tokens.sum += total;
+          item.reviewer.tokens.calls += 1;
+        }
         const cost = num(event.costUsd);
         if (cost !== undefined) {
           item.costUsd.sum += cost;
@@ -271,6 +300,34 @@ export class ItemTelemetries {
       case "ci-rerun":
         if (id) this.record(id, event.at).ci.reruns += 1;
         return;
+      case "result-review": {
+        if (!id) return;
+        const { reviewer } = this.record(id, event.at);
+        reviewer.reviews += 1;
+        const of = (value: unknown) =>
+          (value && typeof value === "object" ? value : {}) as Record<
+            string,
+            unknown
+          >;
+        for (const [kind, n] of Object.entries(of(event.verdicts)))
+          reviewer.verdicts[kind] =
+            (reviewer.verdicts[kind] ?? 0) + (num(n) ?? 0);
+        for (const [ground, n] of Object.entries(of(event.grounds)))
+          reviewer.grounds[ground] =
+            (reviewer.grounds[ground] ?? 0) + (num(n) ?? 0);
+        const suspicions = of(event.suspicions);
+        for (const key of ["raised", "proved", "dropped", "tokens"] as const)
+          reviewer.suspicions[key] += num(suspicions[key]) ?? 0;
+        reviewer.repros.confirmed += num(of(event.repros).confirmed) ?? 0;
+        reviewer.repros.dropped += num(of(event.repros).dropped) ?? 0;
+        reviewer.questions += num(event.questions) ?? 0;
+        reviewer.ms += num(event.ms) ?? 0;
+        const phases = of(event.phases);
+        reviewer.phases.prepareMs += num(phases.prepareMs) ?? 0;
+        reviewer.phases.modelMs += num(phases.modelMs) ?? 0;
+        reviewer.phases.proofsMs += num(phases.proofsMs) ?? 0;
+        return;
+      }
       case "published": {
         if (!id) return;
         const changes = changesOf(event);
@@ -355,6 +412,17 @@ export class ItemTelemetries {
         validation: {},
         repairs: [],
         reviews: {},
+        reviewer: {
+          reviews: 0,
+          verdicts: {},
+          grounds: {},
+          suspicions: { raised: 0, proved: 0, dropped: 0, tokens: 0 },
+          repros: { confirmed: 0, dropped: 0 },
+          questions: 0,
+          tokens: reported(),
+          ms: 0,
+          phases: { prepareMs: 0, modelMs: 0, proofsMs: 0 },
+        },
         ci: { attempts: 0, polls: 0, reruns: 0 },
         changes: null,
       };
@@ -597,6 +665,10 @@ function rows(
         : "none",
     },
     {
+      label: "Reviewer",
+      value: reviewerLine(item.reviewer),
+    },
+    {
       label: "CI",
       value: item.ci.attempts
         ? `${plural(item.ci.attempts, "attempt")}, ${plural(item.ci.polls, "poll")}, ${plural(item.ci.reruns, "rerun")} of failed jobs`
@@ -624,6 +696,31 @@ function rows(
         ]
       : []),
   ];
+}
+
+/** The result reviews' telemetry as one line of numbers and words. */
+function reviewerLine(reviewer: ItemTelemetry["reviewer"]): string {
+  if (!reviewer.reviews) return "none";
+  const verdicts = ["pass", "suspect", "question"]
+    .map((kind) => `${reviewer.verdicts[kind] ?? 0} ${kind}`)
+    .join(", ");
+  const { suspicions } = reviewer;
+  return [
+    plural(reviewer.reviews, "review"),
+    `verdicts ${verdicts}`,
+    ...(Object.keys(reviewer.grounds).length
+      ? [
+          `refusals by ground ${Object.entries(reviewer.grounds)
+            .map(([ground, n]) => `${n} ${ground}`)
+            .join(", ")}`,
+        ]
+      : []),
+    `suspicions ${suspicions.raised} raised, ${suspicions.proved} proved, ${suspicions.dropped} dropped (proofs ${count(suspicions.tokens)} tokens)`,
+    `repros ${reviewer.repros.confirmed} confirmed, ${reviewer.repros.dropped} dropped`,
+    plural(reviewer.questions, "question"),
+    `${reviewer.tokens.calls ? count(reviewer.tokens.sum) : "not reported"} tokens`,
+    `${duration(reviewer.ms)} (install ${duration(reviewer.phases.prepareMs)}, finder ${duration(reviewer.phases.modelMs)}, proofs ${duration(reviewer.phases.proofsMs)})`,
+  ].join(", ");
 }
 
 /**

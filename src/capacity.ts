@@ -58,6 +58,7 @@ export function hostCapacity(
     workers: number;
     validations: number;
     planners: number;
+    proofs: number;
     memoryMiB: number;
     reservations: Reservations;
   },
@@ -69,12 +70,15 @@ export function hostCapacity(
       worker: execution.workers,
       cpu: execution.validations,
       planner: execution.planners,
+      proof: execution.proofs,
       github: maxActiveObjectives,
     },
     reserveMiB: {
       worker: reservations.worker,
       cpu: reservations.validation,
       planner: reservations.planner,
+      // A proof is a planner call with a few short commands.
+      proof: reservations.planner,
       github: 0,
     } satisfies Record<HostResource, number>,
     budgetMiB: execution.memoryMiB,

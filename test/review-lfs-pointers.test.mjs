@@ -8,12 +8,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  LFS_GUIDANCE,
-  REVIEW_GUIDANCE,
-  reviewResult,
-} from "../dist/review/result.js";
-import { tempDir } from "./helpers.mjs";
+import { reviewResult } from "../dist/review/item.js";
+import { LFS_GUIDANCE, REVIEW_GUIDANCE } from "../dist/review/result.js";
+import { NO_WORKSPACE, tempDir } from "./helpers.mjs";
 
 function git(directory, ...args) {
   const run = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
@@ -120,6 +117,7 @@ test("a result review's candidate/ holds an LFS file's pointer, and its prompt s
       validation: { tree, commands: ["npm test"] },
       sources: [],
       dir: tempDir("factory-review-lfs-root-"),
+      ...NO_WORKSPACE,
       signal: AbortSignal.timeout(60_000),
       log: () => {},
     }),

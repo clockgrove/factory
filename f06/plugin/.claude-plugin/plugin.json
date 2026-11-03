@@ -9,7 +9,15 @@
   "homepage": "https://github.com/clockgrove/factory#readme",
   "repository": "https://github.com/clockgrove/factory",
   "license": "MIT",
-  "keywords": ["development", "github", "objectives", "merge-queue"],
+  "keywords": [
+    "development",
+    "github",
+    "objectives",
+    "merge-queue"
+  ],
   "skills": "./skills/",
-  "agents": "./agents/claude/"
+  "agents": [
+    "./agents/claude/implementer.md",
+    "./agents/claude/reviewer.md"
+  ]
 }

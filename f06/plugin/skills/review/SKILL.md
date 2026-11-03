@@ -1,9 +1,9 @@
 ---
-name: factory-review
-description: /factory review <pr>. Run the Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Factory PR by number.
+name: review
+description: /factory:review <pr>. Run the Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Factory PR by number.
 ---
 
-# /factory review <pr>
+# /factory:review <pr>
 
 Run one reviewer pass on a PR in this session, exactly as the Action's reviewer job does.
 
@@ -23,4 +23,4 @@ Post it as one comment-only review: `gh api repos/{owner}/{repo}/pulls/<pr>/revi
 
 ## After
 
-Tell the user how many comments were posted and list them one per line as `path:line: first sentence`. The worker (`/factory <issue>` on the branch, or the Action's worker pass) answers them; do not answer them yourself. Note that the Action's answer pass only answers comments posted by the Factory App; comments posted from your own `gh` login are answered by running `/factory <issue>` again on the branch.
+Tell the user how many comments were posted and list them one per line as `path:line: first sentence`. The worker (`/factory:run <issue>` on the branch, or the Action's worker pass) answers them; do not answer them yourself. Note that the Action's answer pass only answers comments posted by the Factory App; comments posted from your own `gh` login are answered by running `/factory:run <issue>` again on the branch.

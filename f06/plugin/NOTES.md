@@ -3,7 +3,7 @@
 ## Assumptions
 
 1. **Plugin layout.** `.claude-plugin/plugin.json` carries `skills` and `agents` (pointing at `agents/claude/`), modelled on the 0.5.20 manifest; `.codex-plugin/plugin.json` keeps 0.5.20's shape minus the logo and long description. Two marketplace manifests are shipped inside `plugin/` (`.claude-plugin/marketplace.json` for `claude plugin marketplace add`, `.agents/plugins/marketplace.json` for Codex), both pinned to `ref: v0.6.0` and `path: plugin`, so the plugin installs from the Factory repository itself. In 0.5 these lived at the repository root; lane 7 (reset) decides whether to move them up. The Action is expected to mirror `skills/` to `.agents/skills/` and `.claude/skills/` in the runner checkout; the plugin does not ship the mirror twice.
-2. **Command names.** Claude Code resolves a skill by its directory name, so `/factory review` is `skills/factory-review/`, invoked as `/factory-review <pr>`; the task text's `/factory review <pr>` is read as that. Same for score, queue, doctor and setup.
+2. **Command names.** Claude Code 2.1 qualifies a plugin's skills as `/<plugin>:<skill>`, so the command skills are `run`, `review`, `score`, `queue`, `doctor` and `setup`: `/factory:run <issue>`, `/factory:review <pr>`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup` (renamed Nov 2 from `factory`, `factory-review`, … and the scoring definitions skill from `score` to `scoring`).
 3. **Plan-comment marker.** `objective-plan` tags the comment `<!-- factory:{{issue}}:plan -->`, following 0.5's idempotent-marker shape from RESEARCH.md, so a rerun and `/factory score` find it. Lane 2's scripts should look for that marker.
 4. **PR title.** `#<issue>: <goal in a few words>`; the plan says only "titled with the issue number".
 5. **Action scripts.** The command skills call `scripts/doctor.mjs`, `scripts/setup.mjs` and `scripts/dispatch.mjs` under the action checkout (`<action>`), and each lists what the script does as its fallback. Flags (`--repo`, `--json`, `--apply <step>`, `--issue`) are my guess for lane 2 to adopt or change.
@@ -27,13 +27,13 @@
 | prove-acceptance | 36 | 624 |
 | deliver-pr | 36 | 554 |
 | review-pr | 43 | 580 |
-| score | 34 | 628 |
-| factory | 37 | 399 |
-| factory-review | 25 | 265 |
-| factory-score | 27 | 377 |
-| factory-queue | 30 | 476 |
-| factory-doctor | 33 | 468 |
-| factory-setup | 40 | 515 |
+| scoring | 34 | 628 |
+| run | 36 | 426 |
+| review | 25 | 265 |
+| score | 27 | 377 |
+| queue | 30 | 476 |
+| doctor | 33 | 468 |
+| setup | 40 | 515 |
 | clockgrove-objective (in clockgrove-skill/) | 49 | 692 |
 
 None exceeds the cap.

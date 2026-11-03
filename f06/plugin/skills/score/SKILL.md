@@ -1,34 +1,27 @@
 ---
 name: score
-description: How Factory scores an Objective. Use to read the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective) from the issue, the PR, the job log and the harness's usage artifact, with the unit and basis for each harness. Load when asked to score, explain or compare Factory runs, or when building a scorecard row.
+description: /factory:score [issue...]. Build or print the Factory scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean.
 ---
 
-# Score an Objective
+# /factory:score
 
-Job one: file an Objective, walk away, come back to correct, merged work at a reasonable cost. Four numbers per Objective say whether that happened. One scorecard row holds all four, plus the unit and basis of each, so rows from different harnesses are never compared as if they measured the same thing.
+Load the `scoring` skill first; it defines the four numbers, their units and their basis. This skill is the wiring.
 
-## 1. Walk-away (binary)
+## Inputs per Objective
 
-Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit or review on the branch or the issue by a human (anyone but the Factory App and the harness) breaks it, and a card that reached Blocked is a miss. A Question draft answered by a human is a miss for walk-away, recorded with the question so the pattern is visible. Report `yes` or `no` with the first human action that broke it, if any.
+- **Issue.** `gh issue view <issue> --json title,labels,closedAt,comments` and the timeline (`gh api repos/{owner}/{repo}/issues/<issue>/timeline`) for the label event, the plan comment, a Blocked comment and the human actions after the label.
+- **PR.** `gh pr list --head factory/<issue> --state all --json number,mergedAt,isDraft,reviews,comments,body`, then the review comments for the reviewer's pass and the worker's replies.
+- **Job log.** The runs that uploaded this issue's usage artifacts (`gh api repos/{owner}/{repo}/actions/artifacts?name=factory-usage-<issue>`, and `-review`; each carries its `workflow_run.id`), then `gh run view <id> --log` for runner minutes, validation reruns and the exit line. The worker job is named `work (<issue>)`; the review job is `review`.
+- **Usage artifact.** `gh run download <id> -n factory-usage-<issue>` (and `-n factory-usage-<issue>-review` from the review run) into a scratch directory. Every harness uploads `result.json` (normalized) and `events.jsonl` (the raw stream); read `result.json`. Copilot's carries no dollars: use the billing window.
 
-## 2. Solution quality
+For a run made with `/factory:run <issue>` in a session, there is no job log or artifact: take the harness's usage from the session's own output if the user has it, else mark the dollars `unmetered` and the runner minutes `n/a`.
 
-Where there is a comparison (a bench run against a recorded baseline), the bench's blind pairwise judge ranks the two merged diffs; report the judge's pick and its stated reason. Where there is none, the number is the owner's read of the merged diff when they choose to read it, recorded as `read: ok`, `read: defect` or `unread`. Any defect found after merge and traced to the Objective counts against it as an escape, listed by issue number. Never infer quality from validation being green; green is the entry condition for merging, not a quality score.
+## Write the row
 
-## 3. Operator minutes
+When the bench is available (`bench/score.mjs` in the Factory checkout, or `FACTORY_BENCH_HOME`), run `node bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), quality (judge pick / read / unread, escapes), operator minutes (and what on), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
 
-Minutes a human spent on this Objective after the label: reading and acting on a Blocked card, answering a Question, re-filing, fixing a branch by hand. From a stopwatch or the owner's note, not estimated from timestamps. Zero on a clean merge. Report the minutes and what they went on.
+With no issue given, score every issue that carries `factory:objective` and closed since the date the user names, plus the open ones that are Blocked, Question, In review or Running (`--since <date>`); the table is oldest first.
 
-## 4. Dollars per merged Objective
+## After
 
-Per harness, from the usage artifact the worker job uploads, plus the reviewer call:
-
-- **Claude.** The JSON result's `total_cost_usd`, and `modelUsage` keyed by model, which includes sub-agents; the top-level `usage` excludes them, so never use it for the whole run. Unit: USD. Basis: harness-reported.
-- **Codex.** The JSONL's `turn.completed` events carry `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` per turn; reasoning tokens may be missing, and sub-agent totals may be folded in. Sum per model and price from the bench's price table, naming the table's date. Unit: USD. Basis: tokens priced by table.
-- **Copilot.** Token counts and premium requests from `copilot --usage-output-file` (the worker writes it beside `events.jsonl`); no dollars per run. Take the organization's billing data for GitHub AI Credits, attribute to the run by its time window, and convert at GitHub's rate; when the window cannot be attributed to one run, record `unmetered`. Unit: credits (USD at the stated rate). Basis: billing window.
-
-Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
-
-## Reading the artifacts
-
-The issue gives the label time, the plan comment, the Blocked comment and any question. The PR gives the title, body, review comments, replies and merge time. The job log gives the runner minutes, the validation reruns and the exit (delivered, question, blocked). The usage artifact gives the tokens and dollars. `/factory score` reads all four and writes the row; a row with a missing input says which, rather than guessing.
+Show the rows. Say in one line which columns came from a priced table or a billing window rather than a harness report, and the date of the price table.

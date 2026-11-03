@@ -1,9 +1,9 @@
 ---
-name: factory-setup
-description: /factory setup. Install Factory in the current repository on the user's consent: write .github/workflows/factory.yml from the Action's template, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board. Use when the user asks to set up, install or configure Factory for a repository.
+name: setup
+description: /factory:setup. Install Factory in the current repository on the user's consent: write .github/workflows/factory.yml from the Action's template, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board. Use when the user asks to set up, install or configure Factory for a repository.
 ---
 
-# /factory setup
+# /factory:setup
 
 Everything here changes the repository or its GitHub settings, so each step says what it will do and waits for a yes. The work is done by `<action>/scripts/setup.mjs` in the Factory action checkout (`gh repo clone clockgrove/factory` into a scratch directory if it is not local): `node <action>/scripts/setup.mjs --repo OWNER/NAME --apply <step> --yes`, one consented step at a time, where `<step>` is `workflow`, `labels`, `project` or `protection`. Without `--yes` the script only prints what it would do; use that as the preview before asking.
 
@@ -33,4 +33,4 @@ Offer to commit the Factory skills and agent definitions, which the vendors' clo
 
 ## After
 
-Run `/factory doctor` and show its lines. End with the one thing left for the user: commit the workflow, then label an issue `factory:objective`.
+Run `/factory:doctor` and show its lines. End with the one thing left for the user: commit the workflow, then label an issue `factory:objective`.

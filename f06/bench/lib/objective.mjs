@@ -243,6 +243,7 @@ export function scoreObjective(collected, opts = {}) {
     runnerBasis: runner.basis,
     wallMinutes: wall,
     wallBasis: merged ? `${sinceBasis} to merged` : "not merged",
+    skills: opts.skills ?? null,
     missing,
     scoredAt: opts.now ?? new Date().toISOString(),
   };

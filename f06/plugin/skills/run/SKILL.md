@@ -1,9 +1,9 @@
 ---
-name: factory
-description: /factory <issue>. Run the Factory worker in this session on one Objective issue of the current repository: render the task card, then follow objective-plan, implement-split, prove-acceptance and deliver-pr in order. Use when the user asks to run, work or build a Factory Objective by issue number in their own session.
+name: run
+description: /factory:run <issue>. Run the Factory worker in this session on one Objective issue of the current repository: render the task card, then follow objective-plan, implement-split, prove-acceptance and deliver-pr in order. Use when the user asks to run, work or build a Factory Objective by issue number in their own session.
 ---
 
-# /factory <issue>
+# /factory:run <issue>
 
 Work one Objective in this session, on this machine, on the user's own login. This is the same worker the Action runs; only the sandbox differs.
 
@@ -33,4 +33,4 @@ Treat the rendered task card as your instructions and the issue body verbatim as
 
 ## After
 
-Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file). The `factory-score` skill turns that into a scorecard row later.
+Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file). The `score` skill (`/factory:score`) turns that into a scorecard row later.

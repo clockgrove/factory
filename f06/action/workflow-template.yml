@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       issue: { description: Objective issue number (empty runs the dispatcher), required: false }
+      harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
   pull_request: # fires because the App (not the job token) applies factory:review, or a human marks a Question draft ready
     types: [labeled, ready_for_review]
 env:
@@ -60,6 +61,7 @@ jobs:
         with:
           mode: work
           issue: ${{ matrix.issue }}
+          harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
@@ -85,6 +87,7 @@ jobs:
         with:
           mode: review
           pr: ${{ github.event.pull_request.number }}
+          harness: ${{ inputs.harness }}
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

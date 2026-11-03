@@ -5,7 +5,7 @@ description: The Factory reviewer's skill. Use to review a Factory PR (a PR on a
 
 # Review the PR
 
-You get the Objective's issue text, the PR diff and the PR body. You produce review comments; the caller posts them (the Action's review job, or `/factory review` in a session) as one comment-only review carrying the `<!-- factory:<issue>:review -->` marker. You do not decide whether the PR merges: validation, the merge queue and the owner do. One pass, then stop.
+You get the Objective's issue text, the PR diff and the PR body. You produce review comments; the caller posts them (the Action's review job, or `/factory:review` in a session) as one comment-only review carrying the `<!-- factory:<issue>:review -->` marker. You do not decide whether the PR merges: validation, the merge queue and the owner do. One pass, then stop.
 
 ## Read in this order
 

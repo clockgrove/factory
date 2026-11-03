@@ -15,6 +15,10 @@ One row per Objective, read from the issue, the PR on `factory/<issue>`, the job
 
 A missing input shows as `missing: <which>` in the row, never as a guess.
 
+## Skills, versioned
+
+`node bench/skills.mjs` records every plugin skill (SHA-256, lines, words) and a digest in `bench/skills.json`; each scorecard row carries that digest, so a row names the skills it ran on. `node bench/skills.mjs --check` fails when a skill changed without a new record, and both forms fail when a skill is over the one-page cap (60 lines, 700 words). Record after the scored Objective that justified the change, never before.
+
 ## Score
 
 ```sh

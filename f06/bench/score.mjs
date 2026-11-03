@@ -43,6 +43,7 @@ import { collectObjective, listObjectives, recordingApi, snapshotApi, usageFromD
 import { loadPrices } from "./lib/cost.mjs";
 import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
 import { markdownTable, OBJECTIVE_LABEL, scoreObjective } from "./lib/objective.mjs";
+import { existsSync as fileExists } from "node:fs";
 
 /** Rows merged into a standing scorecard: same repository and issue replaces; others are kept; the owner's hand-filled quality fields survive. */
 export function appendScorecard(standing, rows) {
@@ -126,6 +127,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const bots = new Set(values.bot ?? []);
   const label = values.label ?? OBJECTIVE_LABEL;
   const token = values.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null;
+  // The skills the rows ran on: bench/skills.json's digest (node bench/skills.mjs records it).
+  const skillsFile = resolve(import.meta.dirname, "skills.json");
+  const skills = fileExists(skillsFile) ? (() => { const s = JSON.parse(readFileSync(skillsFile, "utf8")); return { digest: s.digest, recordedAt: s.recordedAt ?? null }; })() : null;
 
   const calls = {};
   const live = (path, opts) => ghApi(path, { ...opts, token });
@@ -153,7 +157,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (usageDir && snapshot) collected.usage = usageFor(issue) ?? collected.usage;
       collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
       if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
-      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [] }));
+      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills }));
     }
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

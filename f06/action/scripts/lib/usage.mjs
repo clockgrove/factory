@@ -197,7 +197,7 @@ export function parseCodex(stdout, model) {
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
   rec.usd = priceCodex(rec.model, rec.tokens);
-  rec.basis = rec.usd === null ? `unmetered: no price for ${rec.model ?? "unknown model"}` : priceBasis();
+  rec.basis = rec.usd === null ? (rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
   return rec;
 }
 

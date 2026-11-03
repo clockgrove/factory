@@ -53,6 +53,8 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
   }
   if (h === "codex") {
+    // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
+    if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     if (!key) out.push(FAIL("codex credential", "CODEX_API_KEY absent", "gh secret set CODEX_API_KEY; the action passes it to the harness step only"));
     else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));

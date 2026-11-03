@@ -149,6 +149,13 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
   }
   for (const rec of parts) {
     const part = { artifact: rec.artifact ?? null, harness: rec.harness, model: rec.model ?? null, usd: null, tokens: rec.tokens ?? { input: null, output: null, cached: null }, basis: rec.basis ?? null };
+    if (rec.runs === 0) {
+      // A job that ran no harness (a review job that skipped an already-reviewed PR) cost nothing: not unmetered.
+      part.usd = 0;
+      part.basis = `no harness run (${rec.exit ?? "skipped"})`;
+      out.parts.push(part);
+      continue;
+    }
     if (rec.harness === "claude") {
       part.usd = num(rec.usd);
       part.basis = rec.basis && /harness-reported/.test(rec.basis) ? rec.basis : part.usd === null ? "unmetered: no total_cost_usd" : "harness-reported: total_cost_usd, modelUsage (sub-agents included)";

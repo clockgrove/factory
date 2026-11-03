@@ -101,12 +101,13 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     }
   }
 
-  // No-queue fallback: with strict required checks and no merge queue, an In-review PR that fell behind
-  // the default branch after a sibling merged never auto-merges and nothing updates it. It goes back to a
-  // worker job once (the worker rebases, revalidates and pushes); a second time is Blocked.
+  // Integration failures go back to the worker once, then Blocked (PLAN.md "Merge"): with a merge queue, a
+  // PR the queue evicted as conflicting; without one, a PR that fell behind or conflicts after a sibling
+  // merged, which strict required checks refuse and nothing updates. The worker rebases, revalidates,
+  // pushes and re-arms auto-merge.
   const sentBack = [];
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
-  if (!queue) {
+  {
     for (const issue of issues) {
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
@@ -114,10 +115,10 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       const pr = await getPr(repo, open.number, opts).catch(() => null);
       const rebaseMarker = marker(issue.number, "rebase");
       const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(rebaseMarker)).length;
-      const decision = staleDecision({ pr, rebaseMarkers: markers });
+      const decision = staleDecision({ pr, rebaseMarkers: markers, queue });
       if (decision === "rebase") {
         sentBack.push(issue.number);
-        if (!dryRun) await prComment(repo, open.number, `${rebaseMarker}\nFactory: the branch is behind \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
+        if (!dryRun) await prComment(repo, open.number, `${rebaseMarker}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
       } else if (decision === "blocked") {
         statuses[issue.number] = "Blocked";
         if (!dryRun) await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: "integration failed twice: the branch fell behind again after one rebase", notify: inputs.notify, stage: "dispatch" }, opts);
@@ -203,7 +204,7 @@ async function main() {
   if (args.json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on" : "off (stale PRs go back to the worker once)"}`);
+    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
     for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
     for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);

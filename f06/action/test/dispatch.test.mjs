@@ -63,14 +63,16 @@ test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
   assert.deepEqual(uncapped.ready, [1], "daily_usd 0 means no daily cap");
 });
 
-test("no-queue fallback: a behind or conflicting PR with auto-merge armed goes back once, then Blocks; drafts and unarmed PRs are left alone", async () => {
+test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back once, then Blocks; drafts and clean PRs are left alone", async () => {
   const { staleDecision } = await import("../scripts/lib/logic.mjs");
-  const armed = { draft: false, auto_merge: { merge_method: "squash" }, mergeable_state: "behind" };
-  assert.equal(staleDecision({ pr: armed }), "rebase");
-  assert.equal(staleDecision({ pr: { ...armed, mergeable_state: "dirty" } }), "rebase");
-  assert.equal(staleDecision({ pr: armed, rebaseMarkers: 1 }), "blocked");
-  assert.equal(staleDecision({ pr: { ...armed, mergeable_state: "clean" } }), "ignore");
-  assert.equal(staleDecision({ pr: { ...armed, auto_merge: null } }), "ignore");
-  assert.equal(staleDecision({ pr: { ...armed, draft: true } }), "ignore");
+  const behind = { draft: false, auto_merge: null, mergeable_state: "behind" };
+  assert.equal(staleDecision({ pr: behind }), "rebase", "no queue: behind goes back");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" } }), "rebase");
+  assert.equal(staleDecision({ pr: behind, rebaseMarkers: 1 }), "blocked", "second time is integration failed twice");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "clean" } }), "ignore");
+  assert.equal(staleDecision({ pr: { ...behind, draft: true } }), "ignore");
   assert.equal(staleDecision({ pr: null }), "ignore");
+  assert.equal(staleDecision({ pr: behind, queue: true }), "ignore", "with a queue, behind is the queue's job");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true, rebaseMarkers: 1 }), "blocked");
 });

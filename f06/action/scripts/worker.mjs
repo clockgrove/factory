@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, repoOf, setDraft } from "./lib/github.mjs";
+import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, repoOf, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, decideExit, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
 import {
@@ -277,6 +277,17 @@ async function main() {
     const head = (await observe(repo, checkout, { branch, base, prNumber: pr.number }, token)).pr.head.sha;
     await postValidated(repo, pr.number, issue, head, token);
     if (pr.draft) await setDraft(repo, pr.number, false, token);
+    if (rebaseMode && inputs.autoMerge) {
+      // The review pass is done (the review job skips an already-reviewed PR); the queue or GitHub dropped
+      // auto-merge when the PR went stale, so the worker re-arms it here.
+      try {
+        const how = await enableAutoMerge(repo, pr.number, token);
+        log(how === "auto" ? `auto-merge re-armed on PR #${pr.number} after the rebase` : `PR #${pr.number} mergeable after the rebase; merge requested`);
+      } catch (e) {
+        decision.exit = "blocked";
+        decision.reason = `auto-merge could not be re-armed after the rebase: ${String(e.stderr || e.message).slice(0, 160)}`;
+      }
+    }
     try {
       await addLabels(repo, pr.number, [REVIEW_LABEL], token);
     } catch (e) {

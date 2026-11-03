@@ -280,15 +280,18 @@ export function parseFindings(text) {
 // ------------------------------------------------------- no-queue fallback
 
 /**
- * Without a merge queue, strict required checks refuse a PR whose branch is behind the
- * default branch, and nothing updates it. The dispatcher's decision for an In-review PR:
- *  "rebase"  auto-merge is armed, the PR is behind or conflicting, no rebase sent yet
- *  "blocked" the same after one rebase: integration failed twice
- *  "ignore"  everything else (draft, not armed, clean, unknown)
+ * The dispatcher's decision for an In-review PR (its review pass is done) that cannot merge:
+ *  - with a merge queue, a conflicting PR ("dirty") is evicted by the queue and auto-merge is
+ *    dropped; a PR merely behind is the queue's own job and is left alone;
+ *  - without a queue, strict required checks refuse a PR that is behind or conflicting and
+ *    nothing updates it.
+ * Either way: "rebase" sends it back to a worker job once; "blocked" is the second time
+ * (integration failed twice); "ignore" covers drafts, clean and unknown states.
  */
-export function staleDecision({ pr, rebaseMarkers = 0 }) {
-  if (!pr || pr.draft || !pr.auto_merge) return "ignore";
-  if (!["behind", "dirty"].includes(pr.mergeable_state)) return "ignore";
+export function staleDecision({ pr, rebaseMarkers = 0, queue = false }) {
+  if (!pr || pr.draft) return "ignore";
+  const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
+  if (!stale) return "ignore";
   return rebaseMarkers >= 1 ? "blocked" : "rebase";
 }
 

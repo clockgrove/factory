@@ -63,7 +63,9 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
   await git(checkout, ["config", "user.name", name]);
   await git(checkout, ["config", "user.email", email]);
-  await git(checkout, ["config", "credential.helper", ""]);
+  // `credential.helper` is multi-valued: the empty entry clears the inherited helpers, then ours is added.
+  // A rerun in the same checkout already has both, so replace-all rather than set (which refuses two values).
+  await git(checkout, ["config", "--replace-all", "credential.helper", ""]);
   await git(checkout, ["config", "--add", "credential.helper", credentialHelper || "!f() { echo username=x-access-token; echo \"password=$GH_TOKEN\"; }; f"]);
   await git(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"]).catch(() => {});
   // The job refuses a commit on a protected path; branch protection refuses the push.

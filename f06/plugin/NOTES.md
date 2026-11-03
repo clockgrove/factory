@@ -1,5 +1,7 @@
 # Factory 0.6 plugin: notes from the skills and agents lane
 
+> Layout since Nov 3: this directory also holds `scripts/` (the worker, review, dispatch, doctor and setup scripts with their `lib/`), `test/` and `workflow-template.yml`, moved from `action/` so the installed plugin can run its own command skills. The command skills call `${CLAUDE_PLUGIN_ROOT}/scripts/*.mjs`.
+
 ## Assumptions
 
 1. **Plugin layout.** `.claude-plugin/plugin.json` carries `skills` (a directory) and `agents` (a list of the two `agents/claude/*.md` files; Claude Code 2.1 rejects a directory there), modelled on the 0.5.20 manifest; `.codex-plugin/plugin.json` keeps 0.5.20's shape minus the logo and long description. Two marketplace manifests are shipped inside `plugin/` (`.claude-plugin/marketplace.json` for `claude plugin marketplace add`, `.agents/plugins/marketplace.json` for Codex), both pinned to `ref: v0.6.0` and `path: plugin`, so the plugin installs from the Factory repository itself. In 0.5 these lived at the repository root; lane 7 (reset) decides whether to move them up. The Action is expected to mirror `skills/` to `.agents/skills/` and `.claude/skills/` in the runner checkout; the plugin does not ship the mirror twice.

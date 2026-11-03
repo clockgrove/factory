@@ -1,5 +1,7 @@
 # Factory 0.6 Action: notes from the Action and worker lane
 
+> Layout since Nov 3: the scripts, their tests and `workflow-template.yml` live in `../plugin/` (the plugin is self-contained; an installed plugin must reach its own scripts). `action/` holds `action.yml`, which runs `../plugin/scripts/*.mjs` through `FACTORY_PLUGIN_ROOT`. Paths below that say `scripts/` mean `plugin/scripts/`.
+
 ## What is here
 
 ```

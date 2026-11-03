@@ -9,8 +9,8 @@
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/clockgrove/factory.git",
-        "path": "plugin",
-        "ref": "v0.6.0"
+        "path": "f06/plugin",
+        "ref": "reset"
       },
       "policy": {
         "installation": "AVAILABLE"

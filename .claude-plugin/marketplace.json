@@ -11,10 +11,10 @@
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/clockgrove/factory.git",
-        "path": "plugin",
-        "ref": "v0.5.20"
+        "path": "f06/plugin",
+        "ref": "reset"
       },
-      "description": "Run source-grounded development Objectives in a target repository.",
+      "description": "File a GitHub Objective, walk away, come back to merged work.",
       "category": "development"
     }
   ]

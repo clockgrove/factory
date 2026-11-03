@@ -30,6 +30,11 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
+  if (inputs.credential === "login") {
+    out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine`, "a developer's run; unattended runs bill an API credential"));
+    if (probe) out.push(await probeHarness({ inputs, env }));
+    return out;
+  }
   if (h === "claude") {
     const key = inputs.anthropicApiKey || env.ANTHROPIC_API_KEY;
     const oauth = inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -120,8 +125,10 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
     const bp = await rest(`repos/${repo.full}/branches/${encodeURIComponent(branch)}/protection`, { token }).catch(() => null);
     if (bp?.required_status_checks?.contexts?.length) checks.push(...bp.required_status_checks.contexts);
   }
-  out.push(queue ? PASS("merge queue", `on for ${branch}`) : FAIL("merge queue", `no merge_queue rule on ${branch}`, "node scripts/setup.mjs --apply protection (or Settings > Rules)"));
   checks = [...new Set(checks)];
+  // Without the queue a single Objective still merges on CI plus auto-merge; what is lost is the integrated
+  // re-run that catches a conflict after a sibling merges, so concurrent Objectives need it (PLAN.md).
+  out.push(queue ? PASS("merge queue", `on for ${branch}`) : checks.length ? WARN("merge queue", `no merge_queue rule on ${branch}; required checks gate merges, but concurrent Objectives are not re-tested on the integrated head`, "node scripts/setup.mjs --apply protection (or Settings > Rules)") : FAIL("merge queue", `no merge_queue rule on ${branch}`, "node scripts/setup.mjs --apply protection (or Settings > Rules)"));
   out.push(checks.length ? PASS("required checks", checks.join(", ")) : FAIL("required checks", `none required on ${branch}`, "require the CI workflow's checks: setup --apply protection --ci-checks <names>"));
   if (!repoData.allow_auto_merge && inputs.autoMerge) out.push(FAIL("auto-merge", "repository setting Allow auto-merge is off", "setup --apply protection turns it on, or Settings > General"));
   // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.

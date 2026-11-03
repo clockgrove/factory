@@ -243,7 +243,10 @@ const PROJECT_FIELDS = `
   field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name color description } } }
 `;
 
-/** The repository's Factory project (title "Factory", else the first linked project), or null. */
+/** The board's title: one per repository, since org projects share one namespace. */
+export const projectTitle = (repo) => `Factory: ${repo.name}`;
+
+/** The repository's Factory project (title "Factory: <repo>", "Factory", else a linked project with a Queued column), or null. */
 export async function findProject(repo, opts) {
   const data = await graphql(
     `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id projectsV2(first: 20) { nodes { ${PROJECT_FIELDS} } } } }`,
@@ -251,7 +254,7 @@ export async function findProject(repo, opts) {
     opts,
   );
   const nodes = data?.repository?.projectsV2?.nodes || [];
-  const project = nodes.find((p) => p.title === "Factory") || nodes.find((p) => p.field?.options?.some((o) => o.name === "Queued")) || null;
+  const project = nodes.find((p) => p.title === projectTitle(repo)) || nodes.find((p) => p.title === "Factory") || nodes.find((p) => p.field?.options?.some((o) => o.name === "Queued")) || null;
   return project ? { ...project, repositoryId: data.repository.id } : null;
 }
 
@@ -315,7 +318,7 @@ export const COLUMNS = ["Queued", "Running", "In review", "Blocked", "Done"];
 /** Create the Factory project with the five Status options and link it to the repository. */
 export async function createProject(repo, opts) {
   const { id: repositoryId, owner } = await repositoryNodeId(repo, opts);
-  const created = await graphql(`mutation($o: ID!, $t: String!) { createProjectV2(input: {ownerId: $o, title: $t}) { projectV2 { id number } } }`, { o: owner.id, t: "Factory" }, opts);
+  const created = await graphql(`mutation($o: ID!, $t: String!) { createProjectV2(input: {ownerId: $o, title: $t}) { projectV2 { id number } } }`, { o: owner.id, t: projectTitle(repo) }, opts);
   const project = created.createProjectV2.projectV2;
   await graphql(`mutation($p: ID!, $r: ID!) { linkProjectV2ToRepository(input: {projectId: $p, repositoryId: $r}) { repository { id } } }`, { p: project.id, r: repositoryId }, opts);
   // A new project already has a Status field with Todo/In Progress/Done; replace its options.
@@ -371,15 +374,15 @@ export async function listRulesets(repo, opts) {
   return (await rest(`repos/${repo.full}/rulesets?per_page=100`, opts)) || [];
 }
 
-/** Create or update the Factory ruleset on the default branch: merge queue, required checks, no deletion/force push. */
-export async function ensureRuleset(repo, { branch, checks, ciWorkflow }, opts) {
+/** Create or update the Factory ruleset on the default branch: merge queue (unless `queue: false`), required checks, no deletion/force push. */
+export async function ensureRuleset(repo, { branch, checks, queue = true }, opts) {
   const existing = (await listRulesets(repo, opts)).find((r) => r.name === "factory");
   const rules = [
     { type: "deletion" },
     { type: "non_fast_forward" },
     { type: "pull_request", parameters: { required_approving_review_count: 0, dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false, required_review_thread_resolution: false, allowed_merge_methods: ["squash"] } },
-    { type: "merge_queue", parameters: { merge_method: "SQUASH", max_entries_to_build: 5, min_entries_to_merge: 1, max_entries_to_merge: 5, min_entries_to_merge_wait_minutes: 5, grouping_strategy: "ALLGREEN", check_response_timeout_minutes: 60 } },
   ];
+  if (queue) rules.push({ type: "merge_queue", parameters: { merge_method: "SQUASH", max_entries_to_build: 5, min_entries_to_merge: 1, max_entries_to_merge: 5, min_entries_to_merge_wait_minutes: 5, grouping_strategy: "ALLGREEN", check_response_timeout_minutes: 60 } });
   if (checks.length) rules.push({ type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, required_status_checks: checks.map((context) => ({ context })) } });
   const body = {
     name: "factory",

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
@@ -76,15 +75,31 @@ test("copilot: no usage output is unmetered, never zero; a non-zero exit is an e
   assert.throws(() => parseUsage("gemini", ""), /unknown harness/);
 });
 
-test("copilot: --usage-output-file is the final figure and replaces the stream's counts", () => {
-  const file = join(tmpdir(), `copilot-usage-${process.pid}.json`);
-  writeFileSync(file, JSON.stringify({ sessionId: "s-1", inputTokens: 1000, outputTokens: 50, premiumRequests: 2 }));
-  const rec = parseCopilot('{"type":"assistant.usage","data":{"inputTokens":1,"outputTokens":1}}\n', null, 0, { usageFile: file });
-  assert.deepEqual(rec.tokens, { input: 1000, output: 50, cached: null });
-  assert.equal(rec.premiumRequests, 2);
-  assert.equal(rec.sessionId, "s-1");
+test("copilot 1.0.91: the real JSONL and usage file (captured Nov 2): session id and premium requests from the result line, tokens per model from the file", () => {
+  const rec = parseCopilot(fixture("copilot-events.jsonl"), null, 0, { usageFile: join(import.meta.dirname, "fixtures", "copilot-usage.json") });
+  assert.equal(rec.ok, true);
+  assert.equal(rec.sessionId, "9c0cd216-fd38-4b53-bb20-5a6e6d7e3b63");
+  assert.equal(rec.model, "claude-sonnet-5");
+  assert.equal(rec.turns, 1);
+  assert.deepEqual(rec.tokens, { input: 24945, output: 4, cached: 0 });
+  assert.equal(rec.premiumRequests, 1);
+  assert.equal(rec.aiu, 6.24);
   assert.equal(rec.usd, null);
-  rmSync(file, { force: true });
+  assert.match(rec.basis, /usage-output-file, 1 premium request/);
+  assert.equal(finalText("copilot", fixture("copilot-events.jsonl")), "ok");
+  // Without the file the stream alone gives no token counts: unmetered, never zero.
+  const bare = parseCopilot(fixture("copilot-events.jsonl"), null, 0);
+  assert.deepEqual(bare.tokens, { input: null, output: null, cached: null });
+  assert.match(bare.basis, /unmetered/);
+});
+
+test("codex 0.160: the real probe JSONL (captured Nov 2) parses to one turn with cached tokens and a thread id", () => {
+  const rec = parseCodex(fixture("codex-probe.jsonl"), "gpt-6.1-sol");
+  assert.equal(rec.ok, true);
+  assert.equal(rec.turns, 1);
+  assert.equal(rec.sessionId, "01a19f63-ef53-7ef1-9da6-43fdffaa3891");
+  assert.deepEqual(rec.tokens, { input: 14614, output: 5, cached: 12288 });
+  assert.equal(finalText("codex", fixture("codex-probe.jsonl")), "ok");
 });
 
 test("mergeUsage sums runs and keeps null dollars only when every run is unmetered", () => {

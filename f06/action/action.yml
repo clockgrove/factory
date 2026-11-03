@@ -31,7 +31,7 @@ inputs:
     description: The reviewer's model for its one comment-only pass; `model` when empty.
     required: false
   credential:
-    description: '`api` (default) bills an API credential; `plan` uses CLAUDE_CODE_OAUTH_TOKEN and is for your own repository only.'
+    description: '`api` (default) bills an API credential; `plan` uses CLAUDE_CODE_OAUTH_TOKEN and is for your own repository only. (`login`, the CLI''s own login, exists for a developer''s machine and is refused here.)'
     required: false
   max_concurrent:
     description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.

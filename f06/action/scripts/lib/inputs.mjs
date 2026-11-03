@@ -14,7 +14,7 @@ export const DEFAULTS = {
   model: "", // the harness's default when empty
   subagent_model: "",
   reviewer_model: "",
-  credential: "api",
+  credential: "api", // api | plan (your own repository) | login (a developer's machine only)
   max_concurrent: "3",
   daily_usd: "100",
   max_usd: "25",

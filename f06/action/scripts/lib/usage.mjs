@@ -202,11 +202,15 @@ export function parseCodex(stdout, model) {
 }
 
 /**
- * Copilot: `copilot -p --output-format json` prints JSONL, and `--usage-output-file`
- * writes final usage statistics as JSON (token counts and premium requests; the
- * exact keys are read tolerantly until a real run fixes them). Dollars are always
- * null: Copilot bills GitHub AI Credits, attributed by the bench from the org's
- * billing window, never by the worker. A non-zero exit is a harness error, not a death.
+ * Copilot 1.0.91: `copilot -p --output-format json` prints JSONL whose last line is
+ * `{type: "result", sessionId, exitCode, usage: {premiumRequests, ...}}`, with one
+ * `assistant.turn_end` per turn and the model named on `assistant.message`;
+ * `--usage-output-file` writes `{totalPremiumRequestCost, totalNanoAiu, modelMetrics:
+ * {<model>: {requests: {count, cost}, usage: {inputTokens, outputTokens,
+ * cacheReadTokens, cacheWriteTokens, reasoningTokens}}}}` (sub-agents under
+ * agentMetrics, already summed into modelMetrics). Tokens come from that file; dollars
+ * are always null: Copilot bills GitHub AI Credits (premium requests, AIU), attributed
+ * by the bench from the org's billing window. A non-zero exit is a harness error, not a death.
  */
 export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
   const rec = empty("copilot", model);
@@ -217,35 +221,45 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
   let output = null;
   let cached = null;
   let turns = 0;
-  const take = (d) => {
-    if (!d || typeof d !== "object") return;
-    input = add(input, add(num(d.inputTokens ?? d.input_tokens), num(d.cacheReadTokens ?? d.cached_input_tokens ?? d.cacheReadInputTokens)));
-    output = add(output, num(d.outputTokens ?? d.output_tokens));
-    cached = add(cached, num(d.cacheReadTokens ?? d.cached_input_tokens ?? d.cacheReadInputTokens));
-    if (num(d.premiumRequests) !== null) rec.premiumRequests = add(rec.premiumRequests ?? null, num(d.premiumRequests));
-  };
   for (const e of jsonLines(stdout)) {
-    const sid = e.sessionId ?? e.session_id ?? e.data?.sessionId ?? null;
-    if (sid && !rec.sessionId) rec.sessionId = String(sid);
-    if (/assistant|message/i.test(String(e.type || ""))) turns += 1;
-    take(e.type === "assistant.usage" ? (e.data ?? e) : (e.usage ?? null));
+    if (e.type === "assistant.turn_end") turns += 1;
+    if (e.type === "assistant.message" && e.data?.model && !rec.model) rec.model = e.data.model;
+    if (e.type === "result") {
+      if (e.sessionId) rec.sessionId = String(e.sessionId);
+      if (num(e.usage?.premiumRequests) !== null) rec.premiumRequests = num(e.usage.premiumRequests);
+      if (typeof e.exitCode === "number" && e.exitCode !== 0 && rec.ok) {
+        rec.ok = false;
+        rec.subtype = "error";
+        rec.error = `copilot reported exit ${e.exitCode}`;
+      }
+    }
   }
   if (usageFile && existsSync(usageFile)) {
     try {
       const u = JSON.parse(readFileSync(usageFile, "utf8"));
-      // The file is the final figure; it replaces whatever the stream carried.
-      input = null;
-      output = null;
-      cached = null;
-      take(u.usage ?? u.totals ?? u);
-      if (!rec.sessionId && (u.sessionId || u.session_id)) rec.sessionId = String(u.sessionId ?? u.session_id);
+      const models = u.modelMetrics && typeof u.modelMetrics === "object" ? Object.entries(u.modelMetrics) : [];
+      for (const [name, m] of models) {
+        const t = m.usage || {};
+        input = add(input, num(t.inputTokens));
+        output = add(output, add(num(t.outputTokens), num(t.reasoningTokens)));
+        cached = add(cached, num(t.cacheReadTokens));
+        if (!rec.model) rec.model = name;
+      }
+      if (!models.length && u.tokenDetails) {
+        const d = u.tokenDetails;
+        input = add(num(d.input?.tokenCount), add(num(d.cache_read?.tokenCount), num(d.cache_write?.tokenCount)));
+        output = num(d.output?.tokenCount);
+        cached = num(d.cache_read?.tokenCount);
+      }
+      if (num(u.totalPremiumRequestCost) !== null) rec.premiumRequests = num(u.totalPremiumRequestCost);
+      if (num(u.totalNanoAiu) !== null) rec.aiu = Math.round(u.totalNanoAiu / 1e6) / 1e3;
     } catch {
-      // unreadable usage file: keep the stream's counts
+      // unreadable usage file: tokens stay null
     }
   }
   rec.turns = turns || null;
   rec.tokens = { input, output, cached };
-  rec.basis = input === null && output === null ? "unmetered: Copilot wrote no usage; attribute AI Credits from org billing by time window" : "tokens from copilot --usage-output-file; dollars unmetered (AI Credits, attribute from org billing)";
+  rec.basis = input === null && output === null ? "unmetered: Copilot wrote no usage; attribute AI Credits from org billing by time window" : `tokens from copilot --usage-output-file${rec.premiumRequests !== undefined ? `, ${rec.premiumRequests} premium request(s)` : ""}; dollars unmetered (AI Credits, attribute from org billing)`;
   return rec;
 }
 

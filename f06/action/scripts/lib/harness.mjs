@@ -33,9 +33,17 @@ export function scrubbedEnv(base = process.env, extra = {}) {
  *   codex   api : CODEX_API_KEY, set on this child only
  *   copilot     : COPILOT_GITHUB_TOKEN = the job's GITHUB_TOKEN (copilot-requests: write),
  *                 which wins over GH_TOKEN so the App token is never billed for Copilot
+ *   any   login : the CLI's own login on this machine (PLAN.md's development fallback:
+ *                 "the worker run locally uses whatever the CLI is logged in as");
+ *                 refused inside Actions, where only API credentials run unattended
  */
 export async function credentialEnv({ harness, credential, inputs, env = process.env }) {
   const out = {};
+  if (credential === "login") {
+    if (env.GITHUB_ACTIONS) throw new Error("credential: login is for a developer's machine; unattended runs use api (or plan on your own repository)");
+    for (const k of MODEL_SECRET_KEYS) if (env[k]) out[k] = env[k]; // whatever the developer's shell already carries
+    return { env: out, basis: `${harness} CLI login on this machine` };
+  }
   if (harness === "claude") {
     if (credential === "plan") {
       const tok = inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -187,7 +195,7 @@ export function finalText(harness, stdout) {
       .map((e) => e.item.text || "")
       .join("\n");
   }
-  // Copilot JSONL: the assistant's text fields, when present; else the raw stdout.
-  const texts = parsed.map((e) => e.data?.content ?? e.content ?? e.message?.content ?? e.text ?? null).filter((t) => typeof t === "string");
+  // Copilot JSONL: the assistant's messages (user.message carries the prompt, not an answer); else the raw stdout.
+  const texts = parsed.filter((e) => e.type === "assistant.message" && typeof e.data?.content === "string").map((e) => e.data.content);
   return texts.length ? texts.join("\n") : String(stdout || "");
 }

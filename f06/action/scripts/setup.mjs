@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Factory setup: apply the GitHub fixes doctor names, on consent.
 //   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]
-//                          [--ci-checks "Quality,Tests"] [--harness claude] [--out .github/workflows/factory.yml]
+//                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
 // Without --yes it prints what each step would do and exits. It never creates a
 // GitHub App: it verifies the one whose app_id and app_private_key it is given
 // (or FACTORY_APP_TOKEN) and tells the adopter the App's permissions.
@@ -70,11 +70,11 @@ async function applyProject(repo, opts) {
   return `created project "Factory" (#${p.number}) with ${COLUMNS.join(", ")} and linked it to ${repo.full}`;
 }
 
-async function applyProtection(repo, { ciChecks, autoMerge }, opts) {
+async function applyProtection(repo, { ciChecks, autoMerge, queue }, opts) {
   const data = await getRepo(repo, opts);
   const branch = data.default_branch;
-  await ensureRuleset(repo, { branch, checks: ciChecks }, opts);
-  let note = `ruleset "factory" on ${branch}: merge queue, ${ciChecks.length ? `required checks ${ciChecks.join(", ")}` : "no required checks (pass --ci-checks)"}, no deletion or force push`;
+  await ensureRuleset(repo, { branch, checks: ciChecks, queue }, opts);
+  let note = `ruleset "factory" on ${branch}: ${queue ? "merge queue, " : "no merge queue (--merge-queue false), "}${ciChecks.length ? `required checks ${ciChecks.join(", ")}` : "no required checks (pass --ci-checks)"}, no deletion or force push`;
   if (autoMerge && !data.allow_auto_merge) {
     await rest(`repos/${repo.full}`, { ...opts, method: "PATCH", body: { allow_auto_merge: true } });
     note += "; Allow auto-merge turned on";
@@ -146,7 +146,7 @@ async function main() {
     let note;
     if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await applyProject(repo, opts);
-    else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, autoMerge: inputs.autoMerge }, { token: null });
+    else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, autoMerge: inputs.autoMerge, queue: args.merge_queue !== "false" }, { token: null });
     else if (s === "workflow") note = applyWorkflow({ inputs, args, checkout });
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);

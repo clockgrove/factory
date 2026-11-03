@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}" }
     steps:
-      - uses: clockgrove/factory@{{version}}
+      - uses: {{action}}
         id: f
         with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
   work:
@@ -55,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
-      - uses: clockgrove/factory@{{version}}
+      - uses: {{action}}
         id: f
         with:
           mode: work
@@ -80,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
-      - uses: clockgrove/factory@{{version}}
+      - uses: {{action}}
         id: f
         with:
           mode: review

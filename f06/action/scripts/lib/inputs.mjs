@@ -28,6 +28,7 @@ export const DEFAULTS = {
   protected_paths: "",
   ci_checks: "",
   harness_version: "latest",
+  action: "clockgrove/factory@v1",
   objective_label: "factory:objective",
   mode: "",
   issue: "",

@@ -327,7 +327,8 @@ export async function createProject(repo, opts) {
   const colors = { Queued: "GRAY", Running: "BLUE", "In review": "YELLOW", Blocked: "RED", Done: "GREEN" };
   const options = COLUMNS.map((name) => `{name: "${name}", color: ${colors[name]}, description: ""}`).join(", ");
   if (fieldId) {
-    await graphql(`mutation($p: ID!, $f: ID!) { updateProjectV2Field(input: {projectId: $p, fieldId: $f, singleSelectOptions: [${options}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { p: project.id, f: fieldId }, opts);
+    // UpdateProjectV2FieldInput takes fieldId only (no projectId): the field already belongs to the project.
+    await graphql(`mutation($f: ID!) { updateProjectV2Field(input: {fieldId: $f, singleSelectOptions: [${options}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { f: fieldId }, opts);
   } else {
     await graphql(`mutation($p: ID!) { createProjectV2Field(input: {projectId: $p, dataType: SINGLE_SELECT, name: "Status", singleSelectOptions: [${options}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { p: project.id }, opts);
   }

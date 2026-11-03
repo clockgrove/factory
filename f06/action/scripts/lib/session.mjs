@@ -58,9 +58,9 @@ export function maskFile(file, secrets) {
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());
 
 /** Git as the App: identity, a credential helper that reads GH_TOKEN (nothing on disk), and the hook. */
-export async function configureGit(checkout, { appSlug, botId, protectedList, credentialHelper }) {
-  const name = appSlug ? `${appSlug}[bot]` : "factory[bot]";
-  const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
+export async function configureGit(checkout, { appSlug, botId, login, id, protectedList, credentialHelper }) {
+  const name = appSlug ? `${appSlug}[bot]` : login || "factory[bot]";
+  const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
   await git(checkout, ["config", "user.name", name]);
   await git(checkout, ["config", "user.email", email]);
   await git(checkout, ["config", "credential.helper", ""]);
@@ -102,6 +102,22 @@ export async function botId(appSlug, token) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The git identity for the run: the App's `<slug>[bot]` when the token is the App's,
+ * else the user the token belongs to (a developer's run on their own login), so commits
+ * are attributed to whoever actually pushed and the bench scores them as such.
+ */
+export async function gitIdentity(app, token) {
+  if (app?.appSlug) return { appSlug: app.appSlug, botId: await botId(app.appSlug, token) };
+  try {
+    const u = await rest("user", { token });
+    if (u?.login) return { login: u.login, id: u.id };
+  } catch {
+    // unknown token owner: the generic bot identity below
+  }
+  return { appSlug: null, botId: null };
 }
 
 /** Render the task card and append the issue verbatim: the prompt the harness gets. */

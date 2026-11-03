@@ -2,6 +2,7 @@
 // Factory setup: apply the GitHub fixes doctor names, on consent.
 //   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
+//                          [--action clockgrove/factory@v1]   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 // Without --yes it prints what each step would do and exits. It never creates a
 // GitHub App: it verifies the one whose app_id and app_private_key it is given
 // (or FACTORY_APP_TOKEN) and tells the adopter the App's permissions.
@@ -63,7 +64,7 @@ async function applyProject(repo, opts) {
     const colors = { Queued: "GRAY", Running: "BLUE", "In review": "YELLOW", Blocked: "RED", Done: "GREEN" };
     const all = [...existing.field.options.map((o) => ({ name: o.name, color: o.color || "GRAY", description: o.description || "" })), ...missing.map((name) => ({ name, color: colors[name], description: "" }))];
     const literal = all.map((o) => `{name: ${JSON.stringify(o.name)}, color: ${o.color}, description: ${JSON.stringify(o.description)}}`).join(", ");
-    await graphql(`mutation($p: ID!, $f: ID!) { updateProjectV2Field(input: {projectId: $p, fieldId: $f, singleSelectOptions: [${literal}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { p: existing.id, f: existing.field.id }, opts);
+    await graphql(`mutation($f: ID!) { updateProjectV2Field(input: {fieldId: $f, singleSelectOptions: [${literal}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { f: existing.field.id }, opts);
     return `added ${missing.join(", ")} to project "${existing.title}"`;
   }
   const p = await createProject(repo, opts);
@@ -102,7 +103,7 @@ function applyWorkflow({ inputs, args, checkout }) {
     budget_command: inputs.budgetCommand,
     protected_paths: inputs.protectedAdditions.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
-    version: args.version || "v1",
+    action: args.action || `clockgrove/factory@${args.version || "v1"}`,
   };
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));
   const text = renderWorkflow(template, values);
@@ -119,17 +120,18 @@ async function main() {
   const checkout = resolve(args.checkout || process.cwd());
   const steps = (args.apply || "all") === "all" ? ["labels", "project", "protection", "workflow"] : String(args.apply).split(",").map((s) => s.trim());
   const yes = args.yes === "true";
-  const needsToken = yes && steps.some((s) => s === "labels" || s === "project");
-
+  // Labels, the board and the ruleset are created with the App when its credentials are given, else with the
+  // user's own gh login (a developer running /factory setup); the App is verified, never created.
   let token = inputs.appToken || null;
-  if (needsToken && !token) {
-    if (!inputs.appId || !inputs.appPrivateKey) throw new Error("app_id and app_private_key (or FACTORY_APP_TOKEN) are required; Factory never creates an App — create one at https://github.com/settings/apps/new with contents, pull requests, issues and projects (read and write), install it on this repository, and save FACTORY_APP_ID and FACTORY_APP_PRIVATE_KEY as secrets");
+  if (!token && inputs.appId && inputs.appPrivateKey) {
+    // (the App is optional here; its absence is reported above)
     const app = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name });
     token = app.token;
     mask(token);
     process.stdout.write(`App ${app.appSlug}: installation ${app.installationId}${app.missing.length ? `; MISSING ${app.missing.join(", ")}` : "; permissions ok"}${app.extra.length ? `; extra ${app.extra.join(", ")}` : ""}\n`);
     if (app.missing.length) throw new Error(`the App lacks ${app.missing.join(", ")}; fix its permissions before setup`);
   }
+  if (!token && yes) process.stdout.write("no App credentials given: GitHub steps run as your gh login\n");
   const opts = { token };
   const plan = {
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,

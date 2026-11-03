@@ -21,7 +21,7 @@ import { REVIEW_LABEL, decideExit, protectedPaths, protectedTouched, sumSpend } 
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
-  botId,
+  gitIdentity,
   buildPrompt,
   configureGit,
   crashed,
@@ -124,7 +124,7 @@ async function main() {
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
   const written = installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
-  await configureGit(checkout, { appSlug: app.appSlug, botId: await botId(app.appSlug, keeper.token), protectedList, credentialHelper: keeper.credentialHelper() });
+  await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
   await markRunning(repo, issue, token);
 
   // 4. setup and offline install: the model secrets never reach these.

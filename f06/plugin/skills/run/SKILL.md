@@ -32,6 +32,10 @@ Then check out the default branch, create `factory/<issue>` from it, and fetch t
 
 Treat the rendered task card as your instructions and the issue body verbatim as the specification. Load and follow, in order: `objective-plan`, `implement-split`, `prove-acceptance`, `deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when deliver-pr says to.
 
+## Hand the PR to the Action
+
+When `.github/workflows/factory.yml` exists, the Action's review job takes it from here: after deliver-pr has opened the PR, apply the `factory:review` label to it (`gh pr edit <pr> --add-label factory:review`; a label applied by a user fires the review job as the App's does). The review job posts the one review pass, runs the answer pass and validation, and enables auto-merge. Without the workflow, say that the PR waits for `/factory:review <pr>` and a human merge.
+
 ## After
 
 Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file). The `score` skill (`/factory:score`) turns that into a scorecard row later.

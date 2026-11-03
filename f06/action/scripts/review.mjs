@@ -220,14 +220,34 @@ async function main() {
     eventsFile,
     label: "review",
   });
-  if (!alreadyReviewed) records.push(reviewRec);
-  const findings = parseFindings(reviewRec.finalText || "");
+  // Fable's quota can run out mid-day: a reviewer call refused for quota or rate limits reruns once on the
+  // fallback model (Opus 5.5 at xhigh effort) rather than posting "the reviewer call failed".
+  let reviewRecord = reviewRec;
+  if (!alreadyReviewed && !reviewRec.ok && inputs.reviewerFallback && /quota|rate.?limit|usage limit|overloaded|429|capacity/i.test(`${reviewRec.error || ""} ${reviewRec.stderrTail || ""}`)) {
+    log(`reviewer on ${inputs.reviewerModel} refused (${String(reviewRec.error || "").slice(0, 80)}); falling back to ${inputs.reviewerFallback.model} at ${inputs.reviewerFallback.effort}`);
+    records.push(reviewRec);
+    reviewRecord = await runHarness({
+      harness: inputs.harness,
+      model: inputs.reviewerFallback.model,
+      effort: inputs.reviewerFallback.effort,
+      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+      maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+      agent: inputs.harness === "codex" ? undefined : "reviewer",
+      cwd: checkout,
+      env: harnessEnv,
+      timeoutMs: Math.min(remainingMs(deadlineAt), 45 * 60_000),
+      eventsFile,
+      label: "review-fallback",
+    });
+  }
+  if (!alreadyReviewed) records.push(reviewRecord);
+  const findings = parseFindings(reviewRecord.finalText || "");
   let comments = alreadyReviewed ? [] : snapComments(findings, diff);
   let placeholder = alreadyReviewed;
   if (!comments.length && !alreadyReviewed) {
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
     placeholder = !!first;
-    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRec.ok ? `${PLACEHOLDER_PREFIX} no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_PREFIX} the reviewer call failed (${reviewRec.error || "unknown"}); no findings were produced.` }];
+    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRecord.ok ? `${PLACEHOLDER_PREFIX} no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_PREFIX} the reviewer call failed (${reviewRecord.error || "unknown"}); no findings were produced.` }];
   }
   if (comments.length) {
     await postReview(repo, pr.number, { body: `${marker(issue, "review")}\nFactory reviewer: one comment-only pass, ${comments.length} comment(s).`, comments, commitId: pr.head.sha }, token);

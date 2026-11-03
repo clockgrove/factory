@@ -115,11 +115,12 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort }) {
   switch (harness) {
     case "claude": {
       const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
       if (model) args.push("--model", model);
+      if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
@@ -151,9 +152,9 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
  * prompt or the env.
  */
-export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run" }) {
+export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
-  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile });
+  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });

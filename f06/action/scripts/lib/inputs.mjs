@@ -9,9 +9,16 @@
 // through to the env block rather than overriding it with "".
 import { appendFileSync } from "node:fs";
 
+/** Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's quota is out). */
+export const MODEL_DEFAULTS = {
+  claude: { model: "claude-opus-5-5", subagent_model: "claude-sonnet-5-5", reviewer_model: "claude-fable-5-1", reviewer_fallback: "claude-opus-5-5", reviewer_fallback_effort: "xhigh" },
+  codex: { model: "gpt-6.1-sol", subagent_model: "gpt-6.1-sol", reviewer_model: "gpt-6.1-sol" },
+  copilot: { model: "", subagent_model: "", reviewer_model: "" },
+};
+
 export const DEFAULTS = {
   harness: "claude",
-  model: "", // the harness's default when empty
+  model: "", // empty: MODEL_DEFAULTS for the harness
   subagent_model: "",
   reviewer_model: "",
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
@@ -93,11 +100,14 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
       .map((s) => s.trim())
       .filter(Boolean);
   const repoFull = get("repo") || env.GITHUB_REPOSITORY || "";
+  const harness = get("harness").toLowerCase();
+  const md = MODEL_DEFAULTS[harness] || {};
   return {
-    harness: get("harness").toLowerCase(),
-    model: get("model"),
-    subagentModel: get("subagent_model"),
-    reviewerModel: get("reviewer_model") || get("model"),
+    harness,
+    model: get("model") || md.model || "",
+    subagentModel: get("subagent_model") || md.subagent_model || "",
+    reviewerModel: get("reviewer_model") || md.reviewer_model || get("model") || md.model || "",
+    reviewerFallback: md.reviewer_fallback ? { model: md.reviewer_fallback, effort: md.reviewer_fallback_effort } : null,
     credential: get("credential").toLowerCase(),
     maxConcurrent: num(get("max_concurrent"), 3),
     dailyUsd: num(get("daily_usd"), 100),

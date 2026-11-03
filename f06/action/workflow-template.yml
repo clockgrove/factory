@@ -58,6 +58,7 @@ jobs:
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
     strategy: { max-parallel: {{max_concurrent}}, fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
+    permissions: { contents: read, issues: write, actions: write } # actions: write only for the tick at the end
     concurrency: { group: "factory-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
     steps:
       - uses: actions/checkout@v7
@@ -77,6 +78,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
+      - name: Dispatch tick (this worker finished; a conflicting PR fires no review job)
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh workflow run factory.yml || true
   review:
     name: review (${{ github.head_ref }})
     if: >-

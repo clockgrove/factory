@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, findProject, findPr, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, findProject, findPr, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -116,7 +116,10 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it does not count as the one rebase allowed; the issue is sent again.
       const prefix = marker(issue.number, "rebase").replace(/ -->$/, "");
-      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(prefix));
+      // A human recovery (re-applying factory:objective) starts the count over: only markers newer than
+      // the issue's last objective label count.
+      const since = await objectiveLabeledAt(repo, issue.number, inputs.objectiveLabel, opts).catch(() => null);
+      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(prefix) && (!since || Date.parse(c.created_at) > Date.parse(since)));
       const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue });
       if (decision === "rebase") {

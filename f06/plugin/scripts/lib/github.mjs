@@ -386,6 +386,14 @@ export async function activeWorkIssues(repo, opts) {
   return out;
 }
 
+/** When the Objective label was last applied (a human's recovery re-applies it), or null. */
+export async function objectiveLabeledAt(repo, number, label, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  let last = null;
+  for (const e of events) if (e.event === "labeled" && e.label?.name === label) last = e.created_at;
+  return last;
+}
+
 /** When the issue last became Running (its `labeled factory:running` event), or null. */
 export async function runningSince(repo, number, opts) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];

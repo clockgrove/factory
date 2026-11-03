@@ -59,14 +59,14 @@ A caller can get a transformed greeting: \`${fn}(name)\` ${shape.goal}.
 ## Acceptance
 - \`src/${fn}.mjs\` exports \`${fn}(name)\` built on \`greet\` from \`src/greet.mjs\`: \`${fn}("Ada")\` is \`${shape.ex1}\`; \`${fn}("")\` is \`${shape.ex2}\`.
 - \`test/${fn}.test.mjs\` proves both cases with exact values under \`node:test\`, one \`test()\` per case.
-- \`README.md\`'s API list gains one line for \`${fn}\`; \`npm run check\` and \`npm test\` pass.
+- \`npm run check\` and \`npm test\` pass; no other file changes (the README is left alone so parallel drill Objectives never conflict).
 
 ## Sources
 - \`src/greet.mjs\` and \`test/greet.test.mjs\` (the pattern)
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs) at ${new Date().toISOString()}. Keep the change to the three files named above. Recorded decision: ${shape.decision}.
+Filed by the Factory adopter drill (bench/drill.mjs) at ${new Date().toISOString()}. Keep the change to the two files named above. Recorded decision: ${shape.decision}.
 `;
   return { title: `Add ${fn}(name) over greet(name)`, body, fn };
 });

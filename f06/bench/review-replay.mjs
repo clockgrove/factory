@@ -113,7 +113,7 @@ function issueBody(r) {
 
 function prBody(r) {
   const results = (r.validation?.results ?? []).map((v) => `- \`${v.command}\`: ${v.passed ? "passed" : `failed (exit ${v.exitCode})`}`).join("\n");
-  return `## Acceptance\n${r.criteria.map((c, i) => `| ${i + 1} | ${c.slice(0, 120)} | see diff | see diff |`).join("\n")}\n\n## Validation\n${results || "- (not recorded)"}\n\n## Fake-only proofs\nnone recorded\n\n## Design checklist\nn/a (replay)\n\n## Assumptions\nnone recorded (replay of a recorded candidate)\n\n## Undone\nnone\n`;
+  return `## Acceptance\n${r.criteria.map((c, i) => `| ${i + 1} | ${c.slice(0, 120)} | see diff | see diff |`).join("\n")}\n\n## Validation\n${results || "- (not recorded)"}\n\n## Fake-only proofs\nnone recorded\n\n## Design checklist\nNot recorded in this replay (the candidate predates this PR form); do not comment on its absence.\n\n## Assumptions\nNot recorded in this replay; comment only on assumptions visible in the diff.\n\n## Undone\nnone\n`;
 }
 
 async function git(args, cwd = repo) {

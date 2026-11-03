@@ -35,14 +35,24 @@ export function scrubbedEnv(base = process.env, extra = {}) {
  *                 which wins over GH_TOKEN so the App token is never billed for Copilot
  *   any   login : the CLI's own login on this machine (PLAN.md's development fallback:
  *                 "the worker run locally uses whatever the CLI is logged in as");
- *                 refused inside Actions, where only API credentials run unattended
+ *                 refused inside Actions, where only API credentials run unattended.
+ *                 Outside Actions, `api` with no key present falls back to it with a warning,
+ *                 so a local run needs no credential configuration at all.
  */
+export function hasApiCredential({ harness, inputs, env = process.env }) {
+  if (harness === "claude") return !!(inputs.anthropicApiKey || env.ANTHROPIC_API_KEY || (env.ACTIONS_ID_TOKEN_REQUEST_URL && inputs.anthropicOidcExchangeUrl));
+  if (harness === "codex") return !!(inputs.codexApiKey || env.CODEX_API_KEY);
+  if (harness === "copilot") return !!(env.COPILOT_GITHUB_TOKEN || inputs.githubToken);
+  return false;
+}
+
 export async function credentialEnv({ harness, credential, inputs, env = process.env }) {
   const out = {};
-  if (credential === "login") {
-    if (env.GITHUB_ACTIONS) throw new Error("credential: login is for a developer's machine; unattended runs use api (or plan on your own repository)");
+  const local = !env.GITHUB_ACTIONS;
+  if (credential === "login" || (local && credential === "api" && !hasApiCredential({ harness, inputs, env }))) {
+    if (!local) throw new Error("credential: login is for a developer's machine; unattended runs use api (or plan on your own repository)");
     for (const k of MODEL_SECRET_KEYS) if (env[k]) out[k] = env[k]; // whatever the developer's shell already carries
-    return { env: out, basis: `${harness} CLI login on this machine` };
+    return { env: out, basis: `${harness} CLI login on this machine${credential === "api" ? " (no API credential present; local fallback)" : ""}` };
   }
   if (harness === "claude") {
     if (credential === "plan") {

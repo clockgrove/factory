@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
+import { credentialEnv, finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { CODEX_PRICES, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex } from "../scripts/lib/usage.mjs";
 
 const fixture = (f) => readFileSync(join(import.meta.dirname, "fixtures", f), "utf8");
@@ -137,6 +137,17 @@ test("harness command lines follow RESEARCH.md; the prompt goes on stdin for cla
   assert.equal(p.canResume, true);
   const pr = harnessCommand({ harness: "copilot", prompt: "fix", resume: "s-1" });
   assert.deepEqual(pr.args.slice(pr.args.indexOf("--resume"), pr.args.indexOf("--resume") + 2), ["--resume", "s-1"]);
+});
+
+test("credential: on a developer's machine, api with no key falls back to the CLI login; inside Actions it refuses", async () => {
+  const inputs = { anthropicApiKey: "", anthropicOidcExchangeUrl: "", codexApiKey: "", githubToken: "", claudeCodeOauthToken: "" };
+  const local = await credentialEnv({ harness: "claude", credential: "api", inputs, env: { PATH: "/bin" } });
+  assert.match(local.basis, /CLI login on this machine \(no API credential present; local fallback\)/);
+  assert.deepEqual(local.env, {});
+  const keyed = await credentialEnv({ harness: "claude", credential: "api", inputs: { ...inputs, anthropicApiKey: "sk-1" }, env: { PATH: "/bin" } });
+  assert.equal(keyed.basis, "ANTHROPIC_API_KEY");
+  await assert.rejects(credentialEnv({ harness: "claude", credential: "api", inputs, env: { GITHUB_ACTIONS: "true" } }), /no Claude credential/);
+  await assert.rejects(credentialEnv({ harness: "claude", credential: "login", inputs, env: { GITHUB_ACTIONS: "true" } }), /developer's machine/);
 });
 
 test("model, App and runner secrets never reach a non-harness child", () => {

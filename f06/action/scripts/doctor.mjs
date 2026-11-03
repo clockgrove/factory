@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { ACTION_ROOT, installCommand } from "./lib/checkout.mjs";
-import { CLI, credentialEnv, harnessCommand } from "./lib/harness.mjs";
+import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { protectedPaths } from "./lib/logic.mjs";
@@ -30,8 +30,9 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
-  if (inputs.credential === "login") {
-    out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine`, "a developer's run; unattended runs bill an API credential"));
+  const localFallback = !env.GITHUB_ACTIONS && inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env });
+  if (inputs.credential === "login" || localFallback) {
+    out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
     if (probe) out.push(await probeHarness({ inputs, env }));
     return out;
   }

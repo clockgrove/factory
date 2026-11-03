@@ -113,12 +113,16 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) continue;
       const pr = await getPr(repo, open.number, opts).catch(() => null);
-      const rebaseMarker = marker(issue.number, "rebase");
-      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(rebaseMarker)).length;
-      const decision = staleDecision({ pr, rebaseMarkers: markers, queue });
+      // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
+      // worker job never ran, or died), so it does not count as the one rebase allowed; the issue is sent again.
+      const prefix = marker(issue.number, "rebase").replace(/ -->$/, "");
+      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(prefix));
+      const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
+      const decision = staleDecision({ pr, rebaseMarkers: effective, queue });
       if (decision === "rebase") {
         sentBack.push(issue.number);
-        if (!dryRun) await prComment(repo, open.number, `${rebaseMarker}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
+        const already = markers.some((c) => (c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`));
+        if (!dryRun && !already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
       } else if (decision === "blocked") {
         statuses[issue.number] = "Blocked";
         if (!dryRun) await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: "integration failed twice: the branch fell behind again after one rebase", notify: inputs.notify, stage: "dispatch" }, opts);

@@ -14,8 +14,8 @@ on:
       harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
   issues: # a new Objective dispatches at once (labelled at creation, or labelled later); the cron is only the sweep
     types: [opened, labeled]
-  pull_request: # fires because the App (not the job token) applies factory:review, or a human marks a Question draft ready
-    types: [labeled, ready_for_review]
+  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, or a Factory PR merged (siblings may be stale now)
+    types: [labeled, ready_for_review, closed]
 env:
   FACTORY_HARNESS: {{harness}} # claude | codex | copilot
   FACTORY_MODEL: {{model}}
@@ -44,7 +44,8 @@ jobs:
     # Ticks: the cron, a manual run, a new Objective's label, or the review job's last step (a worker slot freed).
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && (github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective'))))
+      (github.event_name == 'issues' && (github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/'))
     concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
     runs-on: ubuntu-latest
     outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}" }

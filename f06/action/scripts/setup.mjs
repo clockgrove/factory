@@ -109,7 +109,7 @@ function applyWorkflow({ inputs, args, checkout }) {
   const text = renderWorkflow(template, values);
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, text);
-  return `wrote ${out}; commit it on the default branch to start the cron`;
+  return `wrote ${out}; commit it on the default branch to start the cron (through a pull request once the ruleset is on: direct pushes to a protected branch are refused)`;
 }
 
 async function main() {

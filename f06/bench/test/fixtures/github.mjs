@@ -44,7 +44,7 @@ function pull(number, issueNumber, { created, merged = null, draft = false, stat
     merged_by: merged ? mergedBy : null,
     merge_commit_sha: merged ? `merge${number}00` : null,
     head: { ref: `factory/${issueNumber}`, sha: headSha },
-    base: { ref: "main" },
+    base: { ref: "main", sha: "base0000" },
   };
 }
 

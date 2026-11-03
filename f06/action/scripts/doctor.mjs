@@ -21,6 +21,9 @@ const PASS = (n, d) => check(n, "PASS", d);
 const WARN = (n, d, f) => check(n, "WARN", d, f);
 const FAIL = (n, d, f) => check(n, "FAIL", d, f);
 
+/** The one-page cap for a skill (PLAN.md: each skill is at most a page); the only place the number lives. */
+export const SKILL_PAGE = { lines: 60, words: 700 };
+
 const HOSTED_CEILING = 360;
 const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
@@ -234,7 +237,7 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
       const lines = text.split("\n").length;
       const words = text.split(/\s+/).filter(Boolean).length;
       if (!okFm) out.push(FAIL("repository skill", `${name}: frontmatter needs name and description`, `edit ${f}`));
-      else if (lines > 80 || words > 800) out.push(WARN("repository skill", `${name}: ${lines} lines, ${words} words`, "one page per skill"));
+      else if (lines > SKILL_PAGE.lines || words > SKILL_PAGE.words) out.push(WARN("repository skill", `${name}: ${lines} lines, ${words} words`, `one page per skill: at most ${SKILL_PAGE.lines} lines and ${SKILL_PAGE.words} words`));
       else out.push(PASS("repository skill", `${name} (${lines} lines)`));
     }
   }

@@ -93,7 +93,7 @@ async function jobsFor(api, repoFull, runIds) {
  * (lib/gh.mjs's downloadArtifact bound to a token) or is null offline.
  * `usage` is a list of records read from --usage <dir> when given.
  */
-export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true } = {}) {
+export async function collectObjective(api, repoFull, issue, { download = null, usage = null, jobs: wantJobs = true, graphql = null } = {}) {
   const base = `repos/${repoFull}`;
   const issueData = await api(`${base}/issues/${issue}`);
   const [issueTimeline, issueComments, pullsOpen, pullsClosed] = await Promise.all([
@@ -116,6 +116,27 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
       api(`${base}/pulls/${pr.number}/comments?${PER_PAGE}`, { paginate: true }),
     ]);
     pullDetails[pr.number] = { commits, timeline, comments, reviews, reviewComments };
+  }
+  // Human edits of the issue or PR body are not on the REST timeline; GraphQL has lastEditedAt/editor.
+  // Claude's cloud blocks GraphQL, so a failure leaves bodyEdits null and the row says so.
+  let bodyEdits = null;
+  if (graphql) {
+    try {
+      const [owner, name] = repoFull.split("/");
+      const q = `query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ issue(number:$i){ lastEditedAt editor { login __typename } } } }`;
+      const data = await graphql(q, { o: owner, n: name, i: issue });
+      bodyEdits = [];
+      const ed = data?.repository?.issue;
+      if (ed?.lastEditedAt) bodyEdits.push({ at: ed.lastEditedAt, where: `#${issue}`, by: { login: ed.editor?.login, type: ed.editor?.__typename === "Bot" ? "Bot" : "User" } });
+      for (const pr of pulls) {
+        const pq = `query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ pullRequest(number:$i){ lastEditedAt editor { login __typename } } } }`;
+        const pd = await graphql(pq, { o: owner, n: name, i: pr.number });
+        const pe = pd?.repository?.pullRequest;
+        if (pe?.lastEditedAt) bodyEdits.push({ at: pe.lastEditedAt, where: `PR #${pr.number}`, by: { login: pe.editor?.login, type: pe.editor?.__typename === "Bot" ? "Bot" : "User" } });
+      }
+    } catch {
+      bodyEdits = null;
+    }
   }
   let artifacts = [];
   try {
@@ -143,6 +164,7 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
     jobs,
     artifacts,
     usage: records,
+    bodyEdits,
     harness: records.find((r) => r.harness)?.harness ?? null,
   };
 }

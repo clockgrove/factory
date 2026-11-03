@@ -76,3 +76,15 @@ export function findFile(dir, name) {
 }
 
 export const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
+
+/** One GraphQL query through `gh api graphql`; throws where GraphQL is blocked (Claude's cloud). */
+export async function ghGraphql(query, variables = {}, { token } = {}) {
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [k, v] of Object.entries(variables)) args.push(typeof v === "number" ? "-F" : "-f", `${k}=${v}`);
+  const env = { ...process.env };
+  if (token) env.GH_TOKEN = token;
+  const { stdout } = await run("gh", args, { env, maxBuffer: 64 * 1024 * 1024 });
+  const data = JSON.parse(stdout);
+  if (data.errors?.length) throw new Error(data.errors.map((e) => e.message).join("; "));
+  return data.data;
+}

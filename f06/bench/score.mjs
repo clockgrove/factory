@@ -11,6 +11,7 @@
  *                          downloading artifacts (one artifact's unzip, or
  *                          <DIR>/<issue>/ per issue); works without a token
  *   --minutes N=M          operator minutes for issue N, from a stopwatch
+ *   --read N=ok|defect     the owner's read of issue N's merged diff (kept across --append)
  *   --baseline REF         the ref the judge compares each merged head with;
  *                          the row carries the pair for bench/judge.mjs
  *   --bot LOGIN            another machine login to ignore (the App's
@@ -40,7 +41,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { collectObjective, listObjectives, recordingApi, snapshotApi, usageFromDir } from "./lib/collect.mjs";
 import { loadPrices } from "./lib/cost.mjs";
-import { downloadArtifact, ghApi } from "./lib/gh.mjs";
+import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
 import { markdownTable, OBJECTIVE_LABEL, scoreObjective } from "./lib/objective.mjs";
 
 /** Rows merged into a standing scorecard: same repository and issue replaces; others are kept; the owner's hand-filled quality fields survive. */
@@ -52,7 +53,7 @@ export function appendScorecard(standing, rows) {
     if (!o?.quality) return r;
     const quality = { ...r.quality };
     if (!(quality.escapes || []).length && (o.quality.escapes || []).length) quality.escapes = o.quality.escapes;
-    if (quality.read === undefined && o.quality.read !== undefined) quality.read = o.quality.read;
+    if ((quality.read === undefined || quality.read === "unread") && o.quality.read !== undefined && o.quality.read !== "unread") quality.read = o.quality.read;
     return { ...r, quality };
   });
   const kept = (card.rows || []).filter((r) => !rows.some((n) => n.repository === r.repository && n.issue === r.issue));
@@ -67,6 +68,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       since: { type: "string" },
       usage: { type: "string" },
       minutes: { type: "string", multiple: true },
+      read: { type: "string", multiple: true },
       baseline: { type: "string" },
       bot: { type: "string", multiple: true },
       label: { type: "string" },
@@ -109,6 +111,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (!match) usage(`--minutes takes ISSUE=MINUTES, not ${m}`);
     minutes[Number(match[1])] = Number(match[2]);
   }
+  const reads = {};
+  for (const r of values.read ?? []) {
+    const match = /^(\d+)=(ok|defect|unread)$/.exec(r);
+    if (!match) usage(`--read takes ISSUE=ok|defect|unread, not ${r}`);
+    reads[Number(match[1])] = match[2];
+  }
   let prices;
   try {
     prices = loadPrices(values.prices ? resolve(values.prices) : undefined);
@@ -122,6 +130,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const calls = {};
   const live = (path, opts) => ghApi(path, { ...opts, token });
   const api = snapshot ? snapshotApi(snapshot) : values.snapshot ? recordingApi(live, calls) : live;
+  const graphql = snapshot ? null : (q, v) => ghGraphql(q, v, { token });
   const download = snapshot || values.usage ? null : (repoFull, id) => downloadArtifact(repoFull, id, { token });
 
   const usageDir = values.usage ? resolve(values.usage) : null;
@@ -140,11 +149,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       process.exit(65);
     }
     for (const issue of numbers) {
-      const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue), jobs: !values["no-jobs"] }));
+      const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue), jobs: !values["no-jobs"], graphql }));
       if (usageDir && snapshot) collected.usage = usageFor(issue) ?? collected.usage;
       collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
       if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
-      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [] }));
+      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [] }));
     }
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

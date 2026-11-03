@@ -154,6 +154,7 @@ export function runnerMinutes(collected) {
  */
 export function scoreObjective(collected, opts = {}) {
   const { prices, minutes: given, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [] } = opts;
+  // read: the owner's read of the merged diff ("ok", "defect" or "unread"), given with --read, kept across --append.
   const issue = collected.issue;
   const missing = [];
   let since = labelTime(issue, collected.issueTimeline, label, clockAfter);
@@ -171,6 +172,9 @@ export function scoreObjective(collected, opts = {}) {
   const actions = humanActions(collected, since, { bots, label });
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
 
+  const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots)) ?? null;
+  if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
+  if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   const walkAway = {
     value: Boolean(merged) && !blocked && actions.length === 0,
     since,
@@ -208,12 +212,16 @@ export function scoreObjective(collected, opts = {}) {
     candidate: candidateSha ? { ref: candidateSha, pr: (merged ?? open ?? pulls[0])?.number ?? null, branch: BRANCH(issue.number) } : null,
     baseline: baseline ? { ref: baseline } : null,
     escapes: [],
+    read: opts.read ?? "unread",
   };
-  if (baseline && candidateSha)
+  // The judge compares the candidate with a rival solution's tree (--baseline); the auto-grader needs the
+  // pre-change base, which is the PR's own base commit, so the two never share one ref.
+  const preChangeBase = (merged ?? open ?? pulls[0])?.base?.sha ?? null;
+  if (candidateSha && (baseline || preChangeBase))
     quality.judge = {
       objective: `objectives/${issue.number}.md`,
-      command: `node bench/judge.mjs --repo <clone of ${collected.repository}> --a ${candidateSha} --b ${baseline} --objective objectives/${issue.number}.md --judge "<judge command>"`,
-      gradeAuto: `node bench/grade-auto.mjs --repo <clone of ${collected.repository}> --commit ${candidateSha} --base ${baseline} --objective objectives/${issue.number}.md ${(checks.length ? checks : ["<validation command>"]).map((c) => `--check ${JSON.stringify(c)}`).join(" ")} --out grades/${issue.number}.json`,
+      ...(baseline ? { command: `node bench/judge.mjs --repo <clone of ${collected.repository}> --a ${candidateSha} --b ${baseline} --objective objectives/${issue.number}.md --judge "<judge command>"` } : {}),
+      ...(preChangeBase ? { gradeAuto: `node bench/grade-auto.mjs --repo <clone of ${collected.repository}> --commit ${candidateSha} --base ${preChangeBase} --objective objectives/${issue.number}.md ${(checks.length ? checks : ["<validation command>"]).map((c) => `--check ${JSON.stringify(c)}`).join(" ")} --out grades/${issue.number}.json` } : {}),
     };
 
   return {
@@ -251,7 +259,7 @@ export function markdownTable(rows) {
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
     const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
-    const q = r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
+    const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     const cost = r.harness === "codex" && r.cost.usd !== null ? `${fmtUsd(r.cost.usd)} (${(r.cost.tokens.input ?? 0).toLocaleString("en-US")} in / ${(r.cost.tokens.output ?? 0).toLocaleString("en-US")} out)` : fmtUsd(r.cost.usd);
     const cells = [`#${r.issue}`, r.exit, walk, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);

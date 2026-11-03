@@ -138,7 +138,9 @@ test("a baseline makes the row carry the judge's pair inputs", () => {
   assert.equal(row.quality.candidate.ref, "merge10000");
   assert.equal(row.quality.baseline.ref, "main~1");
   assert.match(row.quality.judge.command, /bench\/judge\.mjs --repo .* --a merge10000 --b main~1/);
-  assert.match(row.quality.judge.gradeAuto, /grade-auto\.mjs .* --commit merge10000 --base main~1/);
+  assert.match(row.quality.judge.gradeAuto, /grade-auto\.mjs .* --commit merge10000 --base base0000 /, "the auto-grader takes the PR's own base, never the judge's rival ref");
+  assert.equal(row.quality.read, "unread");
+  assert.equal(scoreObjective(cleanMerge(42, usage("claude")), { prices, read: "ok", now: NOW }).quality.read, "ok");
 });
 
 test("collect over a snapshot gives the fixture back, and score.mjs --replay writes the table, the JSON and the standing scorecard", async () => {

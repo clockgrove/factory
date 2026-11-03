@@ -150,6 +150,8 @@ export async function ensurePr(repo, { branch, base, issue, issueTitle, bodyText
 
 /** Factory's own "no findings" placeholder comment; it needs no answer from the worker. */
 export const PLACEHOLDER_PREFIX = "Factory reviewer:";
+/** A comment that carries no finding: Factory's placeholder, or the reviewer's own "no findings" record (review-pr skill). */
+export const noFinding = (body) => /^\s*(Factory reviewer:|No findings\b)/i.test(String(body || ""));
 
 /**
  * Reviewer root comments with no reply. The reviewer and the worker both post as
@@ -158,7 +160,7 @@ export const PLACEHOLDER_PREFIX = "Factory reviewer:";
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
-  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !String(c.body || "").startsWith(PLACEHOLDER_PREFIX));
+  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !noFinding(c.body));
   return roots.filter((c) => !replies.has(c.id));
 }
 

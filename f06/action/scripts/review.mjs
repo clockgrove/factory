@@ -22,6 +22,7 @@ import { REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPa
 import { git } from "./lib/proc.mjs";
 import {
   PLACEHOLDER_PREFIX,
+  noFinding,
   TASK_CARD_TEMPLATE,
   applyExit,
   gitIdentity,
@@ -235,7 +236,8 @@ async function main() {
     log(`posted review with ${comments.length} comment(s)${placeholder ? " (placeholder: nothing to answer)" : ""}`);
   }
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
-  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+  // A pass with nothing to answer (Factory's placeholder, or the reviewer's one "No findings" record) skips the worker pass.
+  const toAnswer = placeholder || comments.every((c) => noFinding(c.body)) ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
 
   // One worker pass to answer, then validation again.
   if (toAnswer.length) {

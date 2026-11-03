@@ -284,11 +284,21 @@ export async function questionRaised(repo, { issue, pr }, { token }) {
   return plan ? hasQuestion(plan.body) : false;
 }
 
-/** Re-read the PR and the branch after a run. */
-export async function observe(repo, checkout, { branch, base, prNumber }, { token }) {
+/**
+ * Re-read the PR and the branch after a run. The branch's own commits are those beyond its
+ * current merge-base with the default branch, recomputed here: the worker rebases (deliver-pr),
+ * so a base fixed at the start would count the default branch's new commits as the branch's.
+ */
+export async function observe(repo, checkout, { branch, base, defaultBranch, prNumber }, { token }) {
   const pr = prNumber ? await getPr(repo, prNumber, { token }) : await findPr(repo, branch, { token });
-  const delta = await branchDelta(checkout, base);
-  return { pr, delta };
+  let at = base;
+  if (defaultBranch) {
+    await exec("git", ["fetch", "origin", defaultBranch], { cwd: checkout });
+    const mb = await exec("git", ["merge-base", `origin/${defaultBranch}`, "HEAD"], { cwd: checkout });
+    if (mb.code === 0 && mb.stdout.trim()) at = mb.stdout.trim();
+  }
+  const delta = await branchDelta(checkout, at);
+  return { pr, delta, base: at };
 }
 
 /** The harness's last message, for a PR body when the harness opened none. */

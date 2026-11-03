@@ -144,13 +144,11 @@ async function main() {
     await finish("skipped", "draft PR");
     return;
   }
+  // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
+  // rebased PR relabelled by the worker) skips the reviewer and the answer pass but still gets
+  // validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => (r.body || "").includes(marker(issue, "review")));
-  if (alreadyReviewed) {
-    log(`PR #${pr.number} already has Factory's one review pass; not repeating it`);
-    await dropLabel();
-    await finish("skipped", "already reviewed");
-    return;
-  }
+  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 
   // Git identity and the credential helper first (the fetch needs the App's token on a runner), then the branch and the plugin.
   await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
@@ -210,7 +208,7 @@ async function main() {
 
   // The reviewer: one call, comment-only, findings parsed from its last message.
   const diff = await prDiff(repo, pr.number, token);
-  const reviewRec = await runHarness({
+  const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
     prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
@@ -222,11 +220,11 @@ async function main() {
     eventsFile,
     label: "review",
   });
-  records.push(reviewRec);
+  if (!alreadyReviewed) records.push(reviewRec);
   const findings = parseFindings(reviewRec.finalText || "");
-  let comments = snapComments(findings, diff);
-  let placeholder = false;
-  if (!comments.length) {
+  let comments = alreadyReviewed ? [] : snapComments(findings, diff);
+  let placeholder = alreadyReviewed;
+  if (!comments.length && !alreadyReviewed) {
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
     placeholder = !!first;
     if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRec.ok ? `${PLACEHOLDER_PREFIX} no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_PREFIX} the reviewer call failed (${reviewRec.error || "unknown"}); no findings were produced.` }];
@@ -266,7 +264,7 @@ async function main() {
   // The exit. A question is open only if the PR is still a draft now: the worker converts
   // to draft when it raises one, and a human's "mark ready" answers it even though the
   // word QUESTION stays in the body.
-  const after = await observe(repo, checkout, { branch, base, prNumber: pr.number }, token);
+  const after = await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr.number }, token);
   pr = after.pr;
   const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, token)).length;
   const decision = decideExit({

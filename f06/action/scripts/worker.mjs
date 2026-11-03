@@ -221,7 +221,7 @@ async function main() {
 
   // 6. What the run left behind: commits, protected paths, the PR. Pushes carry no model secret.
   await push(checkout, branch, childBase).catch(() => {});
-  let { pr: found, delta } = await observe(repo, checkout, { branch, base }, token);
+  let { pr: found, delta } = await observe(repo, checkout, { branch, base, defaultBranch }, token);
   const hits = protectedTouched(delta.files, protectedList);
   if (!found && delta.count > 0 && !hits) {
     found = await ensurePr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, bodyText: lastMessage(inputs.harness, rec), draft: !rec.ok }, token).catch((e) => {
@@ -254,7 +254,7 @@ async function main() {
     if (validation.died) died += 1;
     if (validation.usage.length) {
       await push(checkout, branch, childBase);
-      ({ pr, delta } = await observe(repo, checkout, { branch, base, prNumber: pr?.number }, token));
+      ({ pr, delta } = await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr?.number }, token));
     }
   }
 
@@ -274,7 +274,7 @@ async function main() {
   if (decision.exit === "delivered" && pr) {
     // Delivered means an open, non-draft PR (the worker may have opened a draft after a harness error);
     // the review label goes on first, because the App applying it is what fires the review job.
-    const head = (await observe(repo, checkout, { branch, base, prNumber: pr.number }, token)).pr.head.sha;
+    const head = (await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr.number }, token)).pr.head.sha;
     await postValidated(repo, pr.number, issue, head, token);
     if (pr.draft) await setDraft(repo, pr.number, false, token);
     if (rebaseMode && inputs.autoMerge) {

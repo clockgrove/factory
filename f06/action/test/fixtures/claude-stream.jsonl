@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"abc-123","model":"claude-fable-5-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the issue."}]},"session_id":"abc-123"}
+not json: a warning the CLI printed
+{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":12,"result":"Budget of $5 reached","session_id":"abc-123","total_cost_usd":5.02,"usage":{"input_tokens":100,"cache_read_input_tokens":50000,"cache_creation_input_tokens":4000,"output_tokens":3000},"modelUsage":{"claude-fable-5-1":{"inputTokens":100,"outputTokens":3000,"cacheReadInputTokens":50000,"cacheCreationInputTokens":4000,"costUSD":5.02}}}

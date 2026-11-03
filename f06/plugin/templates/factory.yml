@@ -1,0 +1,39 @@
+# Factory: unattended Objectives. Installed by /factory setup; edit the inputs, not the jobs.
+# Never trigger on pull_request and never from a fork: the Objective text and the label are
+# the only inputs, and only a writer and a maintainer control those.
+name: factory
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Objective issue number (empty runs the dispatcher)
+        required: false
+permissions:
+  contents: read
+  issues: write
+  # id-token: write         # Claude workload identity federation only
+  # copilot-requests: write # Copilot only
+jobs:
+  factory:
+    uses: clockgrove/factory/.github/workflows/factory.yml@v1
+    secrets: inherit # FACTORY_APP_ID, FACTORY_APP_PRIVATE_KEY, and ANTHROPIC_API_KEY or CODEX_API_KEY
+    with:
+      issue: ${{ inputs.issue }}
+      harness: {{harness}}
+      model: {{model}}
+      subagent_model: {{subagent_model}}
+      reviewer_model: {{reviewer_model}}
+      max_concurrent: {{max_concurrent}}
+      daily_usd: {{daily_usd}}
+      max_usd: {{max_usd}}
+      timeout_minutes: {{timeout_minutes}} # under 360 on hosted runners
+      # Auto-merge on means code lands with no human read. The gate: the CI workflow's checks
+      # on the merge queue's commit, the comment-only reviewer pass, and the merge queue's own re-run.
+      auto_merge: {{auto_merge}}
+      credential: {{credential}} # api; plan only for your own repository
+      notify: {{notify}}
+      runs-on: {{runs_on}}
+      setup: {{setup}}
+      validation: {{validation}}

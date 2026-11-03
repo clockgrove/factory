@@ -1,0 +1,13 @@
+{
+  "_note": "PLACEHOLDER PRICES. Codex reports tokens, not dollars, so the scorecard prices them from this table. None of these rates has been checked against OpenAI's price list; replace them and bump `date` before a row from this table is read as a real dollar figure. The scorecard names the date in every Codex row's basis. Matching is by the longest model prefix. Rates are USD per million tokens; `cached` is the rate for cached input tokens (Codex's input_tokens already includes the cached part).",
+  "date": "2026-11-02",
+  "status": "placeholder",
+  "perMillion": {
+    "gpt-6.1-sol": { "input": 2.5, "cached": 0.25, "output": 15 },
+    "gpt-6.1": { "input": 2.5, "cached": 0.25, "output": 15 },
+    "gpt-5.5-codex": { "input": 1.25, "cached": 0.125, "output": 10 },
+    "gpt-5.5": { "input": 1.25, "cached": 0.125, "output": 10 },
+    "gpt-5-codex": { "input": 1.25, "cached": 0.125, "output": 10 },
+    "gpt-5": { "input": 1.25, "cached": 0.125, "output": 10 }
+  }
+}

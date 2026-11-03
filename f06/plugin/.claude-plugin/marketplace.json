@@ -1,0 +1,21 @@
+{
+  "name": "clockgrove",
+  "description": "Clockgrove plugins for Claude Code.",
+  "owner": {
+    "name": "Clockgrove",
+    "url": "https://github.com/clockgrove"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/clockgrove/factory.git",
+        "path": "plugin",
+        "ref": "v0.6.0"
+      },
+      "description": "File a GitHub Objective, walk away, come back to merged work.",
+      "category": "development"
+    }
+  ]
+}

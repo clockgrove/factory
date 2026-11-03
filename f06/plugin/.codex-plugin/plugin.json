@@ -1,0 +1,18 @@
+{
+  "name": "factory",
+  "version": "0.6.0",
+  "description": "File a GitHub Objective, walk away, come back to merged work: the Factory worker, reviewer and scorecard as skills.",
+  "author": {
+    "name": "Clockgrove",
+    "url": "https://github.com/clockgrove"
+  },
+  "repository": "https://github.com/clockgrove/factory",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Factory",
+    "shortDescription": "Run development Objectives unattended through GitHub",
+    "developerName": "Clockgrove",
+    "category": "Developer Tools"
+  }
+}

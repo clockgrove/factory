@@ -1,0 +1,16 @@
+{
+  "harness": "claude",
+  "model": "claude-fable-5-1",
+  "usd": 7.4312,
+  "tokens": { "input": 2901000, "output": 50000, "cached": 2700000 },
+  "basis": "harness-reported: total_cost_usd, modelUsage (sub-agents included)",
+  "started": "2031-03-02T01:05:00Z",
+  "ended": "2031-03-02T02:15:00Z",
+  "runs": 1,
+  "passes": 1,
+  "exit": "delivered",
+  "reason": "",
+  "credential": "ANTHROPIC_API_KEY",
+  "turns": 87,
+  "priceTableDate": null
+}

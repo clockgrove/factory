@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thr_01HZX"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"Plan posted."}}
+{"type":"turn.completed","usage":{"input_tokens":120000,"cached_input_tokens":90000,"output_tokens":8000}}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":30000,"cached_input_tokens":25000,"output_tokens":2000,"reasoning_output_tokens":500}}

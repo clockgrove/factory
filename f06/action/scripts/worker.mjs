@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, getIssue, getRepo, repoOf, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, repoOf, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, decideExit, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
 import {
@@ -39,6 +39,7 @@ import {
   writeUsage,
 } from "./lib/session.mjs";
 import { jobChecks } from "./doctor.mjs";
+import { exec, git } from "./lib/proc.mjs";
 
 async function main() {
   const startedAt = Date.now();
@@ -125,6 +126,22 @@ async function main() {
   await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
   const { branch, base, resumed } = await prepareBranch(checkout, { issue, defaultBranch });
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
+  // Rebase mode: the dispatcher sent an In-review PR back because its branch fell behind the default
+  // branch (no merge queue). A clean rebase needs no model at all; a conflict goes to the harness.
+  let rebaseMode = false;
+  let rebaseConflict = false;
+  if (resumed && (await findPr(repo, branch, token).catch(() => null))) {
+    const behind = Number((await git(checkout, ["rev-list", "--count", `HEAD..origin/${defaultBranch}`])).stdout.trim()) || 0;
+    if (behind > 0) {
+      rebaseMode = true;
+      const r = await exec("git", ["rebase", `origin/${defaultBranch}`], { cwd: checkout });
+      if (r.code !== 0) {
+        rebaseConflict = true;
+        await exec("git", ["rebase", "--abort"], { cwd: checkout });
+      }
+      log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : "rebased cleanly, no harness run"}`);
+    }
+  }
   const written = installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
   await markRunning(repo, issue, token);
@@ -176,12 +193,14 @@ async function main() {
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  const conflictPrompt = `${prompt.trimEnd()}\n\n---\n\nYour branch ${branch} fell behind ${defaultBranch} after a sibling merged, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch}, resolve each conflict keeping both the default branch's change and this Objective's intent, run the validation commands, commit, and push with --force-with-lease. Do not open a second PR and do not ask questions.`;
+  if (rebaseMode && !rebaseConflict) rec = { ok: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
+  for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget $${inputs.maxUsd}`);
     rec = await runHarness({
       harness: inputs.harness,
       model: inputs.model,
-      prompt: attempt === 1 || !session.id ? prompt : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
+      prompt: attempt === 1 || !session.id ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: attempt > 1 && session.canResume ? session.id : null,
       cwd: checkout,

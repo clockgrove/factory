@@ -11,9 +11,10 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { blockedByRelations, findProject, listIssuesByLabel, moveCard, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, setStateLabel, todaysUsage } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, findProject, findPr, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { selectReady, stateOf, sumSpend } from "./lib/logic.mjs";
+import { marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
+import { applyExit } from "./lib/session.mjs";
 
 export async function appToken(inputs) {
   if (inputs.appToken) return inputs.appToken;
@@ -73,6 +74,57 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     }
   }
 
+  // Stale Running: a Running issue with no worker job alive (a runner kill past the reserve, a crash the
+  // catch could not reach) would hold a slot forever. Past a 15-minute grace for the matrix to start, it
+  // is Blocked with the reason, and the human re-applies the label as for any Blocked card.
+  const readToken = { token: inputs.githubToken || token };
+  const vanished = [];
+  const runningIssues = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running");
+  if (runningIssues.length) {
+    const alive = await activeWorkIssues(repo, readToken).catch((e) => {
+      log(`live jobs could not be listed (${e.message.slice(0, 120)}); stale Running left alone`);
+      return null;
+    });
+    if (alive) {
+      for (const issue of runningIssues) {
+        if (alive.has(issue.number)) continue;
+        const since = await runningSince(repo, issue.number, opts).catch(() => null);
+        if (since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
+        vanished.push(issue.number);
+        statuses[issue.number] = "Blocked";
+        issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
+        if (!dryRun) {
+          const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
+          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: "worker job vanished: Running with no job in progress", notify: inputs.notify, stage: "dispatch" }, opts);
+        }
+      }
+    }
+  }
+
+  // No-queue fallback: with strict required checks and no merge queue, an In-review PR that fell behind
+  // the default branch after a sibling merged never auto-merges and nothing updates it. It goes back to a
+  // worker job once (the worker rebases, revalidates and pushes); a second time is Blocked.
+  const sentBack = [];
+  const queue = await hasMergeQueue(repo, opts).catch(() => true);
+  if (!queue) {
+    for (const issue of issues) {
+      if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
+      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
+      if (!open) continue;
+      const pr = await getPr(repo, open.number, opts).catch(() => null);
+      const rebaseMarker = marker(issue.number, "rebase");
+      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(rebaseMarker)).length;
+      const decision = staleDecision({ pr, rebaseMarkers: markers });
+      if (decision === "rebase") {
+        sentBack.push(issue.number);
+        if (!dryRun) await prComment(repo, open.number, `${rebaseMarker}\nFactory: the branch is behind \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
+      } else if (decision === "blocked") {
+        statuses[issue.number] = "Blocked";
+        if (!dryRun) await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: "integration failed twice: the branch fell behind again after one rebase", notify: inputs.notify, stage: "dispatch" }, opts);
+      }
+    }
+  }
+
   // Running count comes from every objective, not only the wanted ones.
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
@@ -96,6 +148,11 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     dailyUsd: inputs.dailyUsd,
     spentToday,
   });
+  // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
+  if (sentBack.length && !inputs.issue) {
+    const slots = Math.max(0, inputs.maxConcurrent - running);
+    picked.ready = [...sentBack, ...picked.ready.filter((n) => !sentBack.includes(n))].slice(0, slots);
+  }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
   // state label and its card moves to Done. No job runs on merge, so the cron does it.
   const done = [];
@@ -119,7 +176,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
   }
-  return { ...picked, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done };
+  return { ...picked, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done, vanished, sentBack, queue };
 }
 
 async function main() {
@@ -138,12 +195,17 @@ async function main() {
     blocking_source: result.relationSource,
     reset: result.reset,
     done: result.done,
+    vanished: result.vanished,
+    sent_back_to_rebase: result.sentBack,
+    merge_queue: result.queue,
     project: result.project,
   };
   if (args.json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}`);
+    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on" : "off (stale PRs go back to the worker once)"}`);
+    for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
+    for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
     for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
   }
   setOutput("issues", result.ready);

@@ -365,6 +365,49 @@ async function downloadArtifactResult(repo, artifact, token) {
   return file ? JSON.parse(readFileSync(file, "utf8")) : null;
 }
 
+// ------------------------------------------------------------------- jobs
+
+/** The workflow file this run belongs to (GITHUB_WORKFLOW_REF), else factory.yml. */
+export const workflowFile = (env = process.env) => /\/(\.github\/workflows\/([^@/]+))@/.exec(env.GITHUB_WORKFLOW_REF || "")?.[2] || "factory.yml";
+
+/** Issue numbers with a worker job (`work (<n>)`) not yet completed in any live run of the workflow. Needs actions: read. */
+export async function activeWorkIssues(repo, opts) {
+  const out = new Set();
+  for (const status of ["in_progress", "queued", "waiting", "requested", "pending"]) {
+    const runs = (await rest(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?status=${status}&per_page=50`, opts).catch(() => null))?.workflow_runs || [];
+    for (const run of runs) {
+      const jobs = (await rest(`repos/${repo.full}/actions/runs/${run.id}/jobs?per_page=100`, opts).catch(() => null))?.jobs || [];
+      for (const j of jobs) {
+        const m = /^work \((\d+)\)$/.exec(j.name || "");
+        if (m && j.status !== "completed") out.add(Number(m[1]));
+      }
+    }
+  }
+  return out;
+}
+
+/** When the issue last became Running (its `labeled factory:running` event), or null. */
+export async function runningSince(repo, number, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  let last = null;
+  for (const e of events) if (e.event === "labeled" && e.label?.name === "factory:running") last = e.created_at;
+  return last;
+}
+
+/** Whether an active ruleset puts a merge queue on the default branch. */
+export async function hasMergeQueue(repo, opts) {
+  const data = await getRepo(repo, opts);
+  const branch = data.default_branch;
+  for (const r of await listRulesets(repo, opts)) {
+    if (r.target !== "branch" || r.enforcement !== "active") continue;
+    const full = await rest(`repos/${repo.full}/rulesets/${r.id}`, opts).catch(() => null);
+    const inc = full?.conditions?.ref_name?.include || [];
+    if (!inc.some((i) => i === `refs/heads/${branch}` || i === "~DEFAULT_BRANCH")) continue;
+    if ((full.rules || []).some((rule) => rule.type === "merge_queue")) return true;
+  }
+  return false;
+}
+
 // -------------------------------------------------------------- repo facts
 
 export async function getRepo(repo, opts) {

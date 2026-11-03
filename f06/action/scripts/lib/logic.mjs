@@ -277,6 +277,21 @@ export function parseFindings(text) {
   return [];
 }
 
+// ------------------------------------------------------- no-queue fallback
+
+/**
+ * Without a merge queue, strict required checks refuse a PR whose branch is behind the
+ * default branch, and nothing updates it. The dispatcher's decision for an In-review PR:
+ *  "rebase"  auto-merge is armed, the PR is behind or conflicting, no rebase sent yet
+ *  "blocked" the same after one rebase: integration failed twice
+ *  "ignore"  everything else (draft, not armed, clean, unknown)
+ */
+export function staleDecision({ pr, rebaseMarkers = 0 }) {
+  if (!pr || pr.draft || !pr.auto_merge) return "ignore";
+  if (!["behind", "dirty"].includes(pr.mergeable_state)) return "ignore";
+  return rebaseMarkers >= 1 ? "blocked" : "rebase";
+}
+
 // ---------------------------------------------------------------- markers
 
 export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${id ? `:${id}` : ""} -->`;

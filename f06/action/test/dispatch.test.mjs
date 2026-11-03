@@ -62,3 +62,15 @@ test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
   const uncapped = selectReady({ issues: [issue(1)], maxConcurrent: 3, dailyUsd: 0, spentToday: 1e6 });
   assert.deepEqual(uncapped.ready, [1], "daily_usd 0 means no daily cap");
 });
+
+test("no-queue fallback: a behind or conflicting PR with auto-merge armed goes back once, then Blocks; drafts and unarmed PRs are left alone", async () => {
+  const { staleDecision } = await import("../scripts/lib/logic.mjs");
+  const armed = { draft: false, auto_merge: { merge_method: "squash" }, mergeable_state: "behind" };
+  assert.equal(staleDecision({ pr: armed }), "rebase");
+  assert.equal(staleDecision({ pr: { ...armed, mergeable_state: "dirty" } }), "rebase");
+  assert.equal(staleDecision({ pr: armed, rebaseMarkers: 1 }), "blocked");
+  assert.equal(staleDecision({ pr: { ...armed, mergeable_state: "clean" } }), "ignore");
+  assert.equal(staleDecision({ pr: { ...armed, auto_merge: null } }), "ignore");
+  assert.equal(staleDecision({ pr: { ...armed, draft: true } }), "ignore");
+  assert.equal(staleDecision({ pr: null }), "ignore");
+});

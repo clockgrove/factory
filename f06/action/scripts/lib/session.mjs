@@ -24,12 +24,36 @@ import { log } from "./inputs.mjs";
 import { hasQuestion, marker, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
+import { sumSpend } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
-/** The wall clock: when the job must have finished its own work (the runner kills it at timeout_minutes). */
-export function deadline(startedAt, timeoutMinutes, reserveMinutes = 8) {
+/**
+ * The wall clock: when the job must have finished its own work. The runner kills the
+ * job at timeout_minutes counted from the job's start, which is before this script
+ * runs (checkout, Node, the harness install) and must also cover the artifact upload;
+ * the reserve pays for those and for applying the exit.
+ */
+export function deadline(startedAt, timeoutMinutes, reserveMinutes = 15) {
   return startedAt + Math.max(5, timeoutMinutes - reserveMinutes) * 60_000;
+}
+
+/** Replace every secret the job held with *** in a file that will be uploaded (the raw harness stream). */
+export function maskFile(file, secrets) {
+  if (!existsSync(file)) return 0;
+  const values = [...new Set((secrets || []).filter((s) => typeof s === "string" && s.length >= 8))];
+  if (!values.length) return 0;
+  let text = readFileSync(file, "utf8");
+  let hits = 0;
+  for (const v of values) {
+    const parts = text.split(v);
+    if (parts.length > 1) {
+      hits += parts.length - 1;
+      text = parts.join("***");
+    }
+  }
+  if (hits) writeFileSync(file, text);
+  return hits;
 }
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());
 
@@ -106,6 +130,9 @@ export async function ensurePr(repo, { branch, base, issue, issueTitle, bodyText
   return createPr(repo, { head: branch, base, title, body, draft }, { token });
 }
 
+/** Factory's own "no findings" placeholder comment; it needs no answer from the worker. */
+export const PLACEHOLDER_PREFIX = "Factory reviewer:";
+
 /**
  * Reviewer root comments with no reply. The reviewer and the worker both post as
  * the App, so any reply counts: the review-pr skill forbids the reviewer replying.
@@ -113,16 +140,21 @@ export async function ensurePr(repo, { branch, base, issue, issueTitle, bodyText
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
-  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin));
+  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !String(c.body || "").startsWith(PLACEHOLDER_PREFIX));
   return roots.filter((c) => !replies.has(c.id));
 }
+
+/** A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. */
+export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
 
 /**
  * Factory's own validation: run the commands; on red, send the failure back to the
  * same harness (resume where the harness can) and run them once more. Two passes at
- * most. Returns {green, passes, lastOutput, usage: [records], prompts}.
+ * most. `spentUsd` is what the job has spent before this loop; each fix run gets what
+ * is left of `maxUsd`, and nothing is run once it is gone. Returns
+ * {green, passes, lastOutput, usage: [records], harness?: {timedOut|budgetExceeded|died}}.
  */
-export async function validationLoop({ checkout, commands, harness, model, maxUsd, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2 }) {
+export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2 }) {
   const usage = [];
   let passes = 0;
   let last = null;
@@ -136,7 +168,10 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     const failed = v.failed;
     const tail = failed.output.slice(-6000);
     log(`${label} pass ${passes} red: ${failed.command}${failed.timedOut ? " (timed out)" : ""}`);
-    if (passes >= maxPasses || remainingMs(deadlineAt) < 60_000) break;
+    if (passes >= maxPasses) break;
+    if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, usage, harness: { timedOut: true } };
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
+    if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, usage, harness: { budgetExceeded: true } };
     const fix = [
       `Factory's validation pass ${passes} failed on the branch you delivered.`,
       `Command: ${failed.command}`,
@@ -149,10 +184,12 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     ].join("\n");
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;
-    const rec = await runHarness({ harness, model, prompt, maxUsd, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}` });
+    const rec = await runHarness({ harness, model, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}` });
     usage.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
+    if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex and Copilot have no in-run cap
     if (rec.timedOut || rec.budgetExceeded) return { green: false, passes, lastOutput: tail, usage, harness: rec };
+    if (crashed(rec)) return { green: false, passes, lastOutput: tail, usage, harness: { ...rec, died: 1 }, died: true };
   }
   return { green: false, passes, lastOutput: last?.failed?.output.slice(-6000) || "", usage };
 }
@@ -192,7 +229,9 @@ export async function applyExit(repo, { issue, pr, exit, reason, notify, stage =
     if (pr) await setDraft(repo, pr.number, true, { token }).catch((e) => log(`draft: ${e.message.slice(0, 120)}`));
     await setStateLabel(repo, issue, "blocked", { token });
     await moveCard(project, repo, issue, "Blocked", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
-    await upsertComment(repo, issue, marker(issue, "blocked", stage), `${at}Blocked (${stage}): ${reason}${pr ? ` — PR #${pr.number} is a draft with what exists.` : ""} Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`, { token });
+    // One comment per run (not per stage): a second Blocked must be a new comment so the @mention notifies again.
+    const runId = process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || 1}` : String(Date.now());
+    await upsertComment(repo, issue, marker(issue, "blocked", `${stage}:${runId}`), `${at}Blocked (${stage}): ${reason}${pr ? ` — PR #${pr.number} is a draft with what exists.` : ""} Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`, { token });
     return;
   }
   if (exit === "question") {
@@ -205,11 +244,6 @@ export async function applyExit(repo, { issue, pr, exit, reason, notify, stage =
   if (exit === "delivered") {
     await setStateLabel(repo, issue, "in-review", { token });
     await moveCard(project, repo, issue, "In review", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
-    return;
-  }
-  if (exit === "merged") {
-    await setStateLabel(repo, issue, null, { token });
-    await moveCard(project, repo, issue, "Done", { token }).catch(() => {});
     return;
   }
   throw new Error(`unknown exit ${exit}`);
@@ -238,7 +272,7 @@ export async function observe(repo, checkout, { branch, base, prNumber }, { toke
 }
 
 /** The harness's last message, for a PR body when the harness opened none. */
-export const lastMessage = (harness, rec) => finalText(harness, rec?.stdoutTail || "");
+export const lastMessage = (harness, rec) => rec?.finalText ?? finalText(harness, rec?.stdoutTail || "");
 
 /** The marker that says validation is green on a head (the review job waits for it). */
 export const validatedMarker = (issue, sha) => marker(issue, "validated", sha);
@@ -251,5 +285,3 @@ export async function isValidated(repo, prNumber, issue, sha, { token }) {
   const comments = await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => []);
   return (comments || []).some((c) => (c.body || "").includes(validatedMarker(issue, sha)));
 }
-
-export const existsIn = (dir, f) => existsSync(join(dir, f));

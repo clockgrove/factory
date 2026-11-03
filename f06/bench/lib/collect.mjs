@@ -8,57 +8,81 @@
 //     jobs, artifacts, usage: [record...], harness }
 //
 // `usage` comes from the artifacts API when `download` is given (a token
-// with actions: read), else from `--usage <dir>` (lib/usage-dir.mjs), else
+// with actions: read), else from `--usage <dir>` (usageFromDir below), else
 // it is empty and the row says "missing: usage artifact".
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { findFile } from "./gh.mjs";
 import { parseUsageText } from "./cost.mjs";
 import { OBJECTIVE_LABEL } from "./objective.mjs";
 
 const PER_PAGE = "per_page=100";
+const STATE_LABELS = ["factory:blocked", "factory:question", "factory:in-review", "factory:running"];
+const labelNames = (issue) => (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
-/** Every closed issue with the Objective label updated since `since` (ISO date), newest first. */
-export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "closed" } = {}) {
+/** The artifact names the jobs upload (workflow-template.yml): the worker's, and the review job's. */
+export const WORK_ARTIFACT = (issue) => `factory-usage-${issue}`;
+export const REVIEW_ARTIFACT = (issue) => `factory-usage-${issue}-review`;
+
+/**
+ * The Objectives worth a row: issues with the label that closed at or after
+ * `since` (ISO date), plus open ones carrying a Factory state label (Blocked,
+ * Question, In review, Running), so the misses that never merged are rows too.
+ */
+export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all" } = {}) {
   const query = [`labels=${encodeURIComponent(label)}`, `state=${state}`, since ? `since=${encodeURIComponent(since)}` : null, "sort=updated", "direction=desc", PER_PAGE].filter(Boolean).join("&");
   const issues = await api(`repos/${repoFull}/issues?${query}`, { paginate: true });
-  return issues.filter((i) => !i.pull_request && (!since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since))).map((i) => i.number);
+  return issues
+    .filter((i) => !i.pull_request)
+    .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
+    .map((i) => i.number);
 }
 
-/** The usage records of this issue's artifacts, downloaded; each tagged with its artifact name. */
-async function usageFromArtifacts(api, repoFull, issue, download) {
-  const pages = await api(`repos/${repoFull}/actions/artifacts?name=${encodeURIComponent(`factory-usage-${issue}`)}&${PER_PAGE}`, { paginate: true });
-  const named = pages.flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || []));
-  // The name filter is exact, so the review artifacts need a listing of their own prefix.
-  const all = (await api(`repos/${repoFull}/actions/artifacts?${PER_PAGE}`, { paginate: true })).flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || []));
-  const prefix = `factory-usage-${issue}-review-`;
-  const artifacts = [...named, ...all.filter((a) => a.name?.startsWith(prefix))].filter((a, i, arr) => !a.expired && arr.findIndex((b) => b.id === a.id) === i);
+/** This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name their run. */
+async function listArtifacts(api, repoFull, issue) {
+  const out = [];
+  for (const name of [WORK_ARTIFACT(issue), REVIEW_ARTIFACT(issue)]) {
+    let pages;
+    try {
+      pages = await api(`repos/${repoFull}/actions/artifacts?name=${encodeURIComponent(name)}&${PER_PAGE}`, { paginate: true });
+    } catch (error) {
+      if (error.status === 404) continue;
+      throw error;
+    }
+    out.push(...pages.flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || [])));
+  }
+  return out.filter((a, i, arr) => arr.findIndex((b) => b.id === a.id) === i).map((a) => ({ id: a.id, name: a.name, created_at: a.created_at, expired: !!a.expired, workflow_run: a.workflow_run?.id ?? null }));
+}
+
+/** The usage records of the artifacts, downloaded and read; each tagged with its artifact name. */
+async function usageFromArtifacts(artifacts, repoFull, download) {
   const records = [];
   for (const a of artifacts) {
+    if (a.expired) continue;
     const dir = await download(repoFull, a.id);
-    const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
-    const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
-    records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
+    try {
+      const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
+      const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
+      records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
-  return { artifacts: artifacts.map((a) => ({ id: a.id, name: a.name, created_at: a.created_at, workflow_run: a.workflow_run?.id ?? null })), usage: records };
+  return records;
 }
 
-/** The factory workflow's jobs for this issue: job names carry the issue number (workflow-template.yml). */
-async function jobsFor(api, repoFull, issue, { workflow = "factory.yml" } = {}) {
-  let runs;
-  try {
-    runs = (await api(`repos/${repoFull}/actions/workflows/${workflow}/runs?${PER_PAGE}`, { paginate: true })).flatMap((p) => (Array.isArray(p) ? p : p?.workflow_runs || []));
-  } catch (error) {
-    if (error.status === 404) return null;
-    throw error;
-  }
+/**
+ * Every job of the workflow runs that uploaded this issue's artifacts: the
+ * worker run (`work (<issue>)`) and each review run (`review`). The job names
+ * do not all carry the issue number, so the artifacts' `workflow_run` ids are
+ * the link; an Objective with no artifact has no job here.
+ */
+async function jobsFor(api, repoFull, runIds) {
   const jobs = [];
-  const want = new RegExp(`(^|[^0-9])${issue}([^0-9]|$)`);
-  for (const run of runs) {
-    const page = await api(`repos/${repoFull}/actions/runs/${run.id}/jobs?${PER_PAGE}`, { paginate: true });
+  for (const run of runIds) {
+    const page = await api(`repos/${repoFull}/actions/runs/${run}/jobs?${PER_PAGE}`, { paginate: true });
     for (const job of page.flatMap((p) => (Array.isArray(p) ? p : p?.jobs || []))) {
-      if (!want.test(job.name || "")) continue;
-      jobs.push({ id: job.id, run: run.id, name: job.name, started_at: job.started_at, completed_at: job.completed_at, conclusion: job.conclusion });
+      jobs.push({ id: job.id, run, name: job.name, started_at: job.started_at, completed_at: job.completed_at, conclusion: job.conclusion });
     }
   }
   return jobs;
@@ -93,20 +117,21 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
     ]);
     pullDetails[pr.number] = { commits, timeline, comments, reviews, reviewComments };
   }
+  let artifacts = [];
+  try {
+    artifacts = await listArtifacts(api, repoFull, issue);
+  } catch {
+    artifacts = [];
+  }
   let jobs = null;
   if (wantJobs)
     try {
-      jobs = await jobsFor(api, repoFull, issue);
+      jobs = await jobsFor(api, repoFull, [...new Set(artifacts.map((a) => a.workflow_run).filter(Boolean))]);
     } catch {
       jobs = null;
     }
-  let artifacts = [];
   let records = usage ?? [];
-  if (!usage && download) {
-    const got = await usageFromArtifacts(api, repoFull, issue, download);
-    artifacts = got.artifacts;
-    records = got.usage;
-  }
+  if (!usage && download) records = await usageFromArtifacts(artifacts, repoFull, download);
   return {
     repository: repoFull,
     collectedAt: new Date().toISOString(),
@@ -145,15 +170,15 @@ export function recordingApi(inner, calls) {
 }
 
 /** Usage records from a directory of result.json / events.jsonl files (one artifact's unzip, or several side by side). */
-export function usageFromDir(dir, { readdir, read }) {
+export function usageFromDir(dir, { readdir, read, isDir = null }) {
   const records = [];
   const walk = (at, depth) => {
     for (const name of readdir(at)) {
       const file = `${at}/${name}`;
       if (name === "result.json" || name === "events.jsonl" || (depth === 0 && /\.(json|jsonl)$/.test(name))) {
         const rec = parseUsageText(read(file));
-        if (rec) records.push({ ...rec, artifact: basename(at) === basename(dir) ? name : `${basename(at)}/${name}` });
-      } else if (depth < 2 && !name.includes(".")) {
+        if (rec?.harness) records.push({ ...rec, artifact: basename(at) === basename(dir) ? name : `${basename(at)}/${name}` });
+      } else if (depth < 2 && (isDir ? isDir(file) : !name.includes("."))) {
         try {
           walk(file, depth + 1);
         } catch {

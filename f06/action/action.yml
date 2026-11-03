@@ -40,7 +40,7 @@ inputs:
     description: The dispatcher starts nothing once today's usage artifacts sum past this many dollars (UTC day).
     required: false
   max_usd:
-    description: The per-Objective dollar cap, passed to the harness (Claude `--max-budget-usd`) and checked after each run.
+    description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it; Claude gets what is left as `--max-budget-usd`, Codex and Copilot are checked after each run. The review job has the same cap of its own.
     required: false
   timeout_minutes:
     description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.
@@ -122,17 +122,21 @@ runs:
   using: composite
   steps:
     - name: Node 22
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: "22"
 
     - name: Install the harness CLI
       if: inputs.mode != 'dispatch'
       shell: bash
+      # The harness comes from `with:` when given, else the workflow's FACTORY_HARNESS env block
+      # (visible to composite steps at runtime), else claude: the same precedence as lib/inputs.mjs.
       env:
-        HARNESS: ${{ inputs.harness || 'claude' }}
-        VERSION: ${{ inputs.harness_version || 'latest' }}
+        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
+        HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
+        VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
         case "$HARNESS" in
           claude)  npm install -g "@anthropic-ai/claude-code@${VERSION}" ;;
           codex)   npm install -g "@openai/codex@${VERSION}" ;;

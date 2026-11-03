@@ -5,7 +5,7 @@ description: The Factory reviewer's skill. Use to review a Factory PR (a PR on a
 
 # Review the PR
 
-You get the Objective's issue text, the PR diff and the PR body. You post review comments. You do not decide whether the PR merges: validation, the merge queue and the owner do. One pass, then stop.
+You get the Objective's issue text, the PR diff and the PR body. You produce review comments; the caller posts them (the Action's review job, or `/factory review` in a session) as one comment-only review carrying the `<!-- factory:<issue>:review -->` marker. You do not decide whether the PR merges: validation, the merge queue and the owner do. One pass, then stop.
 
 ## Read in this order
 
@@ -16,7 +16,7 @@ You get the Objective's issue text, the PR diff and the PR body. You post review
 
 ## What a comment is
 
-A review comment is tied to a line of the diff (use the PR review API with path and line; a comment that fits no line goes on the file's first changed line). Each comment, in two or three sentences, states:
+A review comment is tied to a line on the new side of the diff (a comment that fits no line goes on the file's first changed line). Each comment, in two or three sentences, states:
 
 - the acceptance entry (`acceptance 3`) or the repository rule (`testing.md: one integration test per claim`) it concerns;
 - what the line does that the entry or rule does not allow, or what the entry requires that the line does not do;
@@ -40,4 +40,4 @@ No summary comment, no approve, no request changes, no "LGTM", no overall verdic
 
 ## Finish
 
-Submit the review as a single comment-only review containing all your comments. If you found nothing, submit it with one comment on the PR's first changed line saying so and naming the entries you checked, so the record shows the pass ran.
+Your final message is only this JSON, no prose around it: `{"comments": [{"path": "src/file.ts", "line": 42, "body": "acceptance 2: ..."}]}`. If you found nothing, return one comment on the PR's first changed line saying so and naming the entries you checked, so the record shows the pass ran. Do not post to GitHub yourself.

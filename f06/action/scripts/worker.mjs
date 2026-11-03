@@ -9,24 +9,27 @@
 // failures sent back to the same harness); decide the exit (delivered, question,
 // blocked); move the card, set the label, draft/comment/request as the exit says;
 // write usage/events.jsonl and usage/result.json for the artifact.
+import { pathToFileURL } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, getIssue, getRepo, repoOf } from "./lib/github.mjs";
+import { addLabels, getIssue, getRepo, repoOf, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { decideExit, protectedPaths, protectedTouched } from "./lib/logic.mjs";
+import { REVIEW_LABEL, decideExit, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
   botId,
   buildPrompt,
   configureGit,
+  crashed,
   deadline,
   ensurePr,
   lastMessage,
   markRunning,
+  maskFile,
   observe,
   postValidated,
   push,
@@ -36,8 +39,6 @@ import {
   writeUsage,
 } from "./lib/session.mjs";
 import { jobChecks } from "./doctor.mjs";
-
-export const REVIEW_LABEL = "factory:review";
 
 async function main() {
   const startedAt = Date.now();
@@ -57,6 +58,7 @@ async function main() {
   let passes = 0;
   let pr = null;
   let credentialBasis = "none";
+  let cred = { env: {} };
 
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
@@ -67,6 +69,9 @@ async function main() {
 
   const finish = async (exit, reason) => {
     keeper.stop();
+    // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis });
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     setOutput("exit", exit);
@@ -79,6 +84,19 @@ async function main() {
     }
   };
 
+  // Any uncaught failure from here on still applies an exit: an issue left Running
+  // forever holds a max_concurrent slot and never reaches the Blocked column.
+  try {
+    await run();
+  } catch (e) {
+    log(`worker crashed: ${e.message.slice(0, 300)}`);
+    const reason = `worker crashed: ${e.message.slice(0, 200)}`;
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
+    await finish("blocked", reason);
+    throw e;
+  }
+
+  async function run() {
   // 1. Doctor's job checks: a misconfigured repository Blocks with one line, not a run.
   const checks = await jobChecks({ inputs, repo, token: keeper.token, app, checkout });
   const failed = checks.filter((c) => c.status === "FAIL");
@@ -104,7 +122,7 @@ async function main() {
   const defaultBranch = repoData.default_branch || (await defaultBranchOf(checkout));
   const { branch, base, resumed } = await prepareBranch(checkout, { issue, defaultBranch });
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
-  const written = installPlugin(checkout, PLUGIN_ROOT);
+  const written = installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
   await configureGit(checkout, { appSlug: app.appSlug, botId: await botId(app.appSlug, keeper.token), protectedList, credentialHelper: keeper.credentialHelper() });
   await markRunning(repo, issue, token);
@@ -137,7 +155,7 @@ async function main() {
   }
 
   // 5. The prompt and the harness.
-  const cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   credentialBasis = cred.basis;
   const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch };
   const prompt = buildPrompt({
@@ -152,7 +170,8 @@ async function main() {
     protectedList,
   });
   writeFileSync(join(usageDir, "task-card.md"), prompt.split("\n---\n")[0]);
-  const session = { id: null, canResume: inputs.harness !== "copilot" };
+  const session = { id: null, canResume: true };
+  const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -161,7 +180,7 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       prompt: attempt === 1 || !session.id ? prompt : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
-      maxUsd: inputs.maxUsd,
+      maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: attempt > 1 && session.canResume ? session.id : null,
       cwd: checkout,
       env: harnessEnv,
@@ -171,16 +190,16 @@ async function main() {
     });
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
-    // A death is a process that ended without a harness result (signal, or a non-zero exit with no turn recorded).
-    const crashed = !rec.ok && !rec.timedOut && !rec.budgetExceeded && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
-    if (!crashed) break;
+    // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it.
+    if (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd) rec.budgetExceeded = true;
+    if (!crashed(rec)) break;
     died += 1;
     log(`harness process died (${rec.error}); ${died < 2 ? "retrying once" : "second death"}`);
     if (died >= 2) break;
   }
 
-  // 6. What the run left behind: commits, protected paths, the PR.
-  await push(checkout, branch, harnessEnv).catch(() => {});
+  // 6. What the run left behind: commits, protected paths, the PR. Pushes carry no model secret.
+  await push(checkout, branch, childBase).catch(() => {});
   let { pr: found, delta } = await observe(repo, checkout, { branch, base }, token);
   const hits = protectedTouched(delta.files, protectedList);
   if (!found && delta.count > 0 && !hits) {
@@ -202,6 +221,7 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       maxUsd: inputs.maxUsd,
+      spentUsd: sumSpend(records),
       session,
       taskCard: prompt,
       env: harnessEnv,
@@ -210,39 +230,47 @@ async function main() {
     });
     records.push(...validation.usage);
     passes = validation.passes;
+    if (validation.died) died += 1;
     if (validation.usage.length) {
-      await push(checkout, branch, harnessEnv);
+      await push(checkout, branch, childBase);
       ({ pr, delta } = await observe(repo, checkout, { branch, base, prNumber: pr?.number }, token));
     }
   }
 
   // 8. The exit.
   // Green validation on an open PR outweighs a harness error code (max turns, a late tool failure);
-  // with no validation commands at all, the harness's own verdict stands.
+  // with no validation commands at all, the harness's own verdict stands. A validation fix run that
+  // died is a death, not a red pass; a deadline or budget reached during it is that cap.
   const evidenceOk = !!(validation?.green && inputs.validation.length && pr);
   const decision = decideExit({
     harness: { ...rec, ok: rec.ok || evidenceOk, died, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput } : undefined,
+    validation: validation && !validation.died && !validation.harness ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     planHasQuestion: pr ? await questionRaised(repo, { issue, pr }, token) : false,
   });
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "work" }, token);
   if (decision.exit === "delivered" && pr) {
+    // Delivered means an open, non-draft PR (the worker may have opened a draft after a harness error);
+    // the review label goes on first, because the App applying it is what fires the review job.
     const head = (await observe(repo, checkout, { branch, base, prNumber: pr.number }, token)).pr.head.sha;
     await postValidated(repo, pr.number, issue, head, token);
-    // The App applies this label, so the pull_request(labeled) event fires and the review job runs.
-    await addLabels(repo, pr.number, [REVIEW_LABEL], token).catch((e) => log(`review label: ${e.message.slice(0, 120)}`));
+    if (pr.draft) await setDraft(repo, pr.number, false, token);
+    try {
+      await addLabels(repo, pr.number, [REVIEW_LABEL], token);
+    } catch (e) {
+      decision.exit = "blocked";
+      decision.reason = `the review label could not be applied, so no review job would run: ${e.message.slice(0, 160)}`;
+    }
   }
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "work" }, token);
   await finish(decision.exit, decision.reason);
+  }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] worker failed: ${e.message}\n`);
     process.exit(1);
   });
 }
-
-export { main as runWorker };

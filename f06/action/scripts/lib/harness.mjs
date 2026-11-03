@@ -2,7 +2,7 @@
 // and turn what it printed into one usage record. CLI flags follow RESEARCH.md;
 // what RESEARCH.md leaves open is recorded in NOTES.md.
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { exec, onPath } from "./proc.mjs";
 import { parseUsage } from "./usage.mjs";
 
@@ -14,12 +14,14 @@ export const CLI = {
 
 /** Keys that must never reach a child that is not the harness (validation commands, git hooks). */
 export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
+/** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
+export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID"];
 
-/** Env for a non-harness child: the job's env with the model secrets and the raw inputs removed. */
+/** Env for a non-harness child (and the harness itself, before its own credential is added): the job's env with every secret removed. */
 export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
-  for (const k of MODEL_SECRET_KEYS) delete e[k];
-  for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_PRIVATE_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|GITHUB_TOKEN)$/.test(k)) delete e[k];
+  for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS]) delete e[k];
+  for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL)$/.test(k)) delete e[k];
   return e;
 }
 
@@ -90,15 +92,17 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
 }
 
 /**
- * The command line for one run. `resume` is the session id of the run to continue,
- * when the harness can (Claude --resume, Codex exec resume); Copilot cannot, so the
- * caller folds the failure into a fresh prompt.
+ * The command line for one run. `resume` is the session id of the run to continue
+ * (Claude --resume, Codex exec resume, Copilot --resume); `agent` names a pinned
+ * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
+ * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile }) {
   switch (harness) {
     case "claude": {
       const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
       if (model) args.push("--model", model);
+      if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
       return { cmd: "claude", args, stdin: prompt, canResume: true };
@@ -111,10 +115,13 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent }
       return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true };
     }
     case "copilot": {
-      const args = ["-p", prompt, "--allow-all-tools", "--no-ask-user"];
+      // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
+      const args = ["-p", prompt, "--allow-all", "--output-format", "json"];
       if (model) args.push("--model", model);
       if (agent) args.push("--agent", agent);
-      return { cmd: "copilot", args, stdin: undefined, canResume: false };
+      if (resume) args.push("--resume", resume);
+      if (usageFile) args.push("--usage-output-file", usageFile);
+      return { cmd: "copilot", args, stdin: undefined, canResume: true };
     }
     default:
       throw new Error(`unknown harness ${harness}`);
@@ -123,11 +130,12 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent }
 
 /**
  * Run the harness once. Streams stdout to `eventsFile` (usage/events.jsonl), returns
- * the usage record plus {timedOut, exitCode, stdoutTail}. Never logs the prompt
- * or the env.
+ * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
+ * prompt or the env.
  */
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run" }) {
-  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent });
+  const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
+  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });
@@ -136,7 +144,8 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const started = new Date().toISOString();
   const r = await exec(cmd, args, { cwd, env, input: stdin, timeoutMs, tee: eventsFile, echo: true });
   const ended = new Date().toISOString();
-  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1);
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile });
+  rec.finalText = finalText(harness, r.stdout);
   rec.started = started;
   rec.ended = ended;
   rec.timedOut = r.timedOut;
@@ -178,5 +187,7 @@ export function finalText(harness, stdout) {
       .map((e) => e.item.text || "")
       .join("\n");
   }
-  return String(stdout || "");
+  // Copilot JSONL: the assistant's text fields, when present; else the raw stdout.
+  const texts = parsed.map((e) => e.data?.content ?? e.content ?? e.message?.content ?? e.text ?? null).filter((t) => typeof t === "string");
+  return texts.length ? texts.join("\n") : String(stdout || "");
 }

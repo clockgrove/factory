@@ -30,6 +30,7 @@ export function loadPrices(file = PRICES_FILE) {
 /** USD for Codex tokens by the longest model prefix in the table; null when the model is not listed. */
 export function priceTokens(prices, model, tokens) {
   if (!model || !tokens) return null;
+  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
   const key = Object.keys(prices.perMillion)
     .sort((a, b) => b.length - a.length)
     .find((k) => model === k || model.startsWith(k));
@@ -117,8 +118,19 @@ export function parseUsageText(text, { model = null } = {}) {
   const lines = jsonLines(trimmed);
   if (!lines.length) return null;
   if (lines.some((l) => l.type === "turn.completed" || l.type === "thread.started")) return fromCodexEvents(trimmed, model);
-  const result = [...lines].reverse().find((l) => l.type === "result");
-  return result ? fromClaudeResult(result, model) : null;
+  // The worker appends one result per harness run (the first prompt, each validation fix pass): sum them all.
+  const results = lines.filter((l) => l.type === "result").map((r) => fromClaudeResult(r, model));
+  if (!results.length) return null;
+  const sum = results[0];
+  for (const r of results.slice(1)) {
+    sum.usd = sum.usd === null && r.usd === null ? null : (sum.usd ?? 0) + (r.usd ?? 0);
+    sum.tokens = { input: add(sum.tokens.input, r.tokens.input), output: add(sum.tokens.output, r.tokens.output), cached: add(sum.tokens.cached, r.tokens.cached) };
+    sum.turns = add(sum.turns, r.turns);
+    sum.model = sum.model ?? r.model;
+  }
+  sum.usd = round4(sum.usd);
+  sum.runs = results.length;
+  return sum;
 }
 
 /**
@@ -157,16 +169,20 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.tokens.cached = add(out.tokens.cached, part.tokens?.cached ?? null);
   }
   const unmetered = out.parts.filter((p) => p.usd === null);
-  out.usd = unmetered.length ? null : round4(out.parts.reduce((s, p) => s + p.usd, 0));
+  const priced = out.parts.filter((p) => p.usd !== null);
+  // The priced parts are summed; an unmetered part makes the figure partial, never hides what is known.
+  out.usd = priced.length ? round4(priced.reduce((s, p) => s + p.usd, 0)) : null;
+  const partial = unmetered.length && priced.length ? `partial: ${unmetered.length} of ${out.parts.length} artifacts unmetered (${unmetered.map((p) => p.basis).join("; ")}); ` : "";
   switch (harness) {
     case "claude":
       out.unit = "usd";
-      out.basis = unmetered.length ? `unmetered: ${unmetered.map((p) => p.basis).join("; ")}` : "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
+      out.basis = priced.length ? `${partial}harness-reported: total_cost_usd, modelUsage (sub-agents included)` : `unmetered: ${unmetered.map((p) => p.basis).join("; ")}`;
       break;
     case "codex":
-      out.unit = "tokens";
+      // Dollars priced from the table are the measure (PLAN.md); tokens stay the unit only while unpriced.
+      out.unit = priced.length ? "usd" : "tokens";
       out.priceTableDate = prices.date;
-      out.basis = unmetered.length ? unmetered[0].basis : `tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+      out.basis = priced.length ? `${partial}tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unmetered[0].basis;
       out.note = prices.status === "placeholder" ? "prices.json carries placeholder rates; replace them before reading this as dollars" : null;
       break;
     case "copilot":
@@ -176,7 +192,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       break;
     default:
       out.unit = "usd";
-      out.basis = unmetered.length ? "unmetered" : parts[0].basis ?? "unknown";
+      out.basis = priced.length ? `${partial}${parts[0].basis ?? "unknown"}` : "unmetered";
   }
   if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
   return out;

@@ -70,7 +70,7 @@ export function cleanMerge(number = 42, usage = []) {
         reviewComments: [{ user: APP, created_at: at(2, 2, 40), body: "acceptance 1: quote values with commas" }, { user: APP, created_at: at(2, 2, 55), body: "Done in cafe0002." }],
       },
     },
-    jobs: [{ id: 1, run: 10, name: `work (${number})`, started_at: at(2, 1, 3), completed_at: at(2, 2, 12), conclusion: "success" }, { id: 2, run: 11, name: `review (#${number})`, started_at: at(2, 2, 15), completed_at: at(2, 2, 58), conclusion: "success" }],
+    jobs: [{ id: 1, run: 10, name: `work (${number})`, started_at: at(2, 1, 3), completed_at: at(2, 2, 12), conclusion: "success" }, { id: 2, run: 11, name: "review", started_at: at(2, 2, 15), completed_at: at(2, 2, 58), conclusion: "success" }],
     artifacts: [],
     usage,
     harness: usage[0]?.harness ?? null,
@@ -123,7 +123,7 @@ export function questionAnswered(number = 45, usage = []) {
         reviewComments: [],
       },
     },
-    jobs: [{ id: 4, run: 13, name: `work (${number})`, started_at: at(2, 1, 3), completed_at: at(2, 2, 12), conclusion: "success" }, { id: 5, run: 14, name: `review (#${number})`, started_at: at(3, 8, 32), completed_at: at(3, 9, 10), conclusion: "success" }],
+    jobs: [{ id: 4, run: 13, name: `work (${number})`, started_at: at(2, 1, 3), completed_at: at(2, 2, 12), conclusion: "success" }, { id: 5, run: 14, name: "review", started_at: at(3, 8, 32), completed_at: at(3, 9, 10), conclusion: "success" }],
     artifacts: [],
     usage,
     harness: usage[0]?.harness ?? null,
@@ -141,7 +141,9 @@ export function snapshotOf(collected) {
     [`${base}/issues/${n}/comments?per_page=100`]: collected.issueComments,
     [`${base}/pulls?head=${head}&state=open&per_page=100`]: collected.pulls.filter((p) => p.state === "open"),
     [`${base}/pulls?head=${head}&state=closed&per_page=100`]: collected.pulls.filter((p) => p.state !== "open"),
-    [`${base}/actions/workflows/factory.yml/runs?per_page=100`]: [{ workflow_runs: collected.jobs.map((j) => ({ id: j.run })) }],
+    // The artifacts name the runs whose jobs are counted: the worker's run and each review run.
+    [`${base}/actions/artifacts?name=factory-usage-${n}&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name.startsWith("work")).map((j) => ({ id: j.id * 100, name: `factory-usage-${n}`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run } })) }],
+    [`${base}/actions/artifacts?name=factory-usage-${n}-review&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name === "review").map((j) => ({ id: j.id * 100, name: `factory-usage-${n}-review`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run } })) }],
   };
   for (const pr of collected.pulls) {
     const d = collected.pullDetails[pr.number];

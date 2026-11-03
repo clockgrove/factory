@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
@@ -63,15 +64,27 @@ test("codex: unknown model is unmetered, never zero", () => {
   assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), 1.25, "prefix match");
 });
 
-test("copilot: no usage output; dollars null with the billing-window basis", () => {
+test("copilot: no usage output is unmetered, never zero; a non-zero exit is an error, not a death", () => {
   const rec = parseCopilot(fixture("copilot-stdout.txt"), null, 0);
   assert.equal(rec.ok, true);
   assert.equal(rec.usd, null);
   assert.deepEqual(rec.tokens, { input: null, output: null, cached: null });
-  assert.match(rec.basis, /unmetered: Copilot bills AI Credits/);
-  assert.equal(parseCopilot("", null, 2).ok, false);
-  assert.equal(parseUsage("copilot", "", null, 0).harness, "copilot");
+  assert.match(rec.basis, /unmetered: Copilot wrote no usage/);
+  const bad = parseCopilot("", null, 2);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.subtype, "error", "a subtype means the run is not counted as a process death");
   assert.throws(() => parseUsage("gemini", ""), /unknown harness/);
+});
+
+test("copilot: --usage-output-file is the final figure and replaces the stream's counts", () => {
+  const file = join(tmpdir(), `copilot-usage-${process.pid}.json`);
+  writeFileSync(file, JSON.stringify({ sessionId: "s-1", inputTokens: 1000, outputTokens: 50, premiumRequests: 2 }));
+  const rec = parseCopilot('{"type":"assistant.usage","data":{"inputTokens":1,"outputTokens":1}}\n', null, 0, { usageFile: file });
+  assert.deepEqual(rec.tokens, { input: 1000, output: 50, cached: null });
+  assert.equal(rec.premiumRequests, 2);
+  assert.equal(rec.sessionId, "s-1");
+  assert.equal(rec.usd, null);
+  rmSync(file, { force: true });
 });
 
 test("mergeUsage sums runs and keeps null dollars only when every run is unmetered", () => {
@@ -99,13 +112,19 @@ test("harness command lines follow RESEARCH.md; the prompt goes on stdin for cla
   assert.ok(x.args.includes("-m") && x.args.at(-1) === "-");
   const xr = harnessCommand({ harness: "codex", prompt: "fix", resume: "thr_1" });
   assert.deepEqual(xr.args.slice(0, 3), ["exec", "resume", "thr_1"]);
-  const p = harnessCommand({ harness: "copilot", prompt: "P", agent: "reviewer" });
+  const a = harnessCommand({ harness: "claude", prompt: "review", maxUsd: 0, agent: "reviewer" });
+  assert.deepEqual(a.args.slice(a.args.indexOf("--agent"), a.args.indexOf("--agent") + 2), ["--agent", "reviewer"]);
+  const p = harnessCommand({ harness: "copilot", prompt: "P", agent: "reviewer", usageFile: "/tmp/u.json" });
   assert.deepEqual(p.args.slice(0, 2), ["-p", "P"]);
-  assert.ok(p.args.includes("--no-ask-user") && p.args.includes("--agent"));
-  assert.equal(p.canResume, false);
+  assert.ok(p.args.includes("--allow-all") && p.args.includes("--agent") && !p.args.includes("--no-ask-user"), "copilot 1.0.91 has --allow-all and no --no-ask-user");
+  assert.deepEqual(p.args.slice(p.args.indexOf("--output-format"), p.args.indexOf("--output-format") + 2), ["--output-format", "json"]);
+  assert.deepEqual(p.args.slice(p.args.indexOf("--usage-output-file")), ["--usage-output-file", "/tmp/u.json"]);
+  assert.equal(p.canResume, true);
+  const pr = harnessCommand({ harness: "copilot", prompt: "fix", resume: "s-1" });
+  assert.deepEqual(pr.args.slice(pr.args.indexOf("--resume"), pr.args.indexOf("--resume") + 2), ["--resume", "s-1"]);
 });
 
-test("model secrets never reach a non-harness child", () => {
-  const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", FACTORY_INPUT_CODEX_API_KEY: "ck", FACTORY_INPUT_APP_PRIVATE_KEY: "pem", FACTORY_INPUT_MODEL: "m" }, { GH_TOKEN: "t" });
+test("model, App and runner secrets never reach a non-harness child", () => {
+  const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", FACTORY_INPUT_CODEX_API_KEY: "ck", FACTORY_INPUT_APP_PRIVATE_KEY: "pem", FACTORY_INPUT_MODEL: "m", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc", ACTIONS_ID_TOKEN_REQUEST_URL: "u", ACTIONS_RUNTIME_TOKEN: "rt", FACTORY_APP_TOKEN: "ghs", FACTORY_APP_PRIVATE_KEY: "pem" }, { GH_TOKEN: "t" });
   assert.deepEqual(e, { PATH: "/bin", FACTORY_INPUT_MODEL: "m", GH_TOKEN: "t" });
 });

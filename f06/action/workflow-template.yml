@@ -30,8 +30,9 @@ env:
   FACTORY_BUDGET_COMMAND: {{budget_command}}
   FACTORY_PROTECTED_PATHS: {{protected_paths}}
   FACTORY_CI_CHECKS: {{ci_checks}}
-permissions: # the job token reads code; every write goes through the App's token
+permissions: # the job token reads code and Actions; every write goes through the App's token
   contents: read
+  actions: read # the dispatcher sums today's usage artifacts; doctor lists the CI workflow's triggers
   issues: write
   # id-token: write         # Claude workload identity federation only
   # copilot-requests: write # Copilot only (bills the org or the owner's seat)
@@ -52,7 +53,7 @@ jobs:
     strategy: { max-parallel: {{max_concurrent}}, fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
     concurrency: { group: "factory-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: clockgrove/factory@{{version}}
         id: f
@@ -63,10 +64,13 @@ jobs:
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
           codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
-      - uses: actions/upload-artifact@v4
+          # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan; your own repository only
+      - uses: actions/upload-artifact@v7
         if: always()
         with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
   review:
+    name: review (${{ github.head_ref }})
     if: >-
       github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')
@@ -74,7 +78,7 @@ jobs:
     timeout-minutes: {{timeout_minutes}}
     concurrency: { group: "factory-review-${{ github.event.pull_request.number }}", cancel-in-progress: false }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: clockgrove/factory@{{version}}
         id: f
@@ -85,6 +89,8 @@ jobs:
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
-      - uses: actions/upload-artifact@v4
+          # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.issue_number != ''
-        with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review-${{ github.run_attempt }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
+        with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly

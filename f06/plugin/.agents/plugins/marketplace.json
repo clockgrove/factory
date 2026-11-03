@@ -9,12 +9,11 @@
       "source": {
         "source": "git-subdir",
         "url": "https://github.com/clockgrove/factory.git",
-        "path": "./plugin",
+        "path": "plugin",
         "ref": "v0.6.0"
       },
       "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
+        "installation": "AVAILABLE"
       },
       "category": "Developer Tools"
     }

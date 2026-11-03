@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
-import { FACTORY_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, splitList, taskCardValues } from "../scripts/lib/logic.mjs";
+import { FACTORY_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
 import { buildPrompt } from "../scripts/lib/session.mjs";
 
 const template = readFileSync(join(PLUGIN_ROOT, "templates", "task-card.md"), "utf8");
@@ -45,7 +45,3 @@ test("protected paths: Factory's list plus the repository's, deduped; directory 
   assert.deepEqual(protectedTouched(["src/x.ts"], list), []);
 });
 
-test("splitList accepts commas and newlines", () => {
-  assert.deepEqual(splitList("pnpm check, pnpm test\n pnpm run verify:docs "), ["pnpm check", "pnpm test", "pnpm run verify:docs"]);
-  assert.deepEqual(splitList(""), []);
-});

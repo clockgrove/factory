@@ -4,6 +4,7 @@
 //   node scripts/doctor.mjs --repo OWNER/NAME [--json] [--checkout DIR] [--probe]
 // Runs from the plugin (`/factory doctor`) and, through jobChecks(), as the first
 // step of every worker job, where a FAIL Blocks the Objective with that line.
+import { pathToFileURL } from "node:url";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
@@ -123,8 +124,10 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
   checks = [...new Set(checks)];
   out.push(checks.length ? PASS("required checks", checks.join(", ")) : FAIL("required checks", `none required on ${branch}`, "require the CI workflow's checks: setup --apply protection --ci-checks <names>"));
   if (!repoData.allow_auto_merge && inputs.autoMerge) out.push(FAIL("auto-merge", "repository setting Allow auto-merge is off", "setup --apply protection turns it on, or Settings > General"));
-  const ci = await ciWorkflowTriggers(repo, { token });
-  if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
+  // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.
+  const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token });
+  if (ci.error) out.push(WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions"));
+  else if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
   else if (!ci.mergeGroup) out.push(FAIL("ci workflow", `${ci.name} listens on pull_request but not merge_group`, `add "merge_group:" under on: in ${ci.path}`));
   else out.push(PASS("ci workflow", `${ci.name} on pull_request and merge_group`));
 
@@ -146,7 +149,12 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
 
 /** Find a workflow (other than factory.yml) with pull_request and merge_group triggers. */
 async function ciWorkflowTriggers(repo, opts) {
-  const list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, opts).catch(() => null))?.workflows || [];
+  let list;
+  try {
+    list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, opts))?.workflows || [];
+  } catch (e) {
+    return { found: false, error: `${e.status || ""} ${e.message.slice(0, 120)}`.trim() };
+  }
   let found = null;
   for (const w of list) {
     if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
@@ -182,8 +190,11 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
   out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
   const pkg = existsSync(join(checkout, "package.json")) ? JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")) : null;
   for (const cmd of inputs.validation) {
+    // `pnpm <script>` / `pnpm run <script>` must name a package.json script; `pnpm exec|dlx|x|-r|--filter …` and
+    // `env …` prefixes are not scripts and are only warned about when their binary is absent here.
     const m = /^(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/.exec(cmd);
-    if (m && pkg) {
+    const notScript = m && /^(exec|dlx|x|test|install|i|ci|-.*)$/.test(m[1]) && !pkg?.scripts?.[m[1]];
+    if (m && pkg && !notScript) {
       out.push(pkg.scripts?.[m[1]] ? PASS("validation", cmd) : FAIL("validation", `${cmd}: no script "${m[1]}" in package.json`, "fix the validation input or add the script"));
     } else {
       const bin = cmd.split(/\s+/)[0];
@@ -278,7 +289,7 @@ async function main() {
   process.exit(fails ? 1 : 0);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] doctor failed: ${e.message}\n`);
     process.exit(2);

@@ -61,14 +61,8 @@ export function protectedTouched(files, protectedList) {
   return hits;
 }
 
-/** Split a comma- or newline-separated workflow input into trimmed, non-empty items. */
-export function splitList(input) {
-  if (!input) return [];
-  return String(input)
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
+/** The PR label the App applies after validation is green; `pull_request(labeled)` on it fires the review job. */
+export const REVIEW_LABEL = "factory:review";
 
 // ----------------------------------------------------------------- dispatch
 
@@ -166,10 +160,13 @@ export function sumSpend(records) {
  *  validation: {passes: number, green: boolean, lastOutput?: string}
  *  protectedHits: string[]
  *  planHasQuestion: boolean (the plan comment or the PR body carries a QUESTION item)
+ *  question: boolean, when the caller has already decided whether a question is open
+ *            (the review job: the PR's draft state after the answer pass, so a human's
+ *            "mark ready" on an answered Question is not undone by the word in the body)
  *  reviewUnaddressed: number (review pass: comments without a worker reply)
  * Returns {exit: 'delivered'|'question'|'blocked', reason}
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], planHasQuestion = false, reviewUnaddressed = 0 }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], planHasQuestion = false, question, reviewUnaddressed = 0 }) {
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice" };
   if (harness?.timedOut) return { exit: "blocked", reason: "time cap reached" };
   if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached" };
@@ -183,7 +180,8 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (/^##\s*Blocked\b/m.test(pr.body || "")) return { exit: "blocked", reason: blockedParagraph(pr.body) };
-  if (planHasQuestion || /\bQUESTION\b/.test(pr.body || "")) return { exit: "question", reason: "an assumption would change a public contract or a recorded decision" };
+  const open = question !== undefined ? question : planHasQuestion || /\bQUESTION\b/.test(pr.body || "");
+  if (open) return { exit: "question", reason: "an assumption would change a public contract or a recorded decision" };
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
   return { exit: "delivered", reason: "" };
 }
@@ -200,16 +198,22 @@ export function diffLines(diff) {
   const files = {};
   let path = null;
   let line = 0;
+  let inHeader = false; // between `diff --git` and the first hunk: `---`/`+++` are file names, not content
   for (const raw of String(diff || "").split("\n")) {
-    if (raw.startsWith("+++ ")) {
+    if (raw.startsWith("diff ")) {
+      inHeader = true;
+      continue;
+    }
+    if (inHeader && raw.startsWith("+++ ")) {
       const p = raw.slice(4).replace(/^b\//, "").trim();
       path = p === "/dev/null" ? null : p;
       if (path) files[path] ??= { lines: new Set(), first: null };
       continue;
     }
-    if (raw.startsWith("--- ") || raw.startsWith("diff ") || raw.startsWith("index ")) continue;
+    if (inHeader && (raw.startsWith("--- ") || raw.startsWith("index ") || /^(new|deleted) file mode|^similarity|^rename|^old mode|^new mode|^Binary/.test(raw))) continue;
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
     if (hunk) {
+      inHeader = false;
       line = Number(hunk[1]);
       continue;
     }

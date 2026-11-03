@@ -25,7 +25,7 @@ Per harness, from the usage artifact the worker job uploads, plus the reviewer c
 
 - **Claude.** The JSON result's `total_cost_usd`, and `modelUsage` keyed by model, which includes sub-agents; the top-level `usage` excludes them, so never use it for the whole run. Unit: USD. Basis: harness-reported.
 - **Codex.** The JSONL's `turn.completed` events carry `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` per turn; reasoning tokens may be missing, and sub-agent totals may be folded in. Sum per model and price from the bench's price table, naming the table's date. Unit: USD. Basis: tokens priced by table.
-- **Copilot.** Nothing per run. Take the organization's billing data for GitHub AI Credits, attribute to the run by its time window, and convert at GitHub's rate; when the window cannot be attributed to one run, record `unmetered`. Unit: credits (USD at the stated rate). Basis: billing window.
+- **Copilot.** Token counts and premium requests from `copilot --usage-output-file` (the worker writes it beside `events.jsonl`); no dollars per run. Take the organization's billing data for GitHub AI Credits, attribute to the run by its time window, and convert at GitHub's rate; when the window cannot be attributed to one run, record `unmetered`. Unit: credits (USD at the stated rate). Basis: billing window.
 
 Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
 

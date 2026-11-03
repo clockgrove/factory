@@ -10,37 +10,44 @@
 // run the validation commands again; then, if auto_merge, `gh pr merge --auto
 // --squash` as the App so the merge queue runs. Unaddressed findings or red
 // validation after the pass is the blocked exit.
-import { mkdirSync, readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
-import { credentialEnv, finalText, runHarness, scrubbedEnv } from "./lib/harness.mjs";
+import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments } from "./lib/logic.mjs";
+import { REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import {
+  PLACEHOLDER_PREFIX,
   TASK_CARD_TEMPLATE,
   applyExit,
   botId,
   buildPrompt,
   configureGit,
   deadline,
+  isValidated,
+  maskFile,
   observe,
+  postValidated,
   push,
-  questionRaised,
   remainingMs,
   unaddressedReviewComments,
   validationLoop,
   writeUsage,
 } from "./lib/session.mjs";
-import { REVIEW_LABEL } from "./worker.mjs";
 
-/** The reviewer's prompt: the skill does the work; the JSON shape is what the job parses. */
+/**
+ * The reviewer's prompt: the skill does the work; the JSON shape is what the job
+ * parses. Claude and Copilot run as the pinned reviewer agent (--agent); Codex has
+ * no such flag, so the prompt names the definition file.
+ */
 export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   return [
-    `You are the Factory reviewer for pull request on issue #${issue}: ${issueTitle}. Act as the reviewer agent defined in ${agentFile} and follow the review-pr skill (in .claude/skills/review-pr and .agents/skills/review-pr) exactly. Read the repository as you need to.`,
+    `You are the Factory reviewer for the pull request on issue #${issue}: ${issueTitle}.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the review-pr skill (in .claude/skills/review-pr and .agents/skills/review-pr) exactly. Read the repository as you need to.`,
     "Do NOT post anything to GitHub yourself: the job posts your findings. Your final message must be only a JSON object of this shape, with no prose around it:",
     '```json\n{"comments": [{"path": "src/file.ts", "line": 42, "body": "acceptance 2: ..."}]}\n```',
     "`line` is a line number on the new side of the diff. If you found nothing, return one comment on the first changed line saying so and naming the acceptance entries you checked.",
@@ -104,23 +111,42 @@ async function main() {
   const branch = pr.head.ref;
   const defaultBranch = pr.base?.ref || (await defaultBranchOf(checkout));
 
+  let cred = { env: {} };
   const finish = async (exit, reason) => {
     keeper.stop();
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker" });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("issue", String(issue));
   };
+  // The trigger label comes off on every exit, so a re-label is always one more pass.
+  const dropLabel = () => removeLabel(repo, pr.number, REVIEW_LABEL, token).catch((e) => log(`review label: ${e.message.slice(0, 120)}`));
 
+  try {
+    await run();
+  } catch (e) {
+    log(`review crashed: ${e.message.slice(0, 300)}`);
+    const reason = `review crashed: ${e.message.slice(0, 200)}`;
+    await dropLabel();
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
+    await finish("blocked", reason);
+    throw e;
+  }
+
+  async function run() {
   if (pr.draft) {
     log(`PR #${pr.number} is a draft (question or blocked); the reviewer waits for a human to mark it ready`);
+    await dropLabel();
     await finish("skipped", "draft PR");
     return;
   }
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) {
     log(`PR #${pr.number} already has Factory's one review pass; not repeating it`);
+    await dropLabel();
     await finish("skipped", "already reviewed");
     return;
   }
@@ -129,13 +155,14 @@ async function main() {
   await git(checkout, ["fetch", "origin", branch, defaultBranch]);
   await git(checkout, ["checkout", "-B", branch, `origin/${branch}`]);
   const base = (await git(checkout, ["merge-base", `origin/${defaultBranch}`, "HEAD"])).stdout.trim();
-  installPlugin(checkout, PLUGIN_ROOT);
+  installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
   await configureGit(checkout, { appSlug: app.appSlug, botId: await botId(app.appSlug, keeper.token), protectedList, credentialHelper: keeper.credentialHelper() });
   const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true" });
   for (const k of Object.keys(childBase)) if (childBase[k] === undefined) delete childBase[k];
   if (inputs.setup) {
     const s = await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {
+      await dropLabel();
       await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}`, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", "setup failed");
       return;
@@ -144,39 +171,9 @@ async function main() {
   const install = installCommand(checkout, inputs.install);
   if (install) await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
 
-  // The reviewer: one call, comment-only, findings parsed from its last message.
   const issueData = await getIssue(repo, issue, token);
-  const diff = await prDiff(repo, pr.number, token);
-  const cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch };
-  const reviewRec = await runHarness({
-    harness: inputs.harness,
-    model: inputs.reviewerModel,
-    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
-    maxUsd: inputs.maxUsd,
-    agent: inputs.harness === "copilot" ? "reviewer" : undefined,
-    cwd: checkout,
-    env: harnessEnv,
-    timeoutMs: Math.min(remainingMs(deadlineAt), 45 * 60_000),
-    eventsFile,
-    label: "review",
-  });
-  records.push(reviewRec);
-  // The events file holds only the review run at this point, so its last message is the reviewer's.
-  const findings = parseFindings(finalText(inputs.harness, readFileSync(eventsFile, "utf8")));
-  let comments = snapComments(findings, diff);
-  if (!comments.length) {
-    const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
-    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRec.ok ? "Factory reviewer: no findings; the pass ran and returned nothing line-tied." : `Factory reviewer: the reviewer call failed (${reviewRec.error || "unknown"}); no findings were produced.` }];
-  }
-  if (comments.length) {
-    await postReview(repo, pr.number, { body: `${marker(issue, "review")}\nFactory reviewer: one comment-only pass, ${comments.length} comment(s).`, comments, commitId: pr.head.sha }, token);
-    log(`posted review with ${comments.length} comment(s)`);
-  }
-  const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
-  const toAnswer = await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
-
-  // One worker pass to answer, then validation again.
   const taskCard = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
@@ -188,13 +185,65 @@ async function main() {
     budgetCommand: inputs.budgetCommand,
     protectedList,
   });
-  const session = { id: null, canResume: inputs.harness !== "copilot" };
+  const session = { id: null, canResume: true };
+
+  // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
+  // carries the marker; a head a human pushed or marked ready does not, so Factory's own
+  // pass runs first and a red result is Blocked before any review.
+  if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
+    log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
+    const pre = await validationLoop({ checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
+    records.push(...pre.usage);
+    passes = pre.passes;
+    if (pre.usage.length) await push(checkout, branch, childBase);
+    if (!pre.green) {
+      const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false } });
+      await dropLabel();
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: d.reason || "validation red before review", notify: inputs.notify, stage: "review" }, token);
+      await finish("blocked", d.reason || "validation red before review");
+      return;
+    }
+    pr = await getPr(repo, pr.number, token);
+    await postValidated(repo, pr.number, issue, pr.head.sha, token);
+  }
+
+  // The reviewer: one call, comment-only, findings parsed from its last message.
+  const diff = await prDiff(repo, pr.number, token);
+  const reviewRec = await runHarness({
+    harness: inputs.harness,
+    model: inputs.reviewerModel,
+    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+    maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+    agent: inputs.harness === "codex" ? undefined : "reviewer",
+    cwd: checkout,
+    env: harnessEnv,
+    timeoutMs: Math.min(remainingMs(deadlineAt), 45 * 60_000),
+    eventsFile,
+    label: "review",
+  });
+  records.push(reviewRec);
+  const findings = parseFindings(reviewRec.finalText || "");
+  let comments = snapComments(findings, diff);
+  let placeholder = false;
+  if (!comments.length) {
+    const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
+    placeholder = !!first;
+    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRec.ok ? `${PLACEHOLDER_PREFIX} no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_PREFIX} the reviewer call failed (${reviewRec.error || "unknown"}); no findings were produced.` }];
+  }
+  if (comments.length) {
+    await postReview(repo, pr.number, { body: `${marker(issue, "review")}\nFactory reviewer: one comment-only pass, ${comments.length} comment(s).`, comments, commitId: pr.head.sha }, token);
+    log(`posted review with ${comments.length} comment(s)${placeholder ? " (placeholder: nothing to answer)" : ""}`);
+  }
+  const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
+  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+
+  // One worker pass to answer, then validation again.
   if (toAnswer.length) {
     const rec = await runHarness({
       harness: inputs.harness,
       model: inputs.model,
       prompt: answerPrompt({ taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
-      maxUsd: inputs.maxUsd,
+      maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       cwd: checkout,
       env: harnessEnv,
       timeoutMs: remainingMs(deadlineAt),
@@ -203,14 +252,18 @@ async function main() {
     });
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
-    await push(checkout, branch, harnessEnv);
+    await push(checkout, branch, childBase);
   }
-  const validation = await validationLoop({ checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" });
+  const validation = toAnswer.length
+    ? await validationLoop({ checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
+    : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
-  passes = validation.passes;
-  if (validation.usage.length) await push(checkout, branch, harnessEnv);
+  passes += validation.passes;
+  if (validation.usage.length) await push(checkout, branch, childBase);
 
-  // The exit.
+  // The exit. A question is open only if the PR is still a draft now: the worker converts
+  // to draft when it raises one, and a human's "mark ready" answers it even though the
+  // word QUESTION stays in the body.
   const after = await observe(repo, checkout, { branch, base, prNumber: pr.number }, token);
   pr = after.pr;
   const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, token)).length;
@@ -218,30 +271,33 @@ async function main() {
     harness: validation.harness ?? { ok: true },
     pr: { exists: true, draft: pr.draft, body: pr.body },
     commits: after.delta.count,
-    validation: { passes: validation.passes, green: validation.green },
+    validation: validation.died || validation.harness ? undefined : { passes: validation.passes, green: validation.green },
     protectedHits: protectedTouched(after.delta.files, protectedList),
-    planHasQuestion: await questionRaised(repo, { issue, pr }, token),
+    question: !!pr.draft,
     reviewUnaddressed: unaddressed,
   });
-  await removeLabel(repo, pr.number, REVIEW_LABEL, token);
+  await dropLabel();
   if (decision.exit === "delivered") {
-    if (pr.draft) await setDraft(repo, pr.number, false, token);
     // The merge closes the issue only through a closing keyword; add one when the body lacks it.
     if (!new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#${issue}\\b`, "i").test(pr.body || "")) {
       await rest(`repos/${repo.full}/pulls/${pr.number}`, { ...token, method: "PATCH", body: { body: `${pr.body || ""}\n\nCloses #${issue}\n` } }).catch((e) => log(`body: ${e.message.slice(0, 120)}`));
     }
     if (inputs.autoMerge) {
-      await enableAutoMerge(repo, pr.number, token);
-      log(`auto-merge enabled on PR #${pr.number}; the merge queue takes it`);
+      try {
+        const how = await enableAutoMerge(repo, pr.number, token);
+        log(how === "auto" ? `auto-merge enabled on PR #${pr.number}; the merge queue takes it` : `PR #${pr.number} was already mergeable; merge requested directly`);
+      } catch (e) {
+        decision.exit = "blocked";
+        decision.reason = `auto-merge could not be enabled: ${String(e.stderr || e.message).slice(0, 160)}`;
+      }
     } else log(`auto_merge is false: PR #${pr.number} is ready for a human merge`);
-    await applyExit(repo, { issue, pr, exit: "delivered", reason: "", notify: inputs.notify, stage: "review" }, token);
-  } else {
-    await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "review" }, token);
   }
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "review" }, token);
   await finish(decision.exit, decision.reason);
+  }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] review failed: ${e.message}\n`);
     process.exit(1);

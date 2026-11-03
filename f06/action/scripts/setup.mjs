@@ -8,8 +8,11 @@
 //   labels      factory:objective, the state labels, P0..P2
 //   project     the Factory Project (v2) with Status = Queued, Running, In review, Blocked, Done (GraphQL)
 //   protection  the "factory" ruleset on the default branch: merge queue, required checks,
-//               no deletion, no force push; plus Allow auto-merge on the repository (rulesets REST API)
+//               no deletion, no force push; plus Allow auto-merge on the repository (rulesets REST API).
+//               Rulesets and repository settings need `administration`, which the App does not
+//               have: this step runs with the user's own `gh` login (an admin), never the App.
 //   workflow    .github/workflows/factory.yml from workflow-template.yml with the inputs given
+import { pathToFileURL } from "node:url";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
@@ -116,7 +119,7 @@ async function main() {
   const checkout = resolve(args.checkout || process.cwd());
   const steps = (args.apply || "all") === "all" ? ["labels", "project", "protection", "workflow"] : String(args.apply).split(",").map((s) => s.trim());
   const yes = args.yes === "true";
-  const needsToken = yes && steps.some((s) => s !== "workflow");
+  const needsToken = yes && steps.some((s) => s === "labels" || s === "project");
 
   let token = inputs.appToken || null;
   if (needsToken && !token) {
@@ -131,7 +134,7 @@ async function main() {
   const plan = {
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,
     project: `create the Factory Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns`,
-    protection: `create or update the "factory" ruleset on the default branch (merge queue, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and turn on Allow auto-merge${inputs.autoMerge ? "" : " (skipped: auto_merge false)"}`,
+    protection: `create or update the "factory" ruleset on the default branch (merge queue, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and turn on Allow auto-merge${inputs.autoMerge ? "" : " (skipped: auto_merge false)"}; runs as your gh login (needs admin), not the App`,
     workflow: `write ${args.out || ".github/workflows/factory.yml"} from workflow-template.yml`,
   };
   if (!yes) {
@@ -143,7 +146,7 @@ async function main() {
     let note;
     if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await applyProject(repo, opts);
-    else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, autoMerge: inputs.autoMerge }, opts);
+    else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, autoMerge: inputs.autoMerge }, { token: null });
     else if (s === "workflow") note = applyWorkflow({ inputs, args, checkout });
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);
@@ -151,7 +154,7 @@ async function main() {
   process.stdout.write(`done; run node ${join(ACTION_ROOT, "scripts/doctor.mjs")} --repo ${repo.full} to confirm\n`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] setup failed: ${e.message}\n`);
     process.exit(1);

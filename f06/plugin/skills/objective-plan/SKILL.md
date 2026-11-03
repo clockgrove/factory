@@ -9,7 +9,7 @@ Read the whole issue: goal, acceptance, sources, context and the owner's recorde
 
 ## The plan comment
 
-Post one comment on the issue before writing code, and edit that same comment as the work moves; never post a second one. Mark it with `<!-- factory:{{issue}}:plan -->` on its first line so a rerun finds it. It holds, in this order:
+Post one comment on the issue before writing code, and edit that same comment as the work moves; never post a second one. Mark it with `<!-- factory:<issue>:plan -->` on its first line, with the issue number in place of `<issue>`, so a rerun and the scorecard find it. It holds, in this order:
 
 1. **Goal in your own words.** Two or three sentences. If your words and the issue disagree, the issue wins; fix your words.
 2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to at least one item and name which. Mark each item done by editing the comment as it lands.

@@ -43,9 +43,16 @@ function commitActor(commit) {
   return { login: name || email || "unknown", type: "User", unlinked: true };
 }
 
-/** The first `labeled factory:objective` event (the clock), or null. */
-export function labelTime(issue, timeline, label = OBJECTIVE_LABEL) {
-  const events = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name === label).sort((a, b) => ms(a.created_at) - ms(b.created_at));
+/**
+ * The first `labeled factory:objective` event (the clock), or null. With
+ * `clockAfter`, the first such event at or after that date: an issue that an
+ * earlier Factory already ran under the same label starts its 0.6 clock there.
+ */
+export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter = null) {
+  const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
+  const events = (timeline || [])
+    .filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) >= floor)
+    .sort((a, b) => ms(a.created_at) - ms(b.created_at));
   return events[0]?.created_at ?? null;
 }
 
@@ -146,14 +153,14 @@ export function runnerMinutes(collected) {
  * of extra machine logins), label (the Objective label).
  */
 export function scoreObjective(collected, opts = {}) {
-  const { prices, minutes: given, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL } = opts;
+  const { prices, minutes: given, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [] } = opts;
   const issue = collected.issue;
   const missing = [];
-  let since = labelTime(issue, collected.issueTimeline, label);
-  let sinceBasis = `first "${label}" label`;
+  let since = labelTime(issue, collected.issueTimeline, label, clockAfter);
+  let sinceBasis = clockAfter ? `first "${label}" label at or after ${clockAfter}` : `first "${label}" label`;
   if (!since) {
-    since = issue.created_at;
-    sinceBasis = `issue created (no "${label}" label event found)`;
+    since = clockAfter && ms(issue.created_at) < ms(clockAfter) ? clockAfter : issue.created_at;
+    sinceBasis = clockAfter && since === clockAfter ? `--clock-after (no "${label}" label event at or after it)` : `issue created (no "${label}" label event found)`;
     missing.push("label event");
   }
   const pulls = branchPulls(collected);
@@ -186,7 +193,7 @@ export function scoreObjective(collected, opts = {}) {
   const cost = costOf(usage, prices, { harness: collected.harness ?? null });
 
   const runner = runnerMinutes(collected);
-  if (runner.minutes === null) missing.push("job log");
+  if (collected.jobs === null || collected.jobs === undefined) missing.push("job log");
   const wall = merged ? minutes(since, merged.merged_at) : null;
 
   let operator;
@@ -206,7 +213,7 @@ export function scoreObjective(collected, opts = {}) {
     quality.judge = {
       objective: `objectives/${issue.number}.md`,
       command: `node bench/judge.mjs --repo <clone of ${collected.repository}> --a ${candidateSha} --b ${baseline} --objective objectives/${issue.number}.md --judge "<judge command>"`,
-      gradeAuto: `node bench/grade-auto.mjs --repo <clone of ${collected.repository}> --commit ${candidateSha} --base ${baseline} --objective objectives/${issue.number}.md --out grades/${issue.number}.json`,
+      gradeAuto: `node bench/grade-auto.mjs --repo <clone of ${collected.repository}> --commit ${candidateSha} --base ${baseline} --objective objectives/${issue.number}.md ${(checks.length ? checks : ["<validation command>"]).map((c) => `--check ${JSON.stringify(c)}`).join(" ")} --out grades/${issue.number}.json`,
     };
 
   return {
@@ -235,6 +242,8 @@ export function scoreObjective(collected, opts = {}) {
 
 const fmtUsd = (n) => (n === null || n === undefined ? "unmetered" : `$${n.toFixed(2)}`);
 const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === "number" ? `${n}` : String(n));
+/** One table cell: no pipe, no line break (a Blocked reason may carry either). */
+const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 /** The Markdown table: one row per Objective, oldest issue first. */
 export function markdownTable(rows) {
@@ -243,11 +252,12 @@ export function markdownTable(rows) {
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
     const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
     const q = r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
-    const cost = r.cost.unit === "tokens" && r.cost.usd !== null ? `${fmtUsd(r.cost.usd)} (${(r.cost.tokens.input ?? 0).toLocaleString("en-US")} in / ${(r.cost.tokens.output ?? 0).toLocaleString("en-US")} out)` : fmtUsd(r.cost.usd);
-    lines.push(`| #${r.issue} | ${r.exit} | ${walk} | ${q} | ${fmtMin(r.operator.minutes)} | ${cost} | ${r.cost.unit ?? "?"} | ${(r.cost.basis ?? "").replace(/\|/g, "/")} | ${fmtMin(r.runnerMinutes)} | ${fmtMin(r.wallMinutes)} | ${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""} |`);
+    const cost = r.harness === "codex" && r.cost.usd !== null ? `${fmtUsd(r.cost.usd)} (${(r.cost.tokens.input ?? 0).toLocaleString("en-US")} in / ${(r.cost.tokens.output ?? 0).toLocaleString("en-US")} out)` : fmtUsd(r.cost.usd);
+    const cells = [`#${r.issue}`, r.exit, walk, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
+    lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];
-  for (const r of rows) if (r.cost.note) notes.push(`- #${r.issue}: ${r.cost.note}`);
+  for (const r of rows) if (r.cost.note) notes.push(`- #${r.issue}: ${cell(r.cost.note)}`);
   for (const r of rows) if (r.missing.length) notes.push(`- #${r.issue}: missing ${r.missing.join(", ")}`);
   return `${lines.join("\n")}${notes.length ? `\n\n${notes.join("\n")}` : ""}\n`;
 }

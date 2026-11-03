@@ -9,24 +9,23 @@ Work one Objective in this session, on this machine, on the user's own login. Th
 
 ## Preconditions
 
-- The current directory is a clone of the target repository with its toolchain installed and `gh` logged in. If `.github/workflows/factory.yml` or a Factory config exists, read the validation commands, budget command, protected paths and budget from it; otherwise ask once for whatever is missing, since this is the one interactive path.
+- The current directory is a clone of the target repository with its toolchain installed and `gh` logged in. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`. Otherwise ask once for whatever is missing; this is the one interactive path, before the run starts.
 - The issue carries `factory:objective` and is open. Stop and say so if not.
-- Never run on Factory's own repository.
 
 ## Render the task card
 
-Read `templates/task-card.md` next to this plugin and fill the placeholders:
+Read `templates/task-card.md` in this plugin's root (`${CLAUDE_PLUGIN_ROOT}` in Claude Code; `~/.codex/plugins/cache/<marketplace>/factory/<version>/` in Codex) and fill the placeholders:
 
 | Placeholder | Value |
 | --- | --- |
 | `{{issue}}` | the issue number |
-| `{{usd}}`, `{{hours}}` | the budget; defaults `max_usd` and `timeout_minutes / 60` from the workflow, else what the user said |
-| `{{validation}}` | the repository's validation commands, comma-separated |
+| `{{usd}}`, `{{hours}}` | the budget: `FACTORY_MAX_USD` and `FACTORY_TIMEOUT_MINUTES / 60`, else what the user said |
+| `{{validation}}` | the repository's validation commands, separated by `; ` |
 | `{{budget_command}}` | the test-budget command, or `none` |
-| `{{protected_paths}}` | `.github/`, CODEOWNERS, CI and merge-queue config, the skills and agent directories, the budget file, plus the repository's own list |
+| `{{protected_paths}}` | `.github/`, CODEOWNERS, `.agents/skills/`, `.claude/`, `.codex/`, plus `FACTORY_PROTECTED_PATHS` |
 | `{{branch}}` | `factory/<issue>` |
 
-Then check out the default branch, create `factory/<issue>` from it, fetch the issue body with `gh issue view <issue> --json title,body,labels` and write the agent definitions from `agents/` into the checkout if they are not already there (`.claude/agents/`, `.codex/agents/`, `.github/agents/`, whichever this harness reads).
+Then check out the default branch, create `factory/<issue>` from it, and fetch the issue body with `gh issue view <issue> --json title,body,labels`. Write the agent definitions from this plugin's `agents/` into the checkout for the harness you are (`.claude/agents/`, `.codex/agents/` or `.github/agents/`) unless the repository has its own, and append every path you wrote to `.git/info/exclude`: those directories are protected paths and must never be committed. On Claude Code, also copy the repository's `.agents/skills/*` into `.claude/skills/` the same way, since Claude Code reads only the latter.
 
 ## Run
 
@@ -34,4 +33,4 @@ Treat the rendered task card as your instructions and the issue body verbatim as
 
 ## After
 
-Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: none). The `factory-score` skill turns that into a scorecard row later.
+Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file). The `factory-score` skill turns that into a scorecard row later.

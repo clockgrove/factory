@@ -1,10 +1,10 @@
 # Factory bench (0.6)
 
-The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies; `gh` logged in for anything that reads GitHub.
+The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub) and `unzip` (for artifact downloads).
 
 ## The four numbers
 
-One row per Objective, read from the issue, the PR on `factory/<issue>`, the job log and the usage artifact (`factory-usage-<issue>`, plus `-review-<n>`):
+One row per Objective, read from the issue, the PR on `factory/<issue>`, the job log and the usage artifact (`factory-usage-<issue>`, plus `factory-usage-<issue>-review`):
 
 | Number | What the row says | Taken from |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ Artifacts download through the artifacts API with the `gh` login (needs `actions
 ## Judge and auto-grader on two branches
 
 ```sh
-git clone OWNER/NAME widgets && gh issue view 811 --json body -q .body > objectives/811.md
+gh repo clone OWNER/NAME widgets && gh issue view 811 --json body -q .body > objectives/811.md
 node bench/judge.mjs --repo widgets --a factory/811 --b main~3 --objective objectives/811.md \
     --judge 'node graders/widgets-judge.mjs' --out judgments/811.json
 node bench/grade-auto.mjs --repo widgets --commit factory/811 --base main~3 --objective objectives/811.md \

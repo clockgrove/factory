@@ -9,6 +9,7 @@
 // order P0, P1, P2, then number; cap at max_concurrent minus running; start
 // nothing when today's spend (usage artifacts uploaded today) has reached
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
+import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { blockedByRelations, findProject, listIssuesByLabel, moveCard, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, setStateLabel, todaysUsage } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -53,17 +54,18 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   });
   if (project) statuses = await projectStatuses(project, repo, issues.map((i) => i.number), opts);
 
-  // Recovery: a Blocked or Question issue whose factory:objective label was re-applied
-  // after it stopped is Queued again (the plan's "re-apply the label"). An explicit
-  // --issue from workflow_dispatch is the same human intent.
+  // Recovery: a Blocked, Question or In-review issue (a PR closed unmerged by a human)
+  // whose factory:objective label was re-applied after it stopped is Queued again (the
+  // plan's "re-apply the label"). An explicit --issue from workflow_dispatch is the same
+  // human intent.
   const reset = [];
   for (const issue of wanted) {
     const state = stateOf(issue, statuses[issue.number] ?? null);
-    if (state !== "Blocked" && state !== "Question") continue;
-    const again = inputs.issue === issue.number || (await relabeledAfter(repo, issue.number, inputs.objectiveLabel, ["factory:blocked", "factory:question"], opts).catch(() => false));
+    if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
+    const again = inputs.issue === issue.number || (await relabeledAfter(repo, issue.number, inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], opts).catch(() => false));
     if (!again) continue;
     reset.push(issue.number);
-    issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question)$/.test(typeof l === "string" ? l : l.name));
+    issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
     statuses[issue.number] = "Queued";
     if (!dryRun) {
       await setStateLabel(repo, issue.number, null, opts);
@@ -74,8 +76,17 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   // Running count comes from every objective, not only the wanted ones.
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
-  const records = await todaysUsage(repo, { token, dateIso: now.toISOString().slice(0, 10) });
-  const spentToday = sumSpend(records);
+  // Reading artifacts needs `actions: read`, which the job token has (workflow-template.yml) and
+  // the App does not; the App stays at its four permissions. A failed read starts nothing today.
+  let records = [];
+  let usageError = null;
+  try {
+    records = await todaysUsage(repo, { token: inputs.githubToken || token, dateIso: now.toISOString().slice(0, 10) });
+  } catch (e) {
+    usageError = e.message.slice(0, 200);
+    log(`today's usage could not be read (${usageError}); treating daily_usd as reached`);
+  }
+  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records);
 
   const picked = selectReady({
     issues: wanted,
@@ -108,7 +119,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
   }
-  return { ...picked, running, spentToday, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done };
+  return { ...picked, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done };
 }
 
 async function main() {
@@ -131,7 +142,7 @@ async function main() {
   };
   if (args.json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
-    log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}`);
+    log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
     log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}`);
     for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
   }
@@ -144,7 +155,7 @@ async function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] dispatch failed: ${e.message}\n`);
     process.exit(1);

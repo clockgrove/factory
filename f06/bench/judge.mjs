@@ -20,7 +20,7 @@
  * Exit codes: 0 judged; 64 usage; 70 the judge failed.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -63,13 +63,14 @@ const file = join(home, "benchmarks", "pair.json");
 writeFileSync(file, `${JSON.stringify({ id: "pair", judge: { command: values.judge, timeoutMinutes } }, null, 2)}\n`);
 if (values.graders) {
   // lib/judge.mjs resolves graders/ beside benchmarks/; a symlink puts the given directory there.
-  const { symlinkSync } = await import("node:fs");
   symlinkSync(resolve(values.graders), join(home, "graders"));
 }
 const objective = resolve(values.objective);
 let result;
 try {
   result = await runJudge({ file, judge: { command: values.judge, timeoutMinutes } }, { repo, commit: refs[A], objective }, { repo, commit: refs[B], objective });
+} catch (error) {
+  result = { error: `judge failed: ${error.message}` };
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

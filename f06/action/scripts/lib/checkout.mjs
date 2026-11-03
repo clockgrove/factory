@@ -5,7 +5,6 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec, git } from "./proc.mjs";
-import { protectedTouched } from "./logic.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 
 export const ACTION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -18,12 +17,15 @@ export const AGENT_DIRS = { claude: ".claude/agents", codex: ".codex/agents", co
 const AGENT_SOURCE = { claude: "agents/claude", codex: "agents/codex", copilot: "agents/copilot" };
 
 /**
- * Copy the plugin's skills to .agents/skills and .claude/skills, and all three
- * agent definitions to their directories, without overwriting a repository skill
- * of the same name (an adopter's override wins). Everything written is added to
- * .git/info/exclude so the worker cannot commit it. Returns the paths written.
+ * Copy the plugin's skills to .agents/skills and .claude/skills, mirror the
+ * repository's own .agents/skills into .claude/skills (Claude Code reads only the
+ * latter; Codex and Copilot read .agents/skills), and write the active harness's
+ * agent definitions, without overwriting a repository file of the same name (an
+ * adopter's override wins). `models` rewrites the pinned model lines from the
+ * job's subagent_model / reviewer_model inputs when given. Everything written is
+ * added to .git/info/exclude so the worker cannot commit it. Returns the paths written.
  */
-export function installPlugin(checkout, pluginRoot = PLUGIN_ROOT) {
+export function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harness = null, models = {} } = {}) {
   const written = [];
   const skillsSrc = join(pluginRoot, "skills");
   if (!existsSync(skillsSrc)) throw new Error(`plugin skills not found at ${skillsSrc}`);
@@ -37,19 +39,44 @@ export function installPlugin(checkout, pluginRoot = PLUGIN_ROOT) {
       written.push(join(dir, name));
     }
   }
-  for (const [harness, dir] of Object.entries(AGENT_DIRS)) {
-    const src = join(pluginRoot, AGENT_SOURCE[harness]);
+  const repoSkills = join(checkout, ".agents", "skills");
+  if (existsSync(repoSkills)) {
+    for (const name of readdirSync(repoSkills)) {
+      const src = join(repoSkills, name);
+      const dst = join(checkout, ".claude", "skills", name);
+      if (existsSync(dst) || !existsSync(join(src, "SKILL.md"))) continue;
+      mkdirSync(dirname(dst), { recursive: true });
+      cpSync(src, dst, { recursive: true });
+      written.push(join(".claude", "skills", name));
+    }
+  }
+  for (const [h, dir] of Object.entries(AGENT_DIRS)) {
+    if (harness && h !== harness) continue;
+    const src = join(pluginRoot, AGENT_SOURCE[h]);
     if (!existsSync(src)) continue;
     for (const file of readdirSync(src)) {
       const dst = join(checkout, dir, file);
       if (existsSync(dst)) continue;
       mkdirSync(dirname(dst), { recursive: true });
-      cpSync(join(src, file), dst);
+      const role = file.replace(/\..*$/, "");
+      const model = role === "implementer" ? models.subagent : role === "reviewer" ? models.reviewer : null;
+      writeFileSync(dst, model ? pinModel(readFileSync(join(src, file), "utf8"), h, model) : readFileSync(join(src, file), "utf8"));
       written.push(join(dir, file));
     }
   }
   excludeFromGit(checkout, written);
   return written;
+}
+
+/** Rewrite the pinned model line of an agent definition in its harness's format. */
+export function pinModel(text, harness, model) {
+  if (harness === "codex") return /^model\s*=/m.test(text) ? text.replace(/^model\s*=.*$/m, `model = ${JSON.stringify(model)}`) : `${text.trimEnd()}\nmodel = ${JSON.stringify(model)}\n`;
+  const fm = /^---\n([\s\S]*?)\n---/.exec(text);
+  if (!fm) return text;
+  let front = fm[1];
+  front = /^model:/m.test(front) ? front.replace(/^model:.*$/m, `model: ${model}`) : `${front}\nmodel: ${model}`;
+  if (harness === "copilot" && !/^model-policy:/m.test(front)) front += "\nmodel-policy: required";
+  return text.replace(fm[0], `---\n${front}\n---`);
 }
 
 /** Append paths to .git/info/exclude (local, never committed). */
@@ -81,12 +108,6 @@ export async function branchDelta(checkout, base, branch = "HEAD") {
   const count = Number((await git(checkout, ["rev-list", "--count", `${base}..${branch}`])).stdout.trim()) || 0;
   const files = count ? (await git(checkout, ["diff", "--name-only", `${base}...${branch}`])).stdout.split("\n").map((s) => s.trim()).filter(Boolean) : [];
   return { count, files };
-}
-
-/** Refuse (by reverting) commits that touch a protected path. Returns the offending paths. */
-export async function guardProtected(checkout, base, protectedList) {
-  const { files } = await branchDelta(checkout, base);
-  return protectedTouched(files, protectedList);
 }
 
 /** Run one shell command in the checkout with the model secrets scrubbed from its env. */

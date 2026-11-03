@@ -86,7 +86,7 @@ test("question answered: merged, but the owner's answer and ready-for-review are
 test("cost: Codex tokens are priced from prices.json, with its date and placeholder status in the basis", () => {
   const row = scoreObjective(cleanMerge(46, usage("codex")), { prices, now: NOW });
   assert.equal(row.harness, "codex");
-  assert.equal(row.cost.unit, "tokens");
+  assert.equal(row.cost.unit, "usd"); // dollars priced from the table are the measure
   // 35,000 uncached in, 115,000 cached, 10,500 out at the gpt-6.1-sol placeholder rates
   assert.equal(row.cost.usd, priceTokens(prices, "gpt-6.1-sol", { input: 150000, cached: 115000, output: 10500 }));
   assert.equal(row.cost.usd, 0.2738);
@@ -117,7 +117,7 @@ test("cost: the reviewer's artifact is summed with the worker's; a raw Claude re
   const row = scoreObjective(cleanMerge(48, both), { prices, now: NOW });
   assert.equal(row.cost.usd, 8.2312);
   assert.match(row.cost.basis, /2 artifacts summed/);
-  const raw = parseUsageText(read(join(import.meta.dirname, "..", "..", "action", "test", "fixtures", "claude-result.json")));
+  const raw = parseUsageText(read(join(USAGE, "claude-result.json")));
   assert.equal(raw.harness, "claude");
   assert.equal(raw.usd, 7.4312);
   assert.equal(raw.model, "claude-fable-5-1");

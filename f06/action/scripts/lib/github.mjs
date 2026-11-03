@@ -117,8 +117,8 @@ export async function blockedByRelations(repo, number, opts) {
 
 /**
  * Whether `label` was (re)applied after the last `since` label was applied: the
- * plan's recovery path, where a human re-applies factory:objective to a Blocked or
- * Question issue. Reads the issue timeline's `labeled` events.
+ * plan's recovery path, where a human re-applies factory:objective to a Blocked,
+ * Question or abandoned In-review issue. Reads the issue timeline's `labeled` events.
  */
 export async function relabeledAfter(repo, number, label, since, opts) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
@@ -194,10 +194,6 @@ export async function prDiff(repo, number, opts) {
   return rest(`repos/${repo.full}/pulls/${number}`, { ...opts, raw: "Accept: application/vnd.github.diff" });
 }
 
-export async function prFiles(repo, number, opts) {
-  return (await rest(`repos/${repo.full}/pulls/${number}/files?per_page=100`, { ...opts, paginate: true })) || [];
-}
-
 /** Convert to draft or mark ready: GraphQL is the only API for it. */
 export async function setDraft(repo, number, draft, opts) {
   const pr = await getPr(repo, number, opts);
@@ -224,16 +220,27 @@ export async function prComment(repo, number, body, opts) {
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body } });
 }
 
-/** `gh pr merge --auto --squash` with the App token (the queue needs the App as enqueuer). */
+/**
+ * `gh pr merge --auto --squash` with the App token (the queue needs the App as
+ * enqueuer). GitHub refuses auto-merge on a PR that is already mergeable ("clean
+ * status"); that one merges (enqueues, on a queue-protected branch) directly.
+ */
 export async function enableAutoMerge(repo, number, opts = {}) {
-  await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--auto", "--squash"], { env: env(opts.token) });
+  try {
+    await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--auto", "--squash"], { env: env(opts.token) });
+    return "auto";
+  } catch (e) {
+    if (!/clean status|already|not in the correct state/i.test(String(e.stderr || e.message))) throw e;
+    await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--squash"], { env: env(opts.token) });
+    return "direct";
+  }
 }
 
 // ---------------------------------------------------------------- projects
 
 const PROJECT_FIELDS = `
   id title number
-  field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+  field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name color description } } }
 `;
 
 /** The repository's Factory project (title "Factory", else the first linked project), or null. */
@@ -364,10 +371,6 @@ export async function listRulesets(repo, opts) {
   return (await rest(`repos/${repo.full}/rulesets?per_page=100`, opts)) || [];
 }
 
-export async function getRuleset(repo, id, opts) {
-  return rest(`repos/${repo.full}/rulesets/${id}`, opts);
-}
-
 /** Create or update the Factory ruleset on the default branch: merge queue, required checks, no deletion/force push. */
 export async function ensureRuleset(repo, { branch, checks, ciWorkflow }, opts) {
   const existing = (await listRulesets(repo, opts)).find((r) => r.name === "factory");
@@ -387,23 +390,6 @@ export async function ensureRuleset(repo, { branch, checks, ciWorkflow }, opts) 
   };
   if (existing) return rest(`repos/${repo.full}/rulesets/${existing.id}`, { ...opts, method: "PUT", body });
   return rest(`repos/${repo.full}/rulesets`, { ...opts, method: "POST", body });
-}
-
-/** The installation token's permissions, from the App's installation on this repository. */
-export async function installationPermissions(token) {
-  // The token can read its own installation's repositories; the permissions come back with the installation.
-  const data = await rest("installation/repositories?per_page=1", { token });
-  return data;
-}
-
-export async function userExists(login, opts) {
-  try {
-    await rest(`users/${encodeURIComponent(login)}`, opts);
-    return true;
-  } catch (e) {
-    if (e.status === 404) return false;
-    throw e;
-  }
 }
 
 export async function collaboratorPermission(repo, login, opts) {

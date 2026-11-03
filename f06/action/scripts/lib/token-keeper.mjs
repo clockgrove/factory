@@ -17,6 +17,7 @@ export class TokenKeeper {
     this.owner = owner;
     this.repo = repo;
     this.token = fixedToken;
+    this.issued = fixedToken ? [fixedToken] : []; // every token this job held, for masking the uploaded event log
     this.fixed = !!fixedToken;
     this.refreshMs = refreshMinutes * 60_000;
     this.timer = null;
@@ -38,6 +39,7 @@ export class TokenKeeper {
   async refresh() {
     const minted = await mintInstallationToken({ appId: this.appId, privateKey: this.privateKey, owner: this.owner, repo: this.repo });
     this.token = minted.token;
+    this.issued.push(minted.token);
     this.app = minted;
     mask(this.token);
     this.write();
@@ -52,9 +54,9 @@ export class TokenKeeper {
     chmodSync(hosts, 0o600);
   }
 
-  /** The env additions for a child that must act as the App for hours: no GH_TOKEN, gh reads hosts.yml. */
+  /** The env additions for a child that must act as the App for hours: no GH_TOKEN, gh reads hosts.yml; git reads the token file through the credential helper. */
   childEnv() {
-    return { GH_CONFIG_DIR: join(this.dir, "gh"), GH_TOKEN: undefined, GITHUB_TOKEN: undefined, FACTORY_TOKEN_FILE: join(this.dir, "token") };
+    return { GH_CONFIG_DIR: join(this.dir, "gh"), GH_TOKEN: undefined, GITHUB_TOKEN: undefined };
   }
 
   /** The git credential helper command that reads the token file on every use. */

@@ -5,12 +5,19 @@
 // price table). `basis` says where the dollars came from, so the scorecard shows it.
 // A count a harness does not report is null, never zero.
 
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /**
- * Codex prices, USD per million tokens, by model prefix. Codex reports tokens, not
- * dollars, so the worker prices them here. Update the date with the table.
+ * Codex prices, USD per million tokens, by model prefix: the bench's one table
+ * (bench/prices.json) when it sits beside the action, else this copy of it. Codex
+ * reports tokens, not dollars, so the worker prices them here; the bench re-prices.
+ * `status: "placeholder"` travels into every basis string until the rates are real.
  * Unknown models give usd: null and basis "unmetered: no price for <model>".
  */
-export const CODEX_PRICES = {
+const FALLBACK_PRICES = {
+  status: "placeholder",
   date: "2026-11-02",
   perMillion: {
     "gpt-6.1-sol": { input: 2.5, cached: 0.25, output: 15 },
@@ -21,6 +28,21 @@ export const CODEX_PRICES = {
     "gpt-5": { input: 1.25, cached: 0.125, output: 10 },
   },
 };
+function loadPrices() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const f of [join(here, "..", "..", "..", "bench", "prices.json"), join(here, "..", "..", "bench", "prices.json")]) {
+    if (!existsSync(f)) continue;
+    try {
+      const p = JSON.parse(readFileSync(f, "utf8"));
+      if (p?.perMillion) return p;
+    } catch {
+      // unreadable: fall through
+    }
+  }
+  return FALLBACK_PRICES;
+}
+export const CODEX_PRICES = loadPrices();
+const priceBasis = () => `priced from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
@@ -74,16 +96,19 @@ export function parseClaude(stdout, model) {
       result = null;
     }
   }
+  let init = null;
   if (!result) {
     const lines = jsonLines(stdout);
     result = [...lines].reverse().find((l) => l && l.type === "result") ?? lines.at(-1) ?? null;
+    init = lines.find((l) => l && l.type === "system" && l.session_id) ?? null;
   }
   if (!result) {
     rec.error = "no JSON result on stdout";
+    rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
     return rec;
   }
   rec.subtype = result.subtype ?? null;
-  rec.sessionId = result.session_id ?? null;
+  rec.sessionId = result.session_id ?? init?.session_id ?? null;
   rec.turns = num(result.num_turns);
   rec.budgetExceeded = result.subtype === "error_max_budget_usd";
   rec.ok = result.is_error !== true && (result.subtype === "success" || result.subtype === undefined);
@@ -125,6 +150,7 @@ export function parseClaude(stdout, model) {
 /** Price Codex tokens from the table; null when the model is not listed. */
 export function priceCodex(model, tokens) {
   if (!model) return null;
+  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
   const key = Object.keys(CODEX_PRICES.perMillion)
     .sort((a, b) => b.length - a.length)
     .find((k) => model === k || model.startsWith(k));
@@ -171,44 +197,67 @@ export function parseCodex(stdout, model) {
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
   rec.usd = priceCodex(rec.model, rec.tokens);
-  rec.basis = rec.usd === null ? `unmetered: no price for ${rec.model ?? "unknown model"}` : `priced from table dated ${CODEX_PRICES.date}`;
+  rec.basis = rec.usd === null ? `unmetered: no price for ${rec.model ?? "unknown model"}` : priceBasis();
   return rec;
 }
 
 /**
- * Copilot: `copilot -p` documents no per-run usage. If a JSON line with token counts
- * appears (the SDK's assistant.usage shape), it is summed; otherwise tokens are null.
- * Dollars are always null: Copilot bills GitHub AI Credits, attributed by the bench
- * from the org's billing window, never by the worker.
+ * Copilot: `copilot -p --output-format json` prints JSONL, and `--usage-output-file`
+ * writes final usage statistics as JSON (token counts and premium requests; the
+ * exact keys are read tolerantly until a real run fixes them). Dollars are always
+ * null: Copilot bills GitHub AI Credits, attributed by the bench from the org's
+ * billing window, never by the worker. A non-zero exit is a harness error, not a death.
  */
-export function parseCopilot(stdout, model, exitCode = 0) {
+export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
   const rec = empty("copilot", model);
   rec.ok = exitCode === 0;
+  rec.subtype = rec.ok ? "success" : "error";
   if (!rec.ok) rec.error = `copilot exited ${exitCode}`;
   let input = null;
   let output = null;
   let cached = null;
-  for (const e of jsonLines(stdout)) {
-    const d = e.type === "assistant.usage" ? e.data ?? e : e.usage ?? null;
-    if (!d) continue;
-    input = add(input, add(num(d.inputTokens ?? d.input_tokens), num(d.cacheReadTokens ?? d.cached_input_tokens)));
+  let turns = 0;
+  const take = (d) => {
+    if (!d || typeof d !== "object") return;
+    input = add(input, add(num(d.inputTokens ?? d.input_tokens), num(d.cacheReadTokens ?? d.cached_input_tokens ?? d.cacheReadInputTokens)));
     output = add(output, num(d.outputTokens ?? d.output_tokens));
-    cached = add(cached, num(d.cacheReadTokens ?? d.cached_input_tokens));
+    cached = add(cached, num(d.cacheReadTokens ?? d.cached_input_tokens ?? d.cacheReadInputTokens));
+    if (num(d.premiumRequests) !== null) rec.premiumRequests = add(rec.premiumRequests ?? null, num(d.premiumRequests));
+  };
+  for (const e of jsonLines(stdout)) {
+    const sid = e.sessionId ?? e.session_id ?? e.data?.sessionId ?? null;
+    if (sid && !rec.sessionId) rec.sessionId = String(sid);
+    if (/assistant|message/i.test(String(e.type || ""))) turns += 1;
+    take(e.type === "assistant.usage" ? (e.data ?? e) : (e.usage ?? null));
   }
+  if (usageFile && existsSync(usageFile)) {
+    try {
+      const u = JSON.parse(readFileSync(usageFile, "utf8"));
+      // The file is the final figure; it replaces whatever the stream carried.
+      input = null;
+      output = null;
+      cached = null;
+      take(u.usage ?? u.totals ?? u);
+      if (!rec.sessionId && (u.sessionId || u.session_id)) rec.sessionId = String(u.sessionId ?? u.session_id);
+    } catch {
+      // unreadable usage file: keep the stream's counts
+    }
+  }
+  rec.turns = turns || null;
   rec.tokens = { input, output, cached };
-  rec.basis = "unmetered: Copilot bills AI Credits; attribute from org billing by time window";
+  rec.basis = input === null && output === null ? "unmetered: Copilot wrote no usage; attribute AI Credits from org billing by time window" : "tokens from copilot --usage-output-file; dollars unmetered (AI Credits, attribute from org billing)";
   return rec;
 }
 
 /** One entry point: harness name to parser. */
-export function parseUsage(harness, stdout, model, exitCode = 0) {
+export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
   switch (harness) {
     case "claude":
       return parseClaude(stdout, model);
     case "codex":
       return parseCodex(stdout, model);
     case "copilot":
-      return parseCopilot(stdout, model, exitCode);
+      return parseCopilot(stdout, model, exitCode, extra);
     default:
       throw new Error(`unknown harness ${harness}`);
   }

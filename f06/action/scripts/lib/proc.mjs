@@ -41,6 +41,8 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       const decode = (chunks) => (encoding === "buffer" ? Buffer.concat(chunks) : Buffer.concat(chunks).toString("utf8"));
       resolve({ code, signal, stdout: decode(out), stderr: decode(err), timedOut });
     });
+    // A child that exits before draining a large prompt raises EPIPE on stdin; that is its exit code's story, not ours.
+    child.stdin.on("error", () => {});
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
@@ -62,6 +64,6 @@ export const git = (cwd, args, opts = {}) => must("git", args, { cwd, ...opts })
 
 /** Whether a command is on PATH. */
 export async function onPath(cmd) {
-  const r = await exec("sh", ["-c", `command -v ${cmd}`]);
+  const r = await exec("sh", ["-c", 'command -v "$1"', "_", String(cmd)]);
   return r.code === 0 ? r.stdout.trim() : null;
 }

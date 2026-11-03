@@ -10,10 +10,13 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { agents } = JSON.parse(readFileSync(join(here, "source.json"), "utf8"));
+for (const a of agents) {
+  if (!a.models?.claude || !a.models?.codex?.model || !a.models?.codex?.reasoning_effort) throw new Error(`${a.name}: models.claude and models.codex.{model,reasoning_effort} are required (copilot may be null for the Copilot default)`);
+}
 
 const yamlString = (s) => JSON.stringify(s);
 const tomlString = (s) => JSON.stringify(s);
-const tomlMultiline = (s) => `"""\n${s.replace(/\\/g, "\\\\").replace(/"""/g, '\\"""')}\n"""`;
+const tomlMultiline = (s) => `"""\n${s.trim().replace(/\\/g, "\\\\").replace(/"""/g, '\\"""')}"""`;
 
 function claude(a) {
   return [

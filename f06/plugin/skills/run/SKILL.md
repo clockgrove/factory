@@ -11,6 +11,7 @@ Work one Objective in this session, on this machine, on the user's own login. Th
 
 - The current directory is a clone of the target repository with its toolchain installed and `gh` logged in. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`. Otherwise ask once for whatever is missing; this is the one interactive path, before the run starts.
 - The issue carries `factory:objective` and is open. Stop and say so if not.
+- Never on Factory's own repository (`clockgrove/factory`): Factory is not a consumer of Factory. Stop and say so.
 
 ## Render the task card
 

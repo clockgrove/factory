@@ -2,36 +2,38 @@
 
 Label a GitHub issue `factory:objective`, walk away, come back to merged work.
 
-A worker job checks out your default branch, reads the issue as the whole specification, plans in a comment, implements with pinned sub-agents, runs your validation commands, and opens one PR on `factory/<issue>`. A reviewer job posts one comment-only pass of line-tied findings; the worker answers each once. Then the PR goes to GitHub's merge queue, which re-runs your CI on the integrated head and merges. Dozens of Objectives run at once; you read the Project board's Blocked column when you choose.
+A worker job checks out your default branch, reads the issue as the whole specification, plans in a comment on it, implements with pinned sub-agents, runs your validation commands, and opens one PR. A review job posts one comment-only review, the worker answers each comment once, validation runs again, and auto-merge hands the PR to your merge queue (or, without one, to your required checks). Nothing asks a question; the only stops are **Blocked** (a draft PR, the card in the Blocked column, one comment with the reason) and **Question** (a draft PR whose body asks the one thing a human must decide), and neither stops the queue.
 
 ## Auto-merge is on
 
-Code lands with no human read. That is the point: the gate is your CI workflow's checks on the merge queue's commit, the comment-only reviewer pass, and the merge queue's own re-run. The reviewer has no verdict and no refuse path; its findings stay visible on the merged PR, answered or rebutted. Set `FACTORY_AUTO_MERGE: false` in the workflow to get ready-for-review PRs instead.
-
-Nothing asks a question. Two exits stop one Objective and never the queue: **Blocked** (validation red after Factory's second pass, reviewer findings unaddressed, dollar or time cap, worker died twice) converts the PR to a draft, moves the card to Blocked and posts one @mention; **Question** (an assumption that would change a public contract or a recorded decision) opens the PR as a draft with the question in its body and requests you as reviewer. Fix either by pushing to the branch or editing the issue, then re-apply `factory:objective`; mark a Question draft ready and the reviewer runs.
+Code lands with no human read. The gate is your CI workflow's checks on the integrated commit, the comment-only reviewer pass, and the merge queue's own re-run where you have one. Set `FACTORY_AUTO_MERGE: false` for ready-for-review PRs instead.
 
 ## Install footprint
 
 | Added | What |
 | --- | --- |
-| `.github/workflows/factory.yml` | About 90 lines calling `clockgrove/factory@v1` three times (dispatch, work, review). Cron every 10 minutes and manual. Never from a fork. `/factory setup` writes it; or copy `workflow-template.yml`. |
-| A Factory GitHub App | Two secrets, `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY`. Permissions: contents, pull requests, issues, projects (read and write); nothing else, especially not workflows. Required: a PR opened or enqueued with the job token gets no merge-queue run, and the job token cannot move a Project card. Factory never creates an App; `/factory setup` walks you through creating one in three minutes and then verifies it. |
-| A model credential | Claude: `ANTHROPIC_API_KEY`, or none with workload identity federation (`id-token: write`). Codex: `CODEX_API_KEY`, passed to the harness step only. Copilot: none; the job token with `copilot-requests: write`. Unattended runs bill API credentials, never a subscription. |
-| Merge queue, branch protection, label, Project board | GitHub settings, not files. `node scripts/setup.mjs --repo OWNER/NAME --yes --ci-checks "<your CI check names>"` applies them: the `factory` ruleset (merge queue, required checks, no force push), the labels, the Factory Project with Queued, Running, In review, Blocked, Done, and Allow auto-merge. |
-| A CI workflow on `pull_request` and `merge_group` | The queue needs checks on its own commit. Most repositories have this; add `merge_group:` under `on:` if yours lacks it. `/factory doctor` says. |
+| `.github/workflows/factory.yml` | About 115 lines, written by `/factory:setup` from the plugin's `workflow-template.yml`: a `dispatch` job, a `work` job matrixed over ready Objectives, a `review` job. Triggers: a cron sweep, manual dispatch, an issue opened or labelled `factory:objective`, and `pull_request` when the App labels a PR `factory:review` or a human marks a Question draft ready. The worker and review jobs each fire the next dispatch at their end. Never from a fork. |
+| A Factory GitHub App | Two secrets, `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY`. Permissions: contents, pull requests, issues, projects (read and write), nothing else and never workflows. Every push, PR, label, board move and enqueue uses its short-lived installation token, minted for this one repository. |
+| A model credential | Claude: `ANTHROPIC_API_KEY` (or workload identity federation with `id-token: write`). Codex: `CODEX_API_KEY`, passed only to the harness step. Copilot: none; the job token with `copilot-requests: write`, which needs your organization's Copilot CLI billing policy on. `credential: plan` with `CLAUDE_CODE_OAUTH_TOKEN` is allowed for your own repository only. |
+| Merge queue, branch protection, label, Project board | GitHub settings, not files. `node scripts/setup.mjs --repo OWNER/NAME --yes --ci-checks "<your CI check names>"` applies them with your `gh` login (rulesets need admin) and creates the board (five columns) and the labels. Private repositories outside Enterprise Cloud cannot have a merge queue; Factory runs them on strict required checks and sends a PR that fell behind or conflicts back to the worker once. |
+| A CI workflow on `pull_request` and `merge_group` | Most repositories have one; add `merge_group:` under `on:` if yours lacks it. |
 
-The job token gets `contents: read` and `issues: write`; every write to code goes through the App's short-lived installation token, scoped to the repository. `.github/`, CODEOWNERS, the skills and agent directories and your `protected_paths` are refused at commit time by a hook and at push time by branch protection. Cost is capped three times in the file: `daily_usd` on the dispatcher, `max_usd` per Objective (Claude's own `--max-budget-usd` enforces it inside the run), `timeout_minutes` as the time cap.
+The job token gets `contents: read`, `issues: write`, `actions: read` (usage artifacts and the CI workflow's triggers), and on the work and review jobs `actions: write` for the dispatch tick; it never writes code. The worker runs on an ephemeral runner; what persists is the branch, the PR, the plan comment and a usage artifact. Cost is capped by `max_usd` per job and `daily_usd` per day; Claude enforces its cap inside the run. Secrets are scrubbed from every non-harness child and masked in the uploaded event log.
+
+## The plugin and the Action are one tree
+
+`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned per harness), the task card, the scripts and the workflow template. The Action (`action/action.yml`) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`). Commands: `/factory:run`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`.
 
 ## Check and run
 
 ```sh
-node scripts/doctor.mjs --repo OWNER/NAME          # PASS/WARN/FAIL per check with the fix; changes nothing
-node scripts/setup.mjs  --repo OWNER/NAME --yes    # applies the GitHub fixes and writes the workflow
-node scripts/dispatch.mjs --repo OWNER/NAME --issue 811   # start one Objective now instead of waiting for cron
+node plugin/scripts/doctor.mjs --repo OWNER/NAME --checkout .        # PASS/WARN/FAIL per check with the fix; changes nothing
+node plugin/scripts/setup.mjs  --repo OWNER/NAME --yes --ci-checks "quality"   # GitHub fixes and the workflow file
+gh workflow run factory.yml -f issue=811                              # one Objective now; the cron and the ticks do the rest
 ```
 
-Each worker job uploads `factory-usage-<issue>` with `events.jsonl` (the harness's raw output) and `result.json` (`{harness, model, usd, tokens, basis, started, ended}`); `usd` is `null` when the run is unmetered (Copilot) and the basis says where the dollars came from (harness-reported, priced from a dated table, or billing window).
+Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, model, usd, tokens, basis, exit, …}`); `bench/score.mjs` turns them into the scorecard's four numbers per Objective.
 
 ## Uninstall
 
-Delete `.github/workflows/factory.yml`, the App and its two secrets, and any model key. Optionally delete the `factory` ruleset, the labels and the Project. Nothing is installed anywhere else.
+Delete `.github/workflows/factory.yml`, the App and its two secrets, and any model key. Optionally delete the `factory` ruleset, the labels and the Project. Nothing is installed on anyone's machine.

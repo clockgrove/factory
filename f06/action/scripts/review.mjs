@@ -151,12 +151,12 @@ async function main() {
     return;
   }
 
-  // Checkout the branch, write the plugin in, set up.
+  // Git identity and the credential helper first (the fetch needs the App's token on a runner), then the branch and the plugin.
+  await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
   await git(checkout, ["fetch", "origin", branch, defaultBranch]);
   await git(checkout, ["checkout", "-B", branch, `origin/${branch}`]);
   const base = (await git(checkout, ["merge-base", `origin/${defaultBranch}`, "HEAD"])).stdout.trim();
   installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
-  await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
   const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true" });
   for (const k of Object.keys(childBase)) if (childBase[k] === undefined) delete childBase[k];
   if (inputs.setup) {

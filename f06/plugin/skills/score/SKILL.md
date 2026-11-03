@@ -18,7 +18,7 @@ For a run made with `/factory:run <issue>` in a session, there is no job log or 
 
 ## Write the row
 
-When the bench is available (`bench/score.mjs` in the Factory checkout, or `FACTORY_BENCH_HOME`), run `node bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), quality (judge pick / read / unread, escapes), operator minutes (and what on), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
+When the bench is available (`bench/score.mjs` in a Factory checkout), run `node bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), quality (judge pick / read / unread, escapes), operator minutes (and what on), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
 
 With no issue given, score every issue that carries `factory:objective` and closed since the date the user names, plus the open ones that are Blocked, Question, In review or Running (`--since <date>`); the table is oldest first.
 

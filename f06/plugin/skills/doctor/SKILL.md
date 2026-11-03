@@ -5,10 +5,10 @@ description: /factory:doctor. Check that this repository, its GitHub settings, i
 
 # /factory:doctor
 
-Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:setup` applies fixes on consent. When `<action>/scripts/doctor.mjs` exists (the Factory action checkout), run it and render its output:
+Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:setup` applies fixes on consent. When the plugin's `scripts/doctor.mjs` exists (it ships with this plugin), run it and render its output:
 
 ```sh
-node <action>/scripts/doctor.mjs --repo OWNER/NAME --checkout . --json [--probe] [--run-setup]
+node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup]
 ```
 
 The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or passes `--app-id` and `--app-private-key <path>`; without one every GitHub line FAILs with "no installation token". `--probe` makes the one-call harness probe; `--run-setup` executes the repository's `setup` command instead of only finding it. The list below is what the script checks and the fallback when it is absent.

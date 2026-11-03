@@ -18,7 +18,7 @@ gh workflow run factory.yml -f issue=N # one Objective, state and blocking rules
 
 Then `gh run list --workflow factory.yml --limit 3` and show the user the run link. The dispatcher picks ready Objectives (labelled, not blocked by an open issue, not Running, Blocked, Question or In review), orders them `P0`, `P1`, `P2`, then issue number, starts up to `max_concurrent` and stops at `daily_usd`. A run that starts nothing says why in its log; show that line.
 
-Never run `scripts/dispatch.mjs` from this session except as `node <action>/scripts/dispatch.mjs --repo OWNER/NAME --dry-run` to preview what the next tick would pick: a real local run marks issues Running on the board and no worker job exists outside the workflow to run them.
+Never run the plugin's `scripts/dispatch.mjs` from this session except as `node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" --repo OWNER/NAME --dry-run` to preview what the next tick would pick: a real local run marks issues Running on the board and no worker job exists outside the workflow to run them.
 
 If `/factory:doctor` has not run on this repository in this session, run it first; a misconfigured repository Blocks every Objective with the same one-line reason and spends a runner minute each.
 

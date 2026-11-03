@@ -181,13 +181,15 @@ runs:
         FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
         FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage
+        # The scripts, skills, agents and task card are one tree: the plugin beside this action.
+        FACTORY_PLUGIN_ROOT: ${{ github.action_path }}/../plugin
       run: |
         set -euo pipefail
         echo "usage_dir=$FACTORY_USAGE_DIR" >> "$GITHUB_OUTPUT"
         mkdir -p "$FACTORY_USAGE_DIR"
         case "$FACTORY_INPUT_MODE" in
-          dispatch) node "${{ github.action_path }}/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
-          work)     node "${{ github.action_path }}/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$FACTORY_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
-          review)   node "${{ github.action_path }}/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$FACTORY_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          dispatch) node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          work)     node "$FACTORY_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$FACTORY_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          review)   node "$FACTORY_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$FACTORY_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
           *) echo "mode must be dispatch, work or review" >&2; exit 1 ;;
         esac

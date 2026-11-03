@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { ACTION_ROOT, installCommand } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
@@ -297,7 +297,7 @@ async function main() {
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {
     for (const r of results) process.stdout.write(`${r.status.padEnd(4)} ${r.name}: ${r.detail}${r.fix && r.status !== "PASS" ? `\n     fix: ${r.fix}` : ""}\n`);
-    process.stdout.write(fails ? `\n${fails} failure(s); run node ${join(ACTION_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes\n` : "\nready\n");
+    process.stdout.write(fails ? `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes\n` : "\nready\n");
   }
   process.exit(fails ? 1 : 0);
 }

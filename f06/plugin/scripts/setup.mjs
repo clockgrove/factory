@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { ACTION_ROOT } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, repoOf, rest } from "./lib/github.mjs";
 import { DEFAULTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 
@@ -84,7 +84,7 @@ async function applyProtection(repo, { ciChecks, autoMerge, queue }, opts) {
 }
 
 function applyWorkflow({ inputs, args, checkout }) {
-  const template = readFileSync(join(ACTION_ROOT, "workflow-template.yml"), "utf8");
+  const template = readFileSync(join(PLUGIN_ROOT, "workflow-template.yml"), "utf8");
   const values = {
     harness: inputs.harness,
     model: inputs.model,
@@ -153,7 +153,7 @@ async function main() {
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);
   }
-  process.stdout.write(`done; run node ${join(ACTION_ROOT, "scripts/doctor.mjs")} --repo ${repo.full} to confirm\n`);
+  process.stdout.write(`done; run node ${join(PLUGIN_ROOT, "scripts/doctor.mjs")} --repo ${repo.full} to confirm\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

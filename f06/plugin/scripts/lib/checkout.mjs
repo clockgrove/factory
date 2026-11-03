@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 import { exec, git } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 
-export const ACTION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-/** The plugin: FACTORY_PLUGIN_ROOT, else <action>/plugin (action.yml at the repository root), else <action>/../plugin (action/ beside plugin/). */
-export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || [resolve(ACTION_ROOT, "plugin"), resolve(ACTION_ROOT, "..", "plugin")].find((p) => existsSync(join(p, "skills"))) || resolve(ACTION_ROOT, "..", "plugin");
+/** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
+export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** Kept for callers that name the scripts' home; it is the plugin now. */
+export const ACTION_ROOT = PLUGIN_ROOT;
 
 /** Where each harness reads skills and agents from, relative to the checkout. */
 export const SKILL_DIRS = [".agents/skills", ".claude/skills"];

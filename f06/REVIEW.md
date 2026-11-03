@@ -53,5 +53,10 @@ Three independent reviewers read f06/plugin, f06/action and f06/bench against PL
 13. **Copilot's `--max-ai-credits`** is the Copilot analogue of `--max-budget-usd`; the unit is credits, so it is not wired to `max_usd`. Wire it once a run shows the credit figure.
 14. Smaller: the implementer agent's text bakes in Clockgrove's testing philosophy ("one lasting test per claim, delete scaffolding"); PLAN says adopter rules live in the adopter's skill. RESEARCH.md line 4 says `.agents/skills/` is read by all three harnesses; Claude Code reads `.claude/skills/` only (the mirror above covers it).
 
+## Decisions taken on Nov 2 evening (Kirk)
+- Factory never builds itself: the first adopter and every gate up to the dispatcher run on `clockgrove/factory-scratch` (private, throwaway). PLAN.md's step-7 gate ("Factory's own repository has run one Objective through its own workflow") is superseded; the `/factory` skill keeps "never on Factory's own repository" out of its text but the rule stands.
+- Protection for step 2 is a ruleset requiring the CI check; the merge queue lands at step 3 (#2374). Doctor WARNs instead of FAILs on a missing queue while required checks exist.
+- Step 2's local worker run uses the developer's gh login as the GitHub token (`credential: login` for the harness; `FACTORY_APP_TOKEN` from `gh auth token`); commits are attributed to that login, which the bench scores as a human push. Step 3 (Actions) still needs `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY` as secrets on the scratch repository: the key is yours to add.
+
 ## Verified consistent (no change)
 Task-card placeholders match `taskCardValues`; `result.json` keys match between action and bench; markers and labels match across the three lanes; the three exits and their priority; dispatcher order and caps; the review trigger guard; App permissions; `rulesets`/`merge_queue` REST parameter names; Claude `result` and Codex JSONL field names against RESEARCH.md and the CLIs; judge blinding and temp-dir hygiene; `render.mjs` reproduces the committed agents byte for byte.

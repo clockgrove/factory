@@ -159,3 +159,15 @@ test("scrubbedEnv: an undefined or null extra value removes the key (the dispatc
   const e = scrubbedEnv({ PATH: "/bin", GITHUB_SHA: "abc", GITHUB_REF: "refs/heads/main", KEEP: "1" }, { GITHUB_SHA: undefined, GITHUB_REF: "refs/heads/factory/7", GONE: null });
   assert.deepEqual(e, { PATH: "/bin", GITHUB_REF: "refs/heads/factory/7", KEEP: "1" });
 });
+
+test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach the job's later children", async () => {
+  const { mkdtempSync, writeFileSync: write } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { runnerFileEnv } = await import("../scripts/lib/checkout.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "factory-runner-"));
+  write(join(dir, "path"), "/usr/lib/postgresql/18/bin\n/usr/bin\n\n");
+  write(join(dir, "env"), "PGHOST=localhost\nNOTE<<EOF\nline one\nline two\nEOF\nBAD LINE\n");
+  const out = runnerFileEnv({ PATH: "/usr/bin:/bin", GITHUB_PATH: join(dir, "path"), GITHUB_ENV: join(dir, "env") });
+  assert.deepEqual(out, { PATH: "/usr/lib/postgresql/18/bin:/usr/bin:/bin", PGHOST: "localhost", NOTE: "line one\nline two" });
+  assert.deepEqual(runnerFileEnv({ PATH: "/bin" }), {});
+});

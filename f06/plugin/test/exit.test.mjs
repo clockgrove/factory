@@ -117,3 +117,12 @@ test("decideExit: a red validation names the command that failed", () => {
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 2, green: false, command: "pnpm test" } }).reason, "validation red after Factory's second pass (pnpm test)");
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
 });
+
+test("question: the marker is a list item's first word, not the word in prose", () => {
+  assert.equal(hasQuestion("1. **Resolved by the owner (was a QUESTION):** the wire shape is accepted."), false);
+  assert.equal(hasQuestion("Assumption 1's QUESTION was answered, so the PR is ready."), false);
+  assert.equal(hasQuestion("## Assumptions\n1. **QUESTION: is this wire shape acceptable?** Details."), true);
+  assert.equal(hasQuestion("- QUESTION: which port?"), true);
+  const harness = { ok: true, died: 0 };
+  assert.equal(decideExit({ harness, pr: { exists: true, draft: true, body: "## Assumptions\n1. Resolved (was a QUESTION)." }, commits: 1, validation: { passes: 1, green: true } }).exit, "delivered");
+});

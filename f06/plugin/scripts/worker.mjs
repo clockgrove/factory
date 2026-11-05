@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
-import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -159,6 +159,7 @@ async function main() {
       await finish("blocked", reason);
       return;
     }
+    Object.assign(childBase, runnerFileEnv(childBase)); // PATH and env the setup wrote for the steps after it
   }
   const install = installCommand(checkout, inputs.install);
   if (install) {

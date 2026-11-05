@@ -19,7 +19,7 @@ These sections, in this order, each under exactly this `##` heading (Factory rea
 - `## Validation`: every validation command and the budget command, exactly as run, each with its result and, for a failure, whether it fails identically on the base commit.
 - `## Fake-only proofs`: each entry proved only against a fake or in-memory stand-in, and why the real path could not run here. Write `none` when there are none.
 - `## Design checklist`: when the repository has one, each question answered with `file:line` evidence, or `n/a` with the reason.
-- `## Assumptions`: the plan comment's list, with any item marked `QUESTION` first and phrased as the question a human must answer.
+- `## Assumptions`: the plan comment's list, with any item that starts with `QUESTION:` first and phrased as the question a human must answer; an answered one no longer starts with it.
 - `## Undone`: anything the issue asked for that this PR does not deliver, with the reason and, for a split Objective, the PR that will.
 - `## Blocked` (only when blocked beyond recovery): what blocked you, in one paragraph.
 

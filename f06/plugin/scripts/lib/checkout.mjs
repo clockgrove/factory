@@ -128,6 +128,35 @@ export function branchIdentity(branch) {
   return { GITHUB_REF: `refs/heads/${branch}`, GITHUB_REF_NAME: branch, GITHUB_SHA: undefined };
 }
 
+/**
+ * What a setup command wrote to the runner's GITHUB_PATH and GITHUB_ENV files (a repository's
+ * toolchain script does that as a CI step would), as env additions for the job's later children:
+ * PATH with the new directories first, and each KEY=value or KEY<<DELIM block. Empty off a runner.
+ */
+export function runnerFileEnv(env = process.env) {
+  const out = {};
+  const read = (file) => (file && existsSync(file) ? readFileSync(file, "utf8").split(/\r?\n/) : []);
+  const dirs = read(env.GITHUB_PATH).map((l) => l.trim()).filter(Boolean);
+  if (dirs.length) {
+    const have = String(env.PATH || "").split(":");
+    const fresh = [...new Set(dirs)].filter((d) => !have.includes(d));
+    if (fresh.length) out.PATH = [...fresh, ...have].join(":");
+  }
+  const lines = read(env.GITHUB_ENV);
+  for (let i = 0; i < lines.length; i += 1) {
+    const block = /^([A-Za-z_][A-Za-z0-9_]*)<<(.+)$/.exec(lines[i]);
+    if (block) {
+      const body = [];
+      for (i += 1; i < lines.length && lines[i] !== block[2]; i += 1) body.push(lines[i]);
+      out[block[1]] = body.join("\n");
+      continue;
+    }
+    const pair = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(lines[i]);
+    if (pair) out[pair[1]] = pair[2];
+  }
+  return out;
+}
+
 /** Run the validation commands in order; stop at the first failure. GITHUB_SHA is the HEAD under test. */
 export async function runValidation(checkout, commands, opts = {}) {
   const results = [];

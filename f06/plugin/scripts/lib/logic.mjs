@@ -180,7 +180,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (/^##\s*Blocked\b/m.test(pr.body || "")) return { exit: "blocked", reason: blockedParagraph(pr.body) };
-  const open = question !== undefined ? question : planHasQuestion || /\bQUESTION\b/.test(pr.body || "");
+  const open = question !== undefined ? question : planHasQuestion || hasQuestion(pr.body);
   if (open) return { exit: "question", reason: "an assumption would change a public contract or a recorded decision" };
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
   return { exit: "delivered", reason: "" };
@@ -299,5 +299,8 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false }) {
 
 export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${id ? `:${id}` : ""} -->`;
 
-/** Whether a plan comment (or any text) carries a QUESTION item. */
-export const hasQuestion = (text) => /\bQUESTION\b/.test(String(text || ""));
+/**
+ * Whether a plan comment or PR body carries an open QUESTION item: a list item whose first word
+ * is QUESTION (bold allowed). The word elsewhere in prose ("was a QUESTION, answered") is not one.
+ */
+export const hasQuestion = (text) => /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\*\*|__)?[ \t]*QUESTION\b/m.test(String(text || ""));

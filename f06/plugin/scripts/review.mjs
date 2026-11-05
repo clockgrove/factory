@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -175,6 +175,7 @@ async function main() {
       await finish("blocked", "setup failed");
       return;
     }
+    Object.assign(childBase, runnerFileEnv(childBase)); // PATH and env the setup wrote for the steps after it
   }
   const install = installCommand(checkout, inputs.install);
   if (install) await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });

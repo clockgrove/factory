@@ -22,7 +22,7 @@ Where the issue admits more than one reading, take the simplest one that satisfi
 
 ## The Question rule
 
-An assumption that would change a public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format) or that contradicts a recorded decision in the issue is not yours to make silently. Mark it `QUESTION` in the Assumptions list, take the simplest reading anyway, and finish everything else. The deliver-pr skill then opens the PR as a draft with the question in its body, so the queue moves on and a human answers in the PR. Raise it only when this test is met; the exit costs nothing, which is why it must be rare.
+An assumption that would change a public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format) or that contradicts a recorded decision in the issue is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The deliver-pr skill then opens the PR as a draft with the question in its body, so the queue moves on and a human answers in the PR. Raise it only when this test is met; the exit costs nothing, which is why it must be rare.
 
 ## Mechanism the base lacks
 

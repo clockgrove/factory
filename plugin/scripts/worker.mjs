@@ -17,7 +17,7 @@ import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPl
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, decideExit, marker, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
+import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
@@ -79,7 +79,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis });
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("pr", pr ? String(pr.number) : "");

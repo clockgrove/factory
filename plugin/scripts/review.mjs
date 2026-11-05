@@ -18,7 +18,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installComman
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -122,7 +122,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker" });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("issue", String(issue));

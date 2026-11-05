@@ -195,3 +195,26 @@ test("labelTime: a Running label before a recovery relabel is the clock", async 
   assert.equal(labelTime({}, timeline, "factory:objective", "2026-11-05T17:00:00Z"), "2026-11-05T17:50:00Z");
   assert.equal(labelTime({}, timeline, "factory:objective", null), "2026-10-26T04:00:00Z");
 });
+
+test("waitingMinutes and decisionsOf: queue and human-turn time apart from working time; one person's burst is one decision", async () => {
+  const { waitingMinutes, decisionsOf } = await import("../lib/objective.mjs");
+  const t = [
+    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-05T09:40:00Z" },
+    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T10:00:00Z" },
+    { event: "labeled", label: { name: "factory:question" }, created_at: "2026-11-05T11:00:00Z" },
+    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T12:00:00Z" },
+    { event: "labeled", label: { name: "factory:in-review" }, created_at: "2026-11-05T12:30:00Z" },
+  ];
+  const w = waitingMinutes(t, "2026-11-05T09:40:00Z", "2026-11-05T13:00:00Z");
+  assert.deepEqual(w, { minutes: 80, basis: "waiting: queue, question" });
+  assert.equal(waitingMinutes(t, "2026-11-05T09:40:00Z", null).minutes, null);
+  const acts = [
+    { at: "2026-11-05T11:05:00Z", by: "kirk", kind: "body edit" },
+    { at: "2026-11-05T11:06:00Z", by: "kirk", kind: "unlabeled factory:objective" },
+    { at: "2026-11-05T11:06:10Z", by: "kirk", kind: "labeled factory:objective" },
+    { at: "2026-11-05T11:08:00Z", by: "kirk", kind: "comment" },
+    { at: "2026-11-05T12:40:00Z", by: "kirk", kind: "comment" },
+  ];
+  assert.equal(decisionsOf(acts), 2);
+  assert.equal(decisionsOf([]), 0);
+});

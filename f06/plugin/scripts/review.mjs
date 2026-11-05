@@ -17,7 +17,7 @@ import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
-import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import {
@@ -143,6 +143,16 @@ async function main() {
     await dropLabel();
     await finish("skipped", "draft PR");
     return;
+  }
+  // A worker's harness may mark the PR ready before Factory's own validation pass has run; the
+  // worker applies the review label after that pass, and that label is the review's cue.
+  if (eventAction() === "ready_for_review") {
+    const labels = ((await getIssue(repo, issue, token).catch(() => null))?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+    if (labels.includes("factory:running")) {
+      log(`PR #${pr.number} marked ready while the worker for #${issue} is still running; it applies factory:review after its validation pass`);
+      await finish("skipped", "worker still running");
+      return;
+    }
   }
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer and the answer pass but still gets

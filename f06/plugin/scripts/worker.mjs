@@ -289,7 +289,8 @@ async function main() {
         decision.reason = `auto-merge could not be re-armed after the rebase: ${String(e.stderr || e.message).slice(0, 160)}`;
       }
     }
-    if (rebaseMode && !reviewed) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
+    // Remove, then add: a label already present (a harness applied it early) fires no labeled event.
+    if (!(rebaseMode && reviewed)) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
     try {
       await addLabels(repo, pr.number, [REVIEW_LABEL], token);
     } catch (e) {

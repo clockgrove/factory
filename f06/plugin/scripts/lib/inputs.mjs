@@ -7,7 +7,7 @@
 //   4. the default below.
 // The action declares no defaults of its own, so an empty `with:` value falls
 // through to the env block rather than overriding it with "".
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 /** Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's quota is out). */
 export const MODEL_DEFAULTS = {
@@ -153,3 +153,13 @@ export function mask(value) {
 
 /** Log a line with a stable prefix. Never pass a secret. */
 export const log = (...parts) => process.stdout.write(`[factory] ${parts.join(" ")}\n`);
+
+/** The `action` of the event that fired this job (GITHUB_EVENT_PATH), or null outside Actions. */
+export function eventAction(env = process.env) {
+  if (!env.GITHUB_EVENT_PATH) return null;
+  try {
+    return JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")).action ?? null;
+  } catch {
+    return null;
+  }
+}

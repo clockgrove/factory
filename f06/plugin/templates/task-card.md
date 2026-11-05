@@ -4,4 +4,4 @@ Use the objective-plan, implement-split, prove-acceptance and deliver-pr skills,
 
 Outputs: one plan comment on the issue, edited as you go; commits on {{branch}}; one PR against the default branch titled with the issue number; replies to each reviewer comment, once.
 
-If an assumption would change a public contract or a recorded decision, open the PR as a draft with the question in its body and finish the rest. If you are blocked beyond recovery, post what blocked you on the issue, open the PR as a draft with what you have, and stop. Never print a token or a secret.
+Open the PR as a draft and leave it a draft, with no labels: this job marks it ready for review and applies the review label once its own validation pass is green (deliver-pr's "ready for review" step is the job's here). If an assumption would change a public contract or a recorded decision, put the question in the draft's body and finish the rest. If you are blocked beyond recovery, post what blocked you on the issue, open the PR as a draft with what you have, and stop. Never print a token or a secret.

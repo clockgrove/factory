@@ -141,7 +141,7 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
   const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token });
   if (ci.error) out.push(WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions"));
   else if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
-  else if (!ci.mergeGroup) out.push(FAIL("ci workflow", `${ci.name} listens on pull_request but not merge_group`, `add "merge_group:" under on: in ${ci.path}`));
+  else if (!ci.mergeGroup) out.push((queue ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}`, `add "merge_group:" under on: in ${ci.path}`));
   else out.push(PASS("ci workflow", `${ci.name} on pull_request and merge_group`));
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);

@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
+import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, decideExit, marker, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
 import {
@@ -145,7 +145,11 @@ async function main() {
   // branch (no merge queue). A clean rebase needs no model at all; a conflict goes to the harness.
   let rebaseMode = false;
   let rebaseConflict = false;
-  if (resumed && (await findPr(repo, branch, token).catch(() => null))) {
+  const openPr = resumed ? await findPr(repo, branch, token).catch(() => null) : null;
+  // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
+  // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
+  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
+  if (openPr && sentBack) {
     const behind = Number((await git(checkout, ["rev-list", "--count", `HEAD..origin/${defaultBranch}`])).stdout.trim()) || 0;
     if (behind > 0) {
       rebaseMode = true;

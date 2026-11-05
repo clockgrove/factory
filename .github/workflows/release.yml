@@ -1,0 +1,22 @@
+name: Release
+# Every version tag becomes a GitHub Release, so the Releases page always names the current version.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Release from the tag's message
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="$(git tag -l --format='%(contents)' "$tag")"
+          [ -n "$notes" ] || notes="Factory ${tag#v}."
+          gh release create "$tag" --title "Factory ${tag#v}" --notes "$notes" --latest --verify-tag

@@ -2,7 +2,7 @@
 // Factory setup: apply the GitHub fixes doctor names, on consent.
 //   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
-//                          [--action clockgrove/factory@v0.6]   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
+//                          [--action clockgrove/factory@v0.6.1]   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 // Without --yes it prints what each step would do and exits. It never creates a
 // GitHub App: it verifies the one whose app_id and app_private_key it is given
 // (or FACTORY_APP_TOKEN) and tells the adopter the App's permissions.
@@ -105,7 +105,7 @@ function applyWorkflow({ inputs, args, checkout }) {
     protected_paths: inputs.protectedAdditions.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",
-    action: args.action || `clockgrove/factory@${args.version || "v0.6"}`,
+    action: args.action || `clockgrove/factory@${args.version || "v0.6.1"}`,
   };
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));
   const text = renderWorkflow(template, values);

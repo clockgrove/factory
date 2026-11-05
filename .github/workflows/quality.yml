@@ -18,3 +18,9 @@ jobs:
         run: node --test bench/test/*.test.mjs
       - name: Skills within the one-page cap
         run: node bench/skills.mjs
+  # The main ruleset's required check keeps its 0.5 name; it passes only after the tests above.
+  package-gate:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "quality passed"

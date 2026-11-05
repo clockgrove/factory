@@ -76,3 +76,10 @@ test("integration failure: a behind (no queue) or conflicting (any) In-review PR
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true, rebaseMarkers: 1 }), "blocked");
 });
+
+test("staleDecision: a PR whose review job is running is left alone", async () => {
+  const { staleDecision } = await import("../scripts/lib/logic.mjs");
+  const behind = { draft: false, mergeable_state: "behind" };
+  assert.equal(staleDecision({ pr: behind, reviewing: true }), "ignore");
+  assert.equal(staleDecision({ pr: behind, reviewing: false }), "rebase");
+});

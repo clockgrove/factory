@@ -450,8 +450,11 @@ export function parseFindings(text) {
  * Either way: "rebase" sends it back to a worker job once; "blocked" is the second time
  * (integration failed twice); "ignore" covers drafts, clean and unknown states.
  */
-export function staleDecision({ pr, rebaseMarkers = 0, queue = false }) {
+export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing = false }) {
   if (!pr || pr.draft) return "ignore";
+  // A review job is running on it (the label comes off at that job's exit): its answer pass may
+  // push and its own validation decides; a send-back now would race it (two jobs on one branch).
+  if (reviewing) return "ignore";
   const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
   if (!stale) return "ignore";
   return rebaseMarkers >= 1 ? "blocked" : "rebase";

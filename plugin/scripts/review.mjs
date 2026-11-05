@@ -11,7 +11,7 @@
 // --squash` as the App so the merge queue runs. Unaddressed findings or red
 // validation after the pass is the blocked exit.
 import { pathToFileURL } from "node:url";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
@@ -27,6 +27,7 @@ import {
   buildPrompt,
   configureGit,
   deadline,
+  exitRecord,
   isValidated,
   liveActivity,
   maskFile,
@@ -188,7 +189,9 @@ async function main() {
 
   const issueData = await getIssue(repo, issue, token);
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
-  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch };
+  const exitFile = join(usageDir, "exit.json");
+  rmSync(exitFile, { force: true });
+  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile };
   const taskCard = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
@@ -280,7 +283,9 @@ async function main() {
   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
   if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
 
-  // One worker pass to answer, then validation again.
+  // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
+  // with) says whether it raised a question; the PR's draft state does not.
+  let answerRecord = null;
   if (toAnswer.length) {
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model });
     const rec = await runHarness({
@@ -299,6 +304,10 @@ async function main() {
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     await push(checkout, branch, childBase);
+    const asked = await exitRecord({ file: exitFile, harness: inputs.harness, model: inputs.model, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
+    records.push(...asked.usage);
+    answerRecord = asked.record;
+    if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
   }
   const validation = toAnswer.length
     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
@@ -326,11 +335,14 @@ async function main() {
     commits: after.delta.count,
     validation: validation.died || validation.harness ? undefined : { passes: validation.passes, green: validation.green },
     protectedHits: protectedTouched(after.delta.files, protectedList),
-    question: !!pr.draft,
+    record: answerRecord,
+    question: answerRecord ? answerRecord.exit === "question" : false,
     reviewUnaddressed: unaddressed,
   });
   await dropLabel();
   if (decision.exit === "delivered") {
+    // A harness may have converted the PR to a draft (the task card keeps PRs drafts until Factory's pass); delivered means ready.
+    if (pr.draft) await setDraft(repo, pr.number, false, token).catch((e) => log(`ready: ${e.message.slice(0, 120)}`));
     // The merge closes the issue only through a closing reference GitHub itself parsed; add one when it is missing.
     const closes = await closingIssues(repo, pr.number, token).catch(() => null);
     if (closes && !closes.includes(issue)) {

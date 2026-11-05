@@ -170,7 +170,23 @@ export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded 
  * is left of `maxUsd`, and nothing is run once it is gone. Returns
  * {green, passes, lastOutput, usage: [records], harness?: {timedOut|budgetExceeded|died}}.
  */
-export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2 }) {
+/**
+ * One progress comment per run on the issue, edited in place at each phase with a UTC clock,
+ * so a job's state is readable from outside while it runs (Actions exposes no log of a running
+ * composite step). A phase that has not changed past its usual duration is a stuck job.
+ */
+export function progressReporter(repo, issue, { token }, { stage, runId = process.env.GITHUB_RUN_ID || String(Date.now()) }) {
+  const lines = [];
+  const started = Date.now();
+  const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
+  return async (phase) => {
+    lines.push(`- ${clock(Date.now())} ${phase}`);
+    const body = `Factory ${stage} run ${runId}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}`;
+    await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
+  };
+}
+
+export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null }) {
   const usage = [];
   let passes = 0;
   let last = null;
@@ -178,12 +194,14 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
   for (;;) {
     passes += 1;
     log(`${label} pass ${passes}: ${commands.length} command(s)`);
+    if (onPhase) await onPhase(`${label} pass ${passes} (${commands.length} commands)`);
     const v = await runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
     last = v;
     if (v.green) return { green: true, passes, lastOutput: "", usage };
     const failed = v.failed;
     const tail = failed.output.slice(-6000);
     log(`${label} pass ${passes} red: ${failed.command}${failed.timedOut ? " (timed out)" : ""}`);
+    if (onPhase && passes < maxPasses) await onPhase(`${label} pass ${passes} red: ${failed.command}; fix run`);
     if (passes >= maxPasses) break;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;

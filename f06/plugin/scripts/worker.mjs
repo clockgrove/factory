@@ -33,6 +33,7 @@ import {
   maskFile,
   observe,
   postValidated,
+  progressReporter,
   push,
   remainingMs,
   validationLoop,
@@ -67,6 +68,7 @@ async function main() {
   const keeper = await new TokenKeeper({ dir: join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
   const app = keeper.app;
+  const progress = progressReporter(repo, issue, token, { stage: "work" });
 
   const finish = async (exit, reason) => {
     keeper.stop();
@@ -75,6 +77,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis });
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("pr", pr ? String(pr.number) : "");
@@ -152,6 +155,7 @@ async function main() {
   const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true", ...branchIdentity(branch) });
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
+    await progress("setup");
     const s = await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {
       const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}`;
@@ -164,6 +168,7 @@ async function main() {
   const install = installCommand(checkout, inputs.install);
   if (install) {
     log(`install: ${install}`);
+    await progress("install");
     const i = await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!i.ok) {
       const reason = `offline install failed: ${install}`;
@@ -198,7 +203,8 @@ async function main() {
   const conflictPrompt = `${prompt.trimEnd()}\n\n---\n\nYour branch ${branch} fell behind ${defaultBranch} after a sibling merged, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch}, resolve each conflict keeping both the default branch's change and this Objective's intent, run the validation commands, commit, and push with --force-with-lease. Do not open a second PR and do not ask questions.`;
   if (rebaseMode && !rebaseConflict) rec = { ok: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
-    log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget $${inputs.maxUsd}`);
+    log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
+    await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);
     rec = await runHarness({
       harness: inputs.harness,
       model: inputs.model,
@@ -239,6 +245,7 @@ async function main() {
   const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits });
   if (early.exit !== "blocked") {
     validation = await validationLoop({
+      onPhase: progress,
       checkout,
       commands: inputs.validation,
       harness: inputs.harness,

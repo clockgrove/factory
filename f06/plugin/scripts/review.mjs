@@ -31,6 +31,7 @@ import {
   maskFile,
   observe,
   postValidated,
+  progressReporter,
   push,
   remainingMs,
   unaddressedReviewComments,
@@ -111,12 +112,14 @@ async function main() {
   const defaultBranch = pr.base?.ref || (await defaultBranchOf(checkout));
 
   let cred = { env: {} };
+  const progress = progressReporter(repo, issue, token, { stage: "review" });
   const finish = async (exit, reason) => {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker" });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("issue", String(issue));
@@ -166,6 +169,7 @@ async function main() {
   installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
   const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true", ...branchIdentity(branch) });
   if (inputs.setup) {
+    await progress("setup");
     const s = await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {
       await dropLabel();
@@ -176,7 +180,10 @@ async function main() {
     Object.assign(childBase, runnerFileEnv(childBase)); // PATH and env the setup wrote for the steps after it
   }
   const install = installCommand(checkout, inputs.install);
-  if (install) await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+  if (install) {
+    await progress("install");
+    await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+  }
 
   const issueData = await getIssue(repo, issue, token);
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
@@ -199,7 +206,7 @@ async function main() {
   // pass runs first and a red result is Blocked before any review.
   if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
-    const pre = await validationLoop({ checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
+    const pre = await validationLoop({ onPhase: progress, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
     records.push(...pre.usage);
     passes = pre.passes;
     if (pre.usage.length) await push(checkout, branch, childBase);
@@ -216,6 +223,7 @@ async function main() {
 
   // The reviewer: one call, comment-only, findings parsed from its last message.
   const diff = await prDiff(repo, pr.number, token);
+  if (!alreadyReviewed) await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
   const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
@@ -265,6 +273,7 @@ async function main() {
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+  if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
 
   // One worker pass to answer, then validation again.
   if (toAnswer.length) {
@@ -284,7 +293,7 @@ async function main() {
     await push(checkout, branch, childBase);
   }
   const validation = toAnswer.length
-    ? await validationLoop({ checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
+    ? await validationLoop({ onPhase: progress, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

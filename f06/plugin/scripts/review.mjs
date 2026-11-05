@@ -147,15 +147,14 @@ async function main() {
     await finish("skipped", "draft PR");
     return;
   }
-  // A worker's harness may mark the PR ready before Factory's own validation pass has run; the
-  // worker applies the review label after that pass, and that label is the review's cue.
+  // The worker marks the PR ready and then applies factory:review after its validation pass; the
+  // ready_for_review event is that same transition seen first, never a review cue. A human who
+  // answers a Question re-applies factory:objective (the worker reruns and labels); a human who
+  // wants a review pass applies factory:review.
   if (eventAction() === "ready_for_review") {
-    const labels = ((await getIssue(repo, issue, token).catch(() => null))?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-    if (labels.includes("factory:running")) {
-      log(`PR #${pr.number} marked ready while the worker for #${issue} is still running; it applies factory:review after its validation pass`);
-      await finish("skipped", "worker still running");
-      return;
-    }
+    log(`PR #${pr.number} marked ready; the review runs on the factory:review label, not on this event`);
+    await finish("skipped", "ready_for_review is not a review cue");
+    return;
   }
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer and the answer pass but still gets

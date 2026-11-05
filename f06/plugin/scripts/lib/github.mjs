@@ -264,8 +264,10 @@ export async function checkRuns(repo, sha, opts) {
 /** The tail of an Actions job's log (a check-run's id is the job's id); empty when unavailable. */
 export async function jobLogTail(repo, jobId, opts, chars = 4000) {
   try {
-    const { stdout } = await run("gh", ["api", `repos/${repo.full}/actions/jobs/${jobId}/logs`], { env: env(opts.token), maxBuffer: 64 * 1024 * 1024 });
-    return String(stdout).replace(/^[^\n]*?\d{4}-\d{2}-\d{2}T[\d:.]+Z /gm, "").slice(-chars);
+    // gh refuses to print a log with terminal escapes unless told to; the escapes and the per-line timestamps are stripped here.
+    const { stdout } = await run("gh", ["api", "--allow-escape-sequences", `repos/${repo.full}/actions/jobs/${jobId}/logs`], { env: env(opts.token), maxBuffer: 64 * 1024 * 1024 });
+    // eslint-disable-next-line no-control-regex
+    return String(stdout).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z ?/gm, "").slice(-chars);
   } catch {
     return "";
   }

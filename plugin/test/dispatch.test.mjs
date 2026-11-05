@@ -83,3 +83,9 @@ test("staleDecision: a PR whose review job is running is left alone", async () =
   assert.equal(staleDecision({ pr: behind, reviewing: true }), "ignore");
   assert.equal(staleDecision({ pr: behind, reviewing: false }), "rebase");
 });
+
+test("staleDecision: a conflicting PR goes back even with the review label (no review run can exist for it)", async () => {
+  const { staleDecision } = await import("../scripts/lib/logic.mjs");
+  assert.equal(staleDecision({ pr: { draft: false, mergeable_state: "dirty" }, reviewing: true }), "rebase");
+  assert.equal(staleDecision({ pr: { draft: false, mergeable_state: "behind" }, reviewing: true }), "ignore");
+});

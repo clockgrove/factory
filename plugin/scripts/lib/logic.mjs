@@ -194,6 +194,12 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
 
 export const EXITS = ["delivered", "question", "blocked"];
 
+/** " (work-1 7.90, validation-fix-1 0.54)": each harness run's cost by its label, for the exit line; empty with one or no priced run. */
+export function costByPhase(records) {
+  const parts = (records || []).filter((r) => r && typeof r.usd === "number" && r.label).map((r) => `${r.label} ${r.usd.toFixed(2)}`);
+  return parts.length > 1 ? ` (${parts.join(", ")})` : "";
+}
+
 /**
  * What a running harness is doing, from its own event stream (Claude stream-json, Codex JSONL,
  * Copilot JSON): turns, tool calls, sub-agents started and finished, tokens, the last event's

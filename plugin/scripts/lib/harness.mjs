@@ -170,6 +170,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const r = await exec(cmd, args, { cwd, env, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs });
   const ended = new Date().toISOString();
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile });
+  rec.label = label;
   rec.finalText = finalText(harness, r.stdout);
   rec.started = started;
   rec.ended = ended;

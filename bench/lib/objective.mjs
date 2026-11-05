@@ -61,6 +61,45 @@ export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter =
   return events[0]?.created_at ?? null;
 }
 
+/**
+ * Minutes of the wall clock spent waiting rather than working: from the clock to Factory's first
+ * Running label (a queue slot or a blocker), plus every Blocked or Question interval until the
+ * next Running label (a human's turn). Null without a merge; the basis says what counted.
+ */
+export function waitingMinutes(timeline, since, mergedAt) {
+  if (!since || !mergedAt) return { minutes: null, basis: "not merged" };
+  const labels = (timeline || []).filter((e) => e.event === "labeled" && e.label?.name && ms(e.created_at) >= ms(since)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
+  let total = 0;
+  const parts = [];
+  const firstRunning = labels.find((e) => e.label.name === RUNNING_LABEL);
+  if (firstRunning && ms(firstRunning.created_at) > ms(since)) {
+    total += ms(firstRunning.created_at) - ms(since);
+    parts.push("queue");
+  }
+  for (let i = 0; i < labels.length; i += 1) {
+    const e = labels[i];
+    if (e.label.name !== BLOCKED_LABEL && e.label.name !== QUESTION_LABEL) continue;
+    const next = labels.slice(i + 1).find((n) => n.label.name === RUNNING_LABEL);
+    const end = next ? ms(next.created_at) : ms(mergedAt);
+    if (end > ms(e.created_at)) {
+      total += end - ms(e.created_at);
+      parts.push(e.label.name === BLOCKED_LABEL ? "blocked" : "question");
+    }
+  }
+  return { minutes: Math.round((total / 60000) * 10) / 10, basis: parts.length ? `waiting: ${parts.join(", ")}` : "no waiting" };
+}
+
+/** Human actions grouped into decisions: actions by one person within ten minutes of each other are one decision (an edit, a relabel, a note). */
+export function decisionsOf(actions) {
+  let count = 0;
+  let last = null;
+  for (const a of [...(actions || [])].sort((x, y) => ms(x.at) - ms(y.at))) {
+    if (!last || a.by !== last.by || ms(a.at) - ms(last.at) > 10 * 60000) count += 1;
+    last = a;
+  }
+  return count;
+}
+
 /** The human actions after `since` on the issue and its PRs, oldest first: each {at, where, kind, by, detail}. */
 export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL } = {}) {
   const out = [];
@@ -176,6 +215,7 @@ export function scoreObjective(collected, opts = {}) {
   const blocked = blockedAt(collected, since);
   const question = questionAt(collected, since);
   const actions = humanActions(collected, since, { bots, label });
+  const waiting = waitingMinutes(collected.issueTimeline, since, merged?.merged_at ?? null);
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
 
   const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots)) ?? null;
@@ -249,6 +289,10 @@ export function scoreObjective(collected, opts = {}) {
     runnerBasis: runner.basis,
     wallMinutes: wall,
     wallBasis: merged ? `${sinceBasis} to merged` : "not merged",
+    waitingMinutes: waiting.minutes,
+    waitingBasis: waiting.basis,
+    workingMinutes: wall === null || waiting.minutes === null ? null : Math.max(0, Math.round((wall - waiting.minutes) * 10) / 10),
+    decisions: decisionsOf(actions),
     skills: opts.skills ?? null,
     missing,
     scoredAt: opts.now ?? new Date().toISOString(),

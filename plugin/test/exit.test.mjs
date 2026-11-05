@@ -228,3 +228,10 @@ test("decideExit: a rejected push is the reason, not 'no PR could be opened'", (
   assert.equal(decideExit({ harness, pr: null, commits: 3, pushRejected: "! [remote rejected] HEAD -> factory/808 (cannot lock ref)" }).reason, "push rejected: ! [remote rejected] HEAD -> factory/808 (cannot lock ref)");
   assert.equal(decideExit({ harness, pr: null, commits: 3 }).reason, "no PR could be opened for the branch");
 });
+
+test("costByPhase: each harness run's cost by label on the exit line", async () => {
+  const { costByPhase } = await import("../scripts/lib/logic.mjs");
+  assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }, { label: "validation-fix-1", usd: 0.543 }]), " (work-1 7.90, validation-fix-1 0.54)");
+  assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }]), "");
+  assert.equal(costByPhase([{ label: "work-1", usd: null }, { label: "exit", usd: 0.1 }]), "");
+});

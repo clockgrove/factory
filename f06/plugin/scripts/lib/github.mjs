@@ -216,6 +216,32 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
   return rest(`repos/${repo.full}/pulls/${number}/reviews`, { ...opts, method: "POST", body: { event: "COMMENT", body, comments, ...(commitId ? { commit_id: commitId } : {}) } });
 }
 
+/**
+ * Resolve the review threads Factory opened once the worker has answered them (or they carry no
+ * finding): a ruleset may require every thread resolved before a merge, and a resolved thread
+ * stays visible on the PR, so rebutted findings are still on record. Returns how many were resolved.
+ */
+export async function resolveFactoryThreads(repo, number, reviewerLogin, opts) {
+  const data = await graphql(
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { author { login } body } } } } } } }`,
+    { owner: repo.owner, name: repo.name, n: Number(number) },
+    opts,
+  );
+  const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+  let resolved = 0;
+  for (const t of threads) {
+    if (t.isResolved) continue;
+    const comments = t.comments?.nodes || [];
+    const root = comments[0];
+    if (!root || (reviewerLogin && root.author?.login !== reviewerLogin)) continue;
+    const answered = comments.length > 1 || /^\s*(Factory reviewer:|No findings\b)/i.test(root.body || "");
+    if (!answered) continue;
+    await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);
+    resolved += 1;
+  }
+  return resolved;
+}
+
 export async function prComment(repo, number, body, opts) {
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body } });
 }

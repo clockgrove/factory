@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
+import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
@@ -280,6 +280,14 @@ async function main() {
   records.push(...validation.usage);
   passes += validation.passes;
   if (validation.usage.length) await push(checkout, branch, childBase);
+
+  // Answered threads (and no-finding ones) are resolved so a ruleset that requires thread resolution
+  // can merge; they stay visible on the PR.
+  const resolvedThreads = await resolveFactoryThreads(repo, pr.number, reviewerLogin, token).catch((e) => {
+    log(`threads: ${e.message.slice(0, 120)}`);
+    return 0;
+  });
+  if (resolvedThreads) log(`resolved ${resolvedThreads} answered review thread(s)`);
 
   // The exit. A question is open only if the PR is still a draft now: the worker converts
   // to draft when it raises one, and a human's "mark ready" answers it even though the

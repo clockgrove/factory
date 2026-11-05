@@ -183,3 +183,15 @@ test("score.mjs refuses a bad invocation with exit 64", () => {
   }
   assert.equal(code, 64);
 });
+
+test("labelTime: a Running label before a recovery relabel is the clock", async () => {
+  const { labelTime } = await import("../lib/objective.mjs");
+  const timeline = [
+    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-10-26T04:00:00Z" },
+    { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-05T17:50:00Z" },
+    { event: "labeled", label: { name: "factory:question" }, created_at: "2026-11-05T19:54:00Z" },
+    { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-05T20:29:48Z" },
+  ];
+  assert.equal(labelTime({}, timeline, "factory:objective", "2026-11-05T17:00:00Z"), "2026-11-05T17:50:00Z");
+  assert.equal(labelTime({}, timeline, "factory:objective", null), "2026-10-26T04:00:00Z");
+});

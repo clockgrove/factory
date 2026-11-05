@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isPlaceholder } from "./logic.mjs";
+import { isPlaceholder, marker } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh (or unzip) and throw on non-zero exit, with stderr on the error. */
@@ -218,23 +218,25 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
 }
 
 /**
- * Resolve the review threads Factory opened once the worker has answered them (or they carry no
- * finding): a ruleset may require every thread resolved before a merge, and a resolved thread
- * stays visible on the PR, so rebutted findings are still on record. Returns how many were resolved.
+ * Resolve the review threads Factory itself opened (the root comment belongs to the review
+ * carrying marker(issue, "review")) once they are answered: a reply exists, or the root is
+ * Factory's placeholder. Identified by Factory's own marker, never by login: GraphQL names a
+ * Bot without the "[bot]" suffix REST adds. Returns the number resolved.
  */
-export async function resolveFactoryThreads(repo, number, reviewerLogin, opts) {
+export async function resolveFactoryThreads(repo, number, issue, opts) {
   const data = await graphql(
-    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { author { login } body } } } } } } }`,
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body } } } } } } } }`,
     { owner: repo.owner, name: repo.name, n: Number(number) },
     opts,
   );
   const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+  const mark = marker(issue, "review");
   let resolved = 0;
   for (const t of threads) {
     if (t.isResolved) continue;
     const comments = t.comments?.nodes || [];
     const root = comments[0];
-    if (!root || (reviewerLogin && root.author?.login !== reviewerLogin)) continue;
+    if (!root || !String(root.pullRequestReview?.body || "").includes(mark)) continue;
     const answered = comments.length > 1 || isPlaceholder(root.body);
     if (!answered) continue;
     await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);

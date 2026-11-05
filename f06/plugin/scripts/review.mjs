@@ -301,7 +301,7 @@ async function main() {
 
   // Answered threads (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR.
-  const resolvedThreads = await resolveFactoryThreads(repo, pr.number, reviewerLogin, token).catch((e) => {
+  const resolvedThreads = await resolveFactoryThreads(repo, pr.number, issue, token).catch((e) => {
     log(`threads: ${e.message.slice(0, 120)}`);
     return 0;
   });

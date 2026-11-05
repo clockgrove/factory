@@ -17,6 +17,7 @@ import { costOf } from "./cost.mjs";
 
 export const ROW_VERSION = 1;
 const BRANCH = (issue) => `factory/${issue}`;
+export const RUNNING_LABEL = "factory:running";
 export const OBJECTIVE_LABEL = "factory:objective";
 const BLOCKED_LABEL = "factory:blocked";
 const QUESTION_LABEL = "factory:question";
@@ -51,8 +52,11 @@ function commitActor(commit) {
  */
 export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter = null) {
   const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
+  // The clock is the Objective's first label at or after the floor, or the first time Factory
+  // picked it up (its Running label) if that came first: an issue labelled before the floor and
+  // re-labelled later as a recovery must not have its recovery mistaken for its start.
   const events = (timeline || [])
-    .filter((e) => e.event === "labeled" && e.label?.name === label && ms(e.created_at) >= floor)
+    .filter((e) => e.event === "labeled" && (e.label?.name === label || e.label?.name === RUNNING_LABEL) && ms(e.created_at) >= floor)
     .sort((a, b) => ms(a.created_at) - ms(b.created_at));
   return events[0]?.created_at ?? null;
 }

@@ -246,6 +246,8 @@ async function main() {
   if (early.exit !== "blocked") {
     validation = await validationLoop({
       onPhase: progress,
+      checks: inputs.ciChecks.length && pr ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null,
+      push: () => push(checkout, branch, childBase),
       checkout,
       commands: inputs.validation,
       harness: inputs.harness,

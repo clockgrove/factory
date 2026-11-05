@@ -58,7 +58,7 @@ inputs:
     description: '`auto` (default) installs offline from the lockfile found; `none` skips; any other value is the command to run.'
     required: false
   validation:
-    description: The repository's validation commands, comma- or newline-separated, run as Factory's own pass (two at most) and named in the task card.
+    description: The repository's validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` they are also Factory's own pass (two at most).
     required: false
   budget_command:
     description: The test-budget command named in the task card, if the repository has one.
@@ -67,7 +67,7 @@ inputs:
     description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused.
     required: false
   ci_checks:
-    description: The CI workflow's check names the merge queue requires; used by doctor and setup, not by the jobs.
+    description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and a red check's job logs go to the fix run.
     required: false
   harness_version:
     description: The npm version of the harness CLI to install on the runner; `latest` by default.

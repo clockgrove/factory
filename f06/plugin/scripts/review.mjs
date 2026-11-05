@@ -206,7 +206,7 @@ async function main() {
   // pass runs first and a red result is Blocked before any review.
   if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
-    const pre = await validationLoop({ onPhase: progress, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
+    const pre = await validationLoop({ onPhase: progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
     records.push(...pre.usage);
     passes = pre.passes;
     if (pre.usage.length) await push(checkout, branch, childBase);
@@ -293,7 +293,7 @@ async function main() {
     await push(checkout, branch, childBase);
   }
   const validation = toAnswer.length
-    ? await validationLoop({ onPhase: progress, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
+    ? await validationLoop({ onPhase: progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

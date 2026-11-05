@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isPlaceholder, marker } from "./logic.mjs";
+import { evaluateChecks, isPlaceholder, marker } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh (or unzip) and throw on non-zero exit, with stderr on the error. */
@@ -253,6 +253,51 @@ export async function closingIssues(repo, number, opts) {
     opts,
   );
   return (data?.repository?.pullRequest?.closingIssuesReferences?.nodes || []).map((n) => n.number);
+}
+
+/** Every check-run on a commit (Actions jobs and other apps' checks). */
+export async function checkRuns(repo, sha, opts) {
+  const pages = await rest(`repos/${repo.full}/commits/${sha}/check-runs?per_page=100`, { ...opts, paginate: true });
+  return (pages || []).flatMap((p) => (Array.isArray(p) ? p : p?.check_runs || []));
+}
+
+/** The tail of an Actions job's log (a check-run's id is the job's id); empty when unavailable. */
+export async function jobLogTail(repo, jobId, opts, chars = 4000) {
+  try {
+    const { stdout } = await run("gh", ["api", `repos/${repo.full}/actions/jobs/${jobId}/logs`], { env: env(opts.token), maxBuffer: 64 * 1024 * 1024 });
+    return String(stdout).replace(/^[^\n]*?\d{4}-\d{2}-\d{2}T[\d:.]+Z /gm, "").slice(-chars);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Wait for the named required checks on `sha`: polls the check-runs until every name has a
+ * completed run, or `timeoutMs` passes. A name with no run at all after `appearMs` is a
+ * failure (no workflow ran for this head). Returns {green, checks, output, timedOut} where
+ * `output` is the failed jobs' log tails (every failed check-run on the head, named or not,
+ * since the required check is usually an aggregate of the jobs that actually fail).
+ */
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, onPoll = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const started = Date.now();
+  let runs = [];
+  let state = null;
+  for (;;) {
+    runs = await checkRuns(repo, sha, { token }).catch(() => []);
+    state = evaluateChecks(names, runs);
+    if (state.done) break;
+    const elapsed = Date.now() - started;
+    if (state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
+    if (elapsed > timeoutMs) break;
+    if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
+    await sleep(pollMs);
+  }
+  const timedOut = !state.done;
+  const failedRuns = runs.filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
+  const parts = [];
+  for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${await jobLogTail(repo, r.id, { token })}`);
+  if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
+  return { green: state.green && !timedOut, checks: state, output: parts.join("\n"), timedOut, failedNames: state.failed.map((f) => f.name) };
 }
 
 export async function prComment(repo, number, body, opts) {

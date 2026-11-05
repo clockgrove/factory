@@ -131,3 +131,17 @@ test("decideExit: a red validation names the command that failed", () => {
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
 });
 
+
+test("evaluateChecks: required checks from a head's check-runs, latest run per name, missing is not red", async () => {
+  const { evaluateChecks } = await import("../scripts/lib/logic.mjs");
+  const runs = [
+    { id: 1, name: "quality", status: "completed", conclusion: "failure", started_at: "2026-11-05T01:00:00Z" },
+    { id: 2, name: "quality", status: "completed", conclusion: "success", started_at: "2026-11-05T02:00:00Z" },
+    { id: 3, name: "tests", status: "in_progress", conclusion: null, started_at: "2026-11-05T02:00:00Z" },
+  ];
+  assert.deepEqual(evaluateChecks(["quality"], runs), { done: true, green: true, missing: [], failed: [], pending: [] });
+  assert.deepEqual(evaluateChecks(["quality", "tests"], runs), { done: false, green: false, missing: [], failed: [], pending: ["tests"] });
+  assert.deepEqual(evaluateChecks(["quality", "lint"], runs), { done: false, green: false, missing: ["lint"], failed: [], pending: [] });
+  assert.deepEqual(evaluateChecks(["quality"], [runs[0]]), { done: true, green: false, missing: [], failed: [{ name: "quality", conclusion: "failure", id: 1 }], pending: [] });
+  assert.deepEqual(evaluateChecks([], []), { done: true, green: true, missing: [], failed: [], pending: [] });
+});

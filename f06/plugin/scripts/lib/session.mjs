@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { branchDelta, runValidation } from "./checkout.mjs";
 import { finalText, runHarness } from "./harness.mjs";
 import {
+  awaitChecks,
   createPr,
   findPr,
   findProject,
@@ -186,16 +187,29 @@ export function progressReporter(repo, issue, { token }, { stage, runId = proces
   };
 }
 
-export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null }) {
+export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, push = null }) {
   const usage = [];
   let passes = 0;
   let last = null;
-  if (!commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
+  // With required checks configured, the repository's CI is Factory's validation: the head is
+  // pushed and the named checks are awaited, instead of re-running serially what CI runs in
+  // parallel. The commands stay the harness's own tool (the task card names them).
+  const byChecks = !!(checks && checks.names?.length && checks.prNumber);
+  if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
+  const validate = async () => {
+    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
+    if (push) await push();
+    const sha = (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
+    if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
+    const r = await awaitChecks(checks.repo, sha, checks.names, { token: checks.token, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
+    return { green: r.green, results: [], failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
+  };
   for (;;) {
     passes += 1;
-    log(`${label} pass ${passes}: ${commands.length} command(s)`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${commands.length} commands)`);
-    const v = await runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
+    log(`${label} pass ${passes}: ${byChecks ? `required checks ${checks.names.join(", ")}` : `${commands.length} command(s)`}`);
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? "required checks" : `${commands.length} commands`})`);
+    const v = await validate();
     last = v;
     if (v.green) return { green: true, passes, lastOutput: "", usage };
     const failed = v.failed;
@@ -214,7 +228,7 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
       "```",
       tail,
       "```",
-      "Fix the cause in the code (never weaken, skip or delete a test unless the issue asks), run the validation commands yourself, commit on the same branch and push. Then update the PR body's Validation section. Do not ask questions.",
+      `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""}, commit on the same branch and push. Then update the PR body's Validation section. Do not ask questions.`,
     ].join("\n");
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;

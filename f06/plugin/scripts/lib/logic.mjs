@@ -191,6 +191,38 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
 export const EXITS = ["delivered", "question", "blocked"];
 
 /**
+ * Required checks on a head, from the check-runs GitHub lists for it:
+ *   { done, green, missing: [name], failed: [{name, conclusion, id}], pending: [name] }
+ * Only the latest run of each name counts (a re-run supersedes). A check with no run yet is
+ * missing, not red: the caller decides how long to wait for it.
+ */
+export function evaluateChecks(names, checkRuns) {
+  const latest = new Map();
+  for (const r of checkRuns || []) {
+    const have = latest.get(r.name);
+    if (!have || String(r.started_at || "") > String(have.started_at || "") || (r.id ?? 0) > (have.id ?? 0)) latest.set(r.name, r);
+  }
+  const out = { done: true, green: true, missing: [], failed: [], pending: [] };
+  for (const name of names) {
+    const r = latest.get(name);
+    if (!r) {
+      out.missing.push(name);
+      out.done = false;
+      continue;
+    }
+    if (r.status !== "completed") {
+      out.pending.push(name);
+      out.done = false;
+      continue;
+    }
+    if (!["success", "neutral", "skipped"].includes(r.conclusion)) out.failed.push({ name, conclusion: r.conclusion, id: r.id });
+  }
+  if (out.failed.length) out.green = false;
+  if (!out.done) out.green = false;
+  return out;
+}
+
+/**
  * The harness's exit record: the first JSON object in `text` (a file the task card names, or
  * the harness's answer to EXIT_PROMPT) with `exit` in EXITS. `questions` and `reason` are
  * normalized to strings. Null when there is no such object: the caller then asks the harness.

@@ -218,7 +218,7 @@ async function main() {
     if (!pre.green) {
       const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false } });
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: d.reason || "validation red before review", notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: d.reason || "validation red before review", detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", d.reason || "validation red before review");
       return;
     }
@@ -358,7 +358,7 @@ async function main() {
       }
     } else log(`auto_merge is false: PR #${pr.number} is ready for a human merge`);
   }
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "review" }, token);
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review" }, token);
   await finish(decision.exit, decision.reason);
   }
 }

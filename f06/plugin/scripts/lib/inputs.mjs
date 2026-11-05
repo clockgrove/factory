@@ -36,7 +36,7 @@ export const DEFAULTS = {
   ci_checks: "",
   harness_version: "latest",
   node_version: "22",
-  action: "clockgrove/factory@v1",
+  action: "clockgrove/factory@v0.6",
   objective_label: "factory:objective",
   mode: "",
   issue: "",

@@ -105,7 +105,7 @@ test("workflow template renders with defaults for empty values and stays valid Y
   assert.match(out, /FACTORY_HARNESS: claude/);
   assert.match(out, /max-parallel: 4/);
   assert.match(out, /timeout-minutes: 240/);
-  assert.match(out, /uses: clockgrove\/factory@v1/);
+  assert.match(out, /uses: clockgrove\/factory@v0\.6/);
   assert.doesNotMatch(out, /\{\{\w+\}\}/, "every {{key}} placeholder rendered; ${{ }} expressions stay");
   assert.match(out, /contents: read/);
   assert.doesNotMatch(out, /contents: write/);

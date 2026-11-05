@@ -172,14 +172,14 @@ export function sumSpend(records) {
  * rest are GitHub fields, exit codes and counts.
  * Returns {exit: 'delivered'|'question'|'blocked', reason}
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, question, reviewUnaddressed = 0 }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, question, reviewUnaddressed = 0, pushRejected = "" }) {
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice" };
   if (harness?.timedOut) return { exit: "blocked", reason: "time cap reached" };
   if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached" };
   if (protectedHits.length) return { exit: "blocked", reason: `touched protected path ${protectedHits.join(", ")}` };
   if (!pr?.exists) {
     if (commits === 0) return { exit: "blocked", reason: harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR" };
-    return { exit: "blocked", reason: "no PR could be opened for the branch" };
+    return { exit: "blocked", reason: pushRejected ? `push rejected: ${pushRejected}` : "no PR could be opened for the branch" };
   }
   if (validation && !validation.green) {
     return { exit: "blocked", reason: `validation red after Factory's ${validation.passes >= 2 ? "second" : "first"} pass${validation.command ? ` (${validation.command})` : ""}` };

@@ -93,6 +93,17 @@ export function excludeFromGit(checkout, paths) {
 export async function prepareBranch(checkout, { issue, defaultBranch, remote = "origin" }) {
   const branch = `factory/${issue}`;
   await git(checkout, ["fetch", remote, defaultBranch]);
+  // git cannot hold factory/<issue> beside factory/<issue>/<anything> (a ref is a file or a
+  // directory, not both): an earlier tool's branches under that name block every push. Found
+  // here, before any harness spend, and named so the owner can delete or rename them.
+  const under = await exec("git", ["ls-remote", "--heads", remote, `${branch}/*`], { cwd: checkout });
+  const colliding = under.code === 0 ? under.stdout.split("\n").map((l) => l.split("\t")[1]).filter(Boolean).map((r) => r.replace(/^refs\/heads\//, "")) : [];
+  if (colliding.length) {
+    const e = new Error(`branch ${branch} cannot be created: ${colliding.join(", ")} exist${colliding.length > 1 ? "" : "s"} on ${remote} (delete or rename them)`);
+    e.code = "ref-collision";
+    e.refs = colliding;
+    throw e;
+  }
   const existing = await exec("git", ["ls-remote", "--heads", remote, branch], { cwd: checkout });
   const base = (await git(checkout, ["rev-parse", `${remote}/${defaultBranch}`])).stdout.trim();
   if (existing.code === 0 && existing.stdout.trim()) {

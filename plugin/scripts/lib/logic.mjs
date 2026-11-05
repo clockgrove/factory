@@ -454,7 +454,9 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing 
   if (!pr || pr.draft) return "ignore";
   // A review job is running on it (the label comes off at that job's exit): its answer pass may
   // push and its own validation decides; a send-back now would race it (two jobs on one branch).
-  if (reviewing) return "ignore";
+  // ...except a conflicting PR: GitHub cannot build its merge ref and fires no pull_request run, so no
+  // review job can be running on it whatever label it carries; it goes back for the rebase.
+  if (reviewing && pr.mergeable_state !== "dirty") return "ignore";
   const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
   if (!stale) return "ignore";
   return rebaseMarkers >= 1 ? "blocked" : "rebase";

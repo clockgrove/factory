@@ -189,9 +189,9 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     const tail = failed.output.slice(-6000);
     log(`${label} pass ${passes} red: ${failed.command}${failed.timedOut ? " (timed out)" : ""}`);
     if (passes >= maxPasses) break;
-    if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, usage, harness: { timedOut: true } };
+    if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
-    if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, usage, harness: { budgetExceeded: true } };
+    if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
     const fix = [
       `Factory's validation pass ${passes} failed on the branch you delivered.`,
       `Command: ${failed.command}`,
@@ -208,10 +208,10 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     usage.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex and Copilot have no in-run cap
-    if (rec.timedOut || rec.budgetExceeded) return { green: false, passes, lastOutput: tail, usage, harness: rec };
-    if (crashed(rec)) return { green: false, passes, lastOutput: tail, usage, harness: { ...rec, died: 1 }, died: true };
+    if (rec.timedOut || rec.budgetExceeded) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: rec };
+    if (crashed(rec)) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { ...rec, died: 1 }, died: true };
   }
-  return { green: false, passes, lastOutput: last?.failed?.output.slice(-6000) || "", usage };
+  return { green: false, passes, lastOutput: last?.failed?.output.slice(-6000) || "", command: last?.failed?.command, usage };
 }
 
 /** Write usage/result.json and return the merged record. */
@@ -242,7 +242,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
  * Apply an exit to GitHub: card, fallback label, draft state, the one comment,
  * the review request. `where` is the issue number; `pr` may be null on blocked.
  */
-export async function applyExit(repo, { issue, pr, exit, reason, notify, stage = "work" }, { token }) {
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work" }, { token }) {
   const project = await findProject(repo, { token }).catch(() => null);
   const at = notify ? `@${notify} ` : "";
   if (exit === "blocked") {
@@ -251,7 +251,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, notify, stage =
     await moveCard(project, repo, issue, "Blocked", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
     // One comment per run (not per stage): a second Blocked must be a new comment so the @mention notifies again.
     const runId = process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || 1}` : String(Date.now());
-    await upsertComment(repo, issue, marker(issue, "blocked", `${stage}:${runId}`), `${at}Blocked (${stage}): ${reason}${pr ? ` — PR #${pr.number} is a draft with what exists.` : ""} Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`, { token });
+    await upsertComment(repo, issue, marker(issue, "blocked", `${stage}:${runId}`), `${at}Blocked (${stage}): ${reason}${pr ? ` — PR #${pr.number} is a draft with what exists.` : ""} Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-2500).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}`, { token });
     return;
   }
   if (exit === "question") {

@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
-import { AGENT_DIRS, PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -156,8 +156,7 @@ async function main() {
   await git(checkout, ["checkout", "-B", branch, `origin/${branch}`]);
   const base = (await git(checkout, ["merge-base", `origin/${defaultBranch}`, "HEAD"])).stdout.trim();
   installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel } });
-  const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true" });
-  for (const k of Object.keys(childBase)) if (childBase[k] === undefined) delete childBase[k];
+  const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true", ...branchIdentity(branch) });
   if (inputs.setup) {
     const s = await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {

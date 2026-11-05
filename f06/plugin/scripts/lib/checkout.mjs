@@ -117,11 +117,24 @@ export async function sh(checkout, command, { timeoutMs, env = process.env, extr
   return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, output: `${r.stdout}\n${r.stderr}`.trim() };
 }
 
-/** Run the validation commands in order; stop at the first failure. */
+/**
+ * The commit identity a child of the job sees. The job runs on the dispatching event (an issue
+ * on main, a pull_request merge ref), so its GITHUB_SHA and GITHUB_REF name a commit the checkout
+ * is not on; a repository's own CI scripts that assert HEAD equals GITHUB_SHA would fail for
+ * every branch with commits. Children get the Factory branch as the ref and no GITHUB_SHA;
+ * each validation pass sets GITHUB_SHA to the HEAD it tests (runValidation).
+ */
+export function branchIdentity(branch) {
+  return { GITHUB_REF: `refs/heads/${branch}`, GITHUB_REF_NAME: branch, GITHUB_SHA: undefined };
+}
+
+/** Run the validation commands in order; stop at the first failure. GITHUB_SHA is the HEAD under test. */
 export async function runValidation(checkout, commands, opts = {}) {
   const results = [];
+  const head = (await git(checkout, ["rev-parse", "HEAD"]).catch(() => ({ stdout: "" }))).stdout.trim();
+  const extraEnv = { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}) };
   for (const command of commands) {
-    const r = await sh(checkout, command, opts);
+    const r = await sh(checkout, command, { ...opts, extraEnv });
     results.push({ command, ...r, output: r.output.slice(-20_000) });
     if (!r.ok) return { green: false, results, failed: results.at(-1) };
   }

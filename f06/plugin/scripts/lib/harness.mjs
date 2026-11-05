@@ -17,10 +17,14 @@ export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
 /** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
 export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID"];
 
-/** Env for a non-harness child (and the harness itself, before its own credential is added): the job's env with every secret removed. */
+/**
+ * Env for a non-harness child (and the harness itself, before its own credential is added): the
+ * job's env with every secret removed. An `extra` value of undefined or null removes that key.
+ */
 export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
   for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS]) delete e[k];
+  for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
   for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL)$/.test(k)) delete e[k];
   return e;
 }

@@ -176,7 +176,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     return { exit: "blocked", reason: "no PR could be opened for the branch" };
   }
   if (validation && !validation.green) {
-    return { exit: "blocked", reason: `validation red after Factory's ${validation.passes >= 2 ? "second" : "first"} pass` };
+    return { exit: "blocked", reason: `validation red after Factory's ${validation.passes >= 2 ? "second" : "first"} pass${validation.command ? ` (${validation.command})` : ""}` };
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (/^##\s*Blocked\b/m.test(pr.body || "")) return { exit: "blocked", reason: blockedParagraph(pr.body) };

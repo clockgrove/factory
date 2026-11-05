@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
-import { PLUGIN_ROOT, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -149,8 +149,7 @@ async function main() {
   // 4. setup and offline install: the model secrets never reach these.
   // Children (setup, install, the harness) act as the App through gh's hosts.yml and the
   // git credential helper, both re-written by the keeper; no token sits in their env.
-  const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true" });
-  for (const k of Object.keys(childBase)) if (childBase[k] === undefined) delete childBase[k];
+  const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true", ...branchIdentity(branch) });
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
     const s = await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
@@ -267,7 +266,7 @@ async function main() {
     harness: { ...rec, ok: rec.ok || evidenceOk, died, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation && !validation.died && !validation.harness ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput } : undefined,
+    validation: validation && !validation.died && !validation.harness ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     planHasQuestion: pr ? await questionRaised(repo, { issue, pr }, token) : false,
   });
@@ -298,7 +297,7 @@ async function main() {
       decision.reason = `the review label could not be applied, so no review job would run: ${e.message.slice(0, 160)}`;
     }
   }
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, notify: inputs.notify, stage: "work" }, token);
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work" }, token);
   await finish(decision.exit, decision.reason);
   }
 }

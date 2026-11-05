@@ -110,3 +110,10 @@ test("App JWT is RS256 with iss, iat and exp; a flattened PEM is restored", () =
   assert.deepEqual(JSON.parse(Buffer.from(p, "base64url")), { iat: 1_700_000_000 - 30, exp: 1_700_000_000 + 540, iss: "12345" });
   assert.ok(s.length > 300);
 });
+
+test("decideExit: a red validation names the command that failed", () => {
+  const harness = { ok: true, died: 0 };
+  const pr = { exists: true, draft: false, body: "## Assumptions\nnone" };
+  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 2, green: false, command: "pnpm test" } }).reason, "validation red after Factory's second pass (pnpm test)");
+  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
+});

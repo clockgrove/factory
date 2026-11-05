@@ -154,3 +154,8 @@ test("model, App and runner secrets never reach a non-harness child", () => {
   const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", FACTORY_INPUT_CODEX_API_KEY: "ck", FACTORY_INPUT_APP_PRIVATE_KEY: "pem", FACTORY_INPUT_MODEL: "m", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc", ACTIONS_ID_TOKEN_REQUEST_URL: "u", ACTIONS_RUNTIME_TOKEN: "rt", FACTORY_APP_TOKEN: "ghs", FACTORY_APP_PRIVATE_KEY: "pem" }, { GH_TOKEN: "t" });
   assert.deepEqual(e, { PATH: "/bin", FACTORY_INPUT_MODEL: "m", GH_TOKEN: "t" });
 });
+
+test("scrubbedEnv: an undefined or null extra value removes the key (the dispatch run's GITHUB_SHA never reaches a child)", () => {
+  const e = scrubbedEnv({ PATH: "/bin", GITHUB_SHA: "abc", GITHUB_REF: "refs/heads/main", KEEP: "1" }, { GITHUB_SHA: undefined, GITHUB_REF: "refs/heads/factory/7", GONE: null });
+  assert.deepEqual(e, { PATH: "/bin", GITHUB_REF: "refs/heads/factory/7", KEEP: "1" });
+});

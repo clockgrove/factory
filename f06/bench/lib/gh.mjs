@@ -47,7 +47,8 @@ export async function downloadArtifact(repoFull, artifactId, { token } = {}) {
   if (token) env.GH_TOKEN = token;
   const { stdout } = await run("gh", ["api", `repos/${repoFull}/actions/artifacts/${artifactId}/zip`], { env, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 });
   writeFileSync(zip, stdout);
-  await run("unzip", ["-o", "-q", zip, "-d", dir]);
+  // Python's zipfile is on every runner and developer box; unzip is not.
+  await run("python3", ["-I", "-m", "zipfile", "-e", zip, dir]);
   return dir;
 }
 

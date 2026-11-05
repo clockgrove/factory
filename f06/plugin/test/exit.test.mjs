@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { decideExit, diffLines, hasQuestion, marker, parseFindings, snapComments } from "../scripts/lib/logic.mjs";
+import { decideExit, diffLines, isPlaceholder, marker, parseExitRecord, parseFindings, snapComments } from "../scripts/lib/logic.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 
 const ok = { ok: true };
@@ -14,11 +14,24 @@ test("delivered: PR open, validation green, nothing unaddressed", () => {
   assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 3, validation: { passes: 1, green: true } }), { exit: "delivered", reason: "" });
 });
 
-test("question: a QUESTION in the PR body or the plan comment opens a draft and moves on", () => {
-  assert.equal(decideExit({ harness: ok, pr: pr("## Assumptions\n1. QUESTION: does the API change?"), commits: 1, validation: { passes: 1, green: true } }).exit, "question");
-  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: { passes: 1, green: true }, planHasQuestion: true }).exit, "question");
-  assert.equal(hasQuestion("- questionable"), false, "the marker is the word QUESTION, not a substring");
-  assert.equal(hasQuestion("1. QUESTION: x"), true);
+test("question: the harness's exit record says so; the PR body is never read", () => {
+  const green = { passes: 1, green: true };
+  const record = { exit: "question", reason: "", questions: ["is this wire shape acceptable?"] };
+  assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, record }), { exit: "question", reason: "question: is this wire shape acceptable?" });
+  assert.equal(decideExit({ harness: ok, pr: pr("## Assumptions\n1. QUESTION: does the API change?"), commits: 1, validation: green, record: { exit: "delivered", reason: "", questions: [] } }).exit, "delivered", "the word in the body decides nothing");
+  assert.equal(decideExit({ harness: ok, pr: pr("1. Resolved (was a QUESTION)."), commits: 1, validation: green, record: null }).exit, "delivered");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, record, question: false }).exit, "delivered", "the review job's draft state overrides");
+});
+
+test("parseExitRecord: the first JSON object with a known exit, from a file or a harness answer", () => {
+  assert.deepEqual(parseExitRecord('{"exit":"question","questions":["which port?"],"reason":""}'), { exit: "question", reason: "", questions: ["which port?"] });
+  assert.deepEqual(parseExitRecord('Sure, here it is:\n```json\n{"exit": "delivered"}\n```'), { exit: "delivered", reason: "", questions: [] });
+  assert.deepEqual(parseExitRecord('{"note":"not an exit"} {"exit":"blocked","reason":"no credential","questions":[{"question":"q1"}]}'), { exit: "blocked", reason: "no credential", questions: ["q1"] });
+  assert.equal(parseExitRecord('{"exit":"maybe"}'), null);
+  assert.equal(parseExitRecord("QUESTION: prose only"), null);
+  assert.equal(parseExitRecord(""), null);
+  assert.equal(isPlaceholder("<!-- factory:placeholder -->\nFactory reviewer: no findings"), true);
+  assert.equal(isPlaceholder("No findings here"), false);
 });
 
 test("blocked: each reason in the worker contract, in priority order", () => {
@@ -33,12 +46,12 @@ test("blocked: each reason in the worker contract, in priority order", () => {
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 2, green: false } }).reason, "validation red after Factory's second pass");
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, reviewUnaddressed: 2 }).reason, "2 reviewer finding(s) unaddressed after the one pass");
-  assert.equal(decideExit({ harness: ok, pr: pr("## Blocked\nThe migration needs a credential the runner lacks."), commits: 2, validation: green }).reason, "worker blocked: The migration needs a credential the runner lacks.");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: { exit: "blocked", reason: "The migration needs a credential the runner lacks.", questions: [] } }).reason, "worker blocked: The migration needs a credential the runner lacks.");
   assert.equal(decideExit({ harness: { ok: false, error: "harness error" }, pr: pr(), commits: 2, validation: green }).reason, "harness error");
 });
 
 test("a question with red validation is blocked, not question", () => {
-  assert.equal(decideExit({ harness: ok, pr: pr("QUESTION: x"), commits: 1, validation: { passes: 2, green: false } }).exit, "blocked");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: { passes: 2, green: false }, record: { exit: "question", reason: "", questions: ["x"] } }).exit, "blocked");
 });
 
 test("review: findings parse from a fenced block and snap to diff lines", () => {
@@ -118,11 +131,3 @@ test("decideExit: a red validation names the command that failed", () => {
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
 });
 
-test("question: the marker is a list item's first word, not the word in prose", () => {
-  assert.equal(hasQuestion("1. **Resolved by the owner (was a QUESTION):** the wire shape is accepted."), false);
-  assert.equal(hasQuestion("Assumption 1's QUESTION was answered, so the PR is ready."), false);
-  assert.equal(hasQuestion("## Assumptions\n1. **QUESTION: is this wire shape acceptable?** Details."), true);
-  assert.equal(hasQuestion("- QUESTION: which port?"), true);
-  const harness = { ok: true, died: 0 };
-  assert.equal(decideExit({ harness, pr: { exists: true, draft: true, body: "## Assumptions\n1. Resolved (was a QUESTION)." }, commits: 1, validation: { passes: 1, green: true } }).exit, "delivered");
-});

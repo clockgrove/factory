@@ -21,7 +21,7 @@ import {
   upsertComment,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { hasQuestion, marker, renderTaskCard, taskCardValues } from "./logic.mjs";
+import { EXIT_PROMPT, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
 import { sumSpend } from "./logic.mjs";
@@ -148,10 +148,6 @@ export async function ensurePr(repo, { branch, base, issue, issueTitle, bodyText
   return createPr(repo, { head: branch, base, title, body, draft }, { token });
 }
 
-/** Factory's own "no findings" placeholder comment; it needs no answer from the worker. */
-export const PLACEHOLDER_PREFIX = "Factory reviewer:";
-/** A comment that carries no finding: Factory's placeholder, or the reviewer's own "no findings" record (review-pr skill). */
-export const noFinding = (body) => /^\s*(Factory reviewer:|No findings\b)/i.test(String(body || ""));
 
 /**
  * Reviewer root comments with no reply. The reviewer and the worker both post as
@@ -160,7 +156,7 @@ export const noFinding = (body) => /^\s*(Factory reviewer:|No findings\b)/i.test
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
-  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !noFinding(c.body));
+  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !isPlaceholder(c.body));
   return roots.filter((c) => !replies.has(c.id));
 }
 
@@ -276,12 +272,28 @@ export async function markRunning(repo, issue, { token }) {
   await moveCard(project, repo, issue, "Running", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
 }
 
-/** Whether the PR body or the plan comment raises a QUESTION. */
-export async function questionRaised(repo, { issue, pr }, { token }) {
-  if (pr && hasQuestion(pr.body)) return true;
-  const comments = await rest(`repos/${repo.full}/issues/${issue}/comments?per_page=100`, { token, paginate: true }).catch(() => []);
-  const plan = (comments || []).find((c) => (c.body || "").includes(marker(issue, "plan")));
-  return plan ? hasQuestion(plan.body) : false;
+/**
+ * The harness's exit record: the JSON file the task card told it to write (FACTORY_EXIT_FILE),
+ * else one more harness call answering EXIT_PROMPT (resumed where the harness can), parsed as
+ * JSON. Neither reads the PR body or the plan comment. Returns {record, usage: [records]};
+ * `record` is {exit: "blocked", reason} when the harness left nothing and could not answer.
+ */
+export async function exitRecord({ file, harness, model, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0 }) {
+  const usage = [];
+  if (file && existsSync(file)) {
+    const rec = parseExitRecord(readFileSync(file, "utf8"));
+    if (rec) return { record: rec, usage, basis: "exit file" };
+    log(`exit record at ${file} is not a JSON object with exit in delivered|question|blocked; asking the harness`);
+  } else if (file) log(`no exit record at ${file}; asking the harness`);
+  if (remainingMs(deadlineAt) < 60_000) return { record: { exit: "blocked", reason: "no exit record and no time left to ask", questions: [] }, usage, basis: "none" };
+  const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd) : 0;
+  if (maxUsd > 0 && left <= 0) return { record: { exit: "blocked", reason: "no exit record and no budget left to ask", questions: [] }, usage, basis: "none" };
+  const resume = session?.canResume ? session.id : null;
+  const rec = await runHarness({ harness, model, prompt: EXIT_PROMPT, maxUsd: left, resume, cwd, env, timeoutMs: Math.min(10 * 60_000, remainingMs(deadlineAt)), eventsFile, label: "exit" });
+  usage.push(rec);
+  const parsed = parseExitRecord(rec.finalText);
+  if (parsed) return { record: parsed, usage, basis: "asked" };
+  return { record: { exit: "blocked", reason: "the harness gave no exit record (neither the exit file nor a JSON answer)", questions: [] }, usage, basis: "none" };
 }
 
 /**

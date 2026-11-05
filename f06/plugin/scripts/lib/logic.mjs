@@ -159,14 +159,16 @@ export function sumSpend(records) {
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string}
  *  protectedHits: string[]
- *  planHasQuestion: boolean (the plan comment or the PR body carries a QUESTION item)
- *  question: boolean, when the caller has already decided whether a question is open
- *            (the review job: the PR's draft state after the answer pass, so a human's
- *            "mark ready" on an answered Question is not undone by the word in the body)
+ *  record:     the harness's exit record {exit, reason, questions} (parseExitRecord), or null
+ *  question:   boolean, when the caller has already decided whether a question is open
+ *              (the review job: the PR's draft state after the answer pass, so a human's
+ *              "mark ready" answers it)
  *  reviewUnaddressed: number (review pass: comments without a worker reply)
+ * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
+ * rest are GitHub fields, exit codes and counts.
  * Returns {exit: 'delivered'|'question'|'blocked', reason}
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], planHasQuestion = false, question, reviewUnaddressed = 0 }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, question, reviewUnaddressed = 0 }) {
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice" };
   if (harness?.timedOut) return { exit: "blocked", reason: "time cap reached" };
   if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached" };
@@ -179,17 +181,61 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     return { exit: "blocked", reason: `validation red after Factory's ${validation.passes >= 2 ? "second" : "first"} pass${validation.command ? ` (${validation.command})` : ""}` };
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
-  if (/^##\s*Blocked\b/m.test(pr.body || "")) return { exit: "blocked", reason: blockedParagraph(pr.body) };
-  const open = question !== undefined ? question : planHasQuestion || hasQuestion(pr.body);
-  if (open) return { exit: "question", reason: "an assumption would change a public contract or a recorded decision" };
+  if (record?.exit === "blocked") return { exit: "blocked", reason: `worker blocked: ${(record.reason || "no reason given").slice(0, 200)}` };
+  const open = question !== undefined ? question : record?.exit === "question";
+  if (open) return { exit: "question", reason: record?.questions?.length ? `question: ${record.questions[0].slice(0, 200)}` : "an assumption would change a public contract or a recorded decision" };
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
   return { exit: "delivered", reason: "" };
 }
 
-function blockedParagraph(body) {
-  const m = /^##\s*Blocked\b[^\n]*\n+([^\n]+)/m.exec(body || "");
-  return m ? `worker blocked: ${m[1].trim().slice(0, 200)}` : "worker reported itself blocked";
+export const EXITS = ["delivered", "question", "blocked"];
+
+/**
+ * The harness's exit record: the first JSON object in `text` (a file the task card names, or
+ * the harness's answer to EXIT_PROMPT) with `exit` in EXITS. `questions` and `reason` are
+ * normalized to strings. Null when there is no such object: the caller then asks the harness.
+ */
+export function parseExitRecord(text) {
+  const s = String(text || "");
+  for (let start = s.indexOf("{"); start !== -1; start = s.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < s.length; i += 1) {
+      const c = s[i];
+      if (inString) {
+        if (c === "\\") i += 1;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === "{") depth += 1;
+      else if (c === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          let v;
+          try {
+            v = JSON.parse(s.slice(start, i + 1));
+          } catch {
+            break;
+          }
+          if (v && typeof v === "object" && EXITS.includes(v.exit)) {
+            const questions = (Array.isArray(v.questions) ? v.questions : []).map((q) => (typeof q === "string" ? q : q?.question ?? JSON.stringify(q))).filter(Boolean);
+            return { exit: v.exit, reason: typeof v.reason === "string" ? v.reason : "", questions };
+          }
+          break;
+        }
+      }
+    }
+  }
+  return null;
 }
+
+/** What Factory asks a harness that left no exit record (resumed in its own session where it can). */
+export const EXIT_PROMPT = 'Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": ["each open question a human must answer, verbatim"], "reason": "why you are blocked, else empty"}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered".';
+
+/** Factory's own line comment when a review pass has nothing line-tied to say; the worker never answers it. */
+export const PLACEHOLDER_MARKER = "<!-- factory:placeholder -->";
+export const isPlaceholder = (body) => String(body || "").includes(PLACEHOLDER_MARKER);
 
 // -------------------------------------------------------------- review diff
 
@@ -299,8 +345,3 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false }) {
 
 export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${id ? `:${id}` : ""} -->`;
 
-/**
- * Whether a plan comment or PR body carries an open QUESTION item: a list item whose first word
- * is QUESTION (bold allowed). The word elsewhere in prose ("was a QUESTION, answered") is not one.
- */
-export const hasQuestion = (text) => /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\*\*|__)?[ \t]*QUESTION\b/m.test(String(text || ""));

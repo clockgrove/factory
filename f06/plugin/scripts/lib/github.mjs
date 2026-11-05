@@ -4,6 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isPlaceholder } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh (or unzip) and throw on non-zero exit, with stderr on the error. */
@@ -234,12 +235,22 @@ export async function resolveFactoryThreads(repo, number, reviewerLogin, opts) {
     const comments = t.comments?.nodes || [];
     const root = comments[0];
     if (!root || (reviewerLogin && root.author?.login !== reviewerLogin)) continue;
-    const answered = comments.length > 1 || /^\s*(Factory reviewer:|No findings\b)/i.test(root.body || "");
+    const answered = comments.length > 1 || isPlaceholder(root.body);
     if (!answered) continue;
     await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);
     resolved += 1;
   }
   return resolved;
+}
+
+/** The issue numbers GitHub parsed as closed by this PR (its closing references), as GitHub will act on them. */
+export async function closingIssues(repo, number, opts) {
+  const data = await graphql(
+    `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 50) { nodes { number } } } } }`,
+    { owner: repo.owner, name: repo.name, number },
+    opts,
+  );
+  return (data?.repository?.pullRequest?.closingIssuesReferences?.nodes || []).map((n) => n.number);
 }
 
 export async function prComment(repo, number, body, opts) {
@@ -256,9 +267,16 @@ export async function enableAutoMerge(repo, number, opts = {}) {
     await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--auto", "--squash"], { env: env(opts.token) });
     return "auto";
   } catch (e) {
-    if (!/clean status|already|not in the correct state/i.test(String(e.stderr || e.message))) throw e;
-    await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--squash"], { env: env(opts.token) });
-    return "direct";
+    // Not the error text: the PR's own state decides. Armed after all: done. Else a direct merge
+    // (the already-mergeable case); if that fails too, the first error is the one to report.
+    const state = await rest(`repos/${repo.full}/pulls/${number}`, { token: opts.token }).catch(() => null);
+    if (state?.auto_merge) return "auto";
+    try {
+      await run("gh", ["pr", "merge", String(number), "--repo", repo.full, "--squash"], { env: env(opts.token) });
+      return "direct";
+    } catch {
+      throw e;
+    }
   }
 }
 

@@ -16,13 +16,11 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
+import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import {
-  PLACEHOLDER_PREFIX,
-  noFinding,
   TASK_CARD_TEMPLATE,
   applyExit,
   gitIdentity,
@@ -230,11 +228,12 @@ async function main() {
     eventsFile,
     label: "review",
   });
-  // Fable's quota can run out mid-day: a reviewer call refused for quota or rate limits reruns once on the
-  // fallback model (Opus 5.5 at xhigh effort) rather than posting "the reviewer call failed".
+  // Fable's quota can run out mid-day: a reviewer call that failed (non-zero exit, no result) reruns once on the
+  // fallback model (Opus 5.5 at xhigh effort) rather than posting "the reviewer call failed". The harness
+  // reports no error code for quota, so any failure of the call is the cue; a second failure is posted.
   let reviewRecord = reviewRec;
-  if (!alreadyReviewed && !reviewRec.ok && inputs.reviewerFallback && /quota|rate.?limit|usage limit|overloaded|429|capacity/i.test(`${reviewRec.error || ""} ${reviewRec.stderrTail || ""}`)) {
-    log(`reviewer on ${inputs.reviewerModel} refused (${String(reviewRec.error || "").slice(0, 80)}); falling back to ${inputs.reviewerFallback.model} at ${inputs.reviewerFallback.effort}`);
+  if (!alreadyReviewed && !reviewRec.ok && inputs.reviewerFallback) {
+    log(`reviewer on ${inputs.reviewerModel} failed (exit ${reviewRec.exitCode ?? reviewRec.signal ?? "?"}); falling back to ${inputs.reviewerFallback.model} at ${inputs.reviewerFallback.effort}`);
     records.push(reviewRec);
     reviewRecord = await runHarness({
       harness: inputs.harness,
@@ -257,15 +256,15 @@ async function main() {
   if (!comments.length && !alreadyReviewed) {
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
     placeholder = !!first;
-    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRecord.ok ? `${PLACEHOLDER_PREFIX} no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_PREFIX} the reviewer call failed (${reviewRecord.error || "unknown"}); no findings were produced.` }];
+    if (first) comments = [{ path: first[0], line: first[1].first, side: "RIGHT", body: reviewRecord.ok ? `${PLACEHOLDER_MARKER}\nFactory reviewer: no findings; the pass ran and returned nothing line-tied.` : `${PLACEHOLDER_MARKER}\nFactory reviewer: the reviewer call failed (${reviewRecord.error || "unknown"}); no findings were produced.` }];
   }
   if (comments.length) {
     await postReview(repo, pr.number, { body: `${marker(issue, "review")}\nFactory reviewer: one comment-only pass, ${comments.length} comment(s).`, comments, commitId: pr.head.sha }, token);
     log(`posted review with ${comments.length} comment(s)${placeholder ? " (placeholder: nothing to answer)" : ""}`);
   }
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
-  // A pass with nothing to answer (Factory's placeholder, or the reviewer's one "No findings" record) skips the worker pass.
-  const toAnswer = placeholder || comments.every((c) => noFinding(c.body)) ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+  // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
+  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
 
   // One worker pass to answer, then validation again.
   if (toAnswer.length) {
@@ -300,8 +299,7 @@ async function main() {
   if (resolvedThreads) log(`resolved ${resolvedThreads} answered review thread(s)`);
 
   // The exit. A question is open only if the PR is still a draft now: the worker converts
-  // to draft when it raises one, and a human's "mark ready" answers it even though the
-  // word QUESTION stays in the body.
+  // to draft when it raises one, and a human's "mark ready" answers it.
   const after = await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr.number }, token);
   pr = after.pr;
   const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, token)).length;
@@ -316,8 +314,9 @@ async function main() {
   });
   await dropLabel();
   if (decision.exit === "delivered") {
-    // The merge closes the issue only through a closing keyword; add one when the body lacks it.
-    if (!new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#${issue}\\b`, "i").test(pr.body || "")) {
+    // The merge closes the issue only through a closing reference GitHub itself parsed; add one when it is missing.
+    const closes = await closingIssues(repo, pr.number, token).catch(() => null);
+    if (closes && !closes.includes(issue)) {
       await rest(`repos/${repo.full}/pulls/${pr.number}`, { ...token, method: "PATCH", body: { body: `${pr.body || ""}\n\nCloses #${issue}\n` } }).catch((e) => log(`body: ${e.message.slice(0, 120)}`));
     }
     if (inputs.autoMerge) {

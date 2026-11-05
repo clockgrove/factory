@@ -10,7 +10,7 @@
 // blocked); move the card, set the label, draft/comment/request as the exit says;
 // write usage/events.jsonl and usage/result.json for the artifact.
 import { pathToFileURL } from "node:url";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, runnerFileEnv, sh } from "./lib/checkout.mjs";
@@ -27,13 +27,13 @@ import {
   crashed,
   deadline,
   ensurePr,
+  exitRecord,
   lastMessage,
   markRunning,
   maskFile,
   observe,
   postValidated,
   push,
-  questionRaised,
   remainingMs,
   validationLoop,
   writeUsage,
@@ -176,7 +176,9 @@ async function main() {
   // 5. The prompt and the harness.
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   credentialBasis = cred.basis;
-  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch };
+  const exitFile = join(usageDir, "exit.json");
+  rmSync(exitFile, { force: true }); // a record from an earlier attempt must not speak for this one
+  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile };
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
@@ -258,7 +260,11 @@ async function main() {
     }
   }
 
-  // 8. The exit.
+  // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
+  // a run that had no harness (clean rebase) delivered by construction.
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : await exitRecord({ file: exitFile, harness: inputs.harness, model: inputs.model, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
+  records.push(...asked.usage);
+  if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // Green validation on an open PR outweighs a harness error code (max turns, a late tool failure);
   // with no validation commands at all, the harness's own verdict stands. A validation fix run that
   // died is a death, not a red pass; a deadline or budget reached during it is that cap.
@@ -269,7 +275,7 @@ async function main() {
     commits: delta.count,
     validation: validation && !validation.died && !validation.harness ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
-    planHasQuestion: pr ? await questionRaised(repo, { issue, pr }, token) : false,
+    record: asked.record,
   });
   if (decision.exit === "delivered" && pr) {
     // Delivered means an open, non-draft PR (the worker may have opened a draft after a harness error);

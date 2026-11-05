@@ -33,4 +33,6 @@ After the replies: rebase on the default branch again, run the validation comman
 
 ## Stop
 
-Your outputs are the plan comment and its edits, the commits on `factory/<issue>`, the one PR and its body, and one reply per reviewer comment. Anything else is noise that a human has to read.
+When the FACTORY_EXIT_FILE environment variable is set, write your exit record there as one JSON object before you stop: {"exit": "delivered" | "question" | "blocked", "questions": ["each open question, verbatim"], "reason": "why you are blocked, else empty"}. Factory reads that file, never the PR body, to decide whether you delivered, raised a question or are blocked.
+
+Your outputs are the plan comment and its edits, the commits on `factory/<issue>`, the one PR and its body, one reply per reviewer comment, and the exit record. Anything else is noise that a human has to read.

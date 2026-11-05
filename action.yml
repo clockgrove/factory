@@ -1,0 +1,198 @@
+# clockgrove/factory: one composite Action, three jobs (mode: dispatch | work | review).
+# The adopter's workflow (see workflow-template.yml) calls it three times. Every
+# GitHub write goes through the adopter's Factory GitHub App (app_id + app_private_key,
+# minted into a short-lived installation token here); the job's own GITHUB_TOKEN is
+# used only to read code and, for Copilot, to bill the harness. This Action never
+# creates an App.
+name: Factory
+description: Build a labelled GitHub issue unattended, review it, and hand it to the merge queue.
+author: Clockgrove
+
+inputs:
+  mode:
+    description: Which job this call runs. `dispatch` outputs the ready issue list; `work` builds one issue (needs `issue`); `review` reviews one PR (needs `pr`).
+    required: true
+  issue:
+    description: The Objective issue number (mode work), or one issue to dispatch alone (mode dispatch, from workflow_dispatch).
+    required: false
+  pr:
+    description: The pull request number to review (mode review).
+    required: false
+  harness:
+    description: The harness that runs the worker and the reviewer. `claude`, `codex` or `copilot`.
+    required: false
+  model:
+    description: The worker session's model (the strong one); the harness default when empty.
+    required: false
+  subagent_model:
+    description: The implementer sub-agents' model. Informational here; the model is pinned in the agent definitions the job writes into the checkout.
+    required: false
+  reviewer_model:
+    description: The reviewer's model for its one comment-only pass; `model` when empty.
+    required: false
+  credential:
+    description: '`api` (default) bills an API credential; `plan` uses CLAUDE_CODE_OAUTH_TOKEN and is for your own repository only. (`login`, the CLI''s own login, exists for a developer''s machine and is refused here.)'
+    required: false
+  max_concurrent:
+    description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.
+    required: false
+  daily_usd:
+    description: The dispatcher starts nothing once today's usage artifacts sum past this many dollars (UTC day).
+    required: false
+  max_usd:
+    description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it; Claude gets what is left as `--max-budget-usd`, Codex and Copilot are checked after each run. The review job has the same cap of its own.
+    required: false
+  timeout_minutes:
+    description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.
+    required: false
+  auto_merge:
+    description: '`true` (default) enables auto-merge on the PR after the reviewer pass, so the merge queue lands it with no human read. `false` leaves a ready-for-review PR.'
+    required: false
+  notify:
+    description: The GitHub handle that Blocked comments @mention, Question drafts request as reviewer, and the digest @mentions.
+    required: false
+  setup:
+    description: The repository's toolchain command, run in the checkout before the worker (for example `scripts/ci/toolchain.sh postgresql`). Empty runs nothing.
+    required: false
+  install:
+    description: '`auto` (default) installs offline from the lockfile found; `none` skips; any other value is the command to run.'
+    required: false
+  validation:
+    description: The repository's validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` they are also Factory's own pass (two at most).
+    required: false
+  budget_command:
+    description: The test-budget command named in the task card, if the repository has one.
+    required: false
+  protected_paths:
+    description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused.
+    required: false
+  ci_checks:
+    description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and a red check's job logs go to the fix run.
+    required: false
+  harness_version:
+    description: The npm version of the harness CLI to install on the runner; `latest` by default.
+    required: false
+  node_version:
+    description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
+    required: false
+  app_id:
+    description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
+    required: true
+  app_private_key:
+    description: The App's private key PEM (secret FACTORY_APP_PRIVATE_KEY). Required; used only to mint a short-lived installation token.
+    required: true
+  anthropic_api_key:
+    description: 'ANTHROPIC_API_KEY for the Claude harness. Leave empty to use workload identity federation (needs `id-token: write` and `anthropic_oidc_exchange_url`).'
+    required: false
+  anthropic_oidc_exchange_url:
+    description: The endpoint that exchanges the job's OIDC token for a short-lived Anthropic credential, when using federation instead of a key.
+    required: false
+  claude_code_oauth_token:
+    description: 'A long-lived Claude Code token for `credential: plan`; your own repositories only, never for a product.'
+    required: false
+  codex_api_key:
+    description: CODEX_API_KEY for the Codex harness; passed to the harness child process only, never to the job environment.
+    required: false
+  github_token:
+    description: 'The job''s GITHUB_TOKEN; used only to read code and, for Copilot, as the billing token (`copilot-requests: write`). Defaults to `github.token`.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  issues:
+    description: (dispatch) JSON array of ready issue numbers for `strategy.matrix`.
+    value: ${{ steps.run.outputs.issues }}
+  count:
+    description: (dispatch) How many issues are in `issues`.
+    value: ${{ steps.run.outputs.count }}
+  exit:
+    description: (work, review) `delivered`, `question`, `blocked` or `skipped`.
+    value: ${{ steps.run.outputs.exit }}
+  reason:
+    description: (work, review) The one-line reason for a blocked or question exit.
+    value: ${{ steps.run.outputs.reason }}
+  pr:
+    description: (work) The PR number for the branch, when one exists.
+    value: ${{ steps.run.outputs.pr }}
+  issue_number:
+    description: (review) The Objective issue number the reviewed PR belongs to, for the usage artifact name.
+    value: ${{ steps.run.outputs.issue }}
+  usage_dir:
+    description: (work, review) The directory holding usage/events.jsonl and usage/result.json to upload as `factory-usage-<issue>`.
+    value: ${{ steps.run.outputs.usage_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Node
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
+
+    - name: Install the harness CLI
+      if: inputs.mode != 'dispatch'
+      shell: bash
+      # The harness comes from `with:` when given, else the workflow's FACTORY_HARNESS env block
+      # (visible to composite steps at runtime), else claude: the same precedence as lib/inputs.mjs.
+      env:
+        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
+      run: |
+        HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
+        VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
+        case "$HARNESS" in
+          claude)  npm install -g "@anthropic-ai/claude-code@${VERSION}" ;;
+          codex)   npm install -g "@openai/codex@${VERSION}" ;;
+          copilot) npm install -g "@github/copilot@${VERSION}" ;;
+          *) echo "unknown harness $HARNESS" >&2; exit 1 ;;
+        esac
+
+    - name: Run factory (${{ inputs.mode }})
+      id: run
+      shell: bash
+      # Inputs reach the scripts as FACTORY_INPUT_*; an empty `with:` value falls
+      # through to the workflow's FACTORY_* env block, then to the script default.
+      # The Codex key is set here, on this one step, and the script passes it to the
+      # harness child only; validation commands and git hooks never see it.
+      env:
+        FACTORY_INPUT_MODE: ${{ inputs.mode }}
+        FACTORY_INPUT_ISSUE: ${{ inputs.issue }}
+        FACTORY_INPUT_PR: ${{ inputs.pr }}
+        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_INPUT_MODEL: ${{ inputs.model }}
+        FACTORY_INPUT_SUBAGENT_MODEL: ${{ inputs.subagent_model }}
+        FACTORY_INPUT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
+        FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
+        FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
+        FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
+        FACTORY_INPUT_MAX_USD: ${{ inputs.max_usd }}
+        FACTORY_INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        FACTORY_INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}
+        FACTORY_INPUT_NOTIFY: ${{ inputs.notify }}
+        FACTORY_INPUT_SETUP: ${{ inputs.setup }}
+        FACTORY_INPUT_INSTALL: ${{ inputs.install }}
+        FACTORY_INPUT_VALIDATION: ${{ inputs.validation }}
+        FACTORY_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
+        FACTORY_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        FACTORY_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
+        FACTORY_INPUT_APP_ID: ${{ inputs.app_id }}
+        FACTORY_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
+        FACTORY_INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
+        FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        FACTORY_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
+        FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage
+        # The scripts, skills, agents and task card are one tree: the plugin beside this action.
+        FACTORY_PLUGIN_ROOT: ${{ github.action_path }}/plugin
+      run: |
+        set -euo pipefail
+        echo "usage_dir=$FACTORY_USAGE_DIR" >> "$GITHUB_OUTPUT"
+        mkdir -p "$FACTORY_USAGE_DIR"
+        case "$FACTORY_INPUT_MODE" in
+          dispatch) node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          work)     node "$FACTORY_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$FACTORY_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          review)   node "$FACTORY_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$FACTORY_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          *) echo "mode must be dispatch, work or review" >&2; exit 1 ;;
+        esac

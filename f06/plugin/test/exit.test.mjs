@@ -145,3 +145,52 @@ test("evaluateChecks: required checks from a head's check-runs, latest run per n
   assert.deepEqual(evaluateChecks(["quality"], [runs[0]]), { done: true, green: false, missing: [], failed: [{ name: "quality", conclusion: "failure", id: 1 }], pending: [] });
   assert.deepEqual(evaluateChecks([], []), { done: true, green: true, missing: [], failed: [], pending: [] });
 });
+
+test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line from the harness's own events", async () => {
+  const { harnessActivity, activityLine } = await import("../scripts/lib/logic.mjs");
+  let t = 0;
+  const a = harnessActivity(() => t);
+  const lines = [
+    '{"type":"system","subtype":"init","model":"claude-opus-5-5"}',
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"Planning."},{"type":"tool_use","name":"Agent","input":{"subagent_type":"implementer","description":"Web: reducer"}}],"usage":{"input_tokens":2,"cache_read_input_tokens":13001,"cache_creation_input_tokens":11978,"output_tokens":3}}}',
+    '{"type":"system","subtype":"task_started","task_id":"a1","description":"Web: reducer","subagent_type":"implementer"}',
+    '{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pnpm test --filter web"}}],"usage":{"input_tokens":10,"output_tokens":5}}}',
+    'not json',
+    '{"type":"system","subtype":"task_notification","task_id":"a1","status":"completed"}',
+  ];
+  for (const l of lines) {
+    t += 60_000;
+    a.feed(l);
+  }
+  const snap = a.snapshot();
+  assert.equal(snap.turns, 1, "a sub-agent's assistant message is not a turn");
+  assert.equal(snap.toolCalls, 2);
+  assert.equal(snap.lastTool, "Bash: pnpm test --filter web");
+  assert.deepEqual([snap.subagentsActive.length, snap.subagentsDone], [0, 1]);
+  assert.deepEqual(snap.tokens, { input: 24991, output: 8 });
+  assert.equal(snap.events, 5);
+  const line = activityLine(snap, { harness: "claude", model: "claude-opus-5-5" });
+  assert.match(line, /^claude \(claude-opus-5-5\) working: 6 min, 1 turns, 2 tool calls; sub-agents 1 done; active now; 25k tokens in, 8 out; last tool Bash: pnpm test --filter web$/);
+  t += 7 * 60_000;
+  a.feed('{"type":"system","subtype":"task_started","task_id":"a2","description":"Runtime: journey test","subagent_type":"implementer"}');
+  t += 5 * 60_000;
+  assert.match(activityLine(a.snapshot(), { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 5 min\), 1 done; last event 5 min ago/);
+  a.feed('{"type":"result","total_cost_usd":1.25}');
+  assert.match(activityLine(a.snapshot(), { harness: "claude" }), /finished: .*; ended; .*\$1\.25/);
+  assert.equal(activityLine(harnessActivity(() => 0).snapshot(), { harness: "codex" }), "codex started 0 min ago; no event from it yet");
+  const c = harnessActivity(() => 0);
+  c.feed('{"type":"turn.started"}');
+  c.feed('{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}');
+  c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
+  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 150, output: 25 }]);
+});
+
+test("exec: onLine sees each stdout line; a child silent for idleMs is killed and reported idle", async () => {
+  const { exec } = await import("../scripts/lib/proc.mjs");
+  const seen = [];
+  const r = await exec(process.execPath, ["-e", "process.stdout.write('a\\nb'); setTimeout(() => process.stdout.write('c\\n'), 50)"], { onLine: (l) => seen.push(l) });
+  assert.deepEqual([r.code, r.idle, seen], [0, false, ["a", "bc"]]);
+  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 300 });
+  assert.equal(hung.idle, true);
+  assert.ok(hung.signal, "killed by signal");
+});

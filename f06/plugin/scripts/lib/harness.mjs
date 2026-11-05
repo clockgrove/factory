@@ -156,7 +156,9 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
  * prompt or the env.
  */
-export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort }) {
+export const HARNESS_IDLE_MS = 30 * 60_000;
+
+export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
   const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
@@ -165,7 +167,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     appendFileSync(eventsFile, `${JSON.stringify({ type: "factory.run", label, harness, model: model || null, started: new Date().toISOString(), resume: !!resume })}\n`);
   }
   const started = new Date().toISOString();
-  const r = await exec(cmd, args, { cwd, env, input: stdin, timeoutMs, tee: eventsFile, echo: true });
+  const r = await exec(cmd, args, { cwd, env, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs });
   const ended = new Date().toISOString();
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile });
   rec.finalText = finalText(harness, r.stdout);
@@ -174,9 +176,13 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   rec.timedOut = r.timedOut;
   rec.exitCode = r.code;
   rec.signal = r.signal;
+  rec.idle = !!r.idle;
   if (r.timedOut) {
     rec.ok = false;
     rec.error = rec.error || "wall clock reached";
+  } else if (r.idle) {
+    rec.ok = false;
+    rec.error = `no output from the harness for ${Math.round(idleMs / 60000)} min; killed`;
   } else if (r.code !== 0 && rec.ok) {
     rec.ok = false;
     rec.error = `${cmd} exited ${r.code ?? r.signal}`;

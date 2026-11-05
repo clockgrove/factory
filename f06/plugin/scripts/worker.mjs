@@ -29,6 +29,7 @@ import {
   ensurePr,
   exitRecord,
   lastMessage,
+  liveActivity,
   markRunning,
   maskFile,
   observe,
@@ -205,7 +206,9 @@ async function main() {
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
     await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);
+    const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model });
     rec = await runHarness({
+      onLine: live.onLine,
       harness: inputs.harness,
       model: inputs.model,
       prompt: attempt === 1 || !session.id ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
@@ -217,6 +220,7 @@ async function main() {
       eventsFile,
       label: `work-${attempt}`,
     });
+    live.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it.
@@ -238,6 +242,7 @@ async function main() {
     });
   }
   pr = found;
+  if (pr?.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
 
   // 7. Factory's own validation pass, twice at most, failures back to the harness.
   let validation = null;
@@ -246,6 +251,7 @@ async function main() {
   if (early.exit !== "blocked") {
     validation = await validationLoop({
       onPhase: progress,
+      progress,
       checks: inputs.ciChecks.length && pr ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null,
       push: () => push(checkout, branch, childBase),
       checkout,

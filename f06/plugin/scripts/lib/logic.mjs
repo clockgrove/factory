@@ -191,6 +191,83 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
 export const EXITS = ["delivered", "question", "blocked"];
 
 /**
+ * What a running harness is doing, from its own event stream (Claude stream-json, Codex JSONL,
+ * Copilot JSON): turns, tool calls, sub-agents started and finished, tokens, the last event's
+ * time. Pure: feed(line) per stdout line, snapshot() at any time. The one line this renders is
+ * the progress comment's status while the harness runs, so a reader needs no log.
+ */
+export function harnessActivity(now = () => Date.now()) {
+  const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0 }, usd: null, ended: false, lastText: "" };
+  const brief = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  const feed = (line) => {
+    const t = String(line || "").trim();
+    if (!t.startsWith("{")) return;
+    let e;
+    try {
+      e = JSON.parse(t);
+    } catch {
+      return;
+    }
+    s.events += 1;
+    s.lastEventAt = now();
+    // Claude
+    if (e.type === "assistant" && e.message) {
+      if (!e.parent_tool_use_id) s.turns += 1;
+      for (const c of e.message.content || []) {
+        if (c.type === "tool_use") {
+          s.toolCalls += 1;
+          s.lastTool = c.name === "Bash" && c.input?.command ? `Bash: ${brief(c.input.command)}` : c.input?.description ? `${c.name}: ${brief(c.input.description)}` : c.name;
+        } else if (c.type === "text" && c.text) s.lastText = brief(c.text);
+      }
+      const u = e.message.usage;
+      if (u) {
+        s.tokens.input += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        s.tokens.output += u.output_tokens || 0;
+      }
+    } else if (e.type === "system" && e.subtype === "task_started" && e.task_id) {
+      s.subagents.set(e.task_id, { description: brief(e.description), type: e.subagent_type || e.task_type || "agent", startedAt: now(), done: false });
+    } else if (e.type === "system" && e.subtype === "task_notification" && e.task_id) {
+      const a = s.subagents.get(e.task_id);
+      if (a) {
+        a.done = true;
+        a.status = e.status || "completed";
+        a.endedAt = now();
+      }
+    } else if (e.type === "result") {
+      s.ended = true;
+      if (typeof e.total_cost_usd === "number") s.usd = e.total_cost_usd;
+    }
+    // Codex
+    else if (e.type === "turn.started") s.turns += 1;
+    else if (e.type === "turn.completed" && e.usage) {
+      s.tokens.input += (e.usage.input_tokens || 0) + (e.usage.cached_input_tokens || 0);
+      s.tokens.output += (e.usage.output_tokens || 0) + (e.usage.reasoning_output_tokens || 0);
+    } else if (e.type === "item.started" && e.item) {
+      s.toolCalls += 1;
+      s.lastTool = e.item.type === "command_execution" && e.item.command ? `command: ${brief(e.item.command)}` : e.item.type || "item";
+    } else if (e.type === "item.completed" && e.item?.type === "agent_message" && e.item.text) s.lastText = brief(e.item.text);
+  };
+  const snapshot = () => {
+    const t = now();
+    const active = [...s.subagents.values()].filter((a) => !a.done).map((a) => ({ ...a, minutes: Math.round((t - a.startedAt) / 60000) }));
+    const done = [...s.subagents.values()].filter((a) => a.done).length;
+    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended };
+  };
+  return { feed, snapshot };
+}
+
+/** The status line for a running or finished harness, from a snapshot. */
+export function activityLine(snap, { harness = "harness", model = null, label = "working" } = {}) {
+  const who = `${harness}${model ? ` (${model})` : ""}`;
+  if (!snap.events) return `${who} started ${snap.elapsedMin} min ago; no event from it yet`;
+  const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+  const agents = snap.subagentsActive.length ? `; sub-agents ${snap.subagentsActive.length} active (${snap.subagentsActive.map((a) => `${a.type}: ${a.description || "?"}, ${a.minutes} min`).join("; ")})${snap.subagentsDone ? `, ${snap.subagentsDone} done` : ""}` : snap.subagentsDone ? `; sub-agents ${snap.subagentsDone} done` : "";
+  const last = snap.ended ? "ended" : snap.idleMin === null ? "" : snap.idleMin === 0 ? "active now" : `last event ${snap.idleMin} min ago`;
+  const cost = snap.usd !== null ? `, $${snap.usd.toFixed(2)}` : "";
+  return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
+}
+
+/**
  * Required checks on a head, from the check-runs GitHub lists for it:
  *   { done, green, missing: [name], failed: [{name, conclusion, id}], pending: [name] }
  * Only the latest run of each name counts (a re-run supersedes). A check with no run yet is

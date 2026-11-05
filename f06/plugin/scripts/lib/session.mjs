@@ -22,7 +22,7 @@ import {
   upsertComment,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
 import { sumSpend } from "./logic.mjs";
@@ -178,16 +178,56 @@ export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded 
  */
 export function progressReporter(repo, issue, { token }, { stage, runId = process.env.GITHUB_RUN_ID || String(Date.now()) }) {
   const lines = [];
+  const links = [];
   const started = Date.now();
+  let status = "";
+  let lastWrite = 0;
+  let writing = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
-  return async (phase) => {
-    lines.push(`- ${clock(Date.now())} ${phase}`);
-    const body = `Factory ${stage} run ${runId}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}`;
+  const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
+  const write = async () => {
+    const head = status ? `**${status}**\n\n` : "";
+    const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
+    const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}`;
+    lastWrite = Date.now();
     await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
   };
+  const progress = async (phase) => {
+    lines.push(`- ${clock(Date.now())} ${phase}`);
+    status = "";
+    await write();
+  };
+  /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
+  progress.live = (text, { everyMs = 120_000, force = false } = {}) => {
+    status = text;
+    if (!force && Date.now() - lastWrite < everyMs) return;
+    if (writing) return;
+    writing = write().finally(() => {
+      writing = null;
+    });
+  };
+  /** A link shown in the header (the PR, once it exists). */
+  progress.link = (label, url) => {
+    if (!links.some((l) => l.includes(url))) links.push(`[${label}](${url})`);
+  };
+  return progress;
 }
 
-export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, push = null }) {
+/**
+ * The onLine hook for a harness run: feeds the activity tracker and keeps the progress
+ * comment's status line current. Returns {onLine, tracker, finish(label)}.
+ */
+export function liveActivity(progress, { harness, model }) {
+  const tracker = harnessActivity();
+  const onLine = (line) => {
+    tracker.feed(line);
+    progress?.live(activityLine(tracker.snapshot(), { harness, model }));
+  };
+  progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
+  return { onLine, tracker, finish: () => progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true }) };
+}
+
+export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, push = null, progress = null }) {
   const usage = [];
   let passes = 0;
   let last = null;
@@ -232,7 +272,9 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     ].join("\n");
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;
-    const rec = await runHarness({ harness, model, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}` });
+    const live = liveActivity(progress, { harness, model });
+    const rec = await runHarness({ harness, model, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine });
+    live.finish();
     usage.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex and Copilot have no in-run cap

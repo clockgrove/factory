@@ -28,6 +28,7 @@ import {
   configureGit,
   deadline,
   isValidated,
+  liveActivity,
   maskFile,
   observe,
   postValidated,
@@ -113,6 +114,7 @@ async function main() {
 
   let cred = { env: {} };
   const progress = progressReporter(repo, issue, token, { stage: "review" });
+  if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
   const finish = async (exit, reason) => {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
@@ -206,7 +208,7 @@ async function main() {
   // pass runs first and a red result is Blocked before any review.
   if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
-    const pre = await validationLoop({ onPhase: progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
+    const pre = await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation" });
     records.push(...pre.usage);
     passes = pre.passes;
     if (pre.usage.length) await push(checkout, branch, childBase);
@@ -224,6 +226,7 @@ async function main() {
   // The reviewer: one call, comment-only, findings parsed from its last message.
   const diff = await prDiff(repo, pr.number, token);
   if (!alreadyReviewed) await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
+  const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
   const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
@@ -235,7 +238,9 @@ async function main() {
     timeoutMs: Math.min(remainingMs(deadlineAt), 45 * 60_000),
     eventsFile,
     label: "review",
+    onLine: reviewLive?.onLine,
   });
+  reviewLive?.finish();
   // Fable's quota can run out mid-day: a reviewer call that failed (non-zero exit, no result) reruns once on the
   // fallback model (Opus 5.5 at xhigh effort) rather than posting "the reviewer call failed". The harness
   // reports no error code for quota, so any failure of the call is the cue; a second failure is posted.
@@ -277,7 +282,9 @@ async function main() {
 
   // One worker pass to answer, then validation again.
   if (toAnswer.length) {
+    const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model });
     const rec = await runHarness({
+      onLine: answerLive.onLine,
       harness: inputs.harness,
       model: inputs.model,
       prompt: answerPrompt({ taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
@@ -288,12 +295,13 @@ async function main() {
       eventsFile,
       label: "answer",
     });
+    answerLive.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     await push(checkout, branch, childBase);
   }
   const validation = toAnswer.length
-    ? await validationLoop({ onPhase: progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

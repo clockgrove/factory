@@ -4,6 +4,10 @@ Label a GitHub issue `factory:objective`, walk away, come back to merged work.
 
 A worker job checks out your default branch, reads the issue as the whole specification, plans in a comment on it, implements with pinned sub-agents, opens one PR, and waits for your required checks on it (or runs your validation commands when you have no required checks). A review job posts one comment-only review, the worker answers each comment once, validation runs again, and auto-merge hands the PR to your merge queue (or, without one, to your required checks). Nothing asks a question; the only stops are **Blocked** (a draft PR, the card in the Blocked column, one comment with the reason) and **Question** (a draft PR whose body asks the one thing a human must decide), and neither stops the queue.
 
+## What you see on the issue
+
+While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.
+
 ## Auto-merge is on
 
 Code lands with no human read. The gate is your CI workflow's checks on the integrated commit, the comment-only reviewer pass, and the merge queue's own re-run where you have one. Set `FACTORY_AUTO_MERGE: false` for ready-for-review PRs instead.

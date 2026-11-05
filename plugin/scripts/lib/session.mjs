@@ -131,8 +131,13 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 }
 
 /** Push the branch with the App credential (GH_TOKEN in env). */
+let lastPushError = "";
+/** The stderr of the last push that failed (empty when the last push succeeded). */
+export const pushError = () => lastPushError;
+
 export async function push(checkout, branch, env) {
   const r = await exec("git", ["push", "--force-with-lease", "origin", `HEAD:refs/heads/${branch}`], { cwd: checkout, env, echo: true });
+  lastPushError = r.code === 0 ? "" : String(r.stderr || "").split("\n").filter((l) => /rejected|error|fatal/.test(l)).join("; ").slice(0, 300) || `git push exited ${r.code ?? r.signal}`;
   return r.code === 0;
 }
 

@@ -204,3 +204,27 @@ test("harnessActivity: background commands are counted apart from sub-agents", a
   assert.deepEqual([snap.subagentsActive.length, snap.backgroundCommands], [1, 1]);
   assert.match(activityLine(snap, { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 0 min\); 1 background command running;/);
 });
+
+test("prepareBranch refuses a branch name that collides with refs under it, before any harness spend", async () => {
+  const { prepareBranch } = await import("../scripts/lib/checkout.mjs");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "factory-refs-"));
+  const bare = join(dir, "remote.git");
+  const work = join(dir, "work");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+  execFileSync("git", ["init", "-q", "-b", "main", work]);
+  execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
+  execFileSync("git", ["-C", work, "remote", "add", "origin", bare]);
+  execFileSync("git", ["-C", work, "push", "-q", "origin", "main", "main:refs/heads/factory/5/old-slice"]);
+  await assert.rejects(prepareBranch(work, { issue: 5, defaultBranch: "main" }), (e) => e.code === "ref-collision" && /factory\/5 cannot be created: factory\/5\/old-slice exists/.test(e.message));
+  const ok = await prepareBranch(work, { issue: 6, defaultBranch: "main" });
+  assert.deepEqual([ok.branch, ok.resumed], ["factory/6", false]);
+});
+
+test("decideExit: a rejected push is the reason, not 'no PR could be opened'", () => {
+  const harness = { ok: true, died: 0 };
+  assert.equal(decideExit({ harness, pr: null, commits: 3, pushRejected: "! [remote rejected] HEAD -> factory/808 (cannot lock ref)" }).reason, "push rejected: ! [remote rejected] HEAD -> factory/808 (cannot lock ref)");
+  assert.equal(decideExit({ harness, pr: null, commits: 3 }).reason, "no PR could be opened for the branch");
+});

@@ -36,6 +36,7 @@ import {
   postValidated,
   progressReporter,
   push,
+  pushError,
   remainingMs,
   validationLoop,
   writeUsage,
@@ -128,7 +129,17 @@ async function main() {
   // Git identity and the credential helper first: on a runner (persist-credentials: false) the
   // very first fetch already needs the App's token.
   await configureGit(checkout, { ...(await gitIdentity(app, keeper.token)), protectedList, credentialHelper: keeper.credentialHelper() });
-  const { branch, base, resumed } = await prepareBranch(checkout, { issue, defaultBranch });
+  let prepared;
+  try {
+    prepared = await prepareBranch(checkout, { issue, defaultBranch });
+  } catch (e) {
+    if (e.code !== "ref-collision") throw e;
+    log(e.message);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: e.message, notify: inputs.notify, stage: "branch" }, token);
+    await finish("blocked", e.message);
+    return;
+  }
+  const { branch, base, resumed } = prepared;
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
   // Rebase mode: the dispatcher sent an In-review PR back because its branch fell behind the default
   // branch (no merge queue). A clean rebase needs no model at all; a conflict goes to the harness.
@@ -233,7 +244,9 @@ async function main() {
   }
 
   // 6. What the run left behind: commits, protected paths, the PR. Pushes carry no model secret.
-  await push(checkout, branch, childBase).catch(() => {});
+  const pushed = await push(checkout, branch, childBase).catch(() => false);
+  const pushRejected = pushed ? "" : pushError();
+  if (pushRejected) log(`push rejected: ${pushRejected}`);
   let { pr: found, delta } = await observe(repo, checkout, { branch, base, defaultBranch }, token);
   const hits = protectedTouched(delta.files, protectedList);
   if (!found && delta.count > 0 && !hits) {
@@ -292,6 +305,7 @@ async function main() {
     validation: validation && !validation.died && !validation.harness ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     record: asked.record,
+    pushRejected,
   });
   if (decision.exit === "delivered" && pr) {
     // Delivered means an open, non-draft PR (the worker may have opened a draft after a harness error);

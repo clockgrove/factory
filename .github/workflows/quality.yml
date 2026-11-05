@@ -1,117 +1,26 @@
 name: Quality
-
 on:
   pull_request:
-  # The merge queue runs the checks on each pull request on top of main and
-  # everything queued ahead of it; package-gate is the check it waits for.
-  # It is the only way onto main, so a push to main runs nothing again: the
-  # queue already tested that exact commit.
   merge_group:
-
-permissions:
-  contents: read
-
-# A new push to a pull request cancels its older runs; every merge queue
-# entry runs to completion in its own group.
-concurrency:
-  group: quality-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: true
-
+  push:
+    branches: [main]
 jobs:
-  checks:
-    runs-on: ubuntu-24.04
+  quality:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup
-      - run: npm run lint
-      - run: npm run format:check
-      - run: npm run notices:check
-
-  # npm test's run, split across the shards by scripts/test-partition.mjs,
-  # balanced by the seconds each file took and the name order node --test
-  # starts them in. The seconds come from the newest merge queue run that
-  # had finished when this run was created, so new and grown test files
-  # count without a commit; every shard, and a rerun of one, picks that same
-  # run and so the same split. Without one (no such run, or the API fails),
-  # the committed test/timings.json, the same for every shard. package-gate
-  # checks that the shards ran every file exactly once either way. Five
-  # shards finish in about 41 s of tests each, against 44 s for four and
-  # 38 s for six. Each shard builds for itself: tsc takes under 10 s, and a
-  # build job would put its own runner, setup, build and artifact upload
-  # ahead of every shard.
-  tests:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      # Report every shard's failures, as one unsharded run would.
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup
-      - uses: ./.github/actions/bubblewrap
-      - run: git lfs version
-      - run: npm run build
-      - name: Take test timings from the newest finished merge queue run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          api() { for try in 1 2 3; do gh api "$@" && return; sleep 2; done; return 1; }
-          if created="$(api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)" &&
-            source="$(api "repos/$GITHUB_REPOSITORY/actions/workflows/quality.yml/runs?event=merge_group&status=success&per_page=30" \
-              --jq "[.workflow_runs[] | select(.updated_at < \"$created\")][0].id // empty")" &&
-            [ -n "$source" ] &&
-            gh run download "$source" --pattern 'test-files-*' --dir "$RUNNER_TEMP/durations" &&
-            node scripts/test-timings.mjs "$RUNNER_TEMP"/durations/*/test-durations.json; then
-            echo "Test timings from run $source"
-          else
-            git checkout -- test/timings.json
-            echo "Test timings from the committed test/timings.json"
-          fi
-      # A step of its own: a partition that fails fails the job, rather than
-      # leave node --test no files, which would run every file again.
-      - run: >-
-          node scripts/test-partition.mjs
-          ${{ matrix.shard }} ${{ strategy.job-total }} > test-shard.txt
-      - run: >-
-          node --test --test-timeout=120000
-          --test-reporter=spec --test-reporter-destination=stdout
-          --test-reporter=./scripts/test-files.mjs
-          --test-reporter-destination=test-files.txt
-          --test-reporter=./scripts/test-durations.mjs
-          --test-reporter-destination=test-durations.json
-          $(cat test-shard.txt)
-      - uses: actions/upload-artifact@v7
+      - uses: actions/setup-node@v4
         with:
-          name: test-files-${{ matrix.shard }}
-          path: |
-            test-files.txt
-            test-durations.json
-          if-no-files-found: error
-          retention-days: 7
-          overwrite: true
-
-  # The single required check for main; it passes only when every job above
-  # passes, including offline installation in the CI tests, and the test
-  # shards between them ran every test file exactly once.
+          node-version: 24
+      - name: Plugin tests
+        run: node --test plugin/test/*.test.mjs
+      - name: Bench tests
+        run: node --test bench/test/*.test.mjs
+      - name: Skills within the one-page cap
+        run: node bench/skills.mjs
+  # The main ruleset's required check keeps its 0.5 name; it passes only after the tests above.
   package-gate:
-    if: always()
-    needs: [checks, tests]
-    runs-on: ubuntu-24.04
+    needs: quality
+    runs-on: ubuntu-latest
     steps:
-      - env:
-          CHECKS: ${{ needs.checks.result }}
-          TESTS: ${{ needs.tests.result }}
-        run: |
-          test "$CHECKS" = success
-          test "$TESTS" = success
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: test-files-*
-          path: test-files
-      - run: node scripts/test-shards.mjs test-files/*/test-files.txt
+      - run: echo "quality passed"

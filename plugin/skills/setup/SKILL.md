@@ -1,138 +1,36 @@
 ---
 name: setup
-description: Set up Factory for a target repository, either configuration only or a verified background service that runs a queue of Objectives. Installs the matching factory CLI first when it is missing or another version.
+description: /factory:setup. Install Factory in the current repository on the user's consent: write .github/workflows/factory.yml from the Action's template, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board. Use when the user asks to set up, install or configure Factory for a repository.
 ---
 
-# Factory setup
+# /factory:setup
 
-Set up Factory for one target repository with its `factory` CLI. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own repository: setup refuses it, because Factory never runs on the code that runs it.
+Everything here changes the repository or its GitHub settings, so each step says what it will do and waits for a yes. The work is done by the plugin's `scripts/setup.mjs`: `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes`, one consented step at a time, where `<step>` is `workflow`, `labels`, `project` or `protection`. Without `--yes` the script only prints what it would do; use that as the preview before asking.
 
-## Install the CLI
+## 1. The workflow file (`--apply workflow`)
 
-The CLI must come from the same release as this plugin. Before anything else, run the installer that sits next to this `SKILL.md`, by its absolute path:
+Ask once for the inputs the template needs and pass them as flags: `--harness` (claude, codex, copilot), `--model`, `--subagent-model`, `--reviewer-model`, `--max-concurrent`, `--daily-usd`, `--max-usd`, `--timeout-minutes` (under 360 on hosted runners), `--auto-merge` (default `true`; the file carries the comment that code then lands with no human read, gated by CI on the queue commit, the reviewer and the merge queue), `--credential` (`api`, or `plan` for the user's own repository only), `--notify`, `--runs-on`, `--setup`, `--validation`, `--budget-command`, `--protected-paths`, `--ci-checks`. Show the rendered `.github/workflows/factory.yml` (from the plugin's `workflow-template.yml`); on yes, write it and say it needs a commit on the default branch to start its cron. It triggers on cron, manual dispatch, and `pull_request` only for the `factory:review` label the App applies; never from a fork.
 
-```sh
-node SKILL_DIRECTORY/install-cli.mjs [--prefix ABSOLUTE_DIR] [--downgrade]
-```
+## 2. The GitHub App
 
-It reads the version from the plugin's own manifest and keeps a CLI of that version that is already installed. Otherwise it downloads that release's tarball and `SHA256SUMS`, checks the SHA-256 and the build provenance (`gh attestation verify`), and only then installs it with npm, with the Claude and Copilot SDKs. It needs `gh` logged in and the network. Pass `--prefix` only for an installation directory the operator names: absolute, and outside the target repository and any credential, configuration or state root. The default is a directory per version under `~/.local/share/clockgrove-factory` (under `XDG_DATA_HOME` when set), and the launcher `~/.local/share/clockgrove-factory/bin/factory`, which each install points at its own version, never at an older release than the one it runs unless `--downgrade` says so.
+Walk it; never read, print or copy the key.
 
-Decide on its JSON:
+1. Open `https://github.com/settings/apps/new` (or the organization's `/organizations/<org>/settings/apps/new`). Name it `Factory (<repo>)`, uncheck webhooks, grant repository permissions contents, pull requests, issues and projects as read and write, and nothing else, especially not workflows.
+2. Create it, generate a private key, and note the App ID from its page.
+3. Install it on this repository only.
+4. Save the two secrets: `gh secret set FACTORY_APP_ID` and `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, run by the user, with the path they give as text.
 
-- `status: "current"` or `"installed"` (exit 0): `cli` is the CLI's absolute path: the launcher (`PREFIX/bin/factory` with `--prefix`), unless a matching CLI was already on PATH. Run it in place of `factory` in every command below. `sdks` says whether the Claude and Copilot SDKs are there; those providers need them.
-- `path` not null: the launcher's directory isn't on the operator's PATH, so the `director` skill can't run `factory`. `path` is the line that puts it there; it names no version, so it stays right across releases. Offer to add it to the startup file of the operator's login shell: `~/.profile`, or for bash the first of `~/.bash_profile` and `~/.bash_login` that exists (bash then reads no `~/.profile`), or `~/.zprofile` for zsh. Write the file only on their yes, and never add the line twice:
+Then the model credential: `gh secret set ANTHROPIC_API_KEY` or `CODEX_API_KEY` by the user, or nothing for Copilot and for Claude federation.
 
-  ```sh
-  grep -qxF 'PATH_LINE' FILE || printf '%s\n' 'PATH_LINE' >> FILE
-  ```
+## 3. GitHub settings
 
-  If the file has a line from an earlier setup naming a versioned `clockgrove-factory/X.Y.Z/bin`, offer to replace that line with this one. If they decline, give them the line. It takes effect in new login shells; an agent host started before it still lacks `factory` on its PATH until it restarts, so keep using `cli`.
+- **Labels** (`--apply labels`) and **Project board** (`--apply project`, Projects v2 by GraphQL): these act as the App, so the user first exports an installation token as `FACTORY_APP_TOKEN` (for example `gh api` with their App, or `--app-id` and `--app-private-key <path>` passed to the script); you never read the key.
+- **Merge queue and branch protection** (`--apply protection`): the `factory` ruleset on the default branch (merge queue, required checks from `--ci-checks`, no deletion or force push) and the repository's Allow auto-merge. Rulesets need admin, which the App does not have, so this step runs as the user's own `gh` login. If the CI workflow lacks `merge_group:` under `on:`, show the one-line addition and offer to write it.
 
-- `launcher` present (`kept: true`): the launcher already runs `launcher.version`, a newer release than this plugin's `version`, so the installer left it there (`cli` is this plugin's release, installed beside it). The plugin in the other host (Claude Code or Codex, whichever this isn't) is on that newer release, and this host's plugin is behind. Stop setup here, and don't run `cli`: a background service set up with it would go back to the older release. Tell the operator which plugin is behind and how to update it in this host, then to ask for setup again (after restarting Claude Code, when that's the host):
+## 4. Skills in the repository
 
-  ```sh
-  claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove   # Claude Code
-  codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove      # Codex
-  ```
+Offer to commit the Factory skills and agent definitions, which the vendors' cloud sessions need and the Action does not: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say that a committed Factory skill is thereafter a repository override: it pins that version until the user updates it.
 
-  If the plugin stays on its release, its marketplace was added at a release tag, as before 0.5.2, and a pinned marketplace doesn't move: the README's Plugin section has the one-time move (remove the marketplace, add `clockgrove/factory` without a tag, install the plugin). Only if the operator says to go back to this plugin's release on purpose, run the installer again with `--downgrade`, which moves the launcher back.
+## After
 
-- `status: "unpublished"` (exit 1): this plugin's release is tagged, but its GitHub Release isn't published yet (the Release workflow builds it in the minutes after the tag), so nothing was downloaded or installed. Tell the operator, with `problems`, and run the installer again in a few minutes, or when they ask. Don't install another way or another version meanwhile. If it stays unpublished for an hour, that release failed: stop, and tell the operator to update the plugin once a newer release is out.
-
-- `status: "refused"` (exit 1): show the operator `problems` and stop. A release file that fails a check is never installed. With `--prefix`, a launcher on a newer release in that prefix is refused the same way as `launcher` above: update this plugin, or `--downgrade` only on the operator's say. Never install another way or skip a check; the README's [manual install](https://github.com/clockgrove/factory/blob/main/README.md#install-the-cli-by-hand) is the operator's fallback.
-
-## Register Factory's GitHub App
-
-Factory acts on GitHub as its own GitHub App, and registering it is the required preflight step: walk the operator through it first, before anything about the repository's configuration. Skip it only for a configuration that already names the App or the login (`github.app` or `github.login` in it), or when the operator says to keep the GitHub CLI's login (below).
-
-1. **Link:** `factory setup --repo OWNER/NAME --github-app-link --json` (it needs no configuration). Give the operator `link`: it registers a private App with every permission Factory needs prefilled, in the organization's settings when OWNER is an organization and in their own otherwise. `next` says the rest.
-2. **Register:** they open the link and create the App, keeping the prefilled permissions.
-3. **Key:** they generate a private key on the App's page; GitHub downloads a `.pem` file. Ask them for that file's absolute path, as plain text in their reply, never the file or its content. Never read, print or copy the key yourself; setup reads it.
-4. **Install:** they install the App on All repositories (on an organization; at the least, on the repository and every other repository of its Project). Factory reads every repository of the queue's Project, and All repositories also covers one added to it later.
-5. **App ID:** they give the App's ID, on its settings page.
-
-Their GitHub CLI login is still needed: it runs their own commands and setup's, and Factory acts as the App. If the operator says to keep that login instead, give `--github-login` in place of the App's options; it is recorded, and readiness warns while holds would notify no one. Never choose it for them.
-
-## Choose the outcome
-
-- **Configuration only** (`factory setup`): the request says install, configure, or "don't start work". Nothing runs.
-- **Background** (`factory setup --background`): the request is to keep running queued Objectives. It needs Linux or WSL with a systemd user manager. Running it is the operator's consent to a service; it grants no provider spending and admits no Objective.
-
-Reuse choices the operator already gave. Ask once, together, for what is missing.
-
-## Gather
-
-- **Target:** the repository `OWNER/NAME`, and an absolute path to a clone of it that Factory owns (not the operator's working copy). The clone's origin must name the repository.
-- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
-- **Providers:** `codex` is the default (planner and worker). For Claude or Copilot, add a named provider with `--provider NAME --planner KIND --worker KIND`, and `--default` to make it the default. Ask for the models rather than copying another provider's.
-- **Optional:**
-  - limits: `--max-active`, `--workers`, `--validations`;
-  - delivery: `--delivery regular|native-stack`, and `--base-rerun-workflow FILE` only when the operator names a `workflow_dispatch` workflow free of side effects that Factory may run on the default branch for a fresh comparison of a failed check (off by default: Factory runs nothing there; readiness warns of anything that runs after it);
-  - the sandbox: `--sandbox-network`, `--package-store`, `--read-only-path`, `--sandbox-env`;
-  - the repository's formatter: `--format-command CMD`, when the repository has one (a `format` package script, say; name the tool itself, such as `pnpm exec biome check --write .`), confirmed with the operator. Factory then formats every result itself and commits the change, so no model formats by hand;
-  - final commands: `--required-command`, `--ci-only-command`;
-  - worker settings, such as `--codex-network host` or `--claude-model`.
-
-  docs/reference/setup.md#Setup lists every option and the key it sets.
-
-- **GitHub App:** its ID and the key's path from the preflight above, for `--github-app-id ID --github-app-key PATH`.
-- **Who hears about holds:** the operator's GitHub login for `--operator LOGIN`.
-
-Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
-
-## Run
-
-```sh
-factory setup --repo OWNER/NAME --checkout ABSOLUTE_CLONE --project-id PVT_... --github-app-id ID --github-app-key ABSOLUTE_PEM --operator LOGIN [options] --json
-factory setup --repo OWNER/NAME --provider claude --planner claude --worker claude [--default] --json
-factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FILE]... --json
-```
-
-- **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
-- **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
-- **Identity:** a configuration that names neither the App nor `--github-login`, as one from before 0.5.2, is `blocked` on a `GitHub App` check, and its service refuses to start: walk the operator through the preflight above, or record `--github-login` if they choose the login. The App is a new login, and an Objective in flight finds what it made by the login, so setup refuses the App while any Objective has state: ask the operator to drain the queue (`factory queue drain`) and wait until none runs. With the service refusing and Objectives in flight, that takes the login first, on the operator's say: record `--github-login`, start the service, drain, then the App.
-- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, with Copilot configured `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_PROVIDER_API_KEY` or `COPILOT_PROVIDER_BEARER_TOKEN`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
-- **Background logins:** the service doesn't keep logins from the setup shell, and `--background` checks readiness without them. Codex needs `codex login` (an API key in the shell doesn't reach the service), GitHub needs `gh auth login` or a GitHub App's key given with `--github-app-key` (the service loads setup's copy), and a Claude or Copilot token needs `--credential-file`.
-- **Toolchain:** the service runs the tools on the setup shell's PATH. When the clone pins its tools with mise (`mise.toml` or `.tool-versions`) and `mise` is on that PATH, `--background` puts the pinned versions first. Factory never runs `mise trust` or `mise install`: when readiness's `mise toolchain` check names one, give it to the operator to run in the clone. Never run either yourself, since trusting a mise configuration lets it run code.
-
-## Check the result
-
-Decide on the JSON, never the prose.
-
-- `status: "configured"` (exit 0): saved, it loads, and the target and host are ready.
-- `status: "blocked"` (exit 1): saved, but something isn't ready.
-  - `problems` names the target's problems: the clone's origin, or the Project fields.
-  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, the mise toolchain, provider logins, the GitHub App, GitHub access, merge commits and required checks.
-  - Give the operator one checklist of every `blocked` item with its fix. Then repeat the same command.
-- `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
-- **Installation:** a `warn` named `installation` means another installation serves the repository, and this one's service is refused when it starts. Ask the operator to stop that one (`factory setup --repo OWNER/NAME --stop` on its machine, or stop its `factory serve`). Only if it is gone for good, because its machine is gone or its state was wiped, and the operator says so: run `factory serve --repo OWNER/NAME --take-over` once in the foreground, stop it once it serves, then run `factory setup --repo OWNER/NAME --background`, since the background service can't take over. Then reset the Objectives that were in flight, as in moving the service below.
-- **Project:** a service refused because another installation serves another repository on the same Project names that repository. Ask the operator to stop the installation that serves it. Only if it is gone for good, and the operator says so: on a machine set up for that repository, run `factory serve --repo OTHER/NAME --take-over` once in the foreground and stop it once it serves, which frees the Project; then start this one.
-- **Launcher:** a `warn` named `launcher` means a `factory` launcher links to a release whose directory was deleted, so it runs nothing (workers never get it either way). Run the installer above again, with the `--prefix` its `fix` names if any, which points it at this plugin's release, then repeat the command.
-- **Branch protection:** a `warn` here recommends "require branches to be up to date". Factory never changes repository settings; that's the operator's call.
-- **Capacity:** `capacity` compares the configured slots and memory with the host. It is advice only; keep the operator's limits unless they ask to change them.
-
-For `--background`, the report's `status` is:
-
-- `running`: the unit is active and the service holds its lock;
-- `starting`: started, but not serving yet; check with `factory setup --check`;
-- `blocked`: nothing started; read `problems`, and `setup` when present. A service refused because another installation serves the repository is the `installation` warn above; one refused for the Project is the Project item above.
-
-The report also has `warnings`, such as lingering off, which means the service stops at logout.
-
-## Operate the service
-
-```sh
-factory setup --repo OWNER/NAME --check      # exit 0 only when running
-factory setup --repo OWNER/NAME --stop       # stop it and keep it from starting at login
-factory setup --repo OWNER/NAME --uninstall  # remove the unit; configuration and state stay
-```
-
-After the plugin moves to a new release, run the installer again, then `--background` with the new `cli`: it updates the unit and restarts the service. `--check` reports `service.current: false` until you do.
-
-An idle service with an empty queue makes no model calls.
-
-To move the service to another machine, `--stop` it on the old one, then set up and start it on the new one. Use `factory serve --take-over` only when the old machine is gone or its state was wiped. Then, when the operator asks, run `factory reset N` on the new machine for each Objective that was in flight: until then the new installation doesn't run them.
-
-## Queue work
-
-The operator queues an Objective by setting its card's `Factory` field to Queued, or by asking to run it: `factory run N` queues it and follows it. Only queue Objectives the operator named. Day-to-day operation is the `director` skill.
+Run `/factory:doctor` and show its lines. End with the one thing left for the user: commit the workflow, then label an issue `factory:objective`.

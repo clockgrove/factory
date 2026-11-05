@@ -1,7 +1,7 @@
 {
   "name": "factory",
-  "version": "0.5.20",
-  "description": "Run source-grounded development Objectives in a target repository.",
+  "version": "0.6.0",
+  "description": "File a GitHub Objective, walk away, come back to merged work: the Factory worker, reviewer and scorecard as skills.",
   "author": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
@@ -11,14 +11,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Factory",
-    "logo": "./assets/factory-mark.svg",
-    "shortDescription": "Run development Objectives in a target repository",
-    "longDescription": "Plan repository Objectives into Work Items, run Codex, Claude or Copilot workers, validate and review each result, and deliver through GitHub.",
+    "shortDescription": "Run development Objectives unattended through GitHub",
     "developerName": "Clockgrove",
-    "category": "Developer Tools",
-    "capabilities": ["Read", "Write"],
-    "defaultPrompt": [
-      "Use Factory to inspect a development Objective in my repository"
-    ]
+    "category": "Developer Tools"
   }
 }

@@ -1,0 +1,16 @@
+{
+  "harness": "copilot",
+  "model": null,
+  "usd": null,
+  "tokens": { "input": null, "output": null, "cached": null },
+  "basis": "unmetered: Copilot bills AI Credits; attribute from org billing by time window",
+  "started": "2031-03-04T01:05:00Z",
+  "ended": "2031-03-04T03:00:00Z",
+  "runs": 1,
+  "passes": 1,
+  "exit": "delivered",
+  "reason": "",
+  "credential": "GITHUB_TOKEN (copilot-requests: write)",
+  "turns": null,
+  "priceTableDate": null
+}

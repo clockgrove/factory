@@ -1,0 +1,16 @@
+{
+  "harness": "codex",
+  "model": "gpt-6.1-sol",
+  "usd": 0.6275,
+  "tokens": { "input": 150000, "output": 10500, "cached": 115000 },
+  "basis": "priced from table dated 2026-11-02",
+  "started": "2031-03-03T01:05:00Z",
+  "ended": "2031-03-03T02:40:00Z",
+  "runs": 2,
+  "passes": 2,
+  "exit": "delivered",
+  "reason": "",
+  "credential": "CODEX_API_KEY (step-scoped)",
+  "turns": 2,
+  "priceTableDate": "2026-11-02"
+}

@@ -1,0 +1,118 @@
+# Factory: unattended Objectives. Written by `/factory setup`; edit the env block, not the jobs.
+# Triggers: cron, manual (one issue), a new factory:objective label, the review job's own last step, and
+# pull_request when the Factory App labels a PR factory:review. Never from a fork: the Objective text (a writer) and the label (a
+# maintainer) are the only inputs. Auto-merge is ON: code lands with no human read. The
+# gate is your CI workflow's checks on the merge queue's commit, the comment-only reviewer
+# pass, and the merge queue's own re-run. Set FACTORY_AUTO_MERGE to false for ready PRs.
+name: factory
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      issue: { description: Objective issue number (empty runs the dispatcher), required: false }
+      harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
+  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); the cron is only the sweep
+    types: [opened, labeled]
+  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, or a Factory PR merged (siblings may be stale now)
+    types: [labeled, ready_for_review, closed]
+env:
+  FACTORY_HARNESS: {{harness}} # claude | codex | copilot
+  FACTORY_MODEL: {{model}}
+  FACTORY_SUBAGENT_MODEL: {{subagent_model}}
+  FACTORY_REVIEWER_MODEL: {{reviewer_model}}
+  FACTORY_CREDENTIAL: {{credential}} # api; plan only for your own repository
+  FACTORY_MAX_CONCURRENT: {{max_concurrent}}
+  FACTORY_DAILY_USD: {{daily_usd}}
+  FACTORY_MAX_USD: {{max_usd}}
+  FACTORY_TIMEOUT_MINUTES: {{timeout_minutes}} # under 360 on hosted runners; mirrored in timeout-minutes below
+  FACTORY_AUTO_MERGE: {{auto_merge}}
+  FACTORY_NOTIFY: {{notify}}
+  FACTORY_SETUP: {{setup}}
+  FACTORY_INSTALL: {{install}} # auto (from the lockfile), none, or your own command
+  FACTORY_VALIDATION: {{validation}}
+  FACTORY_BUDGET_COMMAND: {{budget_command}}
+  FACTORY_PROTECTED_PATHS: {{protected_paths}}
+  FACTORY_CI_CHECKS: {{ci_checks}}
+  FACTORY_NODE_VERSION: {{node_version}} # the Node.js your CI uses
+permissions: # the job token reads code and Actions; every write goes through the App's token
+  contents: read
+  actions: read # the dispatcher sums today's usage artifacts; doctor lists the CI workflow's triggers
+  issues: write
+  # id-token: write         # Claude workload identity federation only
+  # copilot-requests: write # Copilot only (bills the org or the owner's seat)
+jobs:
+  dispatch:
+    # Ticks: the cron, a manual run, a new Objective's label, or the review job's last step (a worker slot freed).
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && (github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/'))
+    concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
+    runs-on: ubuntu-latest
+    outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}" }
+    steps:
+      - uses: {{action}}
+        id: f
+        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+  work:
+    needs: dispatch
+    if: needs.dispatch.outputs.count != '' && needs.dispatch.outputs.count != '0'
+    runs-on: {{runs_on}}
+    timeout-minutes: {{timeout_minutes}}
+    strategy: { max-parallel: {{max_concurrent}}, fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
+    permissions: { contents: read, issues: write, actions: write } # actions: write only for the tick at the end
+    concurrency: { group: "factory-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: {{action}}
+        id: f
+        with:
+          mode: work
+          issue: ${{ matrix.issue }}
+          harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
+          codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
+          # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
+      - name: Dispatch tick (this worker finished; a conflicting PR fires no review job)
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh workflow run factory.yml || true
+  review:
+    name: review (${{ github.head_ref }})
+    if: >-
+      github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
+      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')
+    runs-on: {{runs_on}}
+    timeout-minutes: {{timeout_minutes}}
+    permissions: { contents: read, issues: write, actions: write } # actions: write only here, for the tick below
+    concurrency: { group: "factory-review-${{ github.event.pull_request.number }}", cancel-in-progress: false }
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: {{action}}
+        id: f
+        with:
+          mode: review
+          pr: ${{ github.event.pull_request.number }}
+          harness: ${{ inputs.harness }}
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.issue_number != ''
+        with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly
+      - name: Dispatch tick (a worker slot freed)
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh workflow run factory.yml || true

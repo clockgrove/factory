@@ -1,217 +1,187 @@
 #!/usr/bin/env node
 /**
- * `node bench/score.mjs`: score one run into <results>/<benchmark>/<run id>.json.
+ * `node bench/score.mjs`: the four job-one numbers per Objective, read from
+ * GitHub (REST through `gh api`) and the usage artifact the worker job
+ * uploads. One row per Objective; the standing scorecard is their union.
  *
- *   A harness run:   --run-dir DIR        (what bench/provision.mjs wrote)
- *   Any Objective:   --benchmark ID|FILE --state-dir DIR --issue N --run-id ID
- *                    --label TEXT [--group NAME] [--repository OWNER/NAME]
- *                    [--grade-tree DIR --grade-commit SHA] [--hand-fix SHA ...]
+ *   node bench/score.mjs --repo OWNER/NAME --issue N [--issue M ...]
+ *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed factory:objective issue
  *
- * The results directory is --results DIR, or results/ in --bench-home DIR;
- * without either, a harness run's own (the one its run record names), then
- * results/ in FACTORY_BENCH_HOME (bench/lib/home.mjs). A definition given by
- * ID is looked up in --benchmarks DIR, --bench-home DIR or the environment's
- * home.
- * --out FILE writes elsewhere; --print prints the scorecard instead.
- * Read-only on the state directory, so a live service's Objective can be
- * scored. An Objective that hasn't ended scores a partial card (`partial:
- * true`), which is never written into the results: give --out or --print
- * for one.
+ *   --usage DIR            result.json / events.jsonl files to read instead of
+ *                          downloading artifacts (one artifact's unzip, or
+ *                          <DIR>/<issue>/ per issue); works without a token
+ *   --minutes N=M          operator minutes for issue N, from a stopwatch
+ *   --read N=ok|defect     the owner's read of issue N's merged diff (kept across --append)
+ *   --baseline REF         the ref the judge compares each merged head with;
+ *                          the row carries the pair for bench/judge.mjs
+ *   --bot LOGIN            another machine login to ignore (the App's
+ *                          `<slug>[bot]` and any `*[bot]` are ignored already)
+ *   --label NAME           the Objective label (default factory:objective)
+ *   --clock-after DATE     start each clock at the first label event at or
+ *                          after DATE (an issue an earlier Factory ran under
+ *                          the same label keeps its old events; this floors them)
+ *   --check CMD            validation command(s) for the grade-auto line
+ *   --no-jobs              skip the job log (runner minutes become unknown)
+ *   --out FILE             write the rows as JSON to FILE
+ *   --md FILE              write the Markdown table to FILE (default: printed)
+ *   --append FILE          merge the rows into a standing scorecard.json,
+ *                          replacing rows of the same repository and issue
+ *                          (hand-filled quality.escapes and quality.read are kept)
+ *   --snapshot FILE        write every GitHub answer used (a fixture)
+ *   --replay FILE          score from such a snapshot instead of GitHub
+ *   --print                print the JSON rows to stdout too
+ *   --token TOKEN          a GitHub token (default: GH_TOKEN, GITHUB_TOKEN, the gh login)
+ *   --prices FILE          a price table other than bench/prices.json
  *
- * An ended run is graded when the definition has a grader
- * (bench/lib/grade.mjs): on a fresh checkout of the run repository's
- * default branch at the Objective's end. A harness run's repository is its
- * record's checkout; a backfill's is --grade-tree DIR (a clone of the
- * repository) at --grade-commit SHA (default: its default branch at the
- * end). A backfill's hand fixes are the --hand-fix commits given; a harness
- * run's are read from its repository's history.
- *
- *   --grade-only     grade the existing card again (the --out FILE, or the
- *                    run's card in the results) and rewrite it; nothing else
- *                    is scored again.
- *   --grade-file F   attach a grade written outside the harness, such as
- *                    bench/grade-auto.mjs's standalone output (#2273), in
- *                    place of running the definition's grader: checked as a
- *                    grader's output is, at its own commit (or
- *                    --grade-commit SHA, which must agree). A commit other
- *                    than the card's end commit needs --grade-commit.
- *
- * Exit codes: 0 scored (and graded, where it is); 64 usage; 65 a partial
- * card not written into the results; 70 the grader failed, its error
- * recorded in the card's `grade.error`, which is written.
+ * Exit codes: 0 scored; 64 usage; 65 nothing to score; 70 GitHub failed.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { BENCH_DIR, loadDefinition } from "./lib/definition.mjs";
-import { gradeCard, gradeFile, setGrade } from "./lib/grade.mjs";
-import {
-  benchDirs,
-  DIR_OPTIONS,
-  missingDir,
-  runResultsDir,
-} from "./lib/home.mjs";
-import { SCORECARD_VERSION } from "./lib/metrics.mjs";
-import { harnessRun } from "./lib/provision.mjs";
-import { scoreRun } from "./lib/score.mjs";
+import { collectObjective, listObjectives, recordingApi, snapshotApi, usageFromDir } from "./lib/collect.mjs";
+import { loadPrices } from "./lib/cost.mjs";
+import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
+import { markdownTable, OBJECTIVE_LABEL, scoreObjective } from "./lib/objective.mjs";
+import { existsSync as fileExists } from "node:fs";
 
-const { values } = parseArgs({
-  options: {
-    ...DIR_OPTIONS,
-    "run-dir": { type: "string" },
-    benchmark: { type: "string" },
-    "state-dir": { type: "string" },
-    issue: { type: "string" },
-    "run-id": { type: "string" },
-    label: { type: "string" },
-    group: { type: "string" },
-    repository: { type: "string" },
-    out: { type: "string" },
-    print: { type: "boolean" },
-    "grade-tree": { type: "string" },
-    "grade-commit": { type: "string" },
-    "grade-file": { type: "string" },
-    "hand-fix": { type: "string", multiple: true },
-    "grade-only": { type: "boolean" },
-  },
-});
-
-const usage = (message) => {
-  process.stderr.write(
-    `${message}\nSee the header of bench/score.mjs for usage.\n`,
-  );
-  process.exit(64);
-};
-
-const dirs = benchDirs(values);
-let input;
-if (values["run-dir"]) {
-  const record = JSON.parse(
-    readFileSync(join(values["run-dir"], "run.json"), "utf8"),
-  );
-  if (!record.issue)
-    usage(`${values["run-dir"]}/run.json has no filed Objective yet`);
-  input = {
-    benchmark: record.definitionFile ?? record.benchmark,
-    stateDir: record.stateDir,
-    issue: record.issue,
-    run: harnessRun(record),
-    results: runResultsDir(values, record.resultsDir ?? null),
-    checkout: values["grade-tree"] ?? record.checkout ?? null,
-  };
-} else {
-  for (const flag of ["benchmark", "state-dir", "issue", "run-id", "label"])
-    if (!values[flag]) usage(`Give --run-dir, or --${flag} with the others`);
-  const stateDir = resolve(values["state-dir"]);
-  input = {
-    benchmark: values.benchmark,
-    stateDir,
-    issue: Number(values.issue),
-    run: {
-      id: values["run-id"],
-      label: values.label,
-      group: values.group ?? values.label,
-      source: "backfill",
-      // An installation's directory is named OWNER__NAME (paths.ts).
-      repository: values.repository ?? basename(stateDir).replace("__", "/"),
-    },
-    results: dirs.results,
-    checkout: values["grade-tree"] ? resolve(values["grade-tree"]) : null,
-  };
-}
-if (!Number.isSafeInteger(input.issue) || input.issue <= 0)
-  usage("--issue takes an issue number");
-if (values["grade-commit"] && !input.checkout && !values["grade-file"])
-  usage("--grade-commit needs --grade-tree DIR, the repository it is in");
-let attached = null;
-if (values["grade-file"])
-  try {
-    attached = gradeFile(
-      resolve(values["grade-file"]),
-      values["grade-commit"] ?? null,
-    );
-  } catch (error) {
-    usage(`--grade-file: ${error.message}`);
-  }
-if (input.checkout && !existsSync(input.checkout) && values["grade-tree"])
-  usage(`--grade-tree ${input.checkout} does not exist`);
-const writes = !values.print && !values.out;
-if (writes && !input.results)
-  usage(
-    `Where to write the scorecard: ${missingDir("results", "results")} Or give --out FILE or --print.`,
-  );
-
-let definition;
-try {
-  definition = loadDefinition(input.benchmark, dirs.benchmarks);
-} catch (error) {
-  usage(error.message);
-}
-const cardFile = (id) =>
-  values.out ?? join(input.results, definition.id, `${id}.json`);
-/** The run repository's checkout, where it exists (a dry run's record names one never made). */
-const repo =
-  input.checkout && existsSync(input.checkout) ? input.checkout : null;
-
-let card;
-if (values["grade-only"]) {
-  const file = cardFile(input.run.id);
-  if (!existsSync(file))
-    usage(`--grade-only: there is no card ${file} to grade`);
-  card = JSON.parse(readFileSync(file, "utf8"));
-  if (card.schemaVersion !== SCORECARD_VERSION)
-    usage(
-      `--grade-only: ${file} is scorecard version ${card.schemaVersion}, not ${SCORECARD_VERSION}: score it again first`,
-    );
-} else
-  card = await scoreRun({
-    stateDir: input.stateDir,
-    issue: input.issue,
-    definition,
-    run: input.run,
-    factoryRepo: dirname(BENCH_DIR),
-    checkout: repo,
-    handFixes: values["hand-fix"] ?? [],
+/** Rows merged into a standing scorecard: same repository and issue replaces; others are kept; the owner's hand-filled quality fields survive. */
+export function appendScorecard(standing, rows) {
+  const card = standing && typeof standing === "object" ? standing : { version: 1, rows: [] };
+  const old = (r) => (card.rows || []).find((o) => o.repository === r.repository && o.issue === r.issue);
+  const merged = rows.map((r) => {
+    const o = old(r);
+    if (!o?.quality) return r;
+    const quality = { ...r.quality };
+    if (!(quality.escapes || []).length && (o.quality.escapes || []).length) quality.escapes = o.quality.escapes;
+    if ((quality.read === undefined || quality.read === "unread") && o.quality.read !== undefined && o.quality.read !== "unread") quality.read = o.quality.read;
+    return { ...r, quality };
   });
-// A grade of another commit than the Objective's end is attached only when
-// --grade-commit names it.
-if (
-  attached &&
-  !card.partial &&
-  card.endCommit &&
-  attached.commit !== card.endCommit &&
-  !values["grade-commit"]
-)
-  usage(
-    `--grade-file: ${values["grade-file"]} grades ${attached.commit}, not the Objective's end commit ${card.endCommit}: give --grade-commit ${attached.commit} to attach it anyway`,
-  );
-if (!card.partial) {
-  if (attached) setGrade(card, attached);
-  else
-    await gradeCard(card, definition, {
-      repo,
-      commit: values["grade-commit"] ?? null,
-    });
+  const kept = (card.rows || []).filter((r) => !rows.some((n) => n.repository === r.repository && n.issue === r.issue));
+  return { version: 1, updatedAt: new Date().toISOString(), rows: [...kept, ...merged].sort((a, b) => a.repository.localeCompare(b.repository) || a.issue - b.issue) };
 }
-const text = `${JSON.stringify(card, null, 2)}\n`;
-const graded = card.grade?.error
-  ? `; the grader failed: ${card.grade.error}`
-  : card.grade
-    ? `; grade ${card.grade.passed} of ${card.grade.criteria.length} criteria passed`
-    : "";
-if (values.print) process.stdout.write(text);
-else if (card.partial && !values.out) {
-  process.stderr.write(
-    `#${input.issue} is ${card.outcome}, not ended: its scorecard would be partial, and the results hold only ended runs. Give --out FILE or --print to see it.\n`,
-  );
-  process.exit(65);
-} else {
-  const out = cardFile(card.run.id);
-  mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, text);
-  const failed = card.checks.filter((c) => !c.ok);
-  process.stdout.write(
-    `${out}\n${card.outcome}; ${card.totals.tokens.total.toLocaleString("en-US")} tokens; checks ${card.checks.length - failed.length}/${card.checks.length} agree with Factory's diagnostics${failed.length ? `: ${failed.map((c) => c.name).join(", ")} differ` : ""}${graded}\n`,
-  );
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { values } = parseArgs({
+    options: {
+      repo: { type: "string" },
+      issue: { type: "string", multiple: true },
+      since: { type: "string" },
+      usage: { type: "string" },
+      minutes: { type: "string", multiple: true },
+      read: { type: "string", multiple: true },
+      baseline: { type: "string" },
+      bot: { type: "string", multiple: true },
+      label: { type: "string" },
+      "clock-after": { type: "string" },
+      check: { type: "string", multiple: true },
+      "no-jobs": { type: "boolean" },
+      out: { type: "string" },
+      md: { type: "string" },
+      append: { type: "string" },
+      snapshot: { type: "string" },
+      replay: { type: "string" },
+      print: { type: "boolean" },
+      token: { type: "string" },
+      prices: { type: "string" },
+    },
+  });
+  const usage = (message) => {
+    process.stderr.write(`${message}\nSee the header of bench/score.mjs for usage.\n`);
+    process.exit(64);
+  };
+  let snapshot = null;
+  if (values.replay) {
+    try {
+      snapshot = JSON.parse(readFileSync(values.replay, "utf8"));
+    } catch (error) {
+      usage(`--replay: ${error.message}`);
+    }
+  }
+  const repo = values.repo ?? snapshot?.repository;
+  if (!repo || !/^[^/]+\/[^/]+$/.test(repo)) usage("Give --repo OWNER/NAME");
+  const issues = (values.issue ?? (snapshot?.issues ? snapshot.issues.map(String) : [])).map((n) => Number(n));
+  if (issues.some((n) => !Number.isSafeInteger(n) || n <= 0)) usage("--issue takes issue numbers");
+  if (!issues.length && !values.since) usage("Give --issue N (one or more) or --since DATE");
+  if (values.since && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01");
+  if (values["clock-after"] && Number.isNaN(Date.parse(values["clock-after"]))) usage("--clock-after takes a date, such as 2026-11-03");
+  const clockAfter = values["clock-after"] ? new Date(values["clock-after"]).toISOString() : null;
+  const minutes = {};
+  for (const m of values.minutes ?? []) {
+    const match = /^(\d+)=(\d+(?:\.\d+)?)$/.exec(m);
+    if (!match) usage(`--minutes takes ISSUE=MINUTES, not ${m}`);
+    minutes[Number(match[1])] = Number(match[2]);
+  }
+  const reads = {};
+  for (const r of values.read ?? []) {
+    const match = /^(\d+)=(ok|defect|unread)$/.exec(r);
+    if (!match) usage(`--read takes ISSUE=ok|defect|unread, not ${r}`);
+    reads[Number(match[1])] = match[2];
+  }
+  let prices;
+  try {
+    prices = loadPrices(values.prices ? resolve(values.prices) : undefined);
+  } catch (error) {
+    usage(error.message);
+  }
+  const bots = new Set(values.bot ?? []);
+  const label = values.label ?? OBJECTIVE_LABEL;
+  const token = values.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null;
+  // The skills the rows ran on: bench/skills.json's digest (node bench/skills.mjs records it).
+  const skillsFile = resolve(import.meta.dirname, "skills.json");
+  const skills = fileExists(skillsFile) ? (() => { const s = JSON.parse(readFileSync(skillsFile, "utf8")); return { digest: s.digest, recordedAt: s.recordedAt ?? null }; })() : null;
+
+  const calls = {};
+  const live = (path, opts) => ghApi(path, { ...opts, token });
+  const api = snapshot ? snapshotApi(snapshot) : values.snapshot ? recordingApi(live, calls) : live;
+  const graphql = snapshot ? null : (q, v) => ghGraphql(q, v, { token });
+  const download = snapshot || values.usage ? null : (repoFull, id) => downloadArtifact(repoFull, id, { token });
+
+  const usageDir = values.usage ? resolve(values.usage) : null;
+  const usageFor = (issue) => {
+    if (!usageDir) return null;
+    const per = `${usageDir}/${issue}`;
+    const dir = existsSync(per) ? per : usageDir;
+    return usageFromDir(dir, { readdir: readdirSync, read: (f) => readFileSync(f, "utf8"), isDir: (f) => statSync(f).isDirectory() });
+  };
+
+  const rows = [];
+  try {
+    const numbers = issues.length ? issues : await listObjectives(api, repo, { since: values.since, label });
+    if (!numbers.length) {
+      process.stderr.write(`no ${label} issue in ${repo} closed${values.since ? ` since ${values.since}` : ""}, Blocked, Question, In review or Running\n`);
+      process.exit(65);
+    }
+    for (const issue of numbers) {
+      const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue), jobs: !values["no-jobs"], graphql }));
+      if (usageDir && snapshot) collected.usage = usageFor(issue) ?? collected.usage;
+      collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
+      if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
+      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills }));
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(70);
+  }
+
+  if (values.snapshot) {
+    const { __collected, ...rest } = calls;
+    writeFileSync(values.snapshot, `${JSON.stringify({ repository: repo, issues: rows.map((r) => r.issue), calls: rest, collected: __collected }, null, 2)}\n`);
+  }
+  const md = markdownTable(rows);
+  if (values.md) writeFileSync(values.md, md);
+  else process.stdout.write(md);
+  if (values.append) {
+    let standing = null;
+    if (existsSync(values.append)) standing = JSON.parse(readFileSync(values.append, "utf8"));
+    mkdirSync(dirname(resolve(values.append)), { recursive: true });
+    writeFileSync(values.append, `${JSON.stringify(appendScorecard(standing, rows), null, 2)}\n`);
+    process.stderr.write(`${values.append}: ${rows.length} row(s) merged into the standing scorecard\n`);
+  }
+  const json = `${JSON.stringify({ version: 1, repository: repo, scoredAt: new Date().toISOString(), rows }, null, 2)}\n`;
+  if (values.out) {
+    mkdirSync(dirname(resolve(values.out)), { recursive: true });
+    writeFileSync(values.out, json);
+  }
+  if (values.print) process.stdout.write(values.md ? json : `\n${json}`);
 }
-if (card.grade?.error) process.exit(70);

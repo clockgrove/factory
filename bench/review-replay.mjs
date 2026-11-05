@@ -1,409 +1,213 @@
 #!/usr/bin/env node
 /**
- * `node bench/review-replay.mjs`: replay recorded result reviews with a
- * Factory build's result reviewer and score it (#2344,
- * bench/lib/review-replay.mjs).
+ * `node bench/review-replay.mjs`: replay the private review set with the 0.6 reviewer
+ * (the review-pr skill as the pinned reviewer agent) and score its comments against the
+ * set's labels. PLAN.md: no skill line changes without a replay-set run.
  *
- *   --bench-home DIR            the bench home; the set is its review-replay/
- *                               (or FACTORY_BENCH_HOME)
- *   --set DIR                   the replay set itself, over the bench home
- *   --repo DIR                  a clone of the reviewed repository: its
- *                               objects hold each record's base
- *   --build DIR                 the Factory checkout whose reviewer runs
- *                               (its dist/; default: this checkout)
- *   --reviewer auto|v2|v1|recorded the adapter (bench/lib/reviewers/); auto
- *                               picks the one that fits the build, and
- *                               recorded replays the recorded verdicts
- *   --provider codex|claude|copilot  the planner kind (default: codex)
- *   --model NAME, --effort LEVEL     the reviewer's model and effort
- *                               (default: the build's for the provider)
- *   --top-provider codex|claude|copilot, --top-model NAME, --top-effort LEVEL
- *                               the top tier a review escalates to (#2364;
- *                               default: the set's config.json, else the
- *                               build's top tier for --provider), so a
- *                               replay can compare two top tiers
- *   --no-escalation             never escalate
- *   --runs N                    reviews of each record (default: 1)
- *   --concurrency N             reviews at once (default: 1, so reviews
- *                               don't stretch each other's wall time;
- *                               more only within the host's share)
- *   --prepare-concurrency N     preparations at once (default: as
- *                               --concurrency); preparation isn't review
- *                               time
- *   --cache DIR                 what replays share across sets and
- *                               labels, such as each item's warm install
- *                               store (default: ~/.cache/factory-bench/
- *                               review-replay)
- *   --seeded                    add the seeded records (seeded/records/),
- *                               reviewed once each and scored apart
- *   --only ID ...               only these records
- *   --label NAME                the results' name (default: from the
- *                               reviewer, provider, model and effort)
- *   --timeout-minutes N         each review's bound (default: 20)
- *   --fresh                     review again what earlier results hold
+ *   --set DIR               the replay set (records/, labels.json, seeded/, inputs/, plans/)
+ *   --repo DIR              a clone of the reviewed repository holding every record's commits
+ *                           (git fetch <set>/objects.bundle 'refs/*:refs/bundle/*')
+ *   --plugin DIR            the plugin whose skills and agents are reviewed (default: ../plugin)
+ *   --model NAME            the reviewer model (default: the plugin's pinned reviewer)
+ *   --effort LEVEL          --effort for Claude
+ *   --seeded                add the seeded records (one planted defect each)
+ *   --only ID ...           only these records
+ *   --concurrency N         reviews at once (default 2)
+ *   --timeout-minutes N     each review's bound (default 20)
+ *   --label NAME            the results' name (default: 06-<model>)
+ *   --fresh                 review again what earlier results hold
  *
- * Results go to <set>/results/<label>/: runs/<n>/<record id>.json, one
- * per review, reused by a later invocation unless --fresh (one that
- * failed runs again), and
- * scorecard.json. Exit codes: 0 scored (a review that failed is counted
- * in `errors`); 64 usage.
+ * A record is one Work Item's candidate (base..commit) with its acceptance criteria. The
+ * reviewer gets the Objective's goal, the criteria as numbered acceptance entries, a minimal
+ * PR body (validation results from the record) and the diff; it reads the candidate tree.
+ * Scoring per record: a labelled defect is HIT when a comment names one of its criteria
+ * ("acceptance N", 1-based) or sits on a file its evidence names; every other comment is
+ * NOISE. The scorecard reports recall over defects, noise per record, cost and time.
+ * Results: <set>/results/<label>/<id>.json and scorecard.json. Exit 0 scored; 64 usage.
  */
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { HOME_ENV } from "./lib/home.mjs";
-import {
-  candidateProblem,
-  loadSet,
-  perRecord,
-  reviewOnce,
-  scoreRun,
-  scratchRepository,
-  summarize,
-  writeJson,
-} from "./lib/review-replay.mjs";
-import * as recorded from "./lib/reviewers/recorded.mjs";
-import * as v1 from "./lib/reviewers/v1.mjs";
-import * as v2 from "./lib/reviewers/v2.mjs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
-/** Every reviewer generation's adapter, newest first; `recorded` is chosen by name only. */
-const ADAPTERS = [v2, v1];
+const run = promisify(execFile);
+const here = resolve(new URL(".", import.meta.url).pathname);
 
 const { values } = parseArgs({
   options: {
-    "bench-home": { type: "string" },
     set: { type: "string" },
     repo: { type: "string" },
-    build: { type: "string" },
-    reviewer: { type: "string" },
-    provider: { type: "string" },
+    plugin: { type: "string" },
     model: { type: "string" },
     effort: { type: "string" },
-    "top-provider": { type: "string" },
-    "top-model": { type: "string" },
-    "top-effort": { type: "string" },
-    "no-escalation": { type: "boolean" },
-    runs: { type: "string" },
-    concurrency: { type: "string" },
-    "prepare-concurrency": { type: "string" },
-    cache: { type: "string" },
     seeded: { type: "boolean" },
     only: { type: "string", multiple: true },
-    label: { type: "string" },
+    concurrency: { type: "string" },
     "timeout-minutes": { type: "string" },
+    label: { type: "string" },
     fresh: { type: "boolean" },
   },
 });
-
-const usage = (message) => {
-  process.stderr.write(
-    `${message}\nSee the header of bench/review-replay.mjs for usage.\n`,
-  );
+const usage = (m) => {
+  process.stderr.write(`${m}\nSee the header of bench/review-replay.mjs.\n`);
   process.exit(64);
 };
+if (!values.set || !values.repo) usage("Give --set DIR and --repo DIR");
+const set = resolve(values.set);
+const repo = resolve(values.repo);
+const plugin = resolve(values.plugin ?? join(here, "..", "plugin"));
+const scripts = join(plugin, "scripts", "lib");
+const { installPlugin } = await import(pathToFileURL(join(scripts, "checkout.mjs")).href);
+const { runHarness, scrubbedEnv } = await import(pathToFileURL(join(scripts, "harness.mjs")).href);
+const { parseFindings, snapComments } = await import(pathToFileURL(join(scripts, "logic.mjs")).href);
+const { reviewerPrompt } = await import(pathToFileURL(join(plugin, "scripts", "review.mjs")).href);
+const { MODEL_DEFAULTS } = await import(pathToFileURL(join(scripts, "inputs.mjs")).href);
 
-const number = (flag, fallback) => {
-  if (values[flag] === undefined) return fallback;
-  const n = Number(values[flag]);
-  if (!Number.isSafeInteger(n) || n < 1)
-    usage(`--${flag} takes a whole number more than 0`);
-  return n;
-};
+const model = values.model ?? MODEL_DEFAULTS.claude.reviewer_model;
+const effort = values.effort ?? null;
+const label = values.label ?? `06-${model}${effort ? `-${effort}` : ""}`;
+const concurrency = Math.max(1, Number(values.concurrency ?? 2));
+const timeoutMs = Math.max(1, Number(values["timeout-minutes"] ?? 20)) * 60_000;
+const out = join(set, "results", label);
+mkdirSync(out, { recursive: true });
 
-const home = values["bench-home"] ?? process.env[HOME_ENV];
-const setDir = values.set
-  ? resolve(values.set)
-  : home
-    ? resolve(home, "review-replay")
-    : null;
-if (!setDir)
-  usage(
-    `no replay set. It lives outside the Factory repository: give --set DIR, or --bench-home DIR (with review-replay/ inside), or set ${HOME_ENV}.`,
-  );
-if (!existsSync(join(setDir, "records"))) usage(`${setDir} has no records/`);
-if (!values.repo) usage("Give --repo, a clone of the reviewed repository");
-const build = resolve(
-  values.build ?? fileURLToPath(new URL("..", import.meta.url)),
-);
-if (!existsSync(join(build, "dist/review/result.js")))
-  usage(`${build} has no dist/review/result.js: run npm run build there`);
-/** The build's commit, when it is a Git checkout (dist/ is untracked: don't rebuild it during a replay). */
-function buildCommit(dir) {
-  try {
-    return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return null;
+/** The set's records, each with its labels (labels.json for recorded reviews; inline for seeded). */
+function loadSet() {
+  const labels = JSON.parse(readFileSync(join(set, "labels.json"), "utf8"));
+  const records = [];
+  for (const f of readdirSync(join(set, "records")).filter((n) => n.endsWith(".json")).sort()) {
+    const r = JSON.parse(readFileSync(join(set, "records", f), "utf8"));
+    if (r.replay === false) continue;
+    records.push({ ...r, labels: labels[r.id] ?? { refusals: [], defects: [] }, seeded: null });
   }
-}
-const top =
-  values["top-provider"] || values["top-model"] || values["top-effort"]
-    ? {
-        planner: values["top-provider"] ?? values.provider ?? "codex",
-        ...(values["top-model"] ? { model: values["top-model"] } : {}),
-        ...(values["top-effort"] ? { effort: values["top-effort"] } : {}),
-      }
-    : undefined;
-if (top && values["no-escalation"])
-  usage("--no-escalation takes no --top-provider, --top-model or --top-effort");
-const provider = {
-  planner: values.provider ?? "codex",
-  ...(values.model ? { model: values.model } : {}),
-  ...(values.effort ? { effort: values.effort } : {}),
-  // The adapter's top tier: the flags', none, or (absent) the set's.
-  ...(top ? { top } : values["no-escalation"] ? { top: false } : {}),
-};
-for (const kind of [provider.planner, top?.planner])
-  if (kind && !["codex", "claude", "copilot"].includes(kind))
-    usage("--provider and --top-provider take codex, claude or copilot");
-
-let adapter;
-/** The reviewer setting asked for: the flags, else the build's default for the provider. */
-let setting = null;
-if (values.reviewer === "recorded") adapter = recorded;
-else {
-  const result = await import(join(build, "dist/review/result.js"));
-  adapter =
-    !values.reviewer || values.reviewer === "auto"
-      ? ADAPTERS.find((a) => a.fits(result, build))
-      : ADAPTERS.find((a) => a.id === values.reviewer);
-  if (!adapter)
-    usage(
-      values.reviewer && values.reviewer !== "auto"
-        ? `no reviewer adapter ${values.reviewer}; there are ${ADAPTERS.map((a) => a.id).join(", ")} and recorded`
-        : `no adapter in bench/lib/reviewers/ fits ${build}'s reviewer: add one for its generation`,
-    );
-  if (!adapter.fits(result, build))
-    usage(`adapter ${adapter.id} doesn't fit ${build}'s reviewer`);
-  const { defaultModels } = await import(
-    join(build, "dist/providers/selection.js")
-  );
-  const defaults = defaultModels(provider.planner);
-  setting = {
-    provider: provider.planner,
-    model: provider.model ?? defaults.reviewer.model,
-    effort:
-      provider.effort ??
-      defaults.reviewEffort?.["result-review"] ??
-      defaults.reviewer.effort,
-    from:
-      provider.model && provider.effort
-        ? "flags"
-        : provider.model || provider.effort
-          ? "flags, the rest the build's default"
-          : "the build's default",
-    // The top tier the flags ask for; absent, the set's configuration's.
-    ...(top ? { top } : values["no-escalation"] ? { top: "none" } : {}),
-  };
+  if (values.seeded && existsSync(join(set, "seeded", "records"))) {
+    for (const f of readdirSync(join(set, "seeded", "records")).filter((n) => n.endsWith(".json")).sort()) {
+      const r = JSON.parse(readFileSync(join(set, "seeded", "records", f), "utf8"));
+      records.push({ ...r, labels: r.labels ?? { refusals: [], defects: [] } });
+    }
+  }
+  return values.only?.length ? records.filter((r) => values.only.includes(r.id)) : records;
 }
 
-const runs = adapter === recorded ? 1 : number("runs", 1);
-const concurrency = number("concurrency", 1);
-const prepareConcurrency = number("prepare-concurrency", concurrency);
-const shared = resolve(
-  values.cache ??
-    join(
-      process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"),
-      "factory-bench",
-      "review-replay",
-    ),
-);
-const timeoutMs = number("timeout-minutes", 20) * 60_000;
-const label =
-  values.label ??
-  (adapter === recorded
-    ? "recorded"
-    : [
-        adapter.id,
-        provider.planner,
-        provider.model,
-        provider.effort,
-        ...(top ? ["top", top.planner, top.model, top.effort] : []),
-        values["no-escalation"] ? "no-escalation" : undefined,
-      ]
-        .filter(Boolean)
-        .join("-"));
-const out = join(setDir, "results", label);
-const records = loadSet(setDir, {
-  seeded: values.seeded,
-  ...(values.only ? { only: values.only } : {}),
-});
-// The recorded verdicts exist for recorded reviews only, not seeded ones.
-const replayed = records.filter(
-  (record) =>
-    record.replay !== false && (adapter !== recorded || record.recorded),
-);
-if (!replayed.length) usage("no record to replay");
-
-const scratch = scratchRepository(values.repo, setDir);
-process.on("exit", scratch.dispose);
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
-  process.once(signal, () => {
-    scratch.dispose();
-    process.kill(process.pid, signal);
-  });
-
-/** Run `task` over `items`, `width` at a time. */
-async function pool(items, width, task) {
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) await task(items[next++]);
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(width, items.length) }, worker),
-  );
+/** The Objective's goal text from inputs/<n>.json's shown blocks, for the issue text. */
+function objectiveText(objective) {
+  const f = join(set, "inputs", `${objective}.json`);
+  if (!existsSync(f)) return "";
+  const blocks = JSON.parse(readFileSync(f, "utf8")).shown?.blocks ?? [];
+  const lines = [];
+  for (const b of blocks) {
+    if (b.kind === "heading") lines.push(`${"#".repeat(Math.min(6, (b.level ?? 2) + 1))} ${b.text}`);
+    else if (b.kind === "text") lines.push(b.text);
+    else if (b.kind === "list" && Array.isArray(b.items)) lines.push(...b.items.map((i) => `- ${typeof i === "string" ? i : i.text ?? JSON.stringify(i)}`));
+  }
+  return lines.join("\n\n");
 }
 
-// Each record's preparation, once, before any review: what its runs
-// share, such as a warm install store. It isn't
-// review time, so it is timed apart.
-const prepared = new Map();
-if (adapter.prepare)
-  await pool(
-    replayed.filter((record) => !candidateProblem(scratch.clone, record)),
-    prepareConcurrency,
-    async (record) => {
-      const started = Date.now();
-      try {
-        const value = await adapter.prepare({
-          build,
-          set: setDir,
-          cache: { record: join(out, "cache", record.id), shared },
-          record,
-          checkout: scratch.clone,
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        prepared.set(record.id, { value, ms: Date.now() - started });
-        process.stderr.write(
-          `prepared ${record.id} in ${Math.round((Date.now() - started) / 1000)} s\n`,
-        );
-      } catch (error) {
-        prepared.set(record.id, {
-          error: String(error?.message ?? error),
-          ms: Date.now() - started,
-        });
-        process.stderr.write(
-          `prepare ${record.id}: error: ${error?.message ?? error}\n`,
-        );
-      }
-    },
-  );
+function issueBody(r) {
+  const goal = objectiveText(r.objective);
+  const acceptance = r.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  return `${goal}\n\n## Acceptance (this Work Item: ${r.item})\n${acceptance}\n`;
+}
 
-// Each (run, record) pair once; a seeded record is reviewed in run 1 only.
-const pairs = [];
-for (let run = 1; run <= runs; run++)
-  for (const record of replayed)
-    if (run === 1 || !record.seeded) pairs.push({ run, record });
+function prBody(r) {
+  const results = (r.validation?.results ?? []).map((v) => `- \`${v.command}\`: ${v.passed ? "passed" : `failed (exit ${v.exitCode})`}`).join("\n");
+  return `## Acceptance\n${r.criteria.map((c, i) => `| ${i + 1} | ${c.slice(0, 120)} | see diff | see diff |`).join("\n")}\n\n## Validation\n${results || "- (not recorded)"}\n\n## Fake-only proofs\nnone recorded\n\n## Design checklist\nNot recorded in this replay (the candidate predates this PR form); do not comment on its absence.\n\n## Assumptions\nNot recorded in this replay; comment only on assumptions visible in the diff.\n\n## Undone\nnone\n`;
+}
+
+async function git(args, cwd = repo) {
+  const { stdout } = await run("git", args, { cwd, maxBuffer: 256 * 1024 * 1024 });
+  return stdout;
+}
+
+async function reviewOne(r) {
+  const resultFile = join(out, `${r.id}.json`);
+  if (!values.fresh && existsSync(resultFile)) {
+    const prev = JSON.parse(readFileSync(resultFile, "utf8"));
+    if (!prev.error) return prev;
+  }
+  const wt = join(set, "results", "cache", "06", r.id);
+  if (!existsSync(wt)) {
+    mkdirSync(join(set, "results", "cache", "06"), { recursive: true });
+    await git(["worktree", "add", "--detach", wt, r.candidate.commit]);
+  }
+  installPlugin(wt, plugin, { harness: "claude" });
+  const diff = await git(["diff", `${r.candidate.base}..${r.candidate.commit}`]);
+  const prompt = reviewerPrompt({ issue: r.objective, issueTitle: `${r.item} (Objective #${r.objective})`, issueBody: issueBody(r), prBody: prBody(r), diff, harness: "claude" });
+  const env = scrubbedEnv(process.env, { CI: "true" });
+  const started = Date.now();
+  const rec = await runHarness({ harness: "claude", model, effort, prompt, maxUsd: 5, agent: "reviewer", cwd: wt, env, timeoutMs, eventsFile: join(out, "events", `${r.id}.jsonl`), label: r.id });
+  const comments = rec.ok ? snapComments(parseFindings(rec.finalText || ""), diff) : [];
+  const result = { id: r.id, model, effort, ok: rec.ok, error: rec.error ?? null, usd: rec.usd, tokens: rec.tokens, turns: rec.turns, durationMs: Date.now() - started, comments, diffBytes: diff.length };
+  writeFileSync(resultFile, `${JSON.stringify(result, null, 2)}\n`);
+  return result;
+}
+
+/** HIT/NOISE per record. A comment names "acceptance N" (or "criterion N", "entry N"); a defect's evidence names files. */
+function score(r, result) {
+  const criteriaOf = (body) => [...String(body).matchAll(/\b(?:acceptance|criterion|criteria|entry|entries)\s+(\d+)(?:\s*(?:,|and|&)\s*(\d+))*/gi)].flatMap((m) => m.slice(1).filter(Boolean).map(Number));
+  const files = (defect) => [...String(defect.evidence ?? "").matchAll(/([\w./-]+\.(?:ts|tsx|mjs|js|md|json|sql|yml|yaml))/g)].map((m) => m[1]);
+  const defects = r.labels?.defects ?? [];
+  const hits = [];
+  const matched = new Set();
+  for (const d of defects) {
+    const wanted = new Set((d.criteria ?? []).filter((c) => typeof c === "number").map((c) => c + 1));
+    const names = files(d);
+    const by = result.comments.filter((c, i) => {
+      const named = criteriaOf(c.body).some((n) => wanted.has(n));
+      const onFile = names.some((f) => c.path === f || c.path.endsWith(`/${f}`) || f.endsWith(`/${c.path}`));
+      if (named || onFile) matched.add(i);
+      return named || onFile;
+    });
+    hits.push({ defect: d.id, hit: by.length > 0, by: by.map((c) => `${c.path}:${c.line}`) });
+  }
+  const noise = result.comments.filter((c, i) => !matched.has(i) && !/^\s*no findings\b/i.test(c.body));
+  return { defects: defects.length, hits: hits.filter((h) => h.hit).length, detail: hits, comments: result.comments.length, noise: noise.length, noiseBodies: noise.map((c) => `${c.path}:${c.line} ${c.body.slice(0, 120)}`) };
+}
+
+const records = loadSet();
+if (!records.length) usage("no records selected");
+process.stderr.write(`${records.length} record(s) on ${model}${effort ? ` at ${effort}` : ""}, ${concurrency} at once → ${out}\n`);
 const results = [];
-let done = 0;
-await pool(pairs, concurrency, async ({ run, record }) => {
-  const file = join(out, "runs", String(run), `${record.id}.json`);
-  // An earlier result is reused, but not an error: that review runs again.
-  let result =
-    !values.fresh && existsSync(file)
-      ? JSON.parse(readFileSync(file, "utf8"))
-      : null;
-  if (!result || result.error) {
-    const ready = prepared.get(record.id);
-    const problem =
-      candidateProblem(scratch.clone, record) ??
-      (ready?.error ? `its preparation failed: ${ready.error}` : null);
-    result = problem
-      ? {
-          id: record.id,
-          run,
-          verdicts: null,
-          error: problem,
-          tokens: 0,
-          calls: 0,
-          ms: 0,
-          reviewers: [],
-        }
-      : await reviewOnce({
-          adapter,
-          build,
-          set: setDir,
-          cache: { record: join(out, "cache", record.id), shared },
-          prepared: ready?.value,
-          record,
-          run,
-          clone: scratch.clone,
-          provider,
-          timeoutMs,
-        });
-    writeJson(file, result);
-  }
-  results.push(result);
-  done++;
-  const refused = result.verdicts?.filter((v) => v.kind === "refuse").length;
-  process.stderr.write(
-    `[${done}/${pairs.length}] run ${run} ${record.id}: ${result.error ? `error: ${result.error}` : `${refused} refused, ${result.tokens} tokens, ${Math.round(result.ms / 1000)} s`}\n`,
-  );
-});
-
-const section = (subset) => {
-  const ids = new Set(subset.map((r) => r.id));
-  const own = results.filter((r) => ids.has(r.id));
-  const perRun = [];
-  for (let run = 1; run <= runs; run++) {
-    const these = own.filter((r) => r.run === run);
-    if (these.length)
-      perRun.push(scoreRun(subset, these, { recorded: adapter === recorded }));
-  }
-  return {
-    records: subset.length,
-    runs: perRun,
-    summary: summarize(perRun),
-    perRecord: perRecord(subset, own),
-  };
-};
-const history = replayed.filter((r) => !r.seeded);
-const seeded = replayed.filter((r) => r.seeded);
-const scorecard = {
+let next = 0;
+await Promise.all(
+  Array.from({ length: concurrency }, async () => {
+    while (next < records.length) {
+      const r = records[next++];
+      try {
+        const res = await reviewOne(r);
+        results.push({ record: r, result: res });
+        process.stderr.write(`  ${r.id}: ${res.ok ? `${res.comments.length} comment(s), $${res.usd ?? "?"}` : `FAILED ${res.error}`}\n`);
+      } catch (e) {
+        results.push({ record: r, result: { id: r.id, ok: false, error: e.message, comments: [], usd: null } });
+        process.stderr.write(`  ${r.id}: ERROR ${e.message.slice(0, 160)}\n`);
+      }
+    }
+  }),
+);
+const rows = results.map(({ record, result }) => ({ id: record.id, seeded: !!record.seeded, ok: result.ok, usd: result.usd, durationMs: result.durationMs, ...score(record, result) }));
+const sum = (k) => rows.reduce((s, x) => s + (Number(x[k]) || 0), 0);
+const recorded = rows.filter((x) => !x.seeded);
+const seeded = rows.filter((x) => x.seeded);
+const summary = {
   label,
-  reviewer: adapter.id,
-  build,
-  buildCommit: buildCommit(build),
-  // What was asked for, and what the provider reported it ran.
-  setting,
-  reported: [
-    ...new Map(
-      results
-        .flatMap((r) => r.reviewers ?? [])
-        .map((r) => [JSON.stringify(r), r]),
-    ).values(),
-  ],
-  runs,
-  concurrency,
-  prepareConcurrency,
-  prepare: Object.fromEntries(
-    [...prepared].map(([id, entry]) => [
-      id,
-      { ms: entry.ms, ...(entry.error ? { error: entry.error } : {}) },
-    ]),
-  ),
-  notReplayed: records
-    .filter((r) => r.replay === false)
-    .map((r) => ({ id: r.id, why: r.why ?? null })),
-  replay: section(history),
-  ...(seeded.length ? { seeded: section(seeded) } : {}),
+  model,
+  effort,
+  records: rows.length,
+  reviewed: rows.filter((x) => x.ok).length,
+  errors: rows.filter((x) => !x.ok).length,
+  defects: sum("defects"),
+  hits: sum("hits"),
+  recall: sum("defects") ? Math.round((sum("hits") / sum("defects")) * 100) / 100 : null,
+  seededRecall: seeded.reduce((s, x) => s + x.defects, 0) ? Math.round((seeded.reduce((s, x) => s + x.hits, 0) / seeded.reduce((s, x) => s + x.defects, 0)) * 100) / 100 : null,
+  comments: sum("comments"),
+  noise: sum("noise"),
+  noisePerRecord: rows.length ? Math.round((sum("noise") / rows.length) * 100) / 100 : null,
+  cleanRecordsWithNoise: recorded.filter((x) => x.defects === 0 && x.noise > 0).length,
+  usd: Math.round(sum("usd") * 100) / 100,
+  minutes: Math.round(sum("durationMs") / 6000) / 10,
+  scoredAt: new Date().toISOString(),
 };
-writeJson(join(out, "scorecard.json"), scorecard);
-
-const pct = (value) => (value === null ? "n/a" : `${Math.round(value * 100)}%`);
-for (const [name, part] of [
-  ["replay", scorecard.replay],
-  ["seeded", scorecard.seeded],
-]) {
-  if (!part) continue;
-  for (const [index, s] of part.runs.entries())
-    process.stdout.write(
-      `${name} run ${index + 1}: ${s.reviews} reviews (${s.errors} errors), ${s.refusedReviews} refused (precision ${pct(s.reviewPrecision)}), ${s.refusals} refusals (precision ${pct(s.refusalPrecision)}), item defects caught ${s.itemCaught}/${s.itemDefects} (${s.itemDistinctCaught}/${s.itemDistinctDefects} distinct), objective defects caught ${s.objectiveCaught}/${s.objectiveDefects}, ${s.questions} questions, ${s.tokens} tokens, ${Math.round(s.ms / 1000)} s\n`,
-    );
-}
-process.stdout.write(`${join(out, "scorecard.json")}\n`);
+writeFileSync(join(out, "scorecard.json"), `${JSON.stringify({ summary, rows }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);

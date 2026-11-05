@@ -197,6 +197,7 @@ async function main() {
     maxUsd: inputs.maxUsd,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
+    ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
   });

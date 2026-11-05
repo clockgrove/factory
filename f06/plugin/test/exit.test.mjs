@@ -194,3 +194,13 @@ test("exec: onLine sees each stdout line; a child silent for idleMs is killed an
   assert.equal(hung.idle, true);
   assert.ok(hung.signal, "killed by signal");
 });
+
+test("harnessActivity: background commands are counted apart from sub-agents", async () => {
+  const { harnessActivity, activityLine } = await import("../scripts/lib/logic.mjs");
+  const a = harnessActivity(() => 0);
+  a.feed('{"type":"system","subtype":"task_started","task_id":"b1","description":"pnpm test > /tmp/t.log","task_type":"local_bash"}');
+  a.feed('{"type":"system","subtype":"task_started","task_id":"a1","description":"Runtime: journey test","subagent_type":"implementer","task_type":"local_agent"}');
+  const snap = a.snapshot();
+  assert.deepEqual([snap.subagentsActive.length, snap.backgroundCommands], [1, 1]);
+  assert.match(activityLine(snap, { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 0 min\); 1 background command running;/);
+});

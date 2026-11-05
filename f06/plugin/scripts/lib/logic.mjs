@@ -18,13 +18,17 @@ export function renderTaskCard(template, values) {
 }
 
 /** The values the task card needs, from the job's inputs. */
-export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths }) {
+export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [] }) {
   const hours = Math.round((Number(timeoutMinutes) / 60) * 10) / 10;
+  const checks = (ciChecks || []).filter(Boolean);
   return {
     issue: String(issue),
     usd: String(maxUsd),
     hours: String(hours),
     validation: (validation || []).length ? validation.join("; ") : "none",
+    validation_note: checks.length
+      ? `Factory's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head you push, run by CI in parallel; before you push, run the tests your change touches, not the whole suite.`
+      : "Run the validation commands before you push; Factory runs them again.",
     budget_command: budgetCommand && budgetCommand.trim() ? budgetCommand.trim() : "none",
     protected_paths: protectedPaths.join(", "),
     branch: `factory/${issue}`,
@@ -225,7 +229,7 @@ export function harnessActivity(now = () => Date.now()) {
         s.tokens.output += u.output_tokens || 0;
       }
     } else if (e.type === "system" && e.subtype === "task_started" && e.task_id) {
-      s.subagents.set(e.task_id, { description: brief(e.description), type: e.subagent_type || e.task_type || "agent", startedAt: now(), done: false });
+      s.subagents.set(e.task_id, { description: brief(e.description), type: e.subagent_type || e.task_type || "agent", kind: e.task_type === "local_bash" ? "command" : "agent", startedAt: now(), done: false });
     } else if (e.type === "system" && e.subtype === "task_notification" && e.task_id) {
       const a = s.subagents.get(e.task_id);
       if (a) {
@@ -249,9 +253,11 @@ export function harnessActivity(now = () => Date.now()) {
   };
   const snapshot = () => {
     const t = now();
-    const active = [...s.subagents.values()].filter((a) => !a.done).map((a) => ({ ...a, minutes: Math.round((t - a.startedAt) / 60000) }));
-    const done = [...s.subagents.values()].filter((a) => a.done).length;
-    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended };
+    const all = [...s.subagents.values()];
+    const active = all.filter((a) => !a.done && a.kind !== "command").map((a) => ({ ...a, minutes: Math.round((t - a.startedAt) / 60000) }));
+    const done = all.filter((a) => a.done && a.kind !== "command").length;
+    const commands = all.filter((a) => !a.done && a.kind === "command").length;
+    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended };
   };
   return { feed, snapshot };
 }
@@ -262,9 +268,10 @@ export function activityLine(snap, { harness = "harness", model = null, label = 
   if (!snap.events) return `${who} started ${snap.elapsedMin} min ago; no event from it yet`;
   const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
   const agents = snap.subagentsActive.length ? `; sub-agents ${snap.subagentsActive.length} active (${snap.subagentsActive.map((a) => `${a.type}: ${a.description || "?"}, ${a.minutes} min`).join("; ")})${snap.subagentsDone ? `, ${snap.subagentsDone} done` : ""}` : snap.subagentsDone ? `; sub-agents ${snap.subagentsDone} done` : "";
+  const bg = snap.backgroundCommands ? `; ${snap.backgroundCommands} background command${snap.backgroundCommands > 1 ? "s" : ""} running` : "";
   const last = snap.ended ? "ended" : snap.idleMin === null ? "" : snap.idleMin === 0 ? "active now" : `last event ${snap.idleMin} min ago`;
   const cost = snap.usd !== null ? `, $${snap.usd.toFixed(2)}` : "";
-  return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
+  return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}${bg}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
 }
 
 /**

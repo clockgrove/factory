@@ -45,3 +45,10 @@ test("protected paths: Factory's list plus the repository's, deduped; directory 
   assert.deepEqual(protectedTouched(["src/x.ts"], list), []);
 });
 
+
+test("task card: with required checks the harness runs the tests it touched; without them it runs the commands", () => {
+  const withChecks = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: FACTORY_PROTECTED, ciChecks: ["quality"] });
+  assert.match(withChecks.validation_note, /required check \(quality\) on the head you push.*tests your change touches/);
+  const without = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: FACTORY_PROTECTED });
+  assert.equal(without.validation_note, "Run the validation commands before you push; Factory runs them again.");
+});

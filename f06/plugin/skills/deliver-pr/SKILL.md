@@ -7,7 +7,7 @@ description: Last step of working a Factory Objective, after prove-acceptance. U
 
 ## Rebase, then open one PR
 
-Fetch the default branch and rebase `factory/<issue>` onto it. Resolve conflicts in favour of the default branch's structure and your change's intent; re-run the validation commands after any non-trivial conflict. Push with the credential the job provides; never with a token you print or copy.
+Fetch the default branch and rebase `factory/<issue>` onto it. Resolve conflicts in favour of the default branch's structure and your change's intent; re-run the validation commands after any non-trivial conflict (when the task card names required checks, the tests the conflict touches; CI runs the suite). Push with the credential the job provides; never with a token you print or copy.
 
 Open exactly one PR from `factory/<issue>` against the default branch, titled `#<issue>: <goal in a few words>`. If the plan comment holds an assumption marked `QUESTION`, or you are blocked beyond recovery, open it as a draft; otherwise open it ready for review. Reopen or update the existing PR on a rerun; never open a second.
 
@@ -29,7 +29,7 @@ Edit the plan comment to link the PR. Post nothing else on the issue, except the
 
 The reviewer posts one pass of line comments. Handle them once: for each comment, either make the change and reply with the commit, or reply with a rebuttal that names the acceptance entry or repository rule that makes the comment wrong. Never leave a comment unanswered and never answer twice. A comment that names a real defect is fixed, not argued. A comment that flags an assumption as behaviour-changing is answered, when the Question rule's test is met, by marking that assumption `QUESTION` under `## Assumptions` and converting the PR to a draft.
 
-After the replies: rebase on the default branch again, run the validation commands, push, and stop. Do not wait for the merge queue, do not re-request review, do not post a summary. If validation is red after your push, fix it locally and push once more; Factory's second re-run is the last.
+After the replies: rebase on the default branch again, run the validation commands (when the task card names required checks, only the tests your replies touched), push, and stop. Do not wait for the merge queue, do not re-request review, do not post a summary. If validation is red after your push, fix it locally and push once more; Factory's second re-run is the last.
 
 ## Stop
 

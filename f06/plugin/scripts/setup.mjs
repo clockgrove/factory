@@ -99,6 +99,7 @@ function applyWorkflow({ inputs, args, checkout }) {
     notify: inputs.notify,
     runs_on: args.runs_on || "ubuntu-latest",
     setup: inputs.setup,
+    install: inputs.install,
     validation: inputs.validation.join(", "),
     budget_command: inputs.budgetCommand,
     protected_paths: inputs.protectedAdditions.join(", "),

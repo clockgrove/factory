@@ -29,6 +29,7 @@ env:
   FACTORY_AUTO_MERGE: {{auto_merge}}
   FACTORY_NOTIFY: {{notify}}
   FACTORY_SETUP: {{setup}}
+  FACTORY_INSTALL: {{install}} # auto (from the lockfile), none, or your own command
   FACTORY_VALIDATION: {{validation}}
   FACTORY_BUDGET_COMMAND: {{budget_command}}
   FACTORY_PROTECTED_PATHS: {{protected_paths}}
@@ -76,7 +77,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
           codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
-          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan; your own repository only
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
@@ -107,7 +108,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
-          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.issue_number != ''
         with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly

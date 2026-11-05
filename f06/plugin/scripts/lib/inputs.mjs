@@ -35,6 +35,7 @@ export const DEFAULTS = {
   protected_paths: "",
   ci_checks: "",
   harness_version: "latest",
+  node_version: "22",
   action: "clockgrove/factory@v1",
   objective_label: "factory:objective",
   mode: "",

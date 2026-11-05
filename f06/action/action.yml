@@ -72,6 +72,9 @@ inputs:
   harness_version:
     description: The npm version of the harness CLI to install on the runner; `latest` by default.
     required: false
+  node_version:
+    description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
+    required: false
   app_id:
     description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
     required: true
@@ -121,10 +124,10 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Node 22
+    - name: Node
       uses: actions/setup-node@v7
       with:
-        node-version: "22"
+        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
 
     - name: Install the harness CLI
       if: inputs.mode != 'dispatch'

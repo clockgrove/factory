@@ -103,6 +103,7 @@ function applyWorkflow({ inputs, args, checkout }) {
     budget_command: inputs.budgetCommand,
     protected_paths: inputs.protectedAdditions.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
+    node_version: args.node_version || "22",
     action: args.action || `clockgrove/factory@${args.version || "v1"}`,
   };
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));

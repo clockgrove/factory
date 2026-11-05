@@ -267,7 +267,12 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
     // gh refuses to print a log with terminal escapes unless told to; the escapes and the per-line timestamps are stripped here.
     const { stdout } = await run("gh", ["api", "--allow-escape-sequences", `repos/${repo.full}/actions/jobs/${jobId}/logs`], { env: env(opts.token), maxBuffer: 64 * 1024 * 1024 });
     // eslint-disable-next-line no-control-regex
-    return String(stdout).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z ?/gm, "").slice(-chars);
+    const text = String(stdout).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z ?/gm, "");
+    // The runner's own error annotations mark where the job failed; the window around them beats the tail (post-job cleanup).
+    const first = text.indexOf("##[error]");
+    if (first === -1) return text.slice(-chars);
+    const last = text.lastIndexOf("##[error]");
+    return text.slice(Math.max(0, first - Math.round(chars * 0.75)), Math.min(text.length, last + Math.round(chars * 0.25)));
   } catch {
     return "";
   }

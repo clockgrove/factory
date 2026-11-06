@@ -31,9 +31,10 @@ One line per label under `baselines` in the scorecard, so a change's before and 
 ```sh
 node bench/drill.mjs --repo OWNER/SCRATCH --count 2 --dispatch                 # small: one-function additions, merged in minutes
 node bench/drill.mjs --repo OWNER/SCRATCH --set medium --count 5 --dispatch    # medium: five Objectives of real size over the scratch adopter's notes CLI
+node bench/drill.mjs --repo OWNER/SCRATCH --set conflict --dispatch            # conflict: two Objectives that edit one README section, so the second is sent back to rebase
 ```
 
-The drill files Objectives on a scratch repository (never Factory's own, never a product repository), lets the Action take them, waits, and scores them. The medium set is the instrument for changes to the worker's skills; the reviewer's is `bench/review-replay.mjs` against the private replay set.
+A Question or Blocked exit ends the drill's wait for that Objective. The drill files Objectives on a scratch repository (never Factory's own, never a product repository), lets the Action take them, waits, and scores them. The medium set is the instrument for changes to the worker's skills; the reviewer's is `bench/review-replay.mjs` against the private replay set.
 
 ## Skills, versioned
 

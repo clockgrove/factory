@@ -56,3 +56,18 @@ The owner's planning documents (private) set a refactor of where Factory runs, i
 - The scratch adopter (`clockgrove/factory-scratch`) gained a Postgres-backed notes CLI with discovered commands, export formats and rules, database tests on a fresh schema per file, and a setup script that builds pgvector from source, so it can carry the medium set and real setup minutes.
 
 In flight: the medium set's first baseline line; an explorer sub-agent that answers the worker's code questions so the planning skill keeps file contents out of the worker's context (lands only if turns drop on the medium set); a review-pr change requiring a behaviour-changing flag to quote the issue words it conflicts with (lands only if the replay set's recall holds at 0.89 and noise falls below 3.26). Next: the resume policy per re-entry kind, then the sandbox backend on the scratch adopter, then its release. Rules in force: one PR per bite, CI plus one focused review for behaviour changes, the drill as validation, no unit tests without a high-risk reason, every merged PR tagged, and a real adopter paused until the sandbox path is released.
+
+
+## 2026-11-06 overnight: waves 1 and 2 measured on the scratch adopter
+
+Tags v0.7.0 to v0.7.3. v0.7.0 starts the 0.7 line. v0.7.1 fixes a crash in every review job since v0.6.26 (the review job's usage record read a session object out of scope); v0.6.26, v0.6.27 and v0.7.0 carry a known-issue line on their Releases. v0.7.2: the bench counts labels the issue's author applies while filing as filing, not human input. v0.7.3: the drill's medium set no longer collides with its own earlier runs.
+
+Measured on the scratch adopter's medium set (five Objectives of about 30 turns each), with the reviewer on its Opus fallback while Fable's quota was out:
+
+- Baseline: median 32 turns, 5 model minutes, $1.1 per Objective.
+- An explorer sub-agent for the worker's code questions did not reduce turns (104 to 105 over the three comparable Objectives); not landed.
+- The shared system-prompt prefix changed nothing measurable on hosted runners; kept.
+- The resume policy (factory#2437): resuming the worker's saved session for fix passes cost three times more per answer pass and seven times more per conflicting rebase than a fresh session, at equal outcomes. Fresh stays the default; the input stays for adopters.
+- The reviewer-noise change waits for Fable: its replay baseline is a Fable number.
+
+Next: the sandbox backend (wave 3), which needs a Vercel Pro team and an Anthropic API key as secrets on the scratch adopter, and a Docker install on the development box (factory#2432) for local container work.

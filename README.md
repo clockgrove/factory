@@ -44,7 +44,7 @@ Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) wi
 
 ## Inputs that tune cost
 
-Three optional inputs on the Action, all Claude-only and all off or at the harness default unless set: `effort` (the worker's effort level, pinned to `medium` so a CLI default change cannot move cost silently), `compaction_window` (the context size in tokens at which the worker and reviewer sessions compact; the CLI default when empty, a measured lever for large Objectives), and `harness_version` (the npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record). Every Claude call also shares one cached system-prompt prefix across runs.
+Four optional inputs on the Action, all Claude-only and all off or at the harness default unless set: `effort` (the worker's effort level, pinned to `medium` so a CLI default change cannot move cost silently), `compaction_window` (the context size in tokens at which the worker and reviewer sessions compact; the CLI default when empty, a measured lever for large Objectives), `resume_policy` (`fresh` by default: a review fix pass, an answer pass and a conflicting rebase start a fresh session; `fix-passes` resumes the worker's saved session for them, which on Objectives of about 30 turns cost three to seven times more at equal outcomes, so it is for adopters measuring larger ones), and `harness_version` (the npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record). Every Claude call also shares one cached system-prompt prefix across runs.
 
 ## Where Factory runs, and where it is going
 

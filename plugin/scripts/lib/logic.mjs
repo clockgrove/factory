@@ -453,8 +453,10 @@ export function parseFindings(text) {
  *    dropped; a PR merely behind is the queue's own job and is left alone;
  *  - without a queue, strict required checks refuse a PR that is behind or conflicting and
  *    nothing updates it.
- * Either way: "rebase" sends it back to a worker job once; "blocked" is the second time
- * (integration failed twice); "ignore" covers drafts, clean and unknown states.
+ * A PR merely behind without a queue is "update": GitHub merges the default branch into it in
+ * one API call (no runner, no model) and its checks re-run; only a conflicting PR needs a worker.
+ * "rebase" sends it back to a worker job once; "blocked" is the second time (integration failed
+ * twice); "ignore" covers drafts, clean and unknown states.
  */
 export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing = false }) {
   if (!pr || pr.draft) return "ignore";
@@ -465,6 +467,7 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing 
   if (reviewing && pr.mergeable_state !== "dirty") return "ignore";
   const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
   if (!stale) return "ignore";
+  if (!queue && pr.mergeable_state === "behind") return "update";
   return rebaseMarkers >= 1 ? "blocked" : "rebase";
 }
 

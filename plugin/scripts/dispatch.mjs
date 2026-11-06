@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, findProject, findPr, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -106,6 +106,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   // merged, which strict required checks refuse and nothing updates. The worker rebases, revalidates,
   // pushes and re-arms auto-merge.
   const sentBack = [];
+  const updated = [];
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
     for (const issue of issues) {
@@ -123,7 +124,23 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing });
-      if (decision === "rebase") {
+      if (decision === "update") {
+        // Behind, not conflicting: one API call brings the branch up to date and its checks re-run; auto-merge
+        // stays armed (re-armed here if GitHub dropped it). No worker, no model.
+        updated.push(issue.number);
+        if (!dryRun) {
+          try {
+            await updatePrBranch(repo, open.number, opts);
+            log(`  #${issue.number}: PR #${open.number} was behind ${pr.base?.ref}; branch updated by GitHub`);
+            if (!pr.auto_merge && inputs.autoMerge) await enableAutoMerge(repo, open.number, opts).catch((e) => log(`  auto-merge on #${open.number}: ${String(e.message).slice(0, 120)}`));
+          } catch (e) {
+            log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
+            sentBack.push(issue.number);
+            const already = markers.some((c) => (c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`));
+            if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+          }
+        }
+      } else if (decision === "rebase") {
         sentBack.push(issue.number);
         const already = markers.some((c) => (c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`));
         if (!dryRun && !already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`, opts);
@@ -185,7 +202,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
   }
-  return { ...picked, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done, vanished, sentBack, queue };
+  return { ...picked, updated, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done, vanished, sentBack, queue };
 }
 
 async function main() {
@@ -206,6 +223,7 @@ async function main() {
     done: result.done,
     vanished: result.vanished,
     sent_back_to_rebase: result.sentBack,
+    branches_updated: result.updated,
     merge_queue: result.queue,
     project: result.project,
   };

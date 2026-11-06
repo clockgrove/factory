@@ -301,7 +301,9 @@ async function main() {
   }
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
-  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+  // Factory's own reviews on this PR (the marker in the body): their comments are the reviewer's, whoever posted them.
+  const factoryReviewIds = async () => new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
   if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
@@ -360,7 +362,7 @@ async function main() {
   // to draft when it raises one, and a human's "mark ready" answers it.
   const after = await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr.number }, token);
   pr = after.pr;
-  const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, token)).length;
+  const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() })).length;
   const decision = decideExit({
     harness: validation.harness ?? { ok: true },
     pr: { exists: true, draft: pr.draft, body: pr.body },

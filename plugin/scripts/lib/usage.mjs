@@ -52,7 +52,7 @@ function empty(harness, model) {
     harness,
     model: model ?? null,
     usd: null,
-    tokens: { input: null, output: null, cached: null },
+    tokens: { input: null, output: null, cached: null, written: null },
     basis: "unmetered",
     started: null,
     ended: null,
@@ -119,24 +119,32 @@ export function parseClaude(stdout, model) {
     let input = null;
     let output = null;
     let cached = null;
+    let written = null;
     let cost = null;
+    rec.models = {};
     for (const [name, u] of Object.entries(byModel)) {
-      input = add(input, add(num(u.inputTokens), add(num(u.cacheReadInputTokens), num(u.cacheCreationInputTokens))));
-      output = add(output, num(u.outputTokens));
-      cached = add(cached, num(u.cacheReadInputTokens));
-      if (num(u.costUSD) !== null) cost = add(cost, num(u.costUSD));
+      // Cache writes and the per-model split are kept so cost reads by component on the bench's scorecard.
+      const m = { input: num(u.inputTokens), cached: num(u.cacheReadInputTokens), written: num(u.cacheCreationInputTokens), output: num(u.outputTokens), usd: num(u.costUSD) };
+      input = add(input, add(m.input, add(m.cached, m.written)));
+      output = add(output, m.output);
+      cached = add(cached, m.cached);
+      written = add(written, m.written);
+      if (m.usd !== null) cost = add(cost, m.usd);
+      rec.models[name] = m;
       if (!rec.model) rec.model = name;
     }
-    rec.tokens = { input, output, cached };
+    rec.tokens = { input, output, cached, written };
     rec.usd = num(result.total_cost_usd) ?? cost;
     rec.basis = "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
   } else if (result.usage) {
     const u = result.usage;
     const cached = num(u.cache_read_input_tokens);
+    const written = num(u.cache_creation_input_tokens);
     rec.tokens = {
-      input: add(num(u.input_tokens), add(cached, num(u.cache_creation_input_tokens))),
+      input: add(num(u.input_tokens), add(cached, written)),
       output: num(u.output_tokens),
       cached,
+      written,
     };
     rec.usd = num(result.total_cost_usd);
     rec.basis = rec.usd === null ? "unmetered" : "harness-reported: total_cost_usd, usage (sub-agents excluded)";
@@ -193,7 +201,7 @@ export function parseCodex(stdout, model) {
     if (e.type === "item.completed" && e.item?.type === "error") failed = e.item.message || "item error";
   }
   rec.turns = turns;
-  rec.tokens = { input, output, cached };
+  rec.tokens = { input, output, cached, written: null };
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
   rec.usd = priceCodex(rec.model, rec.tokens);
@@ -220,6 +228,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
   let input = null;
   let output = null;
   let cached = null;
+  let written = null;
   let turns = 0;
   for (const e of jsonLines(stdout)) {
     if (e.type === "assistant.turn_end") turns += 1;
@@ -243,6 +252,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
         input = add(input, num(t.inputTokens));
         output = add(output, add(num(t.outputTokens), num(t.reasoningTokens)));
         cached = add(cached, num(t.cacheReadTokens));
+        written = add(written, num(t.cacheWriteTokens));
         if (!rec.model) rec.model = name;
       }
       if (!models.length && u.tokenDetails) {
@@ -250,6 +260,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
         input = add(num(d.input?.tokenCount), add(num(d.cache_read?.tokenCount), num(d.cache_write?.tokenCount)));
         output = num(d.output?.tokenCount);
         cached = num(d.cache_read?.tokenCount);
+        written = num(d.cache_write?.tokenCount);
       }
       if (num(u.totalPremiumRequestCost) !== null) rec.premiumRequests = num(u.totalPremiumRequestCost);
       if (num(u.totalNanoAiu) !== null) rec.aiu = Math.round(u.totalNanoAiu / 1e6) / 1e3;
@@ -258,7 +269,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile } = {}) {
     }
   }
   rec.turns = turns || null;
-  rec.tokens = { input, output, cached };
+  rec.tokens = { input, output, cached, written };
   rec.basis = input === null && output === null ? "unmetered: Copilot wrote no usage; attribute AI Credits from org billing by time window" : `tokens from copilot --usage-output-file${rec.premiumRequests !== undefined ? `, ${rec.premiumRequests} premium request(s)` : ""}; dollars unmetered (AI Credits, attribute from org billing)`;
   return rec;
 }
@@ -278,6 +289,17 @@ export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
 }
 
 /** Sum several records of one run (first prompt, validation retry, review pass). */
+/** Per-model totals summed across runs; undefined when no run reported a split. */
+function mergeModels(a, b) {
+  if (!a && !b) return undefined;
+  const out = { ...(a ?? {}) };
+  for (const [name, m] of Object.entries(b ?? {})) {
+    const p = out[name];
+    out[name] = p ? { input: add(p.input, m.input), cached: add(p.cached, m.cached), written: add(p.written, m.written), output: add(p.output, m.output), usd: add(p.usd, m.usd) } : m;
+  }
+  return out;
+}
+
 export function mergeUsage(records) {
   const live = records.filter(Boolean);
   if (!live.length) return null;
@@ -288,6 +310,8 @@ export function mergeUsage(records) {
     out.tokens.input = add(out.tokens.input, r.tokens.input);
     out.tokens.output = add(out.tokens.output, r.tokens.output);
     out.tokens.cached = add(out.tokens.cached, r.tokens.cached);
+    out.tokens.written = add(out.tokens.written, r.tokens.written ?? null);
+    if (r.models) out.models = mergeModels(out.models, r.models);
     out.turns = add(out.turns, r.turns);
     out.ok = out.ok && r.ok;
     out.error = out.error || r.error;

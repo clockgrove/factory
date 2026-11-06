@@ -307,6 +307,11 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
   return { green: state.green && !timedOut, checks: state, output: parts.join("\n"), timedOut, failedNames: state.failed.map((f) => f.name) };
 }
 
+/** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */
+export async function updatePrBranch(repo, number, opts) {
+  return rest(`repos/${repo.full}/pulls/${number}/update-branch`, { ...opts, method: "PUT", body: {} });
+}
+
 export async function prComment(repo, number, body, opts) {
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body } });
 }

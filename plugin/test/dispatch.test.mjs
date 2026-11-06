@@ -66,9 +66,9 @@ test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
 test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back once, then Blocks; drafts and clean PRs are left alone", async () => {
   const { staleDecision } = await import("../scripts/lib/logic.mjs");
   const behind = { draft: false, auto_merge: null, mergeable_state: "behind" };
-  assert.equal(staleDecision({ pr: behind }), "rebase", "no queue: behind goes back");
+  assert.equal(staleDecision({ pr: behind }), "update", "no queue: GitHub updates a behind branch; no worker");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" } }), "rebase");
-  assert.equal(staleDecision({ pr: behind, rebaseMarkers: 1 }), "blocked", "second time is integration failed twice");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, rebaseMarkers: 1 }), "blocked", "second conflict is integration failed twice");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "clean" } }), "ignore");
   assert.equal(staleDecision({ pr: { ...behind, draft: true } }), "ignore");
   assert.equal(staleDecision({ pr: null }), "ignore");
@@ -81,7 +81,7 @@ test("staleDecision: a PR whose review job is running is left alone", async () =
   const { staleDecision } = await import("../scripts/lib/logic.mjs");
   const behind = { draft: false, mergeable_state: "behind" };
   assert.equal(staleDecision({ pr: behind, reviewing: true }), "ignore");
-  assert.equal(staleDecision({ pr: behind, reviewing: false }), "rebase");
+  assert.equal(staleDecision({ pr: behind, reviewing: false }), "update");
 });
 
 test("staleDecision: a conflicting PR goes back even with the review label (no review run can exist for it)", async () => {

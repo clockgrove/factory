@@ -23,7 +23,7 @@ const BLOCKED_LABEL = "factory:blocked";
 const QUESTION_LABEL = "factory:question";
 
 const ms = (at) => (at ? Date.parse(at) : NaN);
-export const PASSIVE_EVENTS = new Set(["mentioned", "subscribed", "cross-referenced", "connected", "referenced", "issue_type_added", "issue_type_changed", "issue_type_removed", "milestoned", "demilestoned", "pinned", "unpinned", "added_to_project", "moved_columns_in_project", "removed_from_project", "project_v2_item_status_changed"]);
+export const PASSIVE_EVENTS = new Set(["mentioned", "subscribed", "cross-referenced", "connected", "referenced", "issue_type_added", "issue_type_changed", "issue_type_removed", "milestoned", "demilestoned", "pinned", "unpinned", "added_to_project", "moved_columns_in_project", "removed_from_project", "project_v2_item_status_changed", "added_to_project_v2", "removed_from_project_v2", "converted_note_to_issue"]);
 const minutes = (from, to) => (Number.isFinite(ms(from)) && Number.isFinite(ms(to)) ? Math.round((ms(to) - ms(from)) / 60_000) : null);
 
 /** Whether a GitHub actor is a person: not a Bot, not a known machine login. */
@@ -114,12 +114,13 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
     if (PASSIVE_EVENTS.has(e.event)) continue;
     if (e.event === "labeled" && e.label?.name === label && e.created_at === since) continue; // the clock itself
     if (e.event === "commented") {
+      if (/<!-- factory:/.test(e.body || "")) continue; // Factory's own protocol (plan, progress, hold, blocked markers), whoever posted it
       push(e.created_at, issue, "comment", e.user ?? e.actor, (e.body || "").slice(0, 80));
       continue;
     }
     push(e.created_at, issue, e.event === "labeled" || e.event === "unlabeled" ? `${e.event} ${e.label?.name ?? ""}` : e.event, e.actor);
   }
-  for (const c of collected.issueComments || []) push(c.created_at, issue, "comment", c.user, (c.body || "").slice(0, 80));
+  for (const c of collected.issueComments || []) if (!/<!-- factory:/.test(c.body || "")) push(c.created_at, issue, "comment", c.user, (c.body || "").slice(0, 80));
   for (const pr of collected.pulls || []) {
     const where = `PR #${pr.number}`;
     const d = collected.pullDetails?.[pr.number] ?? {};

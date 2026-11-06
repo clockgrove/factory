@@ -218,3 +218,22 @@ test("waitingMinutes and decisionsOf: queue and human-turn time apart from worki
   assert.equal(decisionsOf(acts), 2);
   assert.equal(decisionsOf([]), 0);
 });
+
+test("humanActions: board bookkeeping and Factory-marker comments are not human actions", async () => {
+  const { humanActions } = await import("../lib/objective.mjs");
+  const collected = {
+    issue: { number: 9 },
+    issueTimeline: [
+      { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-06T01:45:23Z", actor: { login: "kirk", type: "User" } },
+      { event: "added_to_project_v2", created_at: "2026-11-06T01:45:40Z", actor: { login: "kirk", type: "User" } },
+      { event: "project_v2_item_status_changed", created_at: "2026-11-06T01:45:50Z", actor: { login: "kirk", type: "User" } },
+      { event: "commented", created_at: "2026-11-06T01:46:00Z", actor: { login: "kirk", type: "User" }, body: "<!-- factory:9:held -->\nHeld on the board." },
+      { event: "commented", created_at: "2026-11-06T02:46:00Z", actor: { login: "kirk", type: "User" }, body: "Please also handle the dark theme." },
+    ],
+    issueComments: [],
+    pulls: [],
+    pullDetails: {},
+  };
+  const acts = humanActions(collected, "2026-11-06T01:45:23Z");
+  assert.deepEqual(acts.map((a) => a.kind), ["comment"]);
+});

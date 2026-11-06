@@ -70,7 +70,7 @@ async function main() {
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
   // read it from a file, so a six-hour harness session never holds a stale token.
-  const keeper = await new TokenKeeper({ dir: join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
+  const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
   const app = keeper.app;
   const progress = progressReporter(repo, issue, token, { stage: "work" });

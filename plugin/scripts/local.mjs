@@ -191,6 +191,9 @@ class Local {
       FACTORY_INPUT_GITHUB_TOKEN: this.token,
       FACTORY_PLUGIN_ROOT: PLUGIN_ROOT,
       FACTORY_USAGE_DIR: usageDir,
+      // gh's config and git's token file sit inside this stage's usage directory: Claude Code's sandbox shows nothing
+      // under the home directory beyond the working directory and the added directories.
+      FACTORY_AUTH_DIR: join(usageDir, "auth"),
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).

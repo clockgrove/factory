@@ -99,7 +99,7 @@ async function main() {
   const records = [];
   let passes = 0;
 
-  const keeper = await new TokenKeeper({ dir: join(checkout, "..", `factory-auth-review-${inputs.pr}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
+  const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(checkout, "..", `factory-auth-review-${inputs.pr}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
   const app = keeper.app;
 

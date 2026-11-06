@@ -70,4 +70,4 @@ Measured on the scratch adopter's medium set (five Objectives of about 30 turns 
 - The resume policy (factory#2437): resuming the worker's saved session for fix passes cost three times more per answer pass and seven times more per conflicting rebase than a fresh session, at equal outcomes. Fresh stays the default; the input stays for adopters.
 - The reviewer-noise change waits for Fable: its replay baseline is a Fable number.
 
-Next: the sandbox backend (wave 3), which needs a Vercel Pro team and an Anthropic API key as secrets on the scratch adopter, and a Docker install on the development box (factory#2432) for local container work.
+Next: the interfaces and the local backend (wave 3), which need no secrets; then the sandbox backend (wave 4), which needs a Vercel Pro team and an Anthropic API key as secrets on the scratch adopter. Docker is not needed (factory#2432, closed).

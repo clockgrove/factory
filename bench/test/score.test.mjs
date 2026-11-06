@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { collectObjective, snapshotApi, usageFromDir } from "../lib/collect.mjs";
 import { costOf, loadPrices, parseUsageText, priceTokens } from "../lib/cost.mjs";
 import { humanActions, markdownTable, scoreObjective } from "../lib/objective.mjs";
+import { phaseMinutes } from "../lib/phases.mjs";
 import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
@@ -242,4 +243,17 @@ test("humanActions: board bookkeeping and Factory-marker comments are not human 
   };
   const acts = humanActions(collected, "2026-11-06T01:45:23Z");
   assert.deepEqual(acts.map((a) => a.kind), ["comment"]);
+});
+
+test("phaseMinutes: minutes between progress lines go to the earlier line's phase; midnight is crossed; no comment is null", () => {
+  const body = (n, lines) => `<!-- factory:${n}:progress:work:1 -->\nFactory work run 1\n${lines.map((l) => `- ${l}`).join("\n")}`;
+  const work = body(7, ["23:50Z setup", "23:52Z install", "00:01Z harness claude (claude-opus-5-5) attempt 1", "00:31Z waiting for required checks (quality) on abc1234", "00:45Z validation pass 1 red: required checks quality on abc1234; fix run", "00:55Z waiting for required checks (quality) on def5678", "01:05Z exit: delivered; usd 1.00"]);
+  const review = `<!-- factory:7:progress:review:2 -->\nFactory review run 2\n- 01:10Z setup\n- 01:11Z reviewer claude-fable-5-1\n- 01:20Z answer pass: 2 comment(s)\n- 01:24Z exit: delivered; usd 0.50`;
+  const p = phaseMinutes([{ body: "<!-- factory:7:plan -->" }, { body: work }, { body: review }], 7);
+  assert.deepEqual(p, { runs: 2, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, otherMinutes: 0, basis: "2 progress comment(s)" });
+  assert.equal(phaseMinutes([{ body: "<!-- factory:8:progress:work:1 -->\n- 01:00Z setup" }], 7).runs, 0);
+  assert.equal(phaseMinutes([], 7).modelMinutes, null);
+  const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
+  assert.equal(row.phases.runs, 0);
+  assert.match(markdownTable([row]), /\| Setup min \| Model min \| CI wait min \| Harness \|/);
 });

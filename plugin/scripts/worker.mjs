@@ -32,6 +32,7 @@ import {
   liveActivity,
   markRunning,
   maskFile,
+  saveTranscript,
   observe,
   postValidated,
   progressReporter,
@@ -77,7 +78,7 @@ async function main() {
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, harnessVersion: harnessVersion(inputs.harness) });
+    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${costByPhase(records)}`);
     setOutput("exit", exit);

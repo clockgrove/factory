@@ -2,7 +2,8 @@
 // protected-path commit guard, the PR, Factory's own validation passes with the
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { branchDelta, runValidation } from "./checkout.mjs";
 import { finalText, runHarness } from "./harness.mjs";
@@ -56,6 +57,40 @@ export function maskFile(file, secrets) {
   if (hits) writeFileSync(file, text);
   return hits;
 }
+/**
+ * Copy the Claude Code session transcript into the usage directory so a later job for the same
+ * Objective can resume it: `<config>/projects/<dir>/<id>.jsonl` (and its `<id>/` side directory
+ * when present) to `<usageDir>/transcript/<dir>/`, each file masked like the event log. Returns
+ * `{id, projectDir, checkout, files}` for the usage record, or null when there is nothing to save.
+ * The project directory name is Claude Code's encoding of the checkout path; a restore is only
+ * valid on a runner whose checkout path is the same, which the record's `checkout` lets it check.
+ */
+export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets = [] }) {
+  if (harness !== "claude" || !sessionId) return null;
+  const root = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  if (!existsSync(root)) return null;
+  const dir = readdirSync(root).find((d) => existsSync(join(root, d, `${sessionId}.jsonl`)));
+  if (!dir) return null;
+  const dest = join(usageDir, "transcript", dir);
+  mkdirSync(dest, { recursive: true });
+  const files = [];
+  cpSync(join(root, dir, `${sessionId}.jsonl`), join(dest, `${sessionId}.jsonl`));
+  files.push(`${sessionId}.jsonl`);
+  if (existsSync(join(root, dir, sessionId))) {
+    cpSync(join(root, dir, sessionId), join(dest, sessionId), { recursive: true });
+    files.push(`${sessionId}/`);
+  }
+  const mask = (p) => {
+    for (const name of readdirSync(p, { withFileTypes: true })) {
+      const f = join(p, name.name);
+      if (name.isDirectory()) mask(f);
+      else maskFile(f, secrets);
+    }
+  };
+  mask(dest);
+  return { id: sessionId, projectDir: dir, checkout, files };
+}
+
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());
 
 /** Git as the App: identity, a credential helper that reads GH_TOKEN (nothing on disk), and the hook. */
@@ -290,7 +325,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
 }
 
 /** Write usage/result.json and return the merged record. */
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const result = {
@@ -310,6 +345,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     credential: credentialBasis,
     turns: merged.turns ?? null,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
+    session,
   };
   writeFileSync(join(usageDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   return result;

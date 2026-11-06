@@ -227,6 +227,7 @@ async function main() {
       onLine: live.onLine,
       harness: inputs.harness,
       model: inputs.model,
+      effort: inputs.effort,
       prompt: attempt === 1 || !session.id ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: attempt > 1 && session.canResume ? session.id : null,
@@ -275,6 +276,7 @@ async function main() {
       checkout,
       commands: inputs.validation,
       harness: inputs.harness,
+      effort: inputs.effort,
       model: inputs.model,
       maxUsd: inputs.maxUsd,
       spentUsd: sumSpend(records),
@@ -295,7 +297,7 @@ async function main() {
 
   // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
   // a run that had no harness (clean rebase) delivered by construction.
-  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : await exitRecord({ file: exitFile, harness: inputs.harness, model: inputs.model, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : await exitRecord({ file: exitFile, harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
   records.push(...asked.usage);
   if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // Green validation on an open PR outweighs a harness error code (max turns, a late tool failure);

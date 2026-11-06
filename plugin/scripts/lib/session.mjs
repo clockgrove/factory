@@ -232,7 +232,7 @@ export function liveActivity(progress, { harness, model }) {
   return { onLine, tracker, finish: () => progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true }) };
 }
 
-export async function validationLoop({ checkout, commands, harness, model, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, push = null, progress = null }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, push = null, progress = null }) {
   const usage = [];
   let passes = 0;
   let last = null;
@@ -278,7 +278,7 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;
     const live = liveActivity(progress, { harness, model });
-    const rec = await runHarness({ harness, model, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine });
+    const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine });
     live.finish();
     usage.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
@@ -357,7 +357,7 @@ export async function markRunning(repo, issue, { token }) {
  * JSON. Neither reads the PR body or the plan comment. Returns {record, usage: [records]};
  * `record` is {exit: "blocked", reason} when the harness left nothing and could not answer.
  */
-export async function exitRecord({ file, harness, model, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0 }) {
+export async function exitRecord({ file, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0 }) {
   const usage = [];
   if (file && existsSync(file)) {
     const rec = parseExitRecord(readFileSync(file, "utf8"));
@@ -368,7 +368,7 @@ export async function exitRecord({ file, harness, model, session, cwd, env, even
   const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd) : 0;
   if (maxUsd > 0 && left <= 0) return { record: { exit: "blocked", reason: "no exit record and no budget left to ask", questions: [] }, usage, basis: "none" };
   const resume = session?.canResume ? session.id : null;
-  const rec = await runHarness({ harness, model, prompt: EXIT_PROMPT, maxUsd: left, resume, cwd, env, timeoutMs: Math.min(10 * 60_000, remainingMs(deadlineAt)), eventsFile, label: "exit" });
+  const rec = await runHarness({ harness, model, effort, prompt: EXIT_PROMPT, maxUsd: left, resume, cwd, env, timeoutMs: Math.min(10 * 60_000, remainingMs(deadlineAt)), eventsFile, label: "exit" });
   usage.push(rec);
   const parsed = parseExitRecord(rec.finalText);
   if (parsed) return { record: parsed, usage, basis: "asked" };

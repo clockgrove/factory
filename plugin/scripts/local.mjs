@@ -5,27 +5,29 @@
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all]
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
 // serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
-// Needs git, gh (logged in), the harness CLI (logged in) and, on Linux and WSL2, bubblewrap and
-// socat for Claude Code's sandbox. No App, no vendor, no API key: pushes, PRs and labels go out
-// under the developer's own gh login, which triggers the repository's CI. GitHub holds every piece
-// of state; the box holds one clone per Objective under <clone>/.factory/<issue>/.
-// `run` works one Objective: claim it, run the worker, then the reviewer in the same clone, and
-// with --wait follow the PR until it merges. `serve` asks the dispatcher what is ready every
-// minute (the repository's caps, order and blocking rules) and runs each pick the same way.
-import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { hostname, platform } from "node:os";
+// Needs git, gh, the harness CLI (logged in), srt (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on
+// Linux and WSL2, bubblewrap and socat; and a fine-grained token for this one repository, in FACTORY_LOCAL_TOKEN
+// or ~/.config/factory/tokens/<owner>/<name>
+// (contents, issues and pull requests read and write; actions read). That token is all the GitHub reach the
+// model gets. No App, no vendor, no API key; GitHub holds every piece of state, and the box holds one clone per
+// Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
+// same sandbox as the harness, since they run on a tree the model edited.
+import { spawn, execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { homedir, hostname, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, readWorkflowEnv, routedHere, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, routedHere, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
-import { onPath } from "./lib/proc.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
+const onPath = (bin) => !!sh("sh", ["-c", `command -v ${bin} || true`]);
+const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
 function parse(argv) {
   const out = { _: [] };
@@ -49,13 +51,6 @@ export function repoFromRemote(url) {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
-/** The env the harness children must not inherit from a Claude Code session the developer ran this from. */
-export function withoutSessionEnv(env) {
-  const out = { ...env };
-  for (const k of Object.keys(out)) if (k === "CLAUDECODE" || k === "CLAUDE_PID" || k === "CLAUDE_EFFORT" || (k.startsWith("CLAUDE_CODE_") && k !== "CLAUDE_CODE_OAUTH_TOKEN")) delete out[k];
-  return out;
-}
-
 /** Today's local spend, from the spend lines each stage appends; the dispatcher adds it to the artifacts' sum. */
 export function localSpentToday(dev, day = new Date().toISOString().slice(0, 10)) {
   const root = join(dev, ".factory");
@@ -76,13 +71,36 @@ export function localSpentToday(dev, day = new Date().toISOString().slice(0, 10)
   return usd;
 }
 
-function preflight(harness) {
+function preflight(harness, repoFull, token) {
   const problems = [];
   if (harness !== "claude") problems.push(`local mode runs the claude harness in this release (the workflow says ${harness}); codex and copilot follow`);
-  for (const bin of ["git", "gh", "claude"]) if (!sh("sh", ["-c", `command -v ${bin} || true`])) problems.push(`${bin} is not on PATH`);
-  if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!sh("sh", ["-c", `command -v ${bin} || true`])) problems.push(`${bin} is not on PATH; Claude Code's sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
+  for (const bin of ["git", "gh", "claude"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
+  if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
+  if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
+  if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
+  if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
+}
+
+/** FACTORY_LOCAL_TOKEN, else the file ~/.config/factory/tokens/<owner>/<name> (the sandbox hides ~/.config/factory from the model). */
+export function tokenFile(repoFull, home = homedir()) {
+  const [owner, name] = repoFull.split("/");
+  return join(home, ".config", "factory", "tokens", owner, name);
+}
+function localToken(repoFull) {
+  if (process.env.FACTORY_LOCAL_TOKEN) return process.env.FACTORY_LOCAL_TOKEN.trim();
+  const f = tokenFile(repoFull);
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
+}
+
+/** The token reaches this repository and nothing else: fine-grained, and every repository it can list is this one. */
+async function checkToken(repoFull, token) {
+  if (!token.startsWith("github_pat_")) throw new Error("FACTORY_LOCAL_TOKEN must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
+  const reach = await rest("user/repos?per_page=100", { token, paginate: true }).catch(() => null);
+  if (reach === null) return;
+  const others = reach.map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase());
+  if (others.length) throw new Error(`FACTORY_LOCAL_TOKEN reaches ${others.length} other repositor${others.length === 1 ? "y" : "ies"} (${others.slice(0, 3).join(", ")}${others.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
 }
 
 class Local {
@@ -90,19 +108,27 @@ class Local {
     // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
     process.env.FACTORY_LOCAL = "1";
     if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
-    this.dev = resolve(flags.dir || process.cwd());
-    this.dev = sh("git", ["-C", this.dev, "rev-parse", "--show-toplevel"]);
+    this.dev = sh("git", ["-C", resolve(flags.dir || process.cwd()), "rev-parse", "--show-toplevel"]);
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
     if (!this.repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
     this.repo = repoOf(this.repoFull);
-    this.token = sh("gh", ["auth", "token"]);
-    this.opts = { token: this.token };
-    this.host = hostname();
     this.wf = readWorkflowEnv(this.dev);
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
-    const problems = preflight(this.harness);
+    this.token = localToken(this.repoFull);
+    const problems = preflight(this.harness, this.repoFull, this.token);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
+    this.opts = { token: this.token };
+    // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
+    this.holder = `${hostname()}:${process.pid}:${randomBytes(3).toString("hex")}`;
+    this.children = new Set();
     this.excludeWorkspaces();
+  }
+
+  /** The token check and the routing label; both need the network. */
+  async init() {
+    await checkToken(this.repoFull, this.token);
+    await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
+    return this;
   }
 
   /** <clone>/.factory/ never shows up in the developer's git status. */
@@ -116,24 +142,38 @@ class Local {
     return join(this.dev, ".factory", String(issue));
   }
 
-  /** One clone per Objective, kept between stages so the dependencies and the transcript wait for the next one. */
-  ensureClone(issue) {
+  domains() {
+    return [...LOCAL_DOMAINS, ...list(process.env.FACTORY_LOCAL_DOMAINS || this.wf.FACTORY_LOCAL_DOMAINS)];
+  }
+
+  /** One clone per Objective, kept between stages so the dependencies and the transcript wait for the next one. Cloned without blocking heartbeats. */
+  async ensureClone(issue) {
     const dir = join(this.ws(issue), "repo");
     if (existsSync(join(dir, ".git"))) return dir;
     mkdirSync(this.ws(issue), { recursive: true });
-    sh("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { stdio: ["ignore", "pipe", "inherit"] });
+    const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
+    const code = await new Promise((done) => {
+      const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token }, stdio: ["ignore", "inherit", "inherit"] });
+      child.on("close", done);
+    });
+    if (code !== 0) throw new Error(`git clone of ${this.repoFull} failed (exit ${code})`);
     return dir;
   }
 
-  /** The child env: the repository's FACTORY_* settings, then what local mode fixes. */
-  stageEnv(issue, usageDir) {
+  /** The env every child starts from: an allow-list plus the repository's FACTORY_* settings, never the whole shell. */
+  baseEnv() {
+    return { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...this.wf, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
+  }
+
+  /** One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in. */
+  stageEnv(issue, usageDir, clone) {
     const ws = this.ws(issue);
-    const extra = String(process.env.FACTORY_LOCAL_DOMAINS || this.wf.FACTORY_LOCAL_DOMAINS || "").split(/[\s,]+/).filter(Boolean);
+    const npmCache = join(ws, "npm-cache");
+    mkdirSync(npmCache, { recursive: true });
+    const srtFile = join(usageDir, "srt.json");
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone }), null, 2));
     return {
-      ...withoutSessionEnv(process.env),
-      ...this.wf,
-      FACTORY_HARNESS: this.harness,
-      FACTORY_LOCAL: "1",
+      ...this.baseEnv(),
       FACTORY_CREDENTIAL: "login",
       // The workflow's setup assumes a runner (sudo, a fresh VM); on a box the toolchain is the box's own.
       FACTORY_SETUP: process.env.FACTORY_LOCAL_SETUP ?? this.wf.FACTORY_LOCAL_SETUP ?? "",
@@ -142,19 +182,23 @@ class Local {
       FACTORY_INPUT_GITHUB_TOKEN: this.token,
       FACTORY_PLUGIN_ROOT: PLUGIN_ROOT,
       FACTORY_USAGE_DIR: usageDir,
-      npm_config_cache: join(ws, "npm-cache"),
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [ws], domains: [...LOCAL_DOMAINS, ...extra] }),
+      npm_config_cache: npmCache,
+      FACTORY_LOCAL_SRT: srtFile,
+      // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone }),
     };
   }
 
   /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */
-  stage(issue, name, script, args) {
+  async stage(issue, name, script, args) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const usageDir = join(this.ws(issue), `usage-${name}-${stamp}`);
     mkdirSync(usageDir, { recursive: true });
     const logFile = join(usageDir, "stage.log");
+    const clone = await this.ensureClone(issue);
     return new Promise((done) => {
-      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", this.ensureClone(issue), "--usage-dir", usageDir], { env: this.stageEnv(issue, usageDir), stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env: this.stageEnv(issue, usageDir, clone), stdio: ["ignore", "pipe", "pipe"] });
+      this.children.add(child);
       const relay = (chunk) => {
         appendFileSync(logFile, chunk);
         for (const line of String(chunk).split("\n")) if (line.trim()) process.stdout.write(`[#${issue} ${name}] ${line}\n`);
@@ -162,6 +206,7 @@ class Local {
       child.stdout.on("data", relay);
       child.stderr.on("data", relay);
       child.on("close", (code) => {
+        this.children.delete(child);
         let result = null;
         try {
           result = JSON.parse(readFileSync(join(usageDir, "result.json"), "utf8"));
@@ -174,32 +219,37 @@ class Local {
     });
   }
 
-  /** The routing label exists, so a developer can send an Objective here by applying it. */
-  async init() {
-    await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
-    return this;
-  }
-
-  /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path respects. */
+  /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. */
   async withClaim(issue, fn) {
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
       return { exit: "skipped" };
     }
-    await writeClaim(this.repo, issue, this.host, this.opts);
-    const beat = setInterval(() => writeClaim(this.repo, issue, this.host, this.opts).catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`)), HEARTBEAT_MS);
+    const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
+    if (held?.fresh && held.holder !== this.holder) {
+      log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
+      return { exit: "skipped" };
+    }
+    await writeClaim(this.repo, issue, this.holder, this.opts);
+    // Two loops writing at once: the comment's last writer holds it, and the other steps aside.
+    const mine = await localClaim(this.repo, issue, this.opts).catch(() => null);
+    if (mine?.holder !== this.holder) {
+      log(`#${issue}: another local loop claimed it first; leaving it alone`);
+      return { exit: "skipped" };
+    }
+    const beat = setInterval(() => writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`)), HEARTBEAT_MS);
     try {
       return await fn();
     } finally {
       clearInterval(beat);
-      await dropClaim(this.repo, issue, this.opts);
+      await dropClaim(this.repo, issue, this.holder, this.opts);
     }
   }
 
   async review(issue, prNumber, { wait = false } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
-    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, ${review.usd.toFixed(2)}` : ""}`);
+    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
     if (wait && review.exit === "delivered") await this.followMerge(issue, prNumber);
     return review;
   }
@@ -208,7 +258,7 @@ class Local {
   runObjective(issue, { wait = false } = {}) {
     return this.withClaim(issue, async () => {
       const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]);
-      log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, ${work.usd.toFixed(2)}` : ""}`);
+      log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
       if (work.exit !== "delivered") return work;
       const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
       return pr ? this.review(issue, pr.number, { wait }) : work;
@@ -216,15 +266,14 @@ class Local {
   }
 
   /** A review re-run on its own (a human re-applied factory:review), in the Objective's clone. */
-  runReview(prNumber, { wait = false } = {}) {
-    return getPr(this.repo, prNumber, this.opts).then((pr) => {
-      const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
-      if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
-      return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
-    });
+  async runReview(prNumber, { wait = false } = {}) {
+    const pr = await getPr(this.repo, prNumber, this.opts);
+    const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
+    if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
+    return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
   }
 
-  /** Open PRs labelled factory:review whose Objective is routed here: the label is the review trigger, as on Actions. */
+  /** Open PRs labelled factory:review whose Objective is routed here and held by no loop: the label is the review trigger, as on Actions. */
   async pendingReviews() {
     const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];
     const out = [];
@@ -232,7 +281,9 @@ class Local {
       const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
       if (!issue || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) continue;
       const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-      if (data && routedHere(data, this.stageEnv(0, ""))) out.push({ issue, pr: pr.number });
+      if (!data || !routedHere(data, this.baseEnv())) continue;
+      if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
+      out.push({ issue, pr: pr.number });
     }
     return out;
   }
@@ -266,14 +317,15 @@ class Local {
     const stop = async () => {
       if (stopping) return;
       stopping = true;
-      log(`stopping: ${running.size} Objective(s) in flight keep their state; their claims lapse in 15 min`);
-      await Promise.all([...running.keys()].map((n) => dropClaim(this.repo, n, this.opts)));
+      log(`stopping: ending ${this.children.size} stage process(es) and releasing their claims; an Objective left Running is Blocked by the dispatcher after 15 min, and re-applying its label brings it back`);
+      for (const child of this.children) child.kill("SIGTERM");
+      await Promise.race([Promise.allSettled(running.values()), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(130);
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     for (;;) {
-      const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.stageEnv(0, "") });
+      const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
       const result = await dispatch(inputs, { token: this.token, localSpentUsd: localSpentToday(this.dev) }).catch((e) => {
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
@@ -298,8 +350,7 @@ async function main() {
   if (cmd === "run") {
     const issue = Number(issueArg);
     if (!Number.isInteger(issue) || issue <= 0) throw new Error("usage: local.mjs run <issue> [--wait]");
-    const local = await new Local(flags).init();
-    const r = await local.runObjective(issue, { wait: !!flags.wait });
+    const r = await (await new Local(flags).init()).runObjective(issue, { wait: !!flags.wait });
     process.exitCode = r.exit === "delivered" ? 0 : 1;
     return;
   }
@@ -314,7 +365,7 @@ async function main() {
     await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 60) * 1000 });
     return;
   }
-  throw new Error("usage: local.mjs run <issue> [--wait] | review <pr> [--wait] | serve [--once]");
+  throw new Error("usage: local.mjs run <issue> [--wait] | review <pr> [--wait] | serve [--once] [--all]");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -114,6 +114,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
     for (const issue of issues) {
+      // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
+      if (!routedHere(issue)) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) continue;

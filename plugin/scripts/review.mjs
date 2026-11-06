@@ -302,7 +302,14 @@ async function main() {
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
   // Factory's own reviews on this PR (the marker in the body): their comments are the reviewer's, whoever posted them.
-  const factoryReviewIds = async () => new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+  // A failed read falls back to the author filter (null), not a crashed review run.
+  const factoryReviewIds = async () => {
+    try {
+      return new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+    } catch {
+      return null;
+    }
+  };
   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
   if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
 

@@ -1,6 +1,6 @@
 # Factory bench (0.6)
 
-The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub) and Python 3 (artifacts are unpacked with its `zipfile` module).
+The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub; `gh run download` unpacks artifacts).
 
 ## The row
 
@@ -48,7 +48,7 @@ node bench/score.mjs --repo OWNER/NAME --since 2026-11-01 --append scorecard.jso
 node bench/score.mjs --repo OWNER/NAME --issue 811 --usage ./usage-811 --minutes 811=12 --baseline main~3 --out 811.json
 ```
 
-Artifacts download through the artifacts API with the `gh` login (needs `actions: read`); `--usage DIR` reads `result.json` or `events.jsonl` from disk instead (one artifact's unzip, or `DIR/<issue>/`). `--snapshot FILE` writes every GitHub answer used; `--replay FILE` scores from it without a token. `--append` replaces the rows of the same repository and issue and keeps the rest.
+Artifacts download through `gh run download` with the `gh` login (needs `actions: read`); `--usage DIR` reads `result.json` or `events.jsonl` from disk instead (one artifact's unzip, or `DIR/<issue>/`). `--snapshot FILE` writes every GitHub answer used; `--replay FILE` scores from it without a token. `--append` replaces the rows of the same repository and issue and keeps the rest.
 
 ## Judge and auto-grader on two branches
 

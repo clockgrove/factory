@@ -47,6 +47,8 @@ Open: a human-review gate (an adopter's asset approval) is correctly a Question 
 
 ## 2026-11-06: the hosting and CI refactor, wave 0 done, wave 1 in progress
 
+The refactor is the 0.7 line from v0.7.0 on; the v0.6.16 to v0.6.27 tags below were its first bites.
+
 The owner's planning documents (private) set a refactor of where Factory runs, in waves gated by scorecard numbers; PLAN.md's decisions of 2026-11-05 and 06 record what was decided. Shipped so far, each as an exact tag:
 
 - v0.6.16 to v0.6.18: the bench reads minutes per phase from the progress comments, turns, harness calls, sessions and run counts from the usage artifacts, cost by component, and `bench/baseline.mjs` appends a labelled baseline line per repository.

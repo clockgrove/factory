@@ -39,7 +39,7 @@ export const DEFAULTS = {
   ci_checks: "",
   harness_version: "latest",
   node_version: "22",
-  action: "clockgrove/factory@v0.6.1",
+  action: "clockgrove/factory@v0.7.0",
   objective_label: "factory:objective",
   mode: "",
   issue: "",

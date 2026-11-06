@@ -12,6 +12,13 @@ export const HEARTBEAT_MS = 2 * 60_000;
 
 export const claimMarker = (issue) => marker(issue, "local");
 
+/** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
+export const LOCAL_LABEL = "factory:local";
+export const hasLocalLabel = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === LOCAL_LABEL);
+
+/** Which path takes an Objective: Actions takes the unlabelled ones; a local loop takes the labelled ones, or all with FACTORY_LOCAL_ALL=1. */
+export const routedHere = (issue, env = process.env) => (isLocal(env) ? env.FACTORY_LOCAL_ALL === "1" || hasLocalLabel(issue) : !hasLocalLabel(issue));
+
 /** True when this process is the local backend (factory run / serve set it). */
 export const isLocal = (env = process.env) => env.FACTORY_LOCAL === "1";
 
@@ -54,7 +61,10 @@ export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.c
 export function claudeLocalSettings({ domains = LOCAL_DOMAINS } = {}) {
   return {
     sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true, network: { allowedDomains: [...new Set(domains)] } },
-    permissions: { allow: ["Read", "Glob", "Grep", "Agent", "Task", "TodoWrite", "Skill"], blockWritesOutsideWorkingDirectories: true },
+    // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
+    // false), which is what confines it; without the rule, gh writes and commands with variables would need a
+    // human approval that a headless run cannot get.
+    permissions: { allow: ["Bash", "Read", "Glob", "Grep", "Agent", "Task", "TodoWrite", "Skill"], blockWritesOutsideWorkingDirectories: true },
   };
 }
 

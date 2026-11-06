@@ -15,7 +15,7 @@ import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProj
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
-import { localClaim } from "./lib/local.mjs";
+import { localClaim, routedHere } from "./lib/local.mjs";
 
 export async function appToken(inputs) {
   if (inputs.appToken) return inputs.appToken;
@@ -32,7 +32,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   const openNumbers = new Set(issues.map((i) => i.number));
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
-  const wanted = inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues;
+  // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs).
+  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => routedHere(i));
   if (inputs.issue && !wanted.length) {
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
     return { ready: [], skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], running: 0, spentToday: 0, reason: "not an objective" };

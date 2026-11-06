@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Factory local mode: the same worker and reviewer the Action runs, on a developer's own box.
 //   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--dir CLONE] [--wait]
+//   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once]
+// Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
+// serve takes only those unless FACTORY_LOCAL_ALL=1. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh (logged in), the harness CLI (logged in) and, on Linux and WSL2, bubblewrap and
 // socat for Claude Code's sandbox. No App, no vendor, no API key: pushes, PRs and labels go out
 // under the developer's own gh login, which triggers the repository's CI. GitHub holds every piece
@@ -16,9 +19,10 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, findPr, findProject, getPr, moveCard, repoOf, setStateLabel } from "./lib/github.mjs";
+import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, dropClaim, readWorkflowEnv, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, readWorkflowEnv, routedHere, writeClaim } from "./lib/local.mjs";
+import { REVIEW_LABEL } from "./lib/logic.mjs";
 import { onPath } from "./lib/proc.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -167,8 +171,14 @@ class Local {
     });
   }
 
-  /** One Objective, start to delivered review (and, with `wait`, to merged). */
-  async runObjective(issue, { wait = false } = {}) {
+  /** The routing label exists, so a developer can send an Objective here by applying it. */
+  async init() {
+    await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
+    return this;
+  }
+
+  /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path respects. */
+  async withClaim(issue, fn) {
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
@@ -177,19 +187,51 @@ class Local {
     await writeClaim(this.repo, issue, this.host, this.opts);
     const beat = setInterval(() => writeClaim(this.repo, issue, this.host, this.opts).catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`)), HEARTBEAT_MS);
     try {
-      const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]);
-      log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
-      if (work.exit !== "delivered") return work;
-      const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
-      if (!pr) return work;
-      const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(pr.number)]);
-      log(`#${issue} review of PR #${pr.number}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
-      if (wait && review.exit === "delivered") await this.followMerge(issue, pr.number);
-      return review;
+      return await fn();
     } finally {
       clearInterval(beat);
       await dropClaim(this.repo, issue, this.opts);
     }
+  }
+
+  async review(issue, prNumber, { wait = false } = {}) {
+    const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
+    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, ${review.usd.toFixed(2)}` : ""}`);
+    if (wait && review.exit === "delivered") await this.followMerge(issue, prNumber);
+    return review;
+  }
+
+  /** One Objective, start to delivered review (and, with `wait`, to merged). */
+  runObjective(issue, { wait = false } = {}) {
+    return this.withClaim(issue, async () => {
+      const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]);
+      log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, ${work.usd.toFixed(2)}` : ""}`);
+      if (work.exit !== "delivered") return work;
+      const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+      return pr ? this.review(issue, pr.number, { wait }) : work;
+    });
+  }
+
+  /** A review re-run on its own (a human re-applied factory:review), in the Objective's clone. */
+  runReview(prNumber, { wait = false } = {}) {
+    return getPr(this.repo, prNumber, this.opts).then((pr) => {
+      const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
+      if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
+      return this.withClaim(issue, () => this.review(issue, prNumber, { wait }));
+    });
+  }
+
+  /** Open PRs labelled factory:review whose Objective is routed here: the label is the review trigger, as on Actions. */
+  async pendingReviews() {
+    const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];
+    const out = [];
+    for (const pr of prs) {
+      const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
+      if (!issue || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) continue;
+      const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+      if (data && routedHere(data, this.stageEnv(0, ""))) out.push({ issue, pr: pr.number });
+    }
+    return out;
   }
 
   /** --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. */
@@ -234,8 +276,10 @@ class Local {
         return { ready: [] };
       });
       const picks = (result.ready || []).filter((n) => !running.has(n));
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${localSpentToday(this.dev).toFixed(2)} spent locally today`);
+      const reviews = (await this.pendingReviews()).filter((r) => !running.has(r.issue) && !picks.includes(r.issue));
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${localSpentToday(this.dev).toFixed(2)} spent locally today`);
       for (const n of picks) running.set(n, this.runObjective(n).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
+      for (const r of reviews) running.set(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr)).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));
       if (once) {
         await Promise.all(running.values());
         return;
@@ -251,16 +295,23 @@ async function main() {
   if (cmd === "run") {
     const issue = Number(issueArg);
     if (!Number.isInteger(issue) || issue <= 0) throw new Error("usage: local.mjs run <issue> [--wait]");
-    const local = new Local(flags);
+    const local = await new Local(flags).init();
     const r = await local.runObjective(issue, { wait: !!flags.wait });
     process.exitCode = r.exit === "delivered" ? 0 : 1;
     return;
   }
-  if (cmd === "serve") {
-    await new Local(flags).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 60) * 1000 });
+  if (cmd === "review") {
+    const pr = Number(issueArg);
+    if (!Number.isInteger(pr) || pr <= 0) throw new Error("usage: local.mjs review <pr> [--wait]");
+    const r = await (await new Local(flags).init()).runReview(pr, { wait: !!flags.wait });
+    process.exitCode = r.exit === "delivered" ? 0 : 1;
     return;
   }
-  throw new Error("usage: local.mjs run <issue> [--wait] | serve [--once]");
+  if (cmd === "serve") {
+    await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 60) * 1000 });
+    return;
+  }
+  throw new Error("usage: local.mjs run <issue> [--wait] | review <pr> [--wait] | serve [--once]");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

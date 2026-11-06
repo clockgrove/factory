@@ -60,7 +60,7 @@ export function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harness = nu
       if (existsSync(dst)) continue;
       mkdirSync(dirname(dst), { recursive: true });
       const role = file.replace(/\..*$/, "");
-      const model = role === "implementer" ? models.subagent : role === "reviewer" ? models.reviewer : null;
+      const model = role === "implementer" || role === "explorer" ? models.subagent : role === "reviewer" ? models.reviewer : null;
       writeFileSync(dst, model ? pinModel(readFileSync(join(src, file), "utf8"), h, model) : readFileSync(join(src, file), "utf8"));
       written.push(join(dir, file));
     }

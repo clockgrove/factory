@@ -7,6 +7,8 @@ description: First step of working a Factory Objective (an issue labelled factor
 
 Read the whole issue: goal, acceptance, sources, context and the owner's recorded decisions. Read the repository instructions (AGENTS.md or CLAUDE.md), any repository skill that names Objectives, and the runbooks they point to. Read only the contract documents for the code you will touch, not whole READMEs.
 
+Do not read code to plan. Every question you have about the code (which files implement something, how a behaviour is tested, what a contract or pattern looks like) goes to the `explorer` agent definition the job wrote into the checkout (`.claude/agents/explorer.md`, `.codex/agents/explorer.toml` or `.github/agents/explorer.agent.md`), one question per spawn, with the issue lines it relates to. Work from its answers, which name files and lines; put the paths it returns into the checklist items. Your own context holds the issue, the plan and the answers, not file contents.
+
 ## The plan comment
 
 Post one comment on the issue before writing code, and edit that same comment as the work moves; never post a second one. Mark it with `<!-- factory:<issue>:plan -->` on its first line, with the issue number in place of `<issue>`, so a rerun and the scorecard find it. It holds, in this order:

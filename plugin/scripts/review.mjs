@@ -119,6 +119,8 @@ async function main() {
   let cred = { env: {} };
   const progress = progressReporter(repo, issue, token, { stage: "review" });
   if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
+  // The work lineage's session (a restored worker session, a fix pass, the answer pass): what finish saves.
+  const session = { id: null, canResume: true };
   const finish = async (exit, reason) => {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
@@ -207,7 +209,6 @@ async function main() {
     budgetCommand: inputs.budgetCommand,
     protectedList,
   });
-  const session = { id: null, canResume: true };
   // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer
   // passes; the reviewer always runs in its own fresh session.
   let restored = null;

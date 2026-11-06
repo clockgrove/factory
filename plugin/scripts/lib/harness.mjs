@@ -1,6 +1,7 @@
 // Launch a harness headless, with the task card as the prompt and a wall clock,
 // and turn what it printed into one usage record. CLI flags follow RESEARCH.md;
 // what RESEARCH.md leaves open is recorded in NOTES.md.
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exec, onPath } from "./proc.mjs";
@@ -159,6 +160,17 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * prompt or the env.
  */
 export const HARNESS_IDLE_MS = 30 * 60_000;
+
+/** The installed CLI version (`<cmd> --version`, first line), so a cost change can be told from a CLI update; null when unknown. */
+export function harnessVersion(harness) {
+  const cmd = { claude: "claude", codex: "codex", copilot: "copilot" }[harness];
+  if (!cmd) return null;
+  try {
+    return execFileSync(cmd, ["--version"], { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "ignore"] }).trim().split(/\r?\n/)[0] || null;
+  } catch {
+    return null;
+  }
+}
 
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;

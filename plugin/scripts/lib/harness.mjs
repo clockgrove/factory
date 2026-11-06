@@ -133,7 +133,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // working directory and the added directories, and shell commands run in Claude Code's sandbox.
       // The developer's own user settings, plugins and MCP servers stay out (a runner has none): only the
       // repository's settings and Factory's own apply.
-      const perms = local ? ["--permission-mode", "acceptEdits", "--setting-sources", "project,local", "--strict-mcp-config", "--settings", JSON.stringify(claudeLocalSettings({ domains: local.domains, clone: local.clone })), ...local.addDirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
+      const perms = local ? ["--permission-mode", "acceptEdits", "--setting-sources", "project,local", "--strict-mcp-config", "--settings", JSON.stringify(claudeLocalSettings({ domains: local.domains, clone: local.clone, unixSockets: local.unixSockets })), ...local.addDirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);

@@ -11,7 +11,8 @@
 // (contents, issues and pull requests read and write; actions read). That token is all the GitHub reach the
 // model gets. No App, no vendor, no API key; GitHub holds every piece of state, and the box holds one clone per
 // Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
-// same sandbox as the harness, since they run on a tree the model edited.
+// same sandbox as the harness, since they run on a tree the model edited. A sandbox has its own network, so local
+// services the tests need are bridged in: FACTORY_LOCAL_SERVICES=postgres:5432 (with DATABASE_URL in FACTORY_LOCAL_ENV).
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
@@ -22,7 +23,7 @@ import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, routedHere, srtSettings, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, localBaseEnv, localClaim, parseServices, readWorkflowEnv, routedHere, serviceSocket, srtSettings, viaSocket, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -123,6 +124,7 @@ class Local {
     this.repo = repoOf(this.repoFull);
     this.wf = readWorkflowEnv(this.dev);
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
+    this.services = parseServices(process.env.FACTORY_LOCAL_SERVICES || this.wf.FACTORY_LOCAL_SERVICES);
     this.token = localToken(this.repoFull);
     const problems = preflight(this.harness, this.repoFull, this.token);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
@@ -174,15 +176,35 @@ class Local {
     return { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...this.wf, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
   }
 
+  /**
+   * Bridge each local service into the stage's socket directory (a sandbox cannot reach the box's 127.0.0.1): one
+   * socat per service, from <usage>/sockets/.s.PGSQL.<port> to 127.0.0.1:<port>, stopped when the stage ends.
+   */
+  bridges(usageDir) {
+    if (!this.services.length) return { dir: null, stop: () => {} };
+    const dir = join(usageDir, "sockets");
+    mkdirSync(dir, { recursive: true });
+    const procs = this.services.map((svc) => spawn("socat", [`UNIX-LISTEN:${serviceSocket(dir, svc)},fork,mode=600`, `TCP:127.0.0.1:${svc.port}`], { stdio: "ignore" }));
+    return { dir, stop: () => procs.forEach((p) => p.kill("SIGTERM")) };
+  }
+
   /** One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in. */
-  stageEnv(issue, usageDir, clone) {
+  stageEnv(issue, usageDir, clone, socketDir = null) {
     const ws = this.ws(issue);
     const npmCache = join(ws, "npm-cache");
     mkdirSync(npmCache, { recursive: true });
     const srtFile = join(usageDir, "srt.json");
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone }), null, 2));
+    const unixSockets = !!socketDir;
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone, unixSockets }), null, 2));
+    // A service URL in the env (DATABASE_URL, or any FACTORY_LOCAL_ENV value) for localhost:<port> now reaches the bridge.
+    const base = this.baseEnv();
+    if (socketDir) {
+      for (const [k, v] of Object.entries(base)) if (typeof v === "string" && !k.startsWith("FACTORY_")) base[k] = viaSocket(v, socketDir, this.services);
+      const pg = this.services.find((s) => s.kind === "postgres");
+      if (pg) Object.assign(base, { PGHOST: socketDir, PGPORT: String(pg.port) });
+    }
     return {
-      ...this.baseEnv(),
+      ...base,
       FACTORY_CREDENTIAL: "login",
       // The workflow's setup assumes a runner (sudo, a fresh VM); on a box the toolchain is the box's own.
       FACTORY_SETUP: process.env.FACTORY_LOCAL_SETUP ?? this.wf.FACTORY_LOCAL_SETUP ?? "",
@@ -197,7 +219,7 @@ class Local {
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone, unixSockets }),
     };
   }
 
@@ -208,8 +230,9 @@ class Local {
     mkdirSync(usageDir, { recursive: true });
     const logFile = join(usageDir, "stage.log");
     const clone = await this.ensureClone(issue);
+    const bridge = this.bridges(usageDir);
     return new Promise((done) => {
-      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env: this.stageEnv(issue, usageDir, clone), stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env: this.stageEnv(issue, usageDir, clone, bridge.dir), stdio: ["ignore", "pipe", "pipe"] });
       this.children.add(child);
       const relay = (chunk) => {
         appendFileSync(logFile, chunk);
@@ -219,6 +242,7 @@ class Local {
       child.stderr.on("data", relay);
       child.on("close", (code) => {
         this.children.delete(child);
+        bridge.stop();
         let result = null;
         try {
           result = JSON.parse(readFileSync(join(usageDir, "result.json"), "utf8"));

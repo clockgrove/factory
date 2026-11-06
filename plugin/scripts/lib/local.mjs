@@ -66,6 +66,43 @@ export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.c
 export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/factory"];
 export const credentialPaths = (home = homedir()) => CREDENTIAL_PATHS.map((p) => join(home, p));
 
+/**
+ * Local services the adopter's commands need (FACTORY_LOCAL_SERVICES, such as "postgres:5432"). A sandbox has its own
+ * network, so 127.0.0.1 inside it is not the box's; Factory bridges each service to a unix socket in the stage's
+ * directory instead, and Postgres clients reach it through that socket directory without any change to the service.
+ */
+export function parseServices(text) {
+  return String(text || "").split(/[\s,]+/).filter(Boolean).map((s) => {
+    const m = /^(postgres):(\d+)$/.exec(s);
+    if (!m) throw new Error(`FACTORY_LOCAL_SERVICES entry ${s} is not one of: postgres:<port>`);
+    return { kind: m[1], port: Number(m[2]) };
+  });
+}
+
+/** The socket file a service's bridge listens on inside `dir` (Postgres looks for .s.PGSQL.<port>). */
+export const serviceSocket = (dir, svc) => join(dir, `.s.PGSQL.${svc.port}`);
+
+/** A postgres URL for localhost:<port> rewritten to reach the bridge's socket directory; anything else unchanged. */
+export function viaSocket(value, dir, services) {
+  let u;
+  try {
+    u = new URL(value);
+  } catch {
+    return value;
+  }
+  if (!/^postgres(ql)?:$/.test(u.protocol) || !["localhost", "127.0.0.1"].includes(u.hostname)) return value;
+  const port = Number(u.port || 5432);
+  if (!services.some((s) => s.kind === "postgres" && s.port === port)) return value;
+  u.searchParams.set("host", dir);
+  return u.toString();
+}
+
+/** Sockets a sandboxed command must not reach even when unix sockets are allowed: root-equivalent or the developer's session. */
+export function dangerousSockets(env = process.env) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  return ["/var/run/docker.sock", "/run/docker.sock", ...(uid !== null ? [`/run/user/${uid}`] : []), ...(env.SSH_AUTH_SOCK ? [env.SSH_AUTH_SOCK] : [])];
+}
+
 /** A clone's git internals Factory itself runs (hooks, config): no sandboxed command and no edit may change them. */
 export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, ".git", "config")];
 
@@ -75,8 +112,8 @@ export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, "
  * credential stores unreadable by shell and file tools alike; the clone's git hooks and config
  * unwritable; file edits auto-approved only inside the working directory and `addDirs` (acceptEdits).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir() } = {}) {
-  const secrets = credentialPaths(home);
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), unixSockets = false } = {}) {
+  const secrets = [...credentialPaths(home), ...(unixSockets ? dangerousSockets() : [])];
   const guards = clone ? gitGuards(clone) : [];
   return {
     sandbox: {
@@ -84,7 +121,7 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
-      network: { allowedDomains: [...new Set(domains)] },
+      network: { allowedDomains: [...new Set(domains)], ...(unixSockets ? { allowAllUnixSockets: true } : {}) },
       filesystem: { denyRead: secrets, denyWrite: guards },
     },
     // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
@@ -100,10 +137,10 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
 }
 
 /** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
-export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir() } = {}) {
+export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), unixSockets = false } = {}) {
   return {
-    network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: credentialPaths(home), allowWrite: writable, denyWrite: clone ? gitGuards(clone) : [] },
+    network: { allowedDomains: [...new Set(domains)], deniedDomains: [], ...(unixSockets ? { allowAllUnixSockets: true } : {}) },
+    filesystem: { denyRead: [...credentialPaths(home), ...(unixSockets ? dangerousSockets() : [])], allowWrite: writable, denyWrite: clone ? gitGuards(clone) : [] },
   };
 }
 
@@ -117,7 +154,7 @@ export function localSandbox(env = {}) {
     return null;
   }
   const s = JSON.parse(env.FACTORY_LOCAL_SANDBOX);
-  return { addDirs: s.addDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null };
+  return { addDirs: s.addDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, unixSockets: !!s.unixSockets };
 }
 
 /**

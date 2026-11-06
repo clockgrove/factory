@@ -17,6 +17,8 @@
  *                            unit and database tests, suffixed so repeated runs never collide
  *   --count N                Objectives to file (default 2 for small, 5 for medium)
  *   --dispatch               fire `gh workflow run factory.yml` after filing (when the opened tick is not trusted)
+ *   --local                  also label each Objective factory:local, so a local loop (plugin/scripts/local.mjs serve)
+ *                            takes it and the Actions path leaves it alone
  *   --wait-minutes N         give up after N minutes (default 40)
  *   --type NAME              the native issue type to set (default Feature; "" to skip)
  *   --usage DIR              where to download the usage artifacts for scoring (default a temp dir)
@@ -32,7 +34,7 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 const here = resolve(new URL(".", import.meta.url).pathname);
 const { values } = parseArgs({
-  options: { repo: { type: "string" }, set: { type: "string" }, count: { type: "string" }, dispatch: { type: "boolean" }, "wait-minutes": { type: "string" }, type: { type: "string" }, usage: { type: "string" }, out: { type: "string" } },
+  options: { repo: { type: "string" }, set: { type: "string" }, count: { type: "string" }, dispatch: { type: "boolean" }, local: { type: "boolean" }, "wait-minutes": { type: "string" }, type: { type: "string" }, usage: { type: "string" }, out: { type: "string" } },
 });
 const usage = (m) => {
   process.stderr.write(`${m}\nSee the header of bench/drill.mjs.\n`);
@@ -218,7 +220,7 @@ for (const o of objectives) {
   const dir = mkdtempSync(join(tmpdir(), "factory-drill-"));
   const file = join(dir, "body.md");
   writeFileSync(file, o.body);
-  const url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "factory:objective", "--label", "P1");
+  const url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "factory:objective", "--label", "P1", ...(values.local ? ["--label", "factory:local"] : []));
   const number = Number(url.split("/").pop());
   await setType(number);
   filed.push({ number, title: o.title, url, filedAt: new Date().toISOString() });

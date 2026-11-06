@@ -24,7 +24,7 @@ A review comment is tied to a line on the new side of the diff (a comment that f
 
 No comment without a named entry or rule. Style, naming and taste are not findings unless a repository rule makes them one.
 
-Before writing a comment, find the body's answer to it (an assumption, a checklist row, an Undone item). A claim the body makes is a finding only when the diff or the issue shows it false; preferring another reading of an entry the diff satisfies is not. No line the rule forbids, or no entry a line fails: no finding. Post only what survives a rebuttal that cites the body.
+Before writing a comment, find the body's answer to it (an assumption, a checklist row, an Undone item). A claim the body makes is a finding only when the diff or the issue shows it false; preferring another reading of an entry the diff satisfies is not. Post only what survives a rebuttal that cites the body.
 
 ## What to look for
 
@@ -32,13 +32,13 @@ Before writing a comment, find the body's answer to it (an assumption, a checkli
 - A test weakened, skipped, loosened or deleted without the issue asking for it.
 - A design-checklist answer whose `file:line` evidence does not say what the answer claims.
 - A recorded decision contradicted by the code.
-- An assumption in the plan or body that changes behaviour a user, a caller or another package can observe. Flag each such assumption with the prefix `Assumption, behaviour-changing:` so the worker and the owner can find it; say what observable behaviour it changes. Do not flag assumptions that change nothing observable. An assumption the issue's acceptance, context or recorded decisions require is not one.
+- An assumption in the plan or body that changes behaviour a user, a caller or another package can observe, and that no line of the issue permits. Flag it with the prefix `Assumption, behaviour-changing:`, say what observable behaviour it changes, and quote the issue words it conflicts with or state that no acceptance entry, context line or recorded decision covers the choice. An assumption whose body entry cites issue, plan or decision text that permits it is not a finding; check that citation before writing; most rebutted findings were exactly this.
 - A number without a source, a new power on a broad grant, unbounded growth, a per-request cost: the repository's own checklist questions, where it has them.
 - A protected path touched, or an undone item not listed under Undone.
 
 ## What you do not do
 
-No summary comment, no approve, no request changes, no "LGTM", no overall verdict, no refusal to review and no recommendation to Block. Do not repeat a finding on every line it recurs; comment once and say it recurs. Do not rewrite the code in the comment beyond a line or two. Do not comment on the PR body's prose except where it misstates the diff. Do not reply to the worker's replies; your pass is over when your comments are posted.
+No summary comment, no approve, no request changes, no "LGTM", no overall verdict, no refusal to review and no recommendation to Block. Comment once on a recurring finding and say it recurs. Do not rewrite the code in the comment beyond a line or two. Do not comment on the PR body's prose except where it misstates the diff. Do not reply to the worker's replies; your pass is over when your comments are posted.
 
 ## Finish
 

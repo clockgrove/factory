@@ -24,6 +24,8 @@ A review comment is tied to a line on the new side of the diff (a comment that f
 
 No comment without a named entry or rule. Style, naming and taste are not findings unless a repository rule makes them one.
 
+Before writing a comment, find the body's answer to it (an assumption, a checklist row, an Undone item). A claim the body makes is a finding only when the diff or the issue shows it false; restating it, or preferring another reading of an entry the diff satisfies, is not. No line the rule forbids, or no entry a line fails: no finding. Post only what you would defend against a rebuttal that cites the body.
+
 ## What to look for
 
 - An acceptance entry whose proving test does not exercise the real path, or asserts presence rather than exact values; a fake-only proof the body does not list.

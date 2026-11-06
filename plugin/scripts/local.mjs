@@ -11,9 +11,11 @@
 // (contents, issues and pull requests read and write; actions read). That token is all the GitHub reach the
 // model gets. No App, no vendor, no API key; GitHub holds every piece of state, and the box holds one clone per
 // Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
-// same sandbox as the harness, since they run on a tree the model edited.
+// same sandbox as the harness, since they run on a tree the model edited. A sandbox has no route to the box's
+// services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
+// Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -79,6 +81,8 @@ function preflight(harness, repoFull, token) {
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
+  // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
+  if (platform() === "darwin" && (process.env.FACTORY_LOCAL_DB || "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
@@ -171,7 +175,10 @@ class Local {
 
   /** The env every child starts from: an allow-list plus the repository's FACTORY_* settings, never the whole shell. */
   baseEnv() {
-    return { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...this.wf, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
+    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...this.wf };
+    // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
+    for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && k !== "FACTORY_LOCAL_TOKEN") env[k] = v;
+    return { ...env, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
   }
 
   /** One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in. */
@@ -184,9 +191,21 @@ class Local {
     const sandboxDir = join(ws, ".sandbox");
     mkdirSync(sandboxDir, { recursive: true });
     const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone }), null, 2));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
+    // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
+    // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
+    const binDir = join(usageDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    for (const tool of readdirSync(join(PLUGIN_ROOT, "bin"))) {
+      copyFileSync(join(PLUGIN_ROOT, "bin", tool), join(binDir, tool));
+      chmodSync(join(binDir, tool), 0o755);
+    }
+    const base = this.baseEnv();
+    // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
+    // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
+    base.PATH = `${base.PATH || ""}:${binDir}`;
     return {
-      ...this.baseEnv(),
+      ...base,
       FACTORY_CREDENTIAL: "login",
       // The workflow's setup assumes a runner (sudo, a fresh VM); on a box the toolchain is the box's own.
       FACTORY_SETUP: process.env.FACTORY_LOCAL_SETUP ?? this.wf.FACTORY_LOCAL_SETUP ?? "",
@@ -201,7 +220,7 @@ class Local {
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
     };
   }
 

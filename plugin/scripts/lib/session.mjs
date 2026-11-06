@@ -204,7 +204,12 @@ export async function gitIdentity(app, token) {
 export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
-  return `${card.trimEnd()}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
+  // Local mode with a database (FACTORY_LOCAL_DB=1): the sandbox cannot reach the box's Postgres, so tests that need
+  // one run through factory-db, which starts a fresh one inside the sandbox for that command.
+  const localDb = process.env.FACTORY_LOCAL === "1" && process.env.FACTORY_LOCAL_DB === "1"
+    ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards."
+    : "";
+  return `${card.trimEnd()}${localDb}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
 }
 
 /** Push the branch with the App credential (GH_TOKEN in env). */
@@ -321,8 +326,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // parallel. The commands stay the harness's own tool (the task card names them).
   const byChecks = !!(checks && checks.names?.length && checks.prNumber);
   if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
+  // In local mode the heavy suites run on the box, not in CI: the commands run first (sandboxed), then the checks.
+  const localFirst = byChecks && commands.length && process.env.FACTORY_LOCAL === "1";
   const validate = async () => {
-    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
+    // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all).
+    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+    if (localFirst) {
+      const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+      if (!local.green) return local;
+    }
     if (push) await push();
     const sha = (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);

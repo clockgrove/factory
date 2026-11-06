@@ -75,9 +75,10 @@ export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, "
  * credential stores unreadable by shell and file tools alike; the clone's git hooks and config
  * unwritable; file edits auto-approved only inside the working directory and `addDirs` (acceptEdits).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir() } = {}) {
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [] } = {}) {
   const secrets = credentialPaths(home);
-  const guards = clone ? gitGuards(clone) : [];
+  // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
+  const guards = [...(clone ? gitGuards(clone) : []), ...readOnly];
   return {
     sandbox: {
       enabled: true,
@@ -100,10 +101,10 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
 }
 
 /** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
-export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir() } = {}) {
+export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [] } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: credentialPaths(home), allowWrite: writable, denyWrite: clone ? gitGuards(clone) : [] },
+    filesystem: { denyRead: credentialPaths(home), allowWrite: writable, denyWrite: [...(clone ? gitGuards(clone) : []), ...readOnly] },
   };
 }
 
@@ -117,7 +118,7 @@ export function localSandbox(env = {}) {
     return null;
   }
   const s = JSON.parse(env.FACTORY_LOCAL_SANDBOX);
-  return { addDirs: s.addDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null };
+  return { addDirs: s.addDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [] };
 }
 
 /**

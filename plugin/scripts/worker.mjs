@@ -271,7 +271,7 @@ async function main() {
   if (pushRejected) log(`push rejected: ${pushRejected}`);
   let { pr: found, delta } = await observe(repo, checkout, { branch, base, defaultBranch }, token);
   const hits = protectedTouched(delta.files, protectedList);
-  if (!found && delta.count > 0 && !hits) {
+  if (!found && delta.count > 0 && !hits.length) {
     found = await ensurePr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, bodyText: lastMessage(inputs.harness, rec), draft: !rec.ok }, token).catch((e) => {
       log(`PR could not be opened: ${e.message.slice(0, 200)}`);
       return null;

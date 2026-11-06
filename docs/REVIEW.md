@@ -48,6 +48,16 @@ Updated Nov 2, 11:35 PM PST after the scratch-adopter runs. Done since the morni
 6. **Codex pricing** needs the `model` input (Codex's output names no model); the price table is still a placeholder.
 7. Smaller: the implementer agent's text bakes in one adopter's testing philosophy ("one lasting test per claim, delete scaffolding"); RESEARCH.md line 4 still says `.agents/skills/` is read by all three harnesses (Claude Code reads `.claude/skills/`; the Action mirrors).
 
+
+### Outcomes (2026-11-05)
+
+1. Copilot pinned models and 5. `--max-ai-credits`: blocked on #2379 (the org's Copilot CLI policy refuses non-interactive runs); untestable until it opens.
+2. #2385: the owner's.
+3. The pre-run ask in `/factory:run`: kept (plugin path only; the Action never asks).
+4. `--ignore-scripts` on the offline install: kept; adopters whose validation needs postinstall set `install:` (Clockgrove does).
+6. Codex pricing: `bench/prices.json` carries OpenAI's published standard-tier rates (read 2026-11-05 from developers.openai.com/api/docs/pricing); the placeholder status is gone.
+7. The implementer agent no longer bakes one adopter's testing philosophy (it follows the repository's testing guide); RESEARCH.md's skill-location line already says one tree at `.agents/skills/` mirrored to `.claude/skills/`, which is what `installPlugin` does.
+
 ## Decisions taken on Nov 2 evening (Kirk)
 - Factory never builds itself: the first adopter and every gate up to the dispatcher run on `clockgrove/factory-scratch` (private, throwaway). PLAN.md's step-7 gate ("Factory's own repository has run one Objective through its own workflow") is superseded; the `/factory` skill keeps "never on Factory's own repository" out of its text but the rule stands.
 - Protection for step 2 is a ruleset requiring the CI check; the merge queue lands at step 3 (#2374). Doctor WARNs instead of FAILs on a missing queue while required checks exist.

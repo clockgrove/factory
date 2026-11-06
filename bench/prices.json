@@ -1,13 +1,13 @@
 {
-  "_note": "PLACEHOLDER PRICES. Codex reports tokens, not dollars, so the scorecard prices them from this table. None of these rates has been checked against OpenAI's price list; replace them and bump `date` before a row from this table is read as a real dollar figure. The scorecard names the date in every Codex row's basis. Matching is by the longest model prefix. Rates are USD per million tokens; `cached` is the rate for cached input tokens (Codex's input_tokens already includes the cached part).",
-  "date": "2026-11-02",
-  "status": "placeholder",
+  "_note": "Codex reports tokens, not dollars, so the scorecard prices them from this table. Rates are USD per million tokens, OpenAI standard tier, short context (<=272K input tokens), read from https://developers.openai.com/api/docs/pricing on the date below; `cached` is the cached-input rate (Codex's input_tokens already includes the cached part). Matching is by the longest model prefix. Long-context requests cost more (gpt-6.1-sol 4/0.20/15, gpt-6.1-terra 2/0.10/7.50, gpt-5.5 10/1/45) and are not priced here.",
+  "date": "2026-11-05",
+  "status": "verified",
+  "source": "https://developers.openai.com/api/docs/pricing",
   "perMillion": {
-    "gpt-6.1-sol": { "input": 2.5, "cached": 0.25, "output": 15 },
-    "gpt-6.1": { "input": 2.5, "cached": 0.25, "output": 15 },
-    "gpt-5.5-codex": { "input": 1.25, "cached": 0.125, "output": 10 },
-    "gpt-5.5": { "input": 1.25, "cached": 0.125, "output": 10 },
-    "gpt-5-codex": { "input": 1.25, "cached": 0.125, "output": 10 },
-    "gpt-5": { "input": 1.25, "cached": 0.125, "output": 10 }
+    "gpt-6.1-sol": { "input": 2.0, "cached": 0.1, "output": 10.0 },
+    "gpt-6.1-terra": { "input": 1.0, "cached": 0.05, "output": 5.0 },
+    "gpt-5.5": { "input": 5.0, "cached": 0.5, "output": 30.0 },
+    "gpt-5.3-codex": { "input": 1.75, "cached": 0.175, "output": 14.0 },
+    "gpt-5": { "input": 1.25, "cached": 0.125, "output": 10.0 }
   }
 }

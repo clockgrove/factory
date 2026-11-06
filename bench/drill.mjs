@@ -8,7 +8,10 @@
  * input; 1 otherwise; 64 usage. What took a night by hand on Nov 2 runs in ~15 minutes.
  *
  *   --repo OWNER/NAME        the scratch adopter (never Factory's own repository, never a product repository)
- *   --set small|medium       small: one-function additions over greet (default); medium: the fixed
+ *   --set small|medium|conflict  small: one-function additions over greet (default); conflict: two
+ *                            small Objectives that must both add a line at the end of README.md's
+ *                            API list, so the second to merge conflicts and is sent back to rebase;
+ *                            medium: the fixed
  *                            five-Objective set over the notes CLI (a format, a command, a column with
  *                            its migration, a rule, a tagged similarity search), each several files with
  *                            unit and database tests, suffixed so repeated runs never collide
@@ -39,7 +42,7 @@ if (!values.repo || !/^[^/]+\/[^/]+$/.test(values.repo)) usage("Give --repo OWNE
 if (/^clockgrove\/(factory|clockgrove)$/.test(values.repo)) usage("the drill runs only on a scratch repository");
 const repo = values.repo;
 const set = values.set ?? "small";
-if (!["small", "medium"].includes(set)) usage("--set is small or medium");
+if (!["small", "medium", "conflict"].includes(set)) usage("--set is small, medium or conflict");
 const count = Math.max(1, Number(values.count ?? (set === "medium" ? 5 : 2)));
 const waitMs = Math.max(1, Number(values["wait-minutes"] ?? 40)) * 60_000;
 const type = values.type ?? "Feature";
@@ -164,6 +167,25 @@ const objectives = Array.from({ length: count }, (_, i) => {
   }
   const shape = SHAPES[i % SHAPES.length];
   const fn = shape.fn(`${stamp}${i}`);
+  if (set === "conflict") {
+    const body = `## Goal
+A caller can get a transformed greeting: \`${fn}(name)\` ${shape.goal}, and the README lists it.
+
+## Acceptance
+- \`src/${fn}.mjs\` exports \`${fn}(name)\` built on \`greet\` from \`src/greet.mjs\`: \`${fn}("Ada")\` is \`${shape.ex1}\`; \`${fn}("")\` is \`${shape.ex2}\`.
+- \`test/${fn}.test.mjs\` proves both cases with exact values under \`node:test\`, one \`test()\` per case.
+- README.md's API list gains one bullet for \`${fn}(name)\` as its last item, in the same form as the bullets above it; no other README line changes.
+- \`npm run check\` and \`npm test\` pass; no other file changes.
+
+## Sources
+- \`src/greet.mjs\`, \`test/greet.test.mjs\` and README.md's API list (the patterns)
+- \`AGENTS.md\`
+
+## Context
+Filed by the Factory adopter drill (bench/drill.mjs, conflict set) at ${new Date().toISOString()}. Recorded decision: ${shape.decision}. Another Objective filed with this one adds its own bullet at the same place; keep both when they meet.
+`;
+    return { title: `Add ${fn}(name) over greet(name) and list it`, body, fn };
+  }
   const body = `## Goal
 A caller can get a transformed greeting: \`${fn}(name)\` ${shape.goal}.
 
@@ -219,6 +241,7 @@ while (Date.now() < deadline && [...state.values()].some((s) => s === "open")) {
     const labels = v.labels.map((l) => l.name);
     if (v.state === "CLOSED") state.set(f.number, "closed");
     else if (labels.includes("factory:blocked")) state.set(f.number, "blocked");
+    else if (labels.includes("factory:question")) state.set(f.number, "question");
     else if (labels.includes("factory:question")) state.set(f.number, "question");
   }
   process.stderr.write(`${new Date().toISOString().slice(11, 19)} ${filed.map((f) => `#${f.number}:${state.get(f.number)}`).join(" ")}\n`);

@@ -2,9 +2,9 @@
 // Factory local mode: the same worker and reviewer the Action runs, on a developer's own box.
 //   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--dir CLONE] [--wait]
 //   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
-//   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once]
+//   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all]
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
-// serve takes only those unless FACTORY_LOCAL_ALL=1. A claim comment with a heartbeat marks one in flight.
+// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
 // Needs git, gh (logged in), the harness CLI (logged in) and, on Linux and WSL2, bubblewrap and
 // socat for Claude Code's sandbox. No App, no vendor, no API key: pushes, PRs and labels go out
 // under the developer's own gh login, which triggers the repository's CI. GitHub holds every piece
@@ -87,6 +87,9 @@ function preflight(harness) {
 
 class Local {
   constructor(flags) {
+    // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
+    process.env.FACTORY_LOCAL = "1";
+    if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
     this.dev = resolve(flags.dir || process.cwd());
     this.dev = sh("git", ["-C", this.dev, "rev-parse", "--show-toplevel"]);
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));

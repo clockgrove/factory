@@ -128,8 +128,9 @@ export async function branchDelta(checkout, base, branch = "HEAD") {
 export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {} } = {}) {
   const childEnv = scrubbedEnv(env, extraEnv);
   // With FACTORY_LOCAL_DB=1 each command also gets a fresh Postgres inside that sandbox (plugin/bin/factory-db).
+  // `--` ends srt's own options: srt has a -c of its own, which would otherwise take the inner bash's -c.
   const inner = ["bash", "-eo", "pipefail", "-c", command];
-  const [cmd, args] = childEnv.FACTORY_LOCAL_SRT ? ["srt", ["-s", childEnv.FACTORY_LOCAL_SRT, ...(childEnv.FACTORY_LOCAL_DB === "1" ? ["factory-db"] : []), ...inner]] : [inner[0], inner.slice(1)];
+  const [cmd, args] = childEnv.FACTORY_LOCAL_SRT ? ["srt", ["-s", childEnv.FACTORY_LOCAL_SRT, "--", ...(childEnv.FACTORY_LOCAL_DB === "1" ? ["factory-db"] : []), ...inner]] : [inner[0], inner.slice(1)];
   const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo: true });
   return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, output: `${r.stdout}\n${r.stderr}`.trim() };
 }

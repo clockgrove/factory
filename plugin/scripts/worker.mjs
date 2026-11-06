@@ -32,6 +32,7 @@ import {
   liveActivity,
   markRunning,
   maskFile,
+  restoreTranscript,
   saveTranscript,
   observe,
   postValidated,
@@ -215,6 +216,14 @@ async function main() {
   });
   writeFileSync(join(usageDir, "task-card.md"), prompt.split("\n---\n")[0]);
   const session = { id: null, canResume: true };
+  // Resume policy: under fix-passes, a rebase send-back that conflicts resumes the worker's saved
+  // session (its transcript rides the usage artifact); every other entry starts fresh.
+  let restored = null;
+  if (inputs.harness === "claude" && inputs.resumePolicy === "fix-passes" && rebaseConflict) {
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
+    if (restored.id) session.id = restored.id;
+  }
+  if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
@@ -229,9 +238,9 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       effort: inputs.effort,
-      prompt: attempt === 1 || !session.id ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
+      prompt: attempt === 1 && restored?.id ? conflictPrompt.split("\n\n---\n\n").at(-1) : attempt === 1 || !session.id ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and the plan comment stand; do not redo finished items.",
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
-      resume: attempt > 1 && session.canResume ? session.id : null,
+      resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
       cwd: checkout,
       env: harnessEnv,
       timeoutMs: remainingMs(deadlineAt),
@@ -244,6 +253,13 @@ async function main() {
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it.
     if (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd) rec.budgetExceeded = true;
     if (!crashed(rec)) break;
+    // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
+    if (attempt === 1 && restored?.id) {
+      log(`resumed session ${restored.id.slice(0, 8)} failed (${rec.error}); running fresh`);
+      await progress("re-entry: resume failed; running fresh");
+      restored = { ...restored, id: null, reason: "resume failed" };
+      session.id = null;
+    }
     died += 1;
     log(`harness process died (${rec.error}); ${died < 2 ? "retrying once" : "second death"}`);
     if (died >= 2) break;

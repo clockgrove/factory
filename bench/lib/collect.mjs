@@ -13,7 +13,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { findFile } from "./gh.mjs";
-import { parseUsageText } from "./cost.mjs";
+import { parseUsageText, sessionsOf } from "./cost.mjs";
 import { OBJECTIVE_LABEL } from "./objective.mjs";
 
 const PER_PAGE = "per_page=100";
@@ -63,6 +63,8 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
     try {
       const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
       const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
+      const events = findFile(dir, "events.jsonl");
+      if (rec && events) rec.sessions = sessionsOf(readFileSync(events, "utf8"));
       records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -198,8 +200,9 @@ export function usageFromDir(dir, { readdir, read, isDir = null }) {
     for (const name of readdir(at)) {
       const file = `${at}/${name}`;
       if (name === "result.json" || name === "events.jsonl" || (depth === 0 && /\.(json|jsonl)$/.test(name))) {
-        const rec = parseUsageText(read(file));
-        if (rec?.harness) records.push({ ...rec, artifact: basename(at) === basename(dir) ? name : `${basename(at)}/${name}` });
+        const text = read(file);
+        const rec = parseUsageText(text);
+        if (rec?.harness) records.push({ ...rec, ...(name === "events.jsonl" ? { sessions: sessionsOf(text) } : {}), artifact: basename(at) === basename(dir) ? name : `${basename(at)}/${name}` });
       } else if (depth < 2 && (isDir ? isDir(file) : !name.includes("."))) {
         try {
           walk(file, depth + 1);
@@ -215,7 +218,9 @@ export function usageFromDir(dir, { readdir, read, isDir = null }) {
   for (const r of records) {
     const key = r.artifact.replace(/\/?(result\.json|events\.jsonl)$/, "");
     const have = byDir.get(key);
-    if (!have || r.artifact.endsWith("result.json")) byDir.set(key, r);
+    const sessions = r.sessions ?? have?.sessions ?? null;
+    if (!have || r.artifact.endsWith("result.json")) byDir.set(key, { ...r, sessions });
+    else if (sessions && !have.sessions) byDir.set(key, { ...have, sessions });
   }
   return [...byDir.values()];
 }

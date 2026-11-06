@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { collectObjective, snapshotApi, usageFromDir } from "../lib/collect.mjs";
-import { costOf, loadPrices, parseUsageText, priceTokens } from "../lib/cost.mjs";
+import { costOf, loadPrices, parseUsageText, priceTokens, sessionsOf } from "../lib/cost.mjs";
 import { humanActions, markdownTable, scoreObjective } from "../lib/objective.mjs";
 import { phaseMinutes } from "../lib/phases.mjs";
 import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
@@ -255,5 +255,26 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   assert.equal(phaseMinutes([], 7).modelMinutes, null);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
-  assert.match(markdownTable([row]), /\| Setup min \| Model min \| CI wait min \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Setup min \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);
+});
+
+test("activity: turns, harness calls, sessions and run counts come from the artifacts", () => {
+  const events = [
+    '{"type":"system","subtype":"init","session_id":"s-1"}',
+    '{"type":"assistant","session_id":"s-1"}',
+    '{"type":"result","session_id":"s-1","num_turns":3,"total_cost_usd":0.1}',
+    '{"type":"system","subtype":"init","session_id":"s-1"}',
+    '{"type":"result","session_id":"s-1","num_turns":2,"total_cost_usd":0.1}',
+  ].join("\n");
+  assert.deepEqual(sessionsOf(events), { calls: 2, sessions: 1 });
+  assert.equal(sessionsOf('{"type":"thread.started","thread_id":"t-9"}\n{"type":"turn.completed","usage":{"input_tokens":1}}').sessions, 1);
+  assert.equal(sessionsOf("not json"), null);
+  // Real artifacts are named factory-usage-<issue> and factory-usage-<issue>-review; the fixture dirs are not.
+  const both = [...usage("claude").map((r) => ({ ...r, artifact: "factory-usage-48" })), ...usage("review").map((r) => ({ ...r, artifact: "factory-usage-48-review" }))];
+  const row = scoreObjective(cleanMerge(48, both), { prices, now: NOW });
+  assert.equal(row.activity.workRuns, 1);
+  assert.equal(row.activity.reviewRuns, 1);
+  assert.equal(row.activity.turns, 87 + (usage("review")[0].turns ?? 0));
+  assert.match(markdownTable([row]), /\| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| 1\+1 \|/);
 });

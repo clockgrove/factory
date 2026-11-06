@@ -292,7 +292,7 @@ export async function validationLoop({ checkout, commands, harness, model, maxUs
 /** Write usage/result.json and return the merged record. */
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis }) {
   mkdirSync(usageDir, { recursive: true });
-  const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null }, basis: "unmetered: no run", started: null, ended: null };
+  const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const result = {
     harness,
     model: merged.model ?? model ?? null,

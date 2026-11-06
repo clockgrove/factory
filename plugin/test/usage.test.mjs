@@ -18,6 +18,8 @@ test("claude: single JSON result; total_cost_usd and modelUsage with sub-agents"
   assert.equal(rec.tokens.input, 1200 + 2400000 + 180000 + 800 + 300000 + 20000);
   assert.equal(rec.tokens.output, 41000 + 9000);
   assert.equal(rec.tokens.cached, 2400000 + 300000);
+  assert.equal(typeof rec.tokens.written, "number", "cache writes are kept");
+  assert.ok(rec.models && Object.keys(rec.models).length >= 1, "per-model split is kept");
   assert.match(rec.basis, /sub-agents included/);
   assert.equal(rec.budgetExceeded, false);
 });
@@ -67,7 +69,7 @@ test("copilot: no usage output is unmetered, never zero; a non-zero exit is an e
   const rec = parseCopilot(fixture("copilot-stdout.txt"), null, 0);
   assert.equal(rec.ok, true);
   assert.equal(rec.usd, null);
-  assert.deepEqual(rec.tokens, { input: null, output: null, cached: null });
+  assert.deepEqual(rec.tokens, { input: null, output: null, cached: null, written: null });
   assert.match(rec.basis, /unmetered: Copilot wrote no usage/);
   const bad = parseCopilot("", null, 2);
   assert.equal(bad.ok, false);
@@ -81,7 +83,7 @@ test("copilot 1.0.91: the real JSONL and usage file (captured Nov 2): session id
   assert.equal(rec.sessionId, "9c0cd216-fd38-4b53-bb20-5a6e6d7e3b63");
   assert.equal(rec.model, "claude-sonnet-5");
   assert.equal(rec.turns, 1);
-  assert.deepEqual(rec.tokens, { input: 24945, output: 4, cached: 0 });
+  assert.deepEqual(rec.tokens, { input: 24945, output: 4, cached: 0, written: 24943 });
   assert.equal(rec.premiumRequests, 1);
   assert.equal(rec.aiu, 6.24);
   assert.equal(rec.usd, null);
@@ -89,7 +91,7 @@ test("copilot 1.0.91: the real JSONL and usage file (captured Nov 2): session id
   assert.equal(finalText("copilot", fixture("copilot-events.jsonl")), "ok");
   // Without the file the stream alone gives no token counts: unmetered, never zero.
   const bare = parseCopilot(fixture("copilot-events.jsonl"), null, 0);
-  assert.deepEqual(bare.tokens, { input: null, output: null, cached: null });
+  assert.deepEqual(bare.tokens, { input: null, output: null, cached: null, written: null });
   assert.match(bare.basis, /unmetered/);
 });
 
@@ -98,7 +100,7 @@ test("codex 0.160: the real probe JSONL (captured Nov 2) parses to one turn with
   assert.equal(rec.ok, true);
   assert.equal(rec.turns, 1);
   assert.equal(rec.sessionId, "01a19f63-ef53-7ef1-9da6-43fdffaa3891");
-  assert.deepEqual(rec.tokens, { input: 14614, output: 5, cached: 12288 });
+  assert.deepEqual(rec.tokens, { input: 14614, output: 5, cached: 12288, written: null });
   assert.equal(finalText("codex", fixture("codex-probe.jsonl")), "ok");
 });
 

@@ -122,7 +122,9 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
 export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort }) {
   switch (harness) {
     case "claude": {
-      const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"];
+      // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
+      // sections (the auto-memory path) move into the first user message instead of the system prompt.
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);

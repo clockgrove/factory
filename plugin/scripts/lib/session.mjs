@@ -329,9 +329,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // In local mode the heavy suites run on the box, not in CI: the commands run first (sandboxed), then the checks.
   const localFirst = byChecks && commands.length && process.env.FACTORY_LOCAL === "1";
   const validate = async () => {
-    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
+    // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all).
+    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
     if (localFirst) {
-      const local = await runValidation(checkout, commands, { timeoutMs: remainingMs(deadlineAt), env });
+      const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
       if (!local.green) return local;
     }
     if (push) await push();

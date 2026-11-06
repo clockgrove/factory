@@ -81,6 +81,8 @@ function preflight(harness, repoFull, token) {
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
+  // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
+  if (platform() === "darwin" && (process.env.FACTORY_LOCAL_DB || "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
@@ -189,7 +191,7 @@ class Local {
     const sandboxDir = join(ws, ".sandbox");
     mkdirSync(sandboxDir, { recursive: true });
     const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone }), null, 2));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
     // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
@@ -199,7 +201,9 @@ class Local {
       chmodSync(join(binDir, tool), 0o755);
     }
     const base = this.baseEnv();
-    base.PATH = `${binDir}:${base.PATH || ""}`;
+    // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
+    // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
+    base.PATH = `${base.PATH || ""}:${binDir}`;
     return {
       ...base,
       FACTORY_CREDENTIAL: "login",
@@ -216,7 +220,7 @@ class Local {
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
     };
   }
 

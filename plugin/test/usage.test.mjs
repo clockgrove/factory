@@ -120,6 +120,7 @@ test("mergeUsage sums runs and keeps null dollars only when every run is unmeter
 test("harness command lines follow RESEARCH.md; the prompt goes on stdin for claude and codex", () => {
   const c = harnessCommand({ harness: "claude", model: "claude-fable-5-1", prompt: "P", maxUsd: 25 });
   assert.equal(c.cmd, "claude");
+  assert.ok(c.args.includes("--exclude-dynamic-system-prompt-sections"), "the system prompt prefix is shared across machines");
   const e = harnessCommand({ harness: "claude", model: "claude-opus-5-5", prompt: "P", maxUsd: 25, effort: "medium" });
   assert.ok(e.args.join(" ").includes("--effort medium"), "a pinned effort reaches the CLI");
   assert.ok(!harnessCommand({ harness: "codex", prompt: "P", maxUsd: 0, effort: "medium" }).args.includes("--effort"), "codex takes no effort flag");

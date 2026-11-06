@@ -199,7 +199,7 @@ async function main() {
   credentialBasis = cred.basis;
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true }); // a record from an earlier attempt must not speak for this one
-  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile };
+  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.harness === "claude" && inputs.compactionWindow ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: inputs.compactionWindow } : {}) };
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,

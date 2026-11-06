@@ -30,7 +30,7 @@ The job token gets `contents: read`, `issues: write`, `actions: read` (usage art
 
 ## The plugin and the Action are one tree
 
-`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned per harness), the task card, the scripts and the workflow template. The Action (`action/action.yml`) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`). Commands: `/factory:run`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`.
+`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned per harness), the task card, the scripts and the workflow template. The Action (`action.yml` at the repository root) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`). Commands: `/factory:run`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`.
 
 ## Check and run
 
@@ -40,7 +40,17 @@ node plugin/scripts/setup.mjs  --repo OWNER/NAME --yes --ci-checks "quality"   #
 gh workflow run factory.yml -f issue=811                              # one Objective now; the cron and the ticks do the rest
 ```
 
-Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, model, usd, tokens, basis, exit, …}`); `bench/score.mjs` turns them into the scorecard's four numbers per Objective.
+Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
+
+## Inputs that tune cost
+
+Three optional inputs on the Action, all Claude-only and all off or at the harness default unless set: `effort` (the worker's effort level, pinned to `medium` so a CLI default change cannot move cost silently), `compaction_window` (the context size in tokens at which the worker and reviewer sessions compact; the CLI default when empty, a measured lever for large Objectives), and `harness_version` (the npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record). Every Claude call also shares one cached system-prompt prefix across runs.
+
+## Where Factory runs, and where it is going
+
+Today every job is a fresh hosted runner: it installs the adopter's toolchain, runs the harness, pushes, waits for the required check, and is discarded. The branch, the PR, the issue's comments and labels, the board and the usage artifact are the only state; GitHub is the database, and the install is this Action plus the App's two secrets. Measured on a real adopter, an Objective's active minutes are about three quarters model time, a sixth waiting on CI, and under a tenth setup, so Factory's work on cost goes to turns first.
+
+The direction, opt-in and under measurement on the scratch adopter before it ships: five stages (dispatch, build, validate, review and fix, merge) behind three interfaces (trigger, sandbox, gate), with the Action as the only controller on every backend. A sandbox backend gives each Objective one pausable sandbox from an image built by the adopter's own setup command, so the toolchain and the harness session survive between stages; it needs an API key and the vendor's token, and nothing else changes. A local backend runs the same worker in a git worktree on a developer's own box with no services. Neither exists yet; when they do, they are workflow inputs, and the runner-only path stays the default.
 
 ## Uninstall
 

@@ -1,8 +1,8 @@
 # Factory bench (0.6)
 
-The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub) and `unzip` (for artifact downloads).
+The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub) and Python 3 (artifacts are unpacked with its `zipfile` module).
 
-## The four numbers
+## The row
 
 One row per Objective, read from the issue, the PR on `factory/<issue>`, the job log and the usage artifact (`factory-usage-<issue>`, plus `factory-usage-<issue>-review`):
 
@@ -14,6 +14,26 @@ One row per Objective, read from the issue, the PR on `factory/<issue>`, the job
 | Cost | dollars with unit and basis | Claude: `usd` from `total_cost_usd` + `modelUsage` (sub-agents in). Codex: `tokens` priced from `prices.json`, dated, **placeholder rates until replaced**. Copilot: `credits`, `unmetered`, attribute from org billing by the row's time window. Reviewer artifacts are summed with the worker's. Runner minutes and wall time (label to merge) sit beside it; wall time is never alone. |
 
 A missing input shows as `missing: <which>` in the row, never as a guess.
+
+Beside the four numbers the row carries, from the same sources: `phases` (setup and install, model, CI-wait and other minutes, read from each run's progress comment), `activity` (turns, harness calls, distinct sessions, work and review run counts, read from the usage artifacts), cost by component (uncached, cached, written and output tokens, and a per-model split), and the harness CLI version. The table shows them as Setup min, Model min, CI wait min, Turns, Runs and Sessions, and the cost cell as `$ (in / cached / written / out)`.
+
+## Baseline
+
+```sh
+node bench/baseline.mjs --scorecard scorecard.json --repo OWNER/NAME --label wave0 --append   # median and p25..p75 of model minutes, turns, cost, cached and written tokens, CI wait, setup, wall minutes and sessions, plus walk-away rate
+node bench/baseline.mjs --scorecard scorecard.json --repo OWNER/NAME --since 2026-11-06 --last 5
+```
+
+One line per label under `baselines` in the scorecard, so a change's before and after is one command.
+
+## Drill
+
+```sh
+node bench/drill.mjs --repo OWNER/SCRATCH --count 2 --dispatch                 # small: one-function additions, merged in minutes
+node bench/drill.mjs --repo OWNER/SCRATCH --set medium --count 5 --dispatch    # medium: five Objectives of real size over the scratch adopter's notes CLI
+```
+
+The drill files Objectives on a scratch repository (never Factory's own, never a product repository), lets the Action take them, waits, and scores them. The medium set is the instrument for changes to the worker's skills; the reviewer's is `bench/review-replay.mjs` against the private replay set.
 
 ## Skills, versioned
 

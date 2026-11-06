@@ -163,8 +163,8 @@ async function main() {
     return;
   }
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
-  // rebased PR relabelled by the worker) skips the reviewer and the answer pass but still gets
-  // validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
+  // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
+  // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 

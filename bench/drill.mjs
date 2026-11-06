@@ -78,7 +78,7 @@ A caller can list notes as plain lines: \`notes list --format ${sfx}\` prints on
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: tags are joined by a semicolon with no spaces; the tab is U+0009.
+Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: tags are joined by a semicolon with no spaces; the tab is U+0009; titles and tags are printed as stored, with no escaping.
 `,
   }),
   (sfx) => ({
@@ -121,14 +121,14 @@ Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date()
 `,
   }),
   (sfx) => ({
-    title: `Add the ${sfx} rule: titles are at most 60 characters`,
+    title: `Add the ${sfx} rule: titles may not contain the word ${sfx}`,
     body: `## Goal
-A note with an over-long title is refused at \`notes add\`.
+A note whose title contains the word \`${sfx}\` is refused at \`notes add\`.
 
 ## Acceptance
-- \`src/rules/${sfx}.mjs\` exports \`code\` \`${sfx.toUpperCase()}\` and \`check(note)\`: returns \`title longer than 60 characters\` when the title's length (UTF-16 code units) exceeds 60, else null; a title of exactly 60 passes.
-- \`test/${sfx}.rule.test.mjs\` proves 60, 61 and a missing title under \`node:test\` without a database.
-- \`test/db/${sfx}.db.test.mjs\` proves on a fresh schema that \`add()\` rejects a 61-character title with that code and accepts a 60-character one.
+- \`src/rules/${sfx}.mjs\` exports \`code\` \`${sfx.toUpperCase()}\` and \`check(note)\`: returns \`title contains ${sfx}\` when the title contains \`${sfx}\` as a whitespace-separated word, case-insensitive, else null; a longer word that contains it passes.
+- \`test/${sfx}.rule.test.mjs\` proves the word, the word in another case, a longer word containing it, and a missing title under \`node:test\` without a database.
+- \`test/db/${sfx}.db.test.mjs\` proves on a fresh schema that \`add()\` rejects a title containing the word with that code and accepts one without it.
 - \`npm run check\`, \`npm test\` and \`npm run test:db\` pass; no other file changes.
 
 ## Sources
@@ -145,8 +145,7 @@ Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date()
 A caller can find the nearest notes among those carrying a tag: \`notes ${sfx} --tag T --embedding 1,2,3 [--k N]\`.
 
 ## Acceptance
-- \`src/notes.mjs\` gains \`similarByTag(client, tag, embedding, k = 3)\`: the \`k\` notes carrying \`tag\` with an embedding, nearest first by Euclidean distance then by id, each row with its \`distance\`; existing functions are unchanged.
-- \`src/commands/${sfx}.mjs\` exports \`run(client, args)\`: parses \`--tag\`, \`--embedding\` and \`--k\` (default 3) with \`parseArgs\`, prints one line per result as \`#<id> <title> (<distance to 3 decimals>)\`; a missing \`--tag\` or \`--embedding\` throws with \`code\` \`BAD_ARGS\`.
+- \`src/commands/${sfx}.mjs\` exports \`run(client, args)\`: queries the \`k\` notes carrying \`tag\` with an embedding itself, nearest first by Euclidean distance then by id, without changing \`src/notes.mjs\`; parses \`--tag\`, \`--embedding\` and \`--k\` (default 3) with \`parseArgs\`, prints one line per result as \`#<id> <title> (<distance to 3 decimals>)\`; a missing \`--tag\` or \`--embedding\` throws with \`code\` \`BAD_ARGS\`.
 - \`test/db/${sfx}.db.test.mjs\` proves on a fresh schema: a tagged near note comes first, an untagged nearer note is excluded, and \`k\` caps the rows.
 - \`test/${sfx}.command.test.mjs\` proves the \`BAD_ARGS\` cases without a database.
 - \`npm run check\`, \`npm test\` and \`npm run test:db\` pass; no other file changes.

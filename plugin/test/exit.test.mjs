@@ -97,6 +97,7 @@ test("inputs: flag, then with:, then workflow env, then default; booleans and li
   const c = resolveInputs({ env: { GITHUB_REPOSITORY: "o/r" }, args: {} });
   assert.deepEqual([c.model, c.subagentModel, c.reviewerModel], ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"], "Claude: Opus worker, Sonnet implementers, Fable reviewer");
   assert.deepEqual(c.reviewerFallback, { model: "claude-opus-5-5", effort: "xhigh" });
+  assert.equal(c.effort, "medium", "the worker's effort is pinned to the harness default, not left to the CLI");
 });
 
 test("workflow template renders with defaults for empty values and stays valid YAML-shaped", () => {

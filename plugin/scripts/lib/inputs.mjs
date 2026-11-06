@@ -11,7 +11,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 
 /** Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's quota is out). */
 export const MODEL_DEFAULTS = {
-  claude: { model: "claude-opus-5-5", subagent_model: "claude-sonnet-5-5", reviewer_model: "claude-fable-5-1", reviewer_fallback: "claude-opus-5-5", reviewer_fallback_effort: "xhigh" },
+  claude: { model: "claude-opus-5-5", subagent_model: "claude-sonnet-5-5", reviewer_model: "claude-fable-5-1", reviewer_fallback: "claude-opus-5-5", reviewer_fallback_effort: "xhigh", effort: "medium" },
   codex: { model: "gpt-6.1-sol", subagent_model: "gpt-6.1-sol", reviewer_model: "gpt-6.1-sol" },
   copilot: { model: "", subagent_model: "", reviewer_model: "" },
 };
@@ -19,6 +19,7 @@ export const MODEL_DEFAULTS = {
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
+  effort: "", // empty: MODEL_DEFAULTS for the harness (the worker's effort; Claude only)
   subagent_model: "",
   reviewer_model: "",
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
@@ -106,6 +107,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
   return {
     harness,
     model: get("model") || md.model || "",
+    effort: get("effort") || md.effort || "",
     subagentModel: get("subagent_model") || md.subagent_model || "",
     reviewerModel: get("reviewer_model") || md.reviewer_model || get("model") || md.model || "",
     reviewerFallback: md.reviewer_fallback ? { model: md.reviewer_fallback, effort: md.reviewer_fallback_effort } : null,

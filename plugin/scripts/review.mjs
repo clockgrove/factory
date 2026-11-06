@@ -31,6 +31,7 @@ import {
   isValidated,
   liveActivity,
   maskFile,
+  saveTranscript,
   observe,
   postValidated,
   progressReporter,
@@ -120,7 +121,7 @@ async function main() {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness) });
+    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${costByPhase(records)}`);
     setOutput("exit", exit);

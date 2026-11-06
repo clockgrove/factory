@@ -15,6 +15,7 @@ import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProj
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
+import { localClaim } from "./lib/local.mjs";
 
 export async function appToken(inputs) {
   if (inputs.appToken) return inputs.appToken;
@@ -24,7 +25,7 @@ export async function appToken(inputs) {
   return minted.token;
 }
 
-export async function dispatch(inputs, { token, now = new Date(), dryRun = false }) {
+export async function dispatch(inputs, { token, now = new Date(), dryRun = false, localSpentUsd = 0 }) {
   const repo = repoOf(inputs.repo);
   const opts = { token };
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -88,6 +89,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     if (alive) {
       for (const issue of runningIssues) {
         if (alive.has(issue.number)) continue;
+        // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh.
+        if ((await localClaim(repo, issue.number, opts).catch(() => null))?.fresh) continue;
         const since = await runningSince(repo, issue.number, opts).catch(() => null);
         if (since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
         vanished.push(issue.number);
@@ -164,7 +167,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     usageError = e.message.slice(0, 200);
     log(`today's usage could not be read (${usageError}); treating daily_usd as reached`);
   }
-  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records);
+  // A local loop adds what it spent today: its runs upload no artifacts.
+  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records) + (Number(localSpentUsd) || 0);
 
   const picked = selectReady({
     issues: wanted,

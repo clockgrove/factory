@@ -45,6 +45,7 @@ import {
 } from "./lib/session.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { exec, git } from "./lib/proc.mjs";
+import { isLocal, localClaim } from "./lib/local.mjs";
 
 async function main() {
   const startedAt = Date.now();
@@ -122,6 +123,13 @@ async function main() {
   if (issueData.state !== "open" || !labels.includes(inputs.objectiveLabel)) {
     log(`#${issue} is not an open ${inputs.objectiveLabel} issue; nothing to do`);
     await finish("skipped", `not an open ${inputs.objectiveLabel} issue`);
+    return;
+  }
+
+  // A local loop holds this Objective (factory run / serve on a developer box): the Actions job steps aside.
+  if (!isLocal() && (await localClaim(repo, issue, token).catch(() => null))?.fresh) {
+    log(`#${issue} is held by a local loop; nothing to do here`);
+    await finish("skipped", "held by a local loop");
     return;
   }
 

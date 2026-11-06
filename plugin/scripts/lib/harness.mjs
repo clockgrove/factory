@@ -6,6 +6,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exec, onPath } from "./proc.mjs";
 import { parseUsage } from "./usage.mjs";
+import { claudeLocalSettings, localSandbox } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -120,12 +121,18 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, local = null }) {
+  // Local mode (a developer's box): Claude Code runs in its own sandbox; the other harnesses' local
+  // sandboxes are not wired yet, so they refuse rather than run with a disposable runner's permissions.
+  if (local && harness !== "claude") throw new Error(`local mode runs the claude harness in this release; ${harness} on a developer box is not sandboxed yet`);
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
       // sections (the auto-memory path) move into the first user message instead of the system prompt.
-      const args = ["-p", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--exclude-dynamic-system-prompt-sections"];
+      // On a runner the VM is disposable, so permissions are skipped; on a developer's box edits stay in the
+      // working directory and the added directories, and shell commands run in Claude Code's sandbox.
+      const perms = local ? ["--permission-mode", "acceptEdits", "--settings", JSON.stringify(claudeLocalSettings({ domains: local.domains })), ...local.addDirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
+      const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);
@@ -174,7 +181,7 @@ export function harnessVersion(harness) {
 
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
-  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort });
+  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, local: localSandbox(env) });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });

@@ -20,6 +20,7 @@ import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, re
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
+import { isLocal, localClaim } from "./lib/local.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
@@ -110,6 +111,12 @@ async function main() {
     return;
   }
   const issue = Number(m[1]);
+  if (!isLocal() && (await localClaim(repo, issue, token).catch(() => null))?.fresh) {
+    log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
+    setOutput("exit", "skipped");
+    setOutput("issue", "");
+    return;
+  }
   const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(checkout, "..", `factory-usage-${issue}-review`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");

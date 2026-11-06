@@ -94,13 +94,22 @@ function localToken(repoFull) {
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
 
-/** The token reaches this repository and nothing else: fine-grained, and every repository it can list is this one. */
+/**
+ * The token can write to this repository and nothing else. A fine-grained token lists every public repository it
+ * may read, and the listed permissions are the person's, not the token's, so write reach is probed instead: an
+ * issue with no title is refused before anything is created, with 422 where the token may write and 403 or 404
+ * where it may not.
+ */
 async function checkToken(repoFull, token) {
-  if (!token.startsWith("github_pat_")) throw new Error("FACTORY_LOCAL_TOKEN must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
-  const reach = await rest("user/repos?per_page=100", { token, paginate: true }).catch(() => null);
-  if (reach === null) return;
-  const others = reach.map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase());
-  if (others.length) throw new Error(`FACTORY_LOCAL_TOKEN reaches ${others.length} other repositor${others.length === 1 ? "y" : "ies"} (${others.slice(0, 3).join(", ")}${others.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
+  if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
+  const reach = (await rest("user/repos?per_page=100", { token, paginate: true }).catch(() => [])) || [];
+  const others = reach.map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase()).slice(0, 20);
+  const writable = [];
+  for (const name of others) {
+    const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {} }).then(() => 201, (e) => e.status || 0);
+    if (status === 422 || status === 201) writable.push(name);
+  }
+  if (writable.length) throw new Error(`the local token can write to ${writable.length} other repositor${writable.length === 1 ? "y" : "ies"} (${writable.slice(0, 3).join(", ")}${writable.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
 }
 
 class Local {

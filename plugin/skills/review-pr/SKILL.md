@@ -24,7 +24,7 @@ A review comment is tied to a line on the new side of the diff (a comment that f
 
 No comment without a named entry or rule. Style, naming and taste are not findings unless a repository rule makes them one.
 
-Before writing a comment, find the body's answer to it (an assumption, a checklist row, an Undone item). A claim the body makes is a finding only when the diff or the issue shows it false; restating it, or preferring another reading of an entry the diff satisfies, is not. No line the rule forbids, or no entry a line fails: no finding. Post only what you would defend against a rebuttal that cites the body.
+Before writing a comment, find the body's answer to it (an assumption, a checklist row, an Undone item). A claim the body makes is a finding only when the diff or the issue shows it false; preferring another reading of an entry the diff satisfies is not. No line the rule forbids, or no entry a line fails: no finding. Post only what survives a rebuttal that cites the body.
 
 ## What to look for
 
@@ -32,7 +32,7 @@ Before writing a comment, find the body's answer to it (an assumption, a checkli
 - A test weakened, skipped, loosened or deleted without the issue asking for it.
 - A design-checklist answer whose `file:line` evidence does not say what the answer claims.
 - A recorded decision contradicted by the code.
-- An assumption in the plan or body that changes behaviour a user, a caller or another package can observe. Flag each such assumption with the prefix `Assumption, behaviour-changing:` so the worker and the owner can find it; say what observable behaviour it changes. Do not flag assumptions that change nothing observable.
+- An assumption in the plan or body that changes behaviour a user, a caller or another package can observe. Flag each such assumption with the prefix `Assumption, behaviour-changing:` so the worker and the owner can find it; say what observable behaviour it changes. Do not flag assumptions that change nothing observable. An assumption the issue's acceptance, context or recorded decisions require is not one.
 - A number without a source, a new power on a broad grant, unbounded growth, a per-request cost: the repository's own checklist questions, where it has them.
 - A protected path touched, or an undone item not listed under Undone.
 

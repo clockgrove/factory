@@ -117,6 +117,22 @@ export function fromCodexEvents(text, model = null) {
 }
 
 /** Any usage file's content to a normalized record, by shape; null when it is none of them. */
+/**
+ * Harness calls and distinct sessions in a raw event stream: Claude's `system/init` lines and
+ * `session_id`, Codex's `thread.started` and thread ids. Null when the text has neither.
+ */
+export function sessionsOf(text) {
+  let calls = 0;
+  const ids = new Set();
+  for (const l of jsonLines(String(text ?? "").trim())) {
+    if (l.type === "system" && l.subtype === "init") calls += 1;
+    if (l.type === "thread.started") calls += 1;
+    if (typeof l.session_id === "string") ids.add(l.session_id);
+    if (typeof l.thread_id === "string") ids.add(l.thread_id);
+  }
+  return calls || ids.size ? { calls, sessions: ids.size } : null;
+}
+
 export function parseUsageText(text, { model = null } = {}) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return null;
@@ -160,7 +176,7 @@ export function parseUsageText(text, { model = null } = {}) {
 export function costOf(records, prices, { harness: declared = null } = {}) {
   const parts = records.filter(Boolean);
   const harness = declared ?? parts[0]?.harness ?? null;
-  const out = { harness, model: parts.find((p) => p.model)?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: null, parts: [], priceTableDate: null, note: null };
+  const out = { harness, model: parts.find((p) => p.model)?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: null, parts: [], priceTableDate: null, note: null, activity: { turns: null, calls: null, sessions: null, workRuns: 0, reviewRuns: 0 } };
   if (!parts.length) {
     out.basis = "unknown: no usage artifact";
     return out;
@@ -189,6 +205,12 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.basis = rec.basis ?? "unknown harness";
     }
     out.parts.push(part);
+    // Activity: turns and harness calls per Objective (the token levers' metric), sessions (continuity),
+    // and how many work and review runs the artifacts came from (re-entries are work runs past the first).
+    out.activity.turns = add(out.activity.turns, num(rec.turns));
+    out.activity.calls = add(out.activity.calls, num(rec.sessions?.calls));
+    out.activity.sessions = add(out.activity.sessions, num(rec.sessions?.sessions));
+    if (rec.runs !== 0 && typeof rec.artifact === "string") out.activity[/(^|-|\/)review(\/|$)/.test(rec.artifact) ? "reviewRuns" : "workRuns"] += 1;
     out.tokens.input = add(out.tokens.input, part.tokens?.input ?? null);
     out.tokens.output = add(out.tokens.output, part.tokens?.output ?? null);
     out.tokens.written = add(out.tokens.written, part.tokens?.written ?? null);

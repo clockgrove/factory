@@ -63,7 +63,7 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
     try {
       const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
       const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
-      records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
+      records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

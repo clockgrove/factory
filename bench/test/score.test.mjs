@@ -96,7 +96,7 @@ test("cost: Codex tokens are priced from prices.json, with its date in the basis
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);
   const raw = parseUsageText(read(join(USAGE, "codex", "events.jsonl")), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 150000, output: 10500, cached: 115000 });
+  assert.deepEqual(raw.tokens, { input: 150000, output: 10500, cached: 115000, written: null });
   assert.equal(costOf([raw], prices).usd, 0.1865);
   assert.equal(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).usd, null);
   assert.match(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
@@ -122,6 +122,12 @@ test("cost: the reviewer's artifact is summed with the worker's; a raw Claude re
   assert.equal(raw.usd, 7.4312);
   assert.equal(raw.model, "claude-fable-5-1");
   assert.equal(raw.tokens.output, 50000);
+  // Cache writes and the per-model split are kept: cost by component without re-reading the artifact.
+  assert.equal(typeof raw.tokens.written, "number");
+  assert.ok(raw.models && raw.models["claude-fable-5-1"]);
+  assert.equal(Object.values(raw.models).reduce((s, m) => s + m.output, 0), raw.tokens.output);
+  assert.equal(costOf([raw], prices).tokens.written, raw.tokens.written);
+  assert.match(markdownTable([row]), /\$8\.23 \(\d+k in \/ \d+k cached \/ \d+k written \/ \d+k out\)/);
 });
 
 test("no usage artifact: the row says so instead of guessing", () => {
@@ -163,7 +169,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   writeFileSync(standing, JSON.stringify({ version: 1, rows: [{ repository: REPO, issue: 7, walkAway: { value: true } }, { repository: REPO, issue: 42, walkAway: { value: false } }] }));
   const out = execFileSync("node", [join(BENCH, "score.mjs"), "--replay", file, "--usage", join(USAGE, "claude"), "--out", join(dir, "rows.json"), "--append", standing], { encoding: "utf8", cwd: dir });
   assert.match(out, /^\| Issue \| Exit \| Walk-away \|/);
-  assert.match(out, /\| #42 \| merged \| yes \| pending \| 0 \| \$7\.43 \| usd \|/);
+  assert.match(out, /\| #42 \| merged \| yes \| pending \| 0 \| \$7\.43 \(201k in \/ 2700k cached \/ 0k written \/ 50k out\) \| usd \|/);
   const rows = JSON.parse(read(join(dir, "rows.json"))).rows;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].issue, 42);

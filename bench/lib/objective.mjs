@@ -114,6 +114,8 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
     // milestone, pin, project card) are not input to the Objective's work.
     if (PASSIVE_EVENTS.has(e.event)) continue;
     if (e.event === "labeled" && e.label?.name === label && e.created_at === since) continue; // the clock itself
+    // Labels the issue's author applies while filing it (a priority, the type's labels) are part of filing, not input.
+    if (e.event === "labeled" && (e.actor?.login ?? null) === (collected.issue.user?.login ?? undefined) && ms(e.created_at) - ms(collected.issue.created_at) <= 60_000) continue;
     if (e.event === "commented") {
       if (/<!-- factory:/.test(e.body || "")) continue; // Factory's own protocol (plan, progress, hold, blocked markers), whoever posted it
       push(e.created_at, issue, "comment", e.user ?? e.actor, (e.body || "").slice(0, 80));

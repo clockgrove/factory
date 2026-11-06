@@ -135,7 +135,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const live = (path, opts) => ghApi(path, { ...opts, token });
   const api = snapshot ? snapshotApi(snapshot) : values.snapshot ? recordingApi(live, calls) : live;
   const graphql = snapshot ? null : (q, v) => ghGraphql(q, v, { token });
-  const download = snapshot || values.usage ? null : (repoFull, id) => downloadArtifact(repoFull, id, { token });
+  const download = snapshot || values.usage ? null : (repoFull, artifact) => downloadArtifact(repoFull, artifact, { token });
 
   const usageDir = values.usage ? resolve(values.usage) : null;
   const usageFor = (issue) => {

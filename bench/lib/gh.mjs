@@ -3,7 +3,7 @@
 // (RESEARCH.md). Every read goes through `api(path)`, which score.mjs swaps
 // for a snapshot reader offline, so nothing here is needed to run a test.
 import { execFile } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -36,19 +36,17 @@ export async function ghApi(path, { paginate = false, token } = {}) {
 }
 
 /**
- * An Actions artifact's files, unzipped into a new temporary directory;
- * returns the directory. Needs a token with `actions: read` on the
- * repository (the artifacts zip endpoint refuses anonymous reads).
+ * An Actions artifact's files, unpacked into a new temporary directory by
+ * `gh run download` (so nothing beyond gh is needed); returns the directory.
+ * `artifact` carries its `name` and `workflow_run` (the run id, or the API's
+ * `{ id }` object). Needs a token with `actions: read` on the repository.
  */
-export async function downloadArtifact(repoFull, artifactId, { token } = {}) {
+export async function downloadArtifact(repoFull, artifact, { token } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "factory-usage-"));
-  const zip = join(dir, "artifact.zip");
   const env = { ...process.env };
   if (token) env.GH_TOKEN = token;
-  const { stdout } = await run("gh", ["api", `repos/${repoFull}/actions/artifacts/${artifactId}/zip`], { env, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 });
-  writeFileSync(zip, stdout);
-  // Python's zipfile is on every runner and developer box; unzip is not.
-  await run("python3", ["-I", "-m", "zipfile", "-e", zip, dir]);
+  const runId = artifact.workflow_run?.id ?? artifact.workflow_run;
+  await run("gh", ["run", "download", String(runId), "-n", artifact.name, "-D", dir, "-R", repoFull], { env, maxBuffer: 64 * 1024 * 1024 });
   return dir;
 }
 

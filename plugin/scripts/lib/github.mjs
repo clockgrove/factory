@@ -1,13 +1,13 @@
 // GitHub REST and GraphQL through `gh api`, with the token the caller sets in GH_TOKEN.
 // Every write the plan routes through the App (push, PR, review request, card move,
 // merge) goes through here with the App token in env; the job token is never passed.
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { evaluateChecks, isPlaceholder, marker } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
-/** Run gh (or unzip) and throw on non-zero exit, with stderr on the error. */
+/** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
   const r = await exec(cmd, args, opts);
   if (r.code !== 0) {
@@ -458,14 +458,16 @@ export async function todaysUsage(repo, { prefix = "factory-usage-", token, date
   return records;
 }
 
+/** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */
 async function downloadArtifactResult(repo, artifact, token) {
   const dir = mkdtempSync(join(tmpdir(), "factory-usage-"));
-  const zip = join(dir, "a.zip");
-  const { stdout } = await run("gh", ["api", `repos/${repo.full}/actions/artifacts/${artifact.id}/zip`], { env: env(token), encoding: "buffer", maxBuffer: 256 * 1024 * 1024 });
-  writeFileSync(zip, stdout);
-  await run("unzip", ["-o", "-q", zip, "-d", dir]);
-  const file = [join(dir, "result.json"), join(dir, "usage", "result.json")].find(existsSync);
-  return file ? JSON.parse(readFileSync(file, "utf8")) : null;
+  try {
+    await run("gh", ["run", "download", String(artifact.workflow_run?.id), "-n", artifact.name, "-D", dir, "-R", repo.full], { env: env(token), timeoutMs: 120_000 });
+    const file = [join(dir, "result.json"), join(dir, "usage", "result.json")].find(existsSync);
+    return file ? JSON.parse(readFileSync(file, "utf8")) : null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ------------------------------------------------------------------- jobs

@@ -59,7 +59,7 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
   const records = [];
   for (const a of artifacts) {
     if (a.expired) continue;
-    const dir = await download(repoFull, a.id);
+    const dir = await download(repoFull, a);
     try {
       const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
       const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
@@ -91,7 +91,7 @@ async function jobsFor(api, repoFull, runIds) {
 }
 
 /**
- * Collect one Objective. `download(repoFull, artifactId)` returns a directory
+ * Collect one Objective. `download(repoFull, artifact)` returns a directory
  * (lib/gh.mjs's downloadArtifact bound to a token) or is null offline.
  * `usage` is a list of records read from --usage <dir> when given.
  */

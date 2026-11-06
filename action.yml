@@ -27,6 +27,9 @@ inputs:
   effort:
     description: The worker session's effort level (Claude harness only); the harness default when empty. Pinned so a CLI default change cannot move cost silently.
     required: false
+  resume_policy:
+    description: (Claude harness only) Which re-entries resume the worker's saved session instead of starting fresh. `fresh` (default) resumes none; `fix-passes` resumes the review job's fix and answer passes and a rebase send-back that conflicts. An answered Question always starts fresh.
+    required: false
   compaction_window:
     description: (Claude harness only) The context size, in tokens such as 300000, at which the worker and reviewer sessions compact; the CLI default when empty. A measured lever for large Objectives, off by default.
     required: false

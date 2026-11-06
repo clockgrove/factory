@@ -21,6 +21,7 @@ export const DEFAULTS = {
   model: "", // empty: MODEL_DEFAULTS for the harness
   effort: "", // empty: MODEL_DEFAULTS for the harness (the worker's effort; Claude only)
   compaction_window: "", // empty: the CLI default (Claude only)
+  resume_policy: "fresh", // fresh | fix-passes (Claude only): which re-entries resume the worker's saved session
   subagent_model: "",
   reviewer_model: "",
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
@@ -110,6 +111,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     model: get("model") || md.model || "",
     effort: get("effort") || md.effort || "",
     compactionWindow: get("compaction_window").trim(),
+    resumePolicy: (get("resume_policy") || "fresh").trim().toLowerCase() === "fix-passes" ? "fix-passes" : "fresh",
     subagentModel: get("subagent_model") || md.subagent_model || "",
     reviewerModel: get("reviewer_model") || md.reviewer_model || get("model") || md.model || "",
     reviewerFallback: md.reviewer_fallback ? { model: md.reviewer_fallback, effort: md.reviewer_fallback_effort } : null,

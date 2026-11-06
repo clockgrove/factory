@@ -31,6 +31,7 @@ import {
   isValidated,
   liveActivity,
   maskFile,
+  restoreTranscript,
   saveTranscript,
   observe,
   postValidated,
@@ -206,6 +207,14 @@ async function main() {
     protectedList,
   });
   const session = { id: null, canResume: true };
+  // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer
+  // passes; the reviewer always runs in its own fresh session.
+  let restored = null;
+  if (inputs.harness === "claude" && inputs.resumePolicy === "fix-passes") {
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
+    if (restored.id) session.id = restored.id;
+  }
+  await progress(`re-entry: ${restored?.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh${restored ? ` (${restored.reason})` : ` (policy ${inputs.resumePolicy})`}`}`);
 
   // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
   // carries the marker; a head a human pushed or marked ready does not, so Factory's own
@@ -293,7 +302,8 @@ async function main() {
       onLine: answerLive.onLine,
       harness: inputs.harness,
       model: inputs.model,
-      prompt: answerPrompt({ taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
+      resume: session.id || null,
+      prompt: answerPrompt({ taskCard: session.id ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       cwd: checkout,
       env: harnessEnv,

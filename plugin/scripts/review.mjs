@@ -280,7 +280,9 @@ async function main() {
   if (!alreadyReviewed) records.push(reviewRecord);
   const findings = parseFindings(reviewRecord.finalText || "");
   let comments = alreadyReviewed ? [] : snapComments(findings, diff);
-  let placeholder = alreadyReviewed;
+  // A re-run (the label re-applied after a failed answer pass) still answers what is unanswered: the reviewer
+  // never makes a second pass, but its findings are answered once; placeholders are never in that list.
+  let placeholder = false;
   if (!comments.length && !alreadyReviewed) {
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.first !== null);
     placeholder = !!first;

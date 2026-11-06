@@ -60,7 +60,7 @@ test("codex: unknown model is unmetered, never zero", () => {
   assert.equal(rec.usd, null);
   assert.match(rec.basis, /unmetered: no price for gpt-unknown-9/);
   assert.equal(priceCodex(null, { input: 1 }), null);
-  assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), 1.25, "prefix match");
+  assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), 5, "prefix match on gpt-5.5 at its published input rate");
 });
 
 test("copilot: no usage output is unmetered, never zero; a non-zero exit is an error, not a death", () => {

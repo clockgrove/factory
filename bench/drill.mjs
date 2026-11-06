@@ -19,6 +19,8 @@
  *   --dispatch               fire `gh workflow run factory.yml` after filing (when the opened tick is not trusted)
  *   --local                  also label each Objective factory:local, so a local loop (plugin/scripts/local.mjs serve)
  *                            takes it and the Actions path leaves it alone
+ *   --local-dir CLONE        with --local: the developer clone the local loop runs from; its .factory/ usage
+ *                            records are scored instead of Actions artifacts
  *   --wait-minutes N         give up after N minutes (default 40)
  *   --type NAME              the native issue type to set (default Feature; "" to skip)
  *   --usage DIR              where to download the usage artifacts for scoring (default a temp dir)
@@ -34,7 +36,7 @@ import { promisify } from "node:util";
 const run = promisify(execFile);
 const here = resolve(new URL(".", import.meta.url).pathname);
 const { values } = parseArgs({
-  options: { repo: { type: "string" }, set: { type: "string" }, count: { type: "string" }, dispatch: { type: "boolean" }, local: { type: "boolean" }, "wait-minutes": { type: "string" }, type: { type: "string" }, usage: { type: "string" }, out: { type: "string" } },
+  options: { repo: { type: "string" }, set: { type: "string" }, count: { type: "string" }, dispatch: { type: "boolean" }, local: { type: "boolean" }, "local-dir": { type: "string" }, "wait-minutes": { type: "string" }, type: { type: "string" }, usage: { type: "string" }, out: { type: "string" } },
 });
 const usage = (m) => {
   process.stderr.write(`${m}\nSee the header of bench/drill.mjs.\n`);
@@ -248,14 +250,18 @@ while (Date.now() < deadline && [...state.values()].some((s) => s === "open")) {
   process.stderr.write(`${new Date().toISOString().slice(11, 19)} ${filed.map((f) => `#${f.number}:${state.get(f.number)}`).join(" ")}\n`);
 }
 
-/** Score with bench/score.mjs from the uploaded artifacts. */
+/** Score with bench/score.mjs from the uploaded artifacts, or, for a local loop, from its usage records on the box. */
 const usageDir = values.usage ? resolve(values.usage) : mkdtempSync(join(tmpdir(), "factory-drill-usage-"));
-for (const f of filed) {
-  for (const a of [`factory-usage-${f.number}`, `factory-usage-${f.number}-review`]) {
-    await run("gh", ["run", "download", "-R", repo, "-n", a, "-D", join(usageDir, String(f.number), a)]).catch(() => {});
+// A local loop uploads no artifacts: its records sit in <clone>/.factory/<issue>/usage-*/ (plugin/scripts/local.mjs).
+const localUsage = values.local && values["local-dir"] ? join(resolve(values["local-dir"]), ".factory") : null;
+if (!localUsage) {
+  for (const f of filed) {
+    for (const a of [`factory-usage-${f.number}`, `factory-usage-${f.number}-review`]) {
+      await run("gh", ["run", "download", "-R", repo, "-n", a, "-D", join(usageDir, String(f.number), a)]).catch(() => {});
+    }
   }
 }
-const scoreArgs = ["--repo", repo, ...filed.flatMap((f) => ["--issue", String(f.number)]), "--usage", usageDir, "--out", join(usageDir, "score.json")];
+const scoreArgs = ["--repo", repo, ...filed.flatMap((f) => ["--issue", String(f.number)]), "--usage", localUsage ?? usageDir, "--out", join(usageDir, "score.json")];
 let rows = [];
 try {
   await run("node", [join(here, "score.mjs"), ...scoreArgs], { maxBuffer: 64 * 1024 * 1024 });

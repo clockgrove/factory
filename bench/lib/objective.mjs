@@ -101,12 +101,32 @@ export function decisionsOf(actions) {
   return count;
 }
 
+/**
+ * Local mode (the factory:local label): Factory acts under the developer's own login, so a person's actions and
+ * Factory's share an actor. Factory's are told apart by structure: the login that posts its progress comments,
+ * acting inside a run's window (the comment's creation to its last edit, with two minutes' slack); the factory state
+ * labels it applies between runs (the local loop's dispatcher); and the merge, which the merge queue records as
+ * whoever armed auto-merge. Re-applying factory:objective, or anything outside a run, stays a person's.
+ */
+const LOCAL_STATE_KIND = /^(un)?labeled factory:(running|in-review|blocked|question|review)$/;
+export function localFactoryActions(collected) {
+  const labels = (collected.issue?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+  if (!labels.includes("factory:local")) return () => false;
+  const progress = (collected.issueComments || []).filter((c) => /^<!-- factory:\d+:progress/.test(c.body || ""));
+  const login = progress[0]?.user?.login;
+  if (!login) return () => false;
+  const slack = 2 * 60_000;
+  const windows = progress.map((c) => [ms(c.created_at) - slack, ms(c.updated_at || c.created_at) + slack]);
+  return (at, actor, kind) => (actor?.login ?? actor?.name) === login && (LOCAL_STATE_KIND.test(kind) || kind === "merged" || windows.some(([a, b]) => ms(at) >= a && ms(at) <= b));
+}
+
 /** The human actions after `since` on the issue and its PRs, oldest first: each {at, where, kind, by, detail}. */
 export function humanActions(collected, since, { bots = new Set(), label = OBJECTIVE_LABEL } = {}) {
   const out = [];
   const after = (at) => Number.isFinite(ms(at)) && ms(at) > ms(since);
+  const factoryLocal = localFactoryActions(collected);
   const push = (at, where, kind, actor, detail = "") => {
-    if (after(at) && isHuman(actor, bots)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
+    if (after(at) && isHuman(actor, bots) && !factoryLocal(at, actor, kind)) out.push({ at, where, kind, by: actor.login ?? actor.name ?? "unknown", detail });
   };
   const issue = `#${collected.issue.number}`;
   for (const e of collected.issueTimeline || []) {
@@ -222,7 +242,8 @@ export function scoreObjective(collected, opts = {}) {
   const waiting = waitingMinutes(collected.issueTimeline, since, merged?.merged_at ?? null);
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
 
-  const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots)) ?? null;
+  const factoryLocal = localFactoryActions(collected);
+  const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !factoryLocal(e.at, e.by, "body edit")) ?? null;
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   const walkAway = {

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# factory-db <command...>: run <command> against a fresh, empty Postgres that exists only for that command.
+# Local mode puts this on the PATH of every sandboxed command. A sandbox has its own network, so the box's
+# Postgres is out of reach by design; this starts one inside the sandbox instead, on its own loopback, with
+# no unix socket. It runs the repository's init step (FACTORY_LOCAL_DB_INIT, for example
+# psql -c 'create extension vector'), sets DATABASE_URL and the PG* variables, runs the command, and removes
+# the database afterwards. Needs the Postgres server binaries (initdb, pg_ctl) on the box.
+set -euo pipefail
+[ $# -gt 0 ] || { echo "usage: factory-db <command...>" >&2; exit 2; }
+
+bin="${FACTORY_PG_BIN:-}"
+if [ -z "$bin" ] && command -v pg_config >/dev/null 2>&1; then bin="$(pg_config --bindir)"; fi
+if [ -z "$bin" ] || [ ! -x "$bin/initdb" ]; then
+  for d in $(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V -r); do [ -x "$d/initdb" ] && { bin="$d"; break; }; done
+fi
+if [ -z "$bin" ] || [ ! -x "$bin/initdb" ]; then
+  echo "factory-db: no Postgres server binaries (initdb, pg_ctl) found; install the postgresql package or set FACTORY_PG_BIN" >&2
+  exit 127
+fi
+
+user="${FACTORY_DB_USER:-factory}"
+name="${FACTORY_DB_NAME:-factory}"
+root="$(mktemp -d "${TMPDIR:-/tmp}/factory-db.XXXXXX")"
+stop() {
+  "$bin/pg_ctl" -D "$root/data" -m immediate stop >/dev/null 2>&1 || true
+  case "$root" in */factory-db.*) rm -rf -- "$root" ;; esac
+}
+trap stop EXIT
+
+"$bin/initdb" -D "$root/data" -U "$user" --auth=trust -E UTF8 >"$root/init.log" 2>&1 || { tail -5 "$root/init.log" >&2; exit 1; }
+port=""
+for p in $(seq 54320 54399); do
+  if "$bin/pg_ctl" -D "$root/data" -l "$root/server.log" -w -o "-c listen_addresses=127.0.0.1 -p $p -c unix_socket_directories='' -c fsync=off -c synchronous_commit=off -c full_page_writes=off" start >/dev/null 2>&1; then
+    port="$p"
+    break
+  fi
+done
+[ -n "$port" ] || { echo "factory-db: Postgres did not start" >&2; tail -5 "$root/server.log" >&2; exit 1; }
+"$bin/createdb" -h 127.0.0.1 -p "$port" -U "$user" "$name"
+
+export PGHOST=127.0.0.1 PGPORT="$port" PGUSER="$user" PGDATABASE="$name"
+export DATABASE_URL="postgres://$user:$user@127.0.0.1:$port/$name"
+if [ -n "${FACTORY_LOCAL_DB_INIT:-}" ]; then bash -eo pipefail -c "$FACTORY_LOCAL_DB_INIT"; fi
+set +e
+"$@"
+rc=$?
+exit "$rc"

@@ -301,6 +301,12 @@ export function scoreObjective(collected, opts = {}) {
 }
 
 const fmtUsd = (n) => (n === null || n === undefined ? "unmetered" : `$${n.toFixed(2)}`);
+/** Token split in thousands: uncached input, cache reads, cache writes, output; the cost's shape at a glance. */
+const fmtTokens = (t) => {
+  const k = (n) => `${Math.round((n ?? 0) / 1000)}k`;
+  const uncached = Math.max(0, (t.input ?? 0) - (t.cached ?? 0) - (t.written ?? 0));
+  return `${k(uncached)} in / ${k(t.cached)} cached / ${k(t.written)} written / ${k(t.output)} out`;
+};
 const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === "number" ? `${n}` : String(n));
 /** One table cell: no pipe, no line break (a Blocked reason may carry either). */
 const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
@@ -312,7 +318,7 @@ export function markdownTable(rows) {
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
     const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
-    const cost = r.harness === "codex" && r.cost.usd !== null ? `${fmtUsd(r.cost.usd)} (${(r.cost.tokens.input ?? 0).toLocaleString("en-US")} in / ${(r.cost.tokens.output ?? 0).toLocaleString("en-US")} out)` : fmtUsd(r.cost.usd);
+    const cost = r.cost.usd !== null && r.cost.tokens.input !== null ? `${fmtUsd(r.cost.usd)} (${fmtTokens(r.cost.tokens)})` : fmtUsd(r.cost.usd);
     const cells = [`#${r.issue}`, r.exit, walk, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }

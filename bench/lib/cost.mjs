@@ -58,36 +58,53 @@ function jsonLines(text) {
 
 /** A raw Claude result object (json or the last stream-json line) to the normalized record. */
 export function fromClaudeResult(result, model = null) {
-  const rec = { harness: "claude", model, usd: null, tokens: { input: null, output: null, cached: null }, basis: "unmetered", turns: num(result.num_turns), exit: null, runs: 1 };
+  const rec = { harness: "claude", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered", turns: num(result.num_turns), exit: null, runs: 1 };
   const byModel = result.modelUsage && typeof result.modelUsage === "object" ? result.modelUsage : null;
   if (byModel && Object.keys(byModel).length) {
     let input = null;
     let output = null;
     let cached = null;
+    let written = null;
     let cost = null;
+    rec.models = {};
     for (const [name, u] of Object.entries(byModel)) {
-      input = add(input, add(num(u.inputTokens), add(num(u.cacheReadInputTokens), num(u.cacheCreationInputTokens))));
-      output = add(output, num(u.outputTokens));
-      cached = add(cached, num(u.cacheReadInputTokens));
-      if (num(u.costUSD) !== null) cost = add(cost, num(u.costUSD));
+      const m = { input: num(u.inputTokens), cached: num(u.cacheReadInputTokens), written: num(u.cacheCreationInputTokens), output: num(u.outputTokens), usd: num(u.costUSD) };
+      input = add(input, add(m.input, add(m.cached, m.written)));
+      output = add(output, m.output);
+      cached = add(cached, m.cached);
+      written = add(written, m.written);
+      if (m.usd !== null) cost = add(cost, m.usd);
+      rec.models[name] = m;
       if (!rec.model) rec.model = name;
     }
-    rec.tokens = { input, output, cached };
+    rec.tokens = { input, output, cached, written };
     rec.usd = num(result.total_cost_usd) ?? cost;
     rec.basis = "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
   } else {
     const u = result.usage || {};
     const cached = num(u.cache_read_input_tokens);
-    rec.tokens = { input: add(num(u.input_tokens), add(cached, num(u.cache_creation_input_tokens))), output: num(u.output_tokens), cached };
+    const written = num(u.cache_creation_input_tokens);
+    rec.tokens = { input: add(num(u.input_tokens), add(cached, written)), output: num(u.output_tokens), cached, written };
     rec.usd = num(result.total_cost_usd);
     rec.basis = rec.usd === null ? "unmetered: no total_cost_usd" : "harness-reported: total_cost_usd, usage (sub-agents excluded)";
   }
   return rec;
 }
 
+/** Per-model token and dollar totals, summed across harness runs (null when neither side reports any). */
+function mergeModels(a, b) {
+  if (!a && !b) return undefined;
+  const out = { ...(a ?? {}) };
+  for (const [name, m] of Object.entries(b ?? {})) {
+    const p = out[name];
+    out[name] = p ? { input: add(p.input, m.input), cached: add(p.cached, m.cached), written: add(p.written, m.written), output: add(p.output, m.output), usd: add(p.usd, m.usd) } : m;
+  }
+  return out;
+}
+
 /** Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). */
 export function fromCodexEvents(text, model = null) {
-  const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
+  const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
   for (const e of jsonLines(text)) {
     if (e.type !== "turn.completed") continue;
     rec.turns += 1;
@@ -124,7 +141,8 @@ export function parseUsageText(text, { model = null } = {}) {
   const sum = results[0];
   for (const r of results.slice(1)) {
     sum.usd = sum.usd === null && r.usd === null ? null : (sum.usd ?? 0) + (r.usd ?? 0);
-    sum.tokens = { input: add(sum.tokens.input, r.tokens.input), output: add(sum.tokens.output, r.tokens.output), cached: add(sum.tokens.cached, r.tokens.cached) };
+    sum.tokens = { input: add(sum.tokens.input, r.tokens.input), output: add(sum.tokens.output, r.tokens.output), cached: add(sum.tokens.cached, r.tokens.cached), written: add(sum.tokens.written, r.tokens.written) };
+    sum.models = mergeModels(sum.models, r.models);
     sum.turns = add(sum.turns, r.turns);
     sum.model = sum.model ?? r.model;
   }
@@ -142,7 +160,7 @@ export function parseUsageText(text, { model = null } = {}) {
 export function costOf(records, prices, { harness: declared = null } = {}) {
   const parts = records.filter(Boolean);
   const harness = declared ?? parts[0]?.harness ?? null;
-  const out = { harness, model: parts.find((p) => p.model)?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null }, basis: null, parts: [], priceTableDate: null, note: null };
+  const out = { harness, model: parts.find((p) => p.model)?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: null, parts: [], priceTableDate: null, note: null };
   if (!parts.length) {
     out.basis = "unknown: no usage artifact";
     return out;
@@ -173,6 +191,8 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.parts.push(part);
     out.tokens.input = add(out.tokens.input, part.tokens?.input ?? null);
     out.tokens.output = add(out.tokens.output, part.tokens?.output ?? null);
+    out.tokens.written = add(out.tokens.written, part.tokens?.written ?? null);
+    if (rec.models) out.models = mergeModels(out.models, rec.models);
     out.tokens.cached = add(out.tokens.cached, part.tokens?.cached ?? null);
   }
   const unmetered = out.parts.filter((p) => p.usd === null);

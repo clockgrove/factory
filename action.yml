@@ -171,6 +171,9 @@ runs:
         FACTORY_INPUT_MODEL: ${{ inputs.model }}
         FACTORY_INPUT_SUBAGENT_MODEL: ${{ inputs.subagent_model }}
         FACTORY_INPUT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
+        FACTORY_INPUT_EFFORT: ${{ inputs.effort }}
+        FACTORY_INPUT_COMPACTION_WINDOW: ${{ inputs.compaction_window }}
+        FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
         FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
         FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
         FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}

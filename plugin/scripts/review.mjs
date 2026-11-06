@@ -33,6 +33,7 @@ import {
   maskFile,
   restoreTranscript,
   saveTranscript,
+  crashed,
   observe,
   postValidated,
   progressReporter,
@@ -122,7 +123,7 @@ async function main() {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: session.id, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${costByPhase(records)}`);
     setOutput("exit", exit);
@@ -214,7 +215,7 @@ async function main() {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
     if (restored.id) session.id = restored.id;
   }
-  await progress(`re-entry: ${restored?.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh${restored ? ` (${restored.reason})` : ` (policy ${inputs.resumePolicy})`}`}`);
+  if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);
 
   // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
   // carries the marker; a head a human pushed or marked ready does not, so Factory's own
@@ -298,12 +299,13 @@ async function main() {
   let answerRecord = null;
   if (toAnswer.length) {
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model });
-    const rec = await runHarness({
+    const resumeAnswer = inputs.resumePolicy === "fix-passes" && session.id ? session.id : null;
+    const answerArgs = (resume) => ({
       onLine: answerLive.onLine,
       harness: inputs.harness,
       model: inputs.model,
-      resume: session.id || null,
-      prompt: answerPrompt({ taskCard: session.id ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
+      resume,
+      prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       cwd: checkout,
       env: harnessEnv,
@@ -311,6 +313,15 @@ async function main() {
       eventsFile,
       label: "answer",
     });
+    let rec = await runHarness(answerArgs(resumeAnswer));
+    // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card.
+    if (resumeAnswer && crashed(rec)) {
+      records.push(rec);
+      log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
+      await progress("re-entry: resume failed; answering fresh");
+      session.id = null;
+      rec = await runHarness(answerArgs(null));
+    }
     answerLive.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;

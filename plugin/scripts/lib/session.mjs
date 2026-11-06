@@ -105,24 +105,32 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir 
   }
   if (!arts.length) return { id: null, from: null, reason: "no earlier usage artifact" };
   arts.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  const a = arts[0];
-  const dir = join(workDir, `factory-restore-${a.id}`);
-  const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: token } });
-  if (d.code !== 0) return { id: null, from: a.name, reason: `artifact download failed (exit ${d.code})` };
-  let s = null;
-  try {
-    s = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).session;
-  } catch {
-    return { id: null, from: a.name, reason: "the artifact has no readable result.json" };
+  // A newer job that ran no harness (a clean rebase, an already-reviewed PR) saved no session:
+  // look past it, newest first, to the most recent run that did.
+  let last = "no earlier run saved a transcript";
+  for (const a of arts.slice(0, 3)) {
+    const dir = join(workDir, `factory-restore-${a.id}`);
+    const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: token }, timeoutMs: 120_000 });
+    if (d.code !== 0) {
+      last = `artifact download failed (exit ${d.code ?? "timeout"})`;
+      continue;
+    }
+    let s = null;
+    try {
+      s = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).session;
+    } catch {
+      continue;
+    }
+    if (!s?.id || !s.projectDir) continue;
+    if (s.checkout !== checkout) return { id: null, from: a.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
+    const src = join(dir, "transcript", s.projectDir);
+    if (!existsSync(join(src, `${s.id}.jsonl`))) return { id: null, from: a.name, reason: "the transcript file is missing from the artifact" };
+    const dest = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects", s.projectDir);
+    mkdirSync(dest, { recursive: true });
+    cpSync(src, dest, { recursive: true });
+    return { id: s.id, from: a.name, reason: "" };
   }
-  if (!s?.id || !s.projectDir) return { id: null, from: a.name, reason: "the earlier run saved no transcript" };
-  if (s.checkout !== checkout) return { id: null, from: a.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
-  const src = join(dir, "transcript", s.projectDir);
-  if (!existsSync(join(src, `${s.id}.jsonl`))) return { id: null, from: a.name, reason: "the transcript file is missing from the artifact" };
-  const dest = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects", s.projectDir);
-  mkdirSync(dest, { recursive: true });
-  cpSync(src, dest, { recursive: true });
-  return { id: s.id, from: a.name, reason: "" };
+  return { id: null, from: null, reason: last };
 }
 
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());

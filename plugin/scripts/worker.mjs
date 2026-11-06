@@ -223,7 +223,7 @@ async function main() {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
     if (restored.id) session.id = restored.id;
   }
-  if (rebaseMode || resumed || restored) await progress(`re-entry: ${restored?.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh${restored ? ` (${restored.reason})` : rebaseMode ? " (rebase send-back; policy ${inputs.resumePolicy})" : resumed ? " (branch resumed; policy " + inputs.resumePolicy + ")" : ""}`}`);
+  if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
@@ -253,6 +253,13 @@ async function main() {
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it.
     if (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd) rec.budgetExceeded = true;
     if (!crashed(rec)) break;
+    // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
+    if (attempt === 1 && restored?.id) {
+      log(`resumed session ${restored.id.slice(0, 8)} failed (${rec.error}); running fresh`);
+      await progress("re-entry: resume failed; running fresh");
+      restored = { ...restored, id: null, reason: "resume failed" };
+      session.id = null;
+    }
     died += 1;
     log(`harness process died (${rec.error}); ${died < 2 ? "retrying once" : "second death"}`);
     if (died >= 2) break;

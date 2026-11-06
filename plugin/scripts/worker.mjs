@@ -45,6 +45,7 @@ import {
 } from "./lib/session.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { exec, git } from "./lib/proc.mjs";
+import { hasLocalLabel, isLocal, localClaim } from "./lib/local.mjs";
 
 async function main() {
   const startedAt = Date.now();
@@ -69,7 +70,7 @@ async function main() {
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
   // read it from a file, so a six-hour harness session never holds a stale token.
-  const keeper = await new TokenKeeper({ dir: join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
+  const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
   const app = keeper.app;
   const progress = progressReporter(repo, issue, token, { stage: "work" });
@@ -122,6 +123,13 @@ async function main() {
   if (issueData.state !== "open" || !labels.includes(inputs.objectiveLabel)) {
     log(`#${issue} is not an open ${inputs.objectiveLabel} issue; nothing to do`);
     await finish("skipped", `not an open ${inputs.objectiveLabel} issue`);
+    return;
+  }
+
+  // A local loop holds this Objective (factory run / serve on a developer box): the Actions job steps aside.
+  if (!isLocal() && (hasLocalLabel(issueData) || (await localClaim(repo, issue, token).catch(() => null))?.fresh)) {
+    log(`#${issue} is held by a local loop; nothing to do here`);
+    await finish("skipped", "held by a local loop");
     return;
   }
 

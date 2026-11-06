@@ -50,7 +50,10 @@ export class TokenKeeper {
     writeFileSync(tokenFile, `${this.token}\n`);
     chmodSync(tokenFile, 0o600);
     const hosts = join(this.dir, "gh", "hosts.yml");
-    writeFileSync(hosts, `github.com:\n    oauth_token: ${this.token}\n    user: x-access-token\n    git_protocol: https\n`);
+    // gh's current config format (version 1, users per host), so gh never migrates it: a migration rewrites the
+    // file, which a sandbox that keeps this directory read-only (local mode) refuses, and gh then has no login.
+    writeFileSync(join(this.dir, "gh", "config.yml"), "version: \"1\"\n");
+    writeFileSync(hosts, `github.com:\n    users:\n        x-access-token:\n            oauth_token: ${this.token}\n    git_protocol: https\n    oauth_token: ${this.token}\n    user: x-access-token\n`);
     chmodSync(hosts, 0o600);
   }
 

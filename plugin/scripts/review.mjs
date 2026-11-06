@@ -20,6 +20,7 @@ import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, re
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
+import { hasLocalLabel, isLocal, localClaim } from "./lib/local.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
@@ -98,7 +99,7 @@ async function main() {
   const records = [];
   let passes = 0;
 
-  const keeper = await new TokenKeeper({ dir: join(checkout, "..", `factory-auth-review-${inputs.pr}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
+  const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(checkout, "..", `factory-auth-review-${inputs.pr}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
   const app = keeper.app;
 
@@ -110,6 +111,12 @@ async function main() {
     return;
   }
   const issue = Number(m[1]);
+  if (!isLocal() && (hasLocalLabel(await getIssue(repo, issue, token).catch(() => null)) || (await localClaim(repo, issue, token).catch(() => null))?.fresh)) {
+    log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
+    setOutput("exit", "skipped");
+    setOutput("issue", "");
+    return;
+  }
   const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(checkout, "..", `factory-usage-${issue}-review`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");
@@ -294,7 +301,16 @@ async function main() {
   }
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
-  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, token);
+  // Factory's own reviews on this PR (the marker in the body): their comments are the reviewer's, whoever posted them.
+  // A failed read falls back to the author filter (null), not a crashed review run.
+  const factoryReviewIds = async () => {
+    try {
+      return new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+    } catch {
+      return null;
+    }
+  };
+  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
   if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
@@ -353,7 +369,7 @@ async function main() {
   // to draft when it raises one, and a human's "mark ready" answers it.
   const after = await observe(repo, checkout, { branch, base, defaultBranch, prNumber: pr.number }, token);
   pr = after.pr;
-  const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, token)).length;
+  const unaddressed = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() })).length;
   const decision = decideExit({
     harness: validation.harness ?? { ok: true },
     pr: { exists: true, draft: pr.draft, body: pr.body },

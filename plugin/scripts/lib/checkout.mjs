@@ -123,8 +123,12 @@ export async function branchDelta(checkout, base, branch = "HEAD") {
 }
 
 /** Run one shell command in the checkout with the model secrets scrubbed from its env. */
+// In local mode (FACTORY_LOCAL_SRT names an srt settings file) the command runs inside the same sandbox as the
+// harness: setup, install and validation run on a tree the model edited, so they get no more reach than it has.
 export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {} } = {}) {
-  const r = await exec("bash", ["-eo", "pipefail", "-c", command], { cwd: checkout, env: scrubbedEnv(env, extraEnv), timeoutMs, echo: true });
+  const childEnv = scrubbedEnv(env, extraEnv);
+  const [cmd, args] = childEnv.FACTORY_LOCAL_SRT ? ["srt", ["-s", childEnv.FACTORY_LOCAL_SRT, "bash", "-eo", "pipefail", "-c", command]] : ["bash", ["-eo", "pipefail", "-c", command]];
+  const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo: true });
   return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, output: `${r.stdout}\n${r.stderr}`.trim() };
 }
 

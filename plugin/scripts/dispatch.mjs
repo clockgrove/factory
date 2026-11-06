@@ -15,6 +15,7 @@ import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProj
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
+import { localClaim, routedHere } from "./lib/local.mjs";
 
 export async function appToken(inputs) {
   if (inputs.appToken) return inputs.appToken;
@@ -24,14 +25,15 @@ export async function appToken(inputs) {
   return minted.token;
 }
 
-export async function dispatch(inputs, { token, now = new Date(), dryRun = false }) {
+export async function dispatch(inputs, { token, now = new Date(), dryRun = false, localSpentUsd = 0 }) {
   const repo = repoOf(inputs.repo);
   const opts = { token };
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
   const openNumbers = new Set(issues.map((i) => i.number));
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
-  const wanted = inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues;
+  // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs).
+  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => routedHere(i));
   if (inputs.issue && !wanted.length) {
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
     return { ready: [], skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], running: 0, spentToday: 0, reason: "not an objective" };
@@ -88,6 +90,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     if (alive) {
       for (const issue of runningIssues) {
         if (alive.has(issue.number)) continue;
+        // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh.
+        if ((await localClaim(repo, issue.number, opts).catch(() => null))?.fresh) continue;
         const since = await runningSince(repo, issue.number, opts).catch(() => null);
         if (since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
         vanished.push(issue.number);
@@ -110,6 +114,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
     for (const issue of issues) {
+      // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
+      if (!routedHere(issue)) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) continue;
@@ -164,7 +170,8 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     usageError = e.message.slice(0, 200);
     log(`today's usage could not be read (${usageError}); treating daily_usd as reached`);
   }
-  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records);
+  // A local loop adds what it spent today: its runs upload no artifacts.
+  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records) + (Number(localSpentUsd) || 0);
 
   const picked = selectReady({
     issues: wanted,

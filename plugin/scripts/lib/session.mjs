@@ -235,11 +235,14 @@ export async function ensurePr(repo, { branch, base, issue, issueTitle, bodyText
 /**
  * Reviewer root comments with no reply. The reviewer and the worker both post as
  * the App, so any reply counts: the review-pr skill forbids the reviewer replying.
+ * `reviewIds` (Factory's own reviews on the PR) decides which roots are the reviewer's
+ * by structure, which also holds in local mode, where reviewer and developer are one login.
  */
-export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token }) {
+export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
-  const roots = comments.filter((c) => !c.in_reply_to_id && (!reviewerLogin || c.user?.login === reviewerLogin) && !isPlaceholder(c.body));
+  const ours = (c) => (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
+  const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
   return roots.filter((c) => !replies.has(c.id));
 }
 

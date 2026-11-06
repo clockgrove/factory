@@ -15,7 +15,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
@@ -179,7 +179,11 @@ class Local {
     const ws = this.ws(issue);
     const npmCache = join(ws, "npm-cache");
     mkdirSync(npmCache, { recursive: true });
-    const srtFile = join(usageDir, "srt.json");
+    // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
+    // the model could loosen the sandbox its own validation runs in.
+    const sandboxDir = join(ws, ".sandbox");
+    mkdirSync(sandboxDir, { recursive: true });
+    const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone }), null, 2));
     return {
       ...this.baseEnv(),

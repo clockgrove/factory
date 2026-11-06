@@ -240,3 +240,5 @@ Measured on a real adopter's twelve merged Objectives, active minutes were 77% m
 - The order of work: turn-count and token levers on the existing path first, read as turns on a fixed scratch set; then the resume policy per re-entry kind, read on manufactured re-entries; then the sandbox backend on the scratch adopter; then its release. Adopters take releases by exact tag on their own cadence, in their own plans; no Factory wave waits on an adopter.
 - Validation is the drill on the scratch adopter; a unit test is added only for high-risk or high-churn logic. A skill's text changes only with its instrument run: the reviewer replay set for review-pr, the medium drill set for the worker skills.
 - A task-graph CI such as Vercel CI needs no Factory change: the gate awaits a named check. Its prerequisites are the adopter's.
+
+**Versioning (2026-11-06).** The hosting and CI refactor is the 0.7 line: v0.7.0 is the first tag on it, and every bite after it is v0.7.N, an exact tag with a Release. The 0.6 tags up to v0.6.27 carried its first bites (the bench columns, the cost inputs, the transcript and the resume policy) and stay as they are. 1.0.0 keeps its bar.

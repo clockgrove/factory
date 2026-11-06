@@ -14,6 +14,7 @@ import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, re
 import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { protectedPaths } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
+import { isLocal } from "./lib/local.mjs";
 import { parseUsage } from "./lib/usage.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -146,8 +147,15 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);
   out.push(label ? PASS("label", inputs.objectiveLabel) : FAIL("label", `${inputs.objectiveLabel} missing`, "setup --apply labels"));
-  const project = await findProject(repo, { token }).catch(() => null);
-  if (!project) out.push(FAIL("project board", "no Factory project linked to the repository", "setup --apply project"));
+  let projectError = null;
+  const project = await findProject(repo, { token }).catch((e) => {
+    projectError = e;
+    return null;
+  });
+  // A local loop's token is scoped to the one repository and usually cannot see an organisation's projects: the
+  // board is then out of view, card moves are skipped, and the labels carry the state, as the dispatcher already does.
+  if (!project && projectError && isLocal()) out.push(WARN("project board", "not visible to the local token; cards will not move and labels carry the state", "grant the token the organisation's Projects read and write permission to move cards"));
+  else if (!project) out.push(FAIL("project board", "no Factory project linked to the repository", "setup --apply project"));
   else {
     const names = (project.field?.options || []).map((o) => o.name);
     const missing = COLUMNS.filter((c) => !names.includes(c));

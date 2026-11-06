@@ -440,6 +440,9 @@ export async function createProject(repo, opts) {
 
 // --------------------------------------------------------------- artifacts
 
+/** An artifact never changes once uploaded: a long-lived dispatcher (factory serve) reads each one once. */
+const usageCache = new Map();
+
 /** Usage artifacts uploaded today (UTC), as parsed result.json records. */
 export async function todaysUsage(repo, { prefix = "factory-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
   // The artifacts endpoint wraps each page as {total_count, artifacts}; --slurp gives the pages.
@@ -449,7 +452,8 @@ export async function todaysUsage(repo, { prefix = "factory-usage-", token, date
   const records = [];
   for (const a of today) {
     try {
-      const rec = await (download ?? downloadArtifactResult)(repo, a, token);
+      const rec = usageCache.has(a.id) ? usageCache.get(a.id) : await (download ?? downloadArtifactResult)(repo, a, token);
+      if (!download) usageCache.set(a.id, rec);
       if (rec) records.push({ artifact: a.name, ...rec });
     } catch (e) {
       records.push({ artifact: a.name, usd: null, basis: `unreadable: ${e.message.slice(0, 120)}` });

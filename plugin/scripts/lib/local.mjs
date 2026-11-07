@@ -3,7 +3,7 @@
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
 import { readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform as osPlatform } from "node:os";
 import { join } from "node:path";
 import { listComments, rest, upsertComment } from "./github.mjs";
 import { marker } from "./logic.mjs";
@@ -96,6 +96,63 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       deny: [...secrets.flatMap((p) => [`Read(/${p})`, `Read(/${p}/**)`]), ...guards.flatMap((p) => [`Edit(/${p})`, `Edit(/${p}/**)`])],
       blockReadsOutsideWorkingDirectories: true,
       blockWritesOutsideWorkingDirectories: true,
+    },
+  };
+}
+
+/** A TOML basic string (JSON's escaping is a subset TOML reads the same way). */
+const tq = JSON.stringify;
+
+/**
+ * Codex's `-c` overrides for a local run: model commands under Codex's own sandbox with a permission profile
+ * built on read-only, writes only in the working directory and `addDirs` (the clone's .git writable for commits,
+ * its hooks and config not), credential stores unreadable, network through Codex's proxy limited to `domains`,
+ * no approval prompts and no escalation, and the model API keys kept out of the commands' environment. Codex's
+ * own login stays readable to Codex itself, which runs outside the sandbox: the profile denies the login file,
+ * not ~/.codex, where Codex keeps the sandbox helper it starts.
+ */
+export function codexLocalConfig({ domains = LOCAL_DOMAINS, addDirs = [], home = homedir(), readOnly = [], secretEnv = [] } = {}) {
+  const deny = CREDENTIAL_PATHS.map((p) => (p === ".codex" ? ".codex/auth.json*" : p)).map((p) => `${tq(join(home, p))}="deny"`);
+  const ro = readOnly.map((p) => `${tq(p)}="read"`);
+  const roots = addDirs.map((d) => `${tq(d)}=true`);
+  const net = [...new Set(domains)].map((d) => `${tq(d)}="allow"`);
+  const profile = `{extends=":read-only",workspace_roots={${roots.join(",")}},filesystem={${[...deny, ...ro, `":workspace_roots"={"."="write",".git"="write",".git/hooks"="read",".git/config"="read"}`].join(",")}},network={enabled=true,mode="full",domains={${net.join(",")}}}}`;
+  return [
+    `default_permissions="factory"`,
+    `permissions.factory=${profile}`,
+    // Without the proxy feature the domain list is ignored and the network is open.
+    `features.network_proxy=true`,
+    `approval_policy="never"`,
+    `approvals_reviewer="user"`,
+    `shell_environment_policy.exclude=[${secretEnv.map(tq).join(",")}]`,
+  ].flatMap((c) => ["-c", c]);
+}
+
+/**
+ * The settings.json for the COPILOT_HOME Factory gives a local Copilot run (`copilot --sandbox`): commands in
+ * Copilot's sandbox with no bypass, writes in the working directory and `addDirs` only, the clone's hooks and
+ * config and `readOnly` unwritable, credential stores denied, no gh or git login handed in, and the network
+ * limited to `domains`. Copilot reads this policy only from its home directory, so the developer's own
+ * ~/.copilot is never touched.
+ */
+export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], platform = osPlatform() } = {}) {
+  return {
+    sandbox: {
+      enabled: true,
+      allowBypass: false,
+      // On by default, it opens tool configuration such as ~/.npmrc to every command.
+      allowDevToolAccess: false,
+      addCurrentWorkingDirectory: true,
+      sandboxMcpServers: true,
+      sandboxLspServers: true,
+      sandboxExtensions: true,
+      auth: { git: false, gh: false },
+      userPolicy: {
+        // On Linux the sandbox's home is an empty tmpfs, so no credential store is there to deny; and a denied file
+        // becomes an empty directory, on which libcurl's ~/.netrc reader loops forever and every git fetch hangs.
+        filesystem: { readwritePaths: addDirs, readonlyPaths: [...(clone ? gitGuards(clone) : []), ...readOnly], deniedPaths: platform === "linux" ? [] : credentialPaths(home) },
+        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [...new Set(domains)] },
+      },
     },
   };
 }

@@ -5,9 +5,10 @@
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all] [--interval SECONDS (30)]
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
 // serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
-// Needs git, gh, the harness CLI (logged in), srt (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on
-// Linux and WSL2, bubblewrap and socat; and a fine-grained token for this one repository, in FACTORY_LOCAL_TOKEN
-// or ~/.config/factory/tokens/<owner>/<name>
+// Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
+// COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
+// (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
+// fine-grained token for this one repository, in FACTORY_LOCAL_TOKEN or ~/.config/factory/tokens/<owner>/<name>
 // (contents, issues and pull requests read and write; actions read). That token is all the GitHub reach the
 // model gets. No App, no vendor, no API key; GitHub holds every piece of state, and the box holds one clone per
 // Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
@@ -15,7 +16,7 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,7 +25,7 @@ import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, routedHere, srtSettings, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, routedHere, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -73,10 +74,16 @@ export function localSpentToday(dev, day = new Date().toISOString().slice(0, 10)
   return usd;
 }
 
-function preflight(harness, repoFull, token) {
+function preflight(harness, repoFull, token, copilotToken) {
   const problems = [];
-  if (harness !== "claude") problems.push(`local mode runs the claude harness in this release (the workflow says ${harness}); codex and copilot follow`);
-  for (const bin of ["git", "gh", "claude"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
+  if (!["claude", "codex", "copilot"].includes(harness)) problems.push(`unknown harness ${harness}`);
+  for (const bin of ["git", "gh", harness]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
+  if (harness === "copilot") {
+    // Copilot's sandbox reads its policy from its own home, so the developer's `copilot login` is not used there.
+    if (!copilotToken) problems.push(`no Copilot token: create a fine-grained token with the Copilot Requests permission and save it to ${copilotTokenFile()} (chmod 600) or export COPILOT_GITHUB_TOKEN`);
+    // Without these Copilot's sandbox cannot start, and every command fails while the run still exits 0.
+    if (platform() === "linux") for (const bin of ["slirp4netns", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; Copilot's sandbox needs it (sudo apt-get install -y slirp4netns iptables)`);
+  }
   if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
@@ -91,6 +98,12 @@ function preflight(harness, repoFull, token) {
 export function tokenFile(repoFull, home = homedir()) {
   const [owner, name] = repoFull.split("/");
   return join(home, ".config", "factory", "tokens", owner, name);
+}
+export const copilotTokenFile = (home = homedir()) => join(home, ".config", "factory", "copilot-token");
+function copilotToken() {
+  if (process.env.COPILOT_GITHUB_TOKEN) return process.env.COPILOT_GITHUB_TOKEN.trim();
+  const f = copilotTokenFile();
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
 function localToken(repoFull) {
   if (process.env.FACTORY_LOCAL_TOKEN) return process.env.FACTORY_LOCAL_TOKEN.trim();
@@ -128,7 +141,8 @@ class Local {
     this.wf = readWorkflowEnv(this.dev);
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
-    const problems = preflight(this.harness, this.repoFull, this.token);
+    this.copilotToken = this.harness === "copilot" ? copilotToken() : "";
+    const problems = preflight(this.harness, this.repoFull, this.token, this.copilotToken);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.opts = { token: this.token };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
@@ -140,8 +154,22 @@ class Local {
   /** The token check and the routing label; both need the network. */
   async init() {
     await checkToken(this.repoFull, this.token);
+    this.codexSelfTest();
     await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
     return this;
+  }
+
+  /**
+   * Codex reports success even when its sandbox cannot start (the command just never runs), so a local Codex loop
+   * first runs one command under the same profile and refuses when it does not run.
+   */
+  codexSelfTest() {
+    if (this.harness !== "codex") return;
+    try {
+      execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains() }), "--", "true"], { cwd: this.dev, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+    } catch (e) {
+      throw new Error(`local mode cannot start: Codex's sandbox does not run here (${String(e.stderr || e.message).trim().slice(0, 200)})`);
+    }
   }
 
   /** <clone>/.factory/ never shows up in the developer's git status. */
@@ -175,7 +203,12 @@ class Local {
 
   /** The env every child starts from: an allow-list plus the repository's FACTORY_* settings, never the whole shell. */
   baseEnv() {
-    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...this.wf };
+    const wf = { ...this.wf };
+    // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
+    if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT"]) delete wf[k];
+    // The developer's own harness and model settings win over the workflow's.
+    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT"]) if (process.env[k]) wf[k] = process.env[k];
+    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...wf };
     // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
     for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && k !== "FACTORY_LOCAL_TOKEN") env[k] = v;
     return { ...env, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
@@ -201,6 +234,7 @@ class Local {
       chmodSync(join(binDir, tool), 0o755);
     }
     const base = this.baseEnv();
+    const extra = this.harnessEnv(issue, usageDir, npmCache, clone);
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
     base.PATH = `${base.PATH || ""}:${binDir}`;
@@ -220,8 +254,25 @@ class Local {
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache, ...(extra.TMPDIR ? [extra.TMPDIR] : [])], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
+      ...extra,
     };
+  }
+
+  /** What the harness's own sandbox needs beyond the shared env: Codex a writable temp directory, Copilot its home and token. */
+  harnessEnv(issue, usageDir, npmCache, clone) {
+    if (this.harness === "codex") {
+      // Codex's profile leaves /tmp read-only, so the stage gets its own temp directory, writable and short: srt
+      // puts its sockets there too, and a socket path has a 108-byte limit. The stage removes it when it ends.
+      return { TMPDIR: mkdtempSync(join(tmpdir(), `factory-${issue}-`)) };
+    }
+    if (this.harness !== "copilot") return {};
+    // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
+    // model must not loosen) and the sessions a later stage resumes.
+    const home = join(this.ws(issue), ".sandbox", "copilot-home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs: [usageDir, npmCache], readOnly: [join(usageDir, "bin")] }), null, 2));
+    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken };
   }
 
   /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */
@@ -232,7 +283,8 @@ class Local {
     const logFile = join(usageDir, "stage.log");
     const clone = await this.ensureClone(issue);
     return new Promise((done) => {
-      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env: this.stageEnv(issue, usageDir, clone), stdio: ["ignore", "pipe", "pipe"] });
+      const env = this.stageEnv(issue, usageDir, clone);
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env, stdio: ["ignore", "pipe", "pipe"] });
       this.children.add(child);
       const relay = (chunk) => {
         appendFileSync(logFile, chunk);
@@ -248,6 +300,7 @@ class Local {
         } catch {
           // no record: the child failed before writing one
         }
+        if (env.TMPDIR && env.TMPDIR !== process.env.TMPDIR) rmSync(env.TMPDIR, { recursive: true, force: true });
         if (Number.isFinite(result?.usd)) appendFileSync(join(this.ws(issue), "spend.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: name, usd: result.usd })}\n`);
         done({ code, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir });
       });

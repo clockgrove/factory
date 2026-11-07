@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exec, onPath } from "./proc.mjs";
 import { parseUsage } from "./usage.mjs";
-import { claudeLocalSettings, localSandbox } from "./local.mjs";
+import { claudeLocalSettings, codexLocalConfig, localSandbox } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -122,9 +122,8 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
 export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, local = null }) {
-  // Local mode (a developer's box): Claude Code runs in its own sandbox; the other harnesses' local
-  // sandboxes are not wired yet, so they refuse rather than run with a disposable runner's permissions.
-  if (local && harness !== "claude") throw new Error(`local mode runs the claude harness in this release; ${harness} on a developer box is not sandboxed yet`);
+  // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
+  // lib/local.mjs to one bar; on a runner the VM is disposable, so permissions are skipped.
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
@@ -145,13 +144,16 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
       const args = resume ? ["exec", "resume", resume] : ["exec"];
-      args.push("--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
+      const perms = local ? codexLocalConfig({ domains: local.domains, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS] }) : ["--dangerously-bypass-approvals-and-sandbox"];
+      args.push("--json", ...perms, "--skip-git-repo-check");
       if (model && !resume) args.push("-m", model);
       return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
-      const args = ["-p", prompt, "--allow-all", "--output-format", "json"];
+      // Locally --sandbox puts every command in Copilot's sandbox under the policy in $COPILOT_HOME/settings.json,
+      // which the local backend writes (lib/local.mjs copilotLocalSettings); --allow-all then only skips prompts.
+      const args = ["-p", prompt, ...(local ? ["--sandbox"] : []), "--allow-all", "--output-format", "json"];
       if (model) args.push("--model", model);
       if (agent) args.push("--agent", agent);
       if (resume) args.push("--resume", resume);

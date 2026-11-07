@@ -143,6 +143,15 @@ test("harness command lines follow RESEARCH.md; the prompt goes on stdin for cla
   assert.equal(p.canResume, true);
   const pr = harnessCommand({ harness: "copilot", prompt: "fix", resume: "s-1" });
   assert.deepEqual(pr.args.slice(pr.args.indexOf("--resume"), pr.args.indexOf("--resume") + 2), ["--resume", "s-1"]);
+  // Local mode: every harness keeps its own sandbox on and never takes a runner's bypass.
+  const local = { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: ["/u/bin"] };
+  const lc = harnessCommand({ harness: "claude", prompt: "P", local });
+  assert.ok(lc.args.includes("--settings") && !lc.args.includes("--dangerously-skip-permissions"));
+  const lx = harnessCommand({ harness: "codex", prompt: "P", local });
+  assert.ok(lx.args.includes('default_permissions="factory"') && lx.args.includes("features.network_proxy=true") && !lx.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.match(lx.args.find((a) => a.startsWith("shell_environment_policy.exclude")), /"CODEX_API_KEY"/);
+  const lp = harnessCommand({ harness: "copilot", prompt: "P", local });
+  assert.ok(lp.args.includes("--sandbox"));
 });
 
 test("credential: on a developer's machine, api with no key falls back to the CLI login; inside Actions it refuses", async () => {

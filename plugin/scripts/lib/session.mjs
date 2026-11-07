@@ -209,7 +209,10 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
   const localDb = process.env.FACTORY_LOCAL === "1" && process.env.FACTORY_LOCAL_DB === "1"
     ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards."
     : "";
-  return `${card.trimEnd()}${localDb}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
+  // Locally the sandboxes give /tmp no lasting space (Codex's is read-only, Copilot's is fresh for each command);
+  // the stage's own temp directory is TMPDIR.
+  const localTmp = process.env.FACTORY_LOCAL === "1" ? "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this sandbox /tmp may be read-only or emptied between commands." : "";
+  return `${card.trimEnd()}${localTmp}${localDb}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
 }
 
 /** Push the branch with the App credential (GH_TOKEN in env). */

@@ -15,6 +15,7 @@ import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, protectedPaths } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
+import { readWorkflowEnv } from "./lib/local.mjs";
 import { parseUsage } from "./lib/usage.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -34,7 +35,9 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
-  const localFallback = !env.GITHUB_ACTIONS && inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env });
+  // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
+  const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
+  const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
   if (inputs.credential === "login" || localFallback) {
     out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
     if (probe) out.push(await probeHarness({ inputs, env }));
@@ -94,16 +97,38 @@ export async function probeHarness({ inputs, env = process.env }) {
 
 // ----------------------------------------------------------------- github
 
+/** The secrets a job needs, by name: the App's two and the harness credential the workflow names. */
+export function neededSecrets(inputs) {
+  const cred = { claude: inputs.credential === "plan" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : ["ANTHROPIC_API_KEY"], codex: ["CODEX_API_KEY"], copilot: ["COPILOT_GITHUB_TOKEN"] }[inputs.harness] || [];
+  return ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ...cred];
+}
+
+async function secretChecks({ inputs, repo }) {
+  const names = new Set();
+  try {
+    for (const path of [`repos/${repo.full}/actions/secrets`, `repos/${repo.full}/actions/organization-secrets`]) {
+      for (const s of (await rest(`${path}?per_page=100`, {}))?.secrets || []) names.add(s.name);
+    }
+  } catch (e) {
+    return [WARN("secrets", `could not list secret names (${String(e.message).slice(0, 100)})`, "run doctor with a gh login that administers the repository")];
+  }
+  const missing = neededSecrets(inputs).filter((n) => !names.has(n));
+  return [missing.length ? FAIL("secrets", `missing ${missing.join(", ")} (repository, or organization secrets visible to it)`, "add them: gh secret set NAME, or at the organization with --repos") : PASS("secrets", `${neededSecrets(inputs).join(", ")} exist; the job mints the App token`)];
+}
+
 export async function githubChecks({ inputs, repo, token, app, env = process.env }) {
   const out = [];
-  if (!token) {
+  if (!token && env.GITHUB_ACTIONS) {
     out.push(FAIL("app token", "no installation token", "set FACTORY_APP_ID and FACTORY_APP_PRIVATE_KEY secrets and pass them as app_id / app_private_key"));
     return out;
   }
-  if (app?.appSlug) {
+  // A developer's run: the job mints the App token, so here the secrets are checked by name (the repository's and the
+  // organization's visible to it), and GitHub is read with the developer's own gh login.
+  if (!token) out.push(...(await secretChecks({ inputs, repo })));
+  else if (app?.appSlug) {
     out.push(app.missing?.length ? FAIL("app permissions", `missing ${app.missing.join(", ")}`, `edit the App's repository permissions (contents, pull requests, issues, projects: write) and accept the new permissions on the installation`) : PASS("app permissions", `${app.appSlug}: contents, pull requests, issues, projects`));
     if (app.extra?.length) out.push(WARN("app permissions", `extra permissions granted: ${app.extra.join(", ")}`, "remove them; Factory needs four, and workflows must stay off"));
-  } else out.push(PASS("app token", "FACTORY_APP_TOKEN supplied; permissions not verified"));
+  } else if (token) out.push(PASS("app token", "FACTORY_APP_TOKEN supplied; permissions not verified"));
 
   // The job token: read-only on code. Visible only inside Actions, through the workflow file.
   const wf = findWorkflow(inputs, env);
@@ -292,10 +317,11 @@ export async function jobChecks({ inputs, repo, token, app, checkout }) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const inputs = resolveInputs({ args });
+  const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
+  // Outside Actions the workflow's env block is not in this process: read it from the checkout (this shell still wins).
+  const inputs = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...readWorkflowEnv(checkout), ...process.env } });
   if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
   const repo = repoOf(inputs.repo);
-  const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   let token = inputs.appToken || null;
   let app = null;
   if (!token && inputs.appId && inputs.appPrivateKey) {

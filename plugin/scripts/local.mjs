@@ -26,7 +26,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, listIssuesByLabel, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
 import { whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, prepareProtectedPaths, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, prepareProtectedPaths, readWorkflowEnv, stageTmpBase, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 
@@ -286,7 +286,7 @@ class Local {
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. The stage removes it when it ends.
-    const stageTmp = mkdtempSync(join(tmpdir(), `factory-${issue}-`));
+    const stageTmp = mkdtempSync(join(stageTmpBase(), `factory-${issue}-`));
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, ...caches, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
     // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.

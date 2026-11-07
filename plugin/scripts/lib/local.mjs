@@ -3,7 +3,7 @@
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { homedir, platform as osPlatform } from "node:os";
+import { homedir, platform as osPlatform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { listComments, rest, upsertComment } from "./github.mjs";
 import { PUSH_ASSOCIATIONS, marker } from "./logic.mjs";
@@ -97,6 +97,13 @@ export function prepareProtectedPaths(clone) {
   }
   return made;
 }
+
+/**
+ * Where a stage's private temp directory is made. Sockets live under it (srt's, Claude Code's per-uid directory), and
+ * a unix socket path is capped at 104 bytes on macOS: its own temp base (/var/folders/…/T/) is too long, and Claude Code
+ * then falls back to the box-wide /tmp/claude-<uid>, so macOS uses /private/tmp.
+ */
+export const stageTmpBase = (os = osPlatform()) => (os === "darwin" ? "/private/tmp" : tmpdir());
 
 /** srt's and Claude Code's own scratch directory, writable in every one of their sandboxes on the box; Factory points nothing there. */
 export const SHARED_TMP = ["/tmp/claude", "/private/tmp/claude"];

@@ -67,7 +67,7 @@ inputs:
     description: '`auto` (default) installs offline from the lockfile found; `none` skips; any other value is the command to run.'
     required: false
   validation:
-    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order.'
+    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
     required: false
   budget_command:
     description: The test-budget command named in the task card, if the repository has one.

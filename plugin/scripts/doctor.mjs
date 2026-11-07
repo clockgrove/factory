@@ -152,6 +152,7 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
   else if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
   else if (!ci.mergeGroup) out.push((queue ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}`, `add "merge_group:" under on: in ${ci.path}`));
   else out.push(PASS("ci workflow", `${ci.name} on pull_request and merge_group`));
+  if (ci.factoryParses === false) out.push(FAIL("workflow file", "GitHub cannot parse .github/workflows/factory.yml (it lists the file by its path, not its name) and runs none of it", "fix its YAML; quote a value that holds \": \", such as validation commands marked parallel:"));
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);
   out.push(label ? PASS("label", inputs.objectiveLabel) : FAIL("label", `${inputs.objectiveLabel} missing`, "setup --apply labels"));
@@ -185,6 +186,9 @@ async function ciWorkflowTriggers(repo, opts) {
     return { found: false, error: `${e.status || ""} ${e.message.slice(0, 120)}`.trim() };
   }
   let found = null;
+  // GitHub lists a workflow file it cannot parse under its path instead of its name, and runs nothing from it.
+  const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
+  const factoryParses = factory ? factory.name !== factory.path : null;
   for (const w of list) {
     if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     const raw = await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }).catch(() => "");
@@ -192,11 +196,11 @@ async function ciWorkflowTriggers(repo, opts) {
     const pr = /^\s*pull_request\s*:/m.test(text) || /on:\s*\[[^\]]*pull_request/.test(text);
     const mg = /^\s*merge_group\s*:/m.test(text) || /on:\s*\[[^\]]*merge_group/.test(text);
     if (pr) {
-      found = { found: true, name: w.name, path: w.path, mergeGroup: mg };
+      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, factoryParses };
       if (mg) return found;
     }
   }
-  return found || { found: false };
+  return found || { found: false, factoryParses };
 }
 
 function findWorkflow(inputs, env) {

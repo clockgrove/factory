@@ -165,6 +165,17 @@ export function mask(value) {
 /** Log a line with a stable prefix. Never pass a secret. */
 export const log = (...parts) => process.stdout.write(`[factory] ${parts.join(" ")}\n`);
 
+/** Who fired this job's event ({login, type}: type "Bot" for an App), from GITHUB_EVENT_PATH; null outside Actions. */
+export function eventSender(env = process.env) {
+  if (!env.GITHUB_EVENT_PATH) return null;
+  try {
+    const s = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")).sender;
+    return s ? { login: s.login, type: s.type } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The `action` of the event that fired this job (GITHUB_EVENT_PATH), or null outside Actions. */
 export function eventAction(env = process.env) {
   if (!env.GITHUB_EVENT_PATH) return null;

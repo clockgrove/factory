@@ -17,7 +17,7 @@ import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPl
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, costByPhase, decideExit, maintainerDecisions, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
@@ -218,11 +218,15 @@ async function main() {
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true }); // a record from an earlier attempt must not speak for this one
   const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}) };
+  // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
+  const decisions = maintainerDecisions([...(await listComments(repo, issue, token).catch(() => [])), ...(openPr ? await listComments(repo, openPr.number, token).catch(() => []) : [])]);
+  if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,
+    decisions,
     maxUsd: inputs.maxUsd,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,

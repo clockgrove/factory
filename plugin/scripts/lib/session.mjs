@@ -24,7 +24,7 @@ import {
   upsertComment,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, decisionsSection, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
 import { spendMarker, sumSpend, trustedAuthor } from "./logic.mjs";
@@ -265,11 +265,12 @@ export async function gitIdentity(app, token) {
 }
 
 /** Render the task card and append the issue verbatim: the prompt the harness gets. */
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [] }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
-  return `${card.trimEnd()}${backend().sandbox.cardNotes()}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
+  const recorded = decisionsSection(decisions);
+  return `${card.trimEnd()}${backend().sandbox.cardNotes()}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
 }
 
 /** Push the branch with the App credential (GH_TOKEN in env). */

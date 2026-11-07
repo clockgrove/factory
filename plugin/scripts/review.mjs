@@ -16,9 +16,9 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
-import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend , trustedAuthor } from "./lib/logic.mjs";
+import { closingIssues, enableAutoMerge, getIssue, getPr, listComments, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
+import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, decisionsSection, diffLines, maintainerDecisions, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import {
@@ -72,17 +72,22 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
 }
 
 /** The worker's prompt for the one pass that answers the review. */
-export function answerPrompt({ taskCard, prNumber, comments }) {
+export function answerPrompt({ taskCard, prNumber, comments, decisions = [] }) {
   const list = comments.map((c) => `- ${c.path}:${c.line} (comment id ${c.id}): ${c.body}`).join("\n");
+  const recorded = decisionsSection(decisions);
+  const ask = comments.length
+    ? `The reviewer has posted its one pass on PR #${prNumber}. Load the deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Reply through \`gh api repos/{owner}/{repo}/pulls/${prNumber}/comments/<id>/replies\` (GraphQL may be unavailable).${recorded ? " Apply the maintainers' decisions below as well." : ""}`
+    : `A maintainer answered PR #${prNumber}'s question and marked it ready. Apply the decisions below to the branch: they are the specification where they differ from your assumptions. Update the PR body's Assumptions so no answered item starts with QUESTION: any more.`;
   return [
     taskCard.trimEnd(),
     "",
     "---",
     "",
-    `The reviewer has posted its one pass on PR #${prNumber}. Load the deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Reply through \`gh api repos/{owner}/{repo}/pulls/${prNumber}/comments/<id>/replies\` (GraphQL may be unavailable). Then rebase on the default branch, run the validation commands, push, and stop.`,
+    `${ask} Then rebase on the default branch, run the validation commands, push, and stop.`,
     "",
     "## Reviewer comments",
     list || "(none)",
+    ...(recorded ? ["", recorded] : []),
   ].join("\n");
 }
 
@@ -163,11 +168,11 @@ async function main() {
     await finish("skipped", "draft PR");
     return;
   }
-  // The worker marks the PR ready and then applies factory:review after its validation pass; the
-  // ready_for_review event is that same transition seen first, never a review cue. A human who
-  // answers a Question re-applies factory:objective (the worker reruns and labels); a human who
-  // wants a review pass applies factory:review.
-  if (eventAction() === "ready_for_review") {
+  // The worker marks the PR ready and then applies factory:review after its validation pass; the App's own
+  // ready_for_review is that transition seen first, never a review cue. A person marking it ready is how a Question is answered (PLAN.md): the review job runs, and the answer pass applies
+  // the maintainers' decisions even when the PR was already reviewed.
+  const humanReady = eventAction() === "ready_for_review" && eventSender()?.type !== "Bot";
+  if (eventAction() === "ready_for_review" && !humanReady) {
     log(`PR #${pr.number} marked ready; the review runs on the factory:review label, not on this event`);
     await finish("skipped", "ready_for_review is not a review cue");
     return;
@@ -203,6 +208,9 @@ async function main() {
   }
 
   const issueData = await getIssue(repo, issue, token);
+  // The maintainers' word since the issue was filed: a Question's answer, a decision recorded in a comment.
+  const decisions = maintainerDecisions([...(await listComments(repo, issue, token).catch(() => [])), ...(await listComments(repo, pr.number, token).catch(() => []))]);
+  if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments`);
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true });
@@ -212,6 +220,7 @@ async function main() {
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,
+    decisions,
     maxUsd: inputs.maxUsd,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
@@ -316,12 +325,15 @@ async function main() {
     }
   };
   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
-  if (toAnswer.length) await progress(`answer pass: ${toAnswer.length} comment(s)`);
+  // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
+  const answerQuestion = humanReady && decisions.length > 0;
+  const answering = toAnswer.length > 0 || answerQuestion;
+  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${answerQuestion ? " and the maintainers' answer" : ""}` : "answer pass: the maintainers' answer to the question");
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
   // with) says whether it raised a question; the PR's draft state does not.
   let answerRecord = null;
-  if (toAnswer.length) {
+  if (answering) {
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model });
     const resumeAnswer = inputs.resumePolicy === "fix-passes" && session.id ? session.id : null;
     const answerArgs = (resume) => ({
@@ -329,7 +341,7 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       resume,
-      prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })) }),
+      prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })), decisions: resume ? decisions : [] }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       cwd: checkout,
       env: harnessEnv,
@@ -356,7 +368,7 @@ async function main() {
     answerRecord = asked.record;
     if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
   }
-  const validation = toAnswer.length
+  const validation = answering
     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, prNumber: pr.number, names: inputs.ciChecks, token: token.token } : null, push: () => push(checkout, branch, childBase), checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation" })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);

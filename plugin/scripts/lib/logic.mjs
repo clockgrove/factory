@@ -503,6 +503,26 @@ export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 export const trustedAuthor = (item) => item?.user?.type === "Bot" || PUSH_ASSOCIATIONS.has(item?.author_association);
 
 /**
+ * Maintainers' decisions on an Objective: comments on its issue and PR by a person who can push (never a bot, never a
+ * Factory marker comment), oldest first. This is how a human answers a Question or records a decision in a comment;
+ * the worker and the answer pass get them beside the issue body.
+ */
+export function maintainerDecisions(comments) {
+  return (comments || [])
+    .filter((c) => c?.user?.type !== "Bot" && PUSH_ASSOCIATIONS.has(c?.author_association) && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim())
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    .map((c) => ({ author: c.user?.login ?? "?", at: c.created_at, body: c.body.trim() }));
+}
+
+/** The decisions as a prompt section ("" when none), capped so a long thread cannot crowd out the task. */
+export function decisionsSection(decisions, cap = 12_000) {
+  if (!decisions?.length) return "";
+  let text = decisions.map((d) => `### ${d.author}, ${String(d.at).slice(0, 16).replace("T", " ")}Z\n\n${d.body}`).join("\n\n");
+  if (text.length > cap) text = `(earlier decisions cut; newest kept)\n\n${text.slice(-cap)}`;
+  return `## Decisions recorded by maintainers (comments on the issue and PR, oldest first)\n\nWhere one answers a question or differs from the issue body, it wins: it is the owner's later word.\n\n${text}`;
+}
+
+/**
  * The spend line a run without a usage artifact (local mode) writes into its progress comment: structured, so a
  * dispatcher reads the number, never the prose exit line. Parsed by spendOf().
  */

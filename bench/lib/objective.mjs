@@ -170,10 +170,23 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
     });
 }
 
+/** `s` without its `<!-- ... -->` spans; an unclosed one runs to the end. A scan, not a regex, so nothing it cuts can rejoin. */
+function withoutComments(s) {
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const open = s.indexOf("<!--", i);
+    if (open < 0) return out + s.slice(i);
+    out += s.slice(i, open);
+    const close = s.indexOf("-->", open + 4);
+    if (close < 0) return out;
+    i = close + 3;
+  }
+}
+
 /** The one-line reason from the worker's Blocked comment (session.mjs applyExit): "Blocked (stage): <reason> — ..." */
 function blockedReason(body) {
-  // Display text only: drop Factory's HTML comments, then any angle bracket a malformed one left behind.
-  const text = String(body || "").replace(/<!--[\s\S]*?-->/g, "").replace(/[<>]/g, "").replace(/^\s*@\S+\s*/, "").trim();
+  const text = withoutComments(String(body || "")).replace(/^\s*@\S+\s*/, "").trim();
   const m = /Blocked \(([^)]*)\):\s*([^\n]*?)(?:\s+—\s+PR #\d+|\s+Fix by pushing|$)/m.exec(text);
   return m ? `${m[2].trim()} (${m[1]})`.slice(0, 200) : text.split("\n")[0].slice(0, 200);
 }

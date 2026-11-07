@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BACKENDS, backend } from "../scripts/lib/backend.mjs";
+import { trustedAuthor } from "../scripts/lib/logic.mjs";
 
 const issue = (...labels) => ({ labels: labels.map((name) => ({ name })) });
 
@@ -32,4 +33,10 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.match(BACKENDS.local.sandbox.cardNotes({ FACTORY_LOCAL_DB: "1" }), /factory-db npm run test:db/);
   assert.deepEqual([BACKENDS.actions.gate.commandsFirst, BACKENDS.local.gate.commandsFirst], [false, true]);
   assert.equal(await BACKENDS.local.trigger.stepsAside(), false);
+});
+
+test("trustedAuthor: Factory acts on a marker only from an App or someone who can push", () => {
+  assert.equal(trustedAuthor({ user: { type: "Bot", login: "clockgrove-factory[bot]" }, author_association: "NONE" }), true);
+  for (const a of ["OWNER", "MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), true);
+  for (const a of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", undefined]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), false);
 });

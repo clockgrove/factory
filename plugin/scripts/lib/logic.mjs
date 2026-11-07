@@ -475,3 +475,11 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing 
 
 export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${id ? `:${id}` : ""} -->`;
 
+/** People who can push; on a public repository anyone else may still comment and review. */
+export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+/**
+ * Whether Factory may act on a marker in this comment or review: written by an App (Factory's own bot; a stranger's
+ * app cannot act on the repository without being installed) or by someone who can push. Anyone can paste a marker.
+ */
+export const trustedAuthor = (item) => item?.user?.type === "Bot" || PUSH_ASSOCIATIONS.has(item?.author_association);
+

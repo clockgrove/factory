@@ -27,7 +27,7 @@ import { log } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
-import { sumSpend } from "./logic.mjs";
+import { sumSpend, trustedAuthor } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -559,5 +559,5 @@ export async function postValidated(repo, prNumber, issue, sha, { token }) {
 
 export async function isValidated(repo, prNumber, issue, sha, { token }) {
   const comments = await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => []);
-  return (comments || []).some((c) => (c.body || "").includes(validatedMarker(issue, sha)));
+  return (comments || []).some((c) => trustedAuthor(c) && (c.body || "").includes(validatedMarker(issue, sha)));
 }

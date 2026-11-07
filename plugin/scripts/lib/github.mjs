@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluateChecks, isPlaceholder, marker } from "./logic.mjs";
+import { evaluateChecks, isPlaceholder, marker, trustedAuthor } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
@@ -171,7 +171,8 @@ export async function listComments(repo, number, opts) {
 /** Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). */
 export async function upsertComment(repo, number, marker, body, opts) {
   const text = `${marker}\n${body}`;
-  const existing = (await listComments(repo, number, opts)).find((c) => (c.body || "").includes(marker));
+  // Only a comment Factory or someone who can push wrote is ours to edit: anyone can paste the marker into theirs.
+  const existing = (await listComments(repo, number, opts)).find((c) => trustedAuthor(c) && (c.body || "").includes(marker));
   if (existing) return rest(`repos/${repo.full}/issues/comments/${existing.id}`, { ...opts, method: "PATCH", body: { body: text } });
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body: text } });
 }
@@ -239,7 +240,7 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  */
 export async function resolveFactoryThreads(repo, number, issue, opts) {
   const data = await graphql(
-    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body } } } } } } } }`,
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body authorAssociation author { __typename } } } } } } } } }`,
     { owner: repo.owner, name: repo.name, n: Number(number) },
     opts,
   );
@@ -250,7 +251,8 @@ export async function resolveFactoryThreads(repo, number, issue, opts) {
     if (t.isResolved) continue;
     const comments = t.comments?.nodes || [];
     const root = comments[0];
-    if (!root || !String(root.pullRequestReview?.body || "").includes(mark)) continue;
+    const review = root?.pullRequestReview;
+    if (!root || !String(review?.body || "").includes(mark) || !trustedAuthor({ user: { type: review?.author?.__typename }, author_association: review?.authorAssociation })) continue;
     const answered = comments.length > 1 || isPlaceholder(root.body);
     if (!answered) continue;
     await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);

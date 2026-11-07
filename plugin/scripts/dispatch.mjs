@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -28,6 +28,8 @@ export async function appToken(inputs) {
 export async function dispatch(inputs, { token, now = new Date(), dryRun = false, localSlots = null }) {
   const repo = repoOf(inputs.repo);
   const opts = { token };
+  // Markers and claims written by people are trusted by write access, which their association may not show this token.
+  await primeWriters(repo, opts);
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
   const openNumbers = new Set(issues.map((i) => i.number));
 

@@ -500,16 +500,27 @@ export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
  * Whether Factory may act on a marker in this comment or review: written by an App (Factory's own bot; a stranger's
  * app cannot act on the repository without being installed) or by someone who can push. Anyone can paste a marker.
  */
-export const trustedAuthor = (item) => item?.user?.type === "Bot" || PUSH_ASSOCIATIONS.has(item?.author_association);
+/**
+ * The repository's writers by login (primeWriters in github.mjs fills it once per run). author_association alone is
+ * not enough: an App's token sees an organization member whose membership is private as CONTRIBUTOR or NONE.
+ */
+const WRITERS = new Set();
+export const addWriters = (logins) => {
+  for (const l of logins || []) if (l) WRITERS.add(l);
+};
+
+/** A person who can push: by the association the reader sees, or by the repository's writer list. */
+export const pushAuthor = (item) => PUSH_ASSOCIATIONS.has(item?.author_association) || WRITERS.has(item?.user?.login);
+export const trustedAuthor = (item) => item?.user?.type === "Bot" || pushAuthor(item);
 
 /**
- * Maintainers' decisions on an Objective: comments on its issue and PR by a person who can push (never a bot, never a
- * Factory marker comment), oldest first. This is how a human answers a Question or records a decision in a comment;
- * the worker and the answer pass get them beside the issue body.
+ * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker
+ * comment), oldest first. Who may decide is not read from author_association: an App's token sees an organization
+ * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.
  */
 export function maintainerDecisions(comments) {
   return (comments || [])
-    .filter((c) => c?.user?.type !== "Bot" && PUSH_ASSOCIATIONS.has(c?.author_association) && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim())
+    .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim())
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
     .map((c) => ({ author: c.user?.login ?? "?", at: c.created_at, body: c.body.trim() }));
 }

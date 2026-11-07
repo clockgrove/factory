@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, prepareBranch, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
+import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, configureGit, crashed, deadline, ensurePr, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, push, pushError, remainingMs, restoreTranscript, saveTranscript, validationLoop, writeUsage } from "./lib/session.mjs";
@@ -48,6 +48,7 @@ async function main() {
   // read it from a file, so a six-hour harness session never holds a stale token.
   const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(usageDir, "..", `factory-auth-${issue}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
+  await primeWriters(repo, token);
   const app = keeper.app;
   const progress = progressReporter(repo, issue, token, { stage: "work" });
 

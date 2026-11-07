@@ -281,11 +281,18 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts)
   }
   const candidates = maintainerDecisions(all);
   const can = new Map();
+  const failed = [];
   for (const login of new Set(candidates.map((d) => d.author))) {
-    const perm = await collaboratorPermission(repo, login, opts).catch(() => null);
+    const perm = await collaboratorPermission(repo, login, opts).catch((e) => {
+      failed.push(`${login} (${e.status || e.message?.slice(0, 60)})`);
+      return null;
+    });
     can.set(login, ["admin", "maintain", "write"].includes(perm));
   }
-  return candidates.filter((d) => can.get(d.author));
+  const kept = candidates.filter((d) => can.get(d.author));
+  // Structured enough to tell "nobody answered" from "an answer was dropped" when a Question does not resume.
+  log(`decisions: ${all.length} comment(s) read, ${candidates.length} by people, ${[...can.values()].filter(Boolean).length} of ${can.size} author(s) with write access, ${kept.length} kept${failed.length ? `; permission read failed for ${failed.join(", ")}` : ""}`);
+  return kept;
 }
 
 /** When the PR last became a Question: its latest conversion to draft, else its creation (a Question opens as a draft). */

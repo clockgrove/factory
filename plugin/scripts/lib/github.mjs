@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluateChecks, isPlaceholder, marker, spendOf, trustedAuthor } from "./logic.mjs";
+import { addWriters, evaluateChecks, isPlaceholder, marker, spendOf, trustedAuthor } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
@@ -597,6 +597,23 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
   };
   if (existing) return rest(`repos/${repo.full}/rulesets/${existing.id}`, { ...opts, method: "PUT", body });
   return rest(`repos/${repo.full}/rulesets`, { ...opts, method: "POST", body });
+}
+
+/**
+ * Learn the repository's writers (push or more; org members and owners included, whatever their membership's
+ * visibility) so trustedAuthor can tell them apart from strangers. Once per process per repository; a failed read
+ * leaves the association check alone, logged.
+ */
+const primed = new Set();
+export async function primeWriters(repo, opts) {
+  if (primed.has(repo.full)) return;
+  primed.add(repo.full);
+  try {
+    const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
+    addWriters(list.map((u) => u.login));
+  } catch (e) {
+    process.stdout.write(`[factory] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
+  }
 }
 
 export async function collaboratorPermission(repo, login, opts) {

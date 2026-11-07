@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
+import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, decisionsSection, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
@@ -109,6 +109,7 @@ async function main() {
 
   const keeper = await new TokenKeeper({ dir: process.env.FACTORY_AUTH_DIR || join(checkout, "..", `factory-auth-review-${inputs.pr}`), appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, fixedToken: inputs.appToken || null }).start();
   const token = { token: keeper.getter };
+  await primeWriters(repo, token);
   const app = keeper.app;
 
   let pr = await getPr(repo, inputs.pr, token);

@@ -5,8 +5,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform as osPlatform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { listComments, rest, upsertComment } from "./github.mjs";
-import { PUSH_ASSOCIATIONS, marker } from "./logic.mjs";
+import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
+import { marker, pushAuthor } from "./logic.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -16,7 +16,6 @@ export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
 const CLAIM_SKEW_MS = 2 * 60_000;
 /** Only people who can push may claim (a local loop writes as its developer, never as the App). */
-const CLAIM_AUTHORS = PUSH_ASSOCIATIONS;
 
 export const claimMarker = (issue) => marker(issue, "local");
 
@@ -42,7 +41,8 @@ export function parseClaim(body, now = Date.now()) {
 /** The issue's local claim, or null. Only a claim posted by someone who can push counts; `fresh` says whether its loop is alive. */
 export async function localClaim(repo, issue, opts, now = Date.now()) {
   const mark = claimMarker(issue);
-  const c = (await listComments(repo, issue, opts)).find((x) => (x.body || "").includes(mark) && CLAIM_AUTHORS.has(x.author_association));
+  await primeWriters(repo, opts);
+  const c = (await listComments(repo, issue, opts)).find((x) => (x.body || "").includes(mark) && x?.user?.type !== "Bot" && pushAuthor(x));
   if (!c) return null;
   const parsed = parseClaim(c.body, now);
   return parsed ? { ...parsed, commentId: c.id } : null;

@@ -15,7 +15,7 @@ import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProj
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
-import { localClaim, routedHere } from "./lib/local.mjs";
+import { backend } from "./lib/backend.mjs";
 
 export async function appToken(inputs) {
   if (inputs.appToken) return inputs.appToken;
@@ -33,7 +33,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
   // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs).
-  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => routedHere(i));
+  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i));
   if (inputs.issue && !wanted.length) {
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
     return { ready: [], skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], running: 0, spentToday: 0, reason: "not an objective" };
@@ -91,7 +91,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       for (const issue of runningIssues) {
         if (alive.has(issue.number)) continue;
         // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh.
-        if ((await localClaim(repo, issue.number, opts).catch(() => null))?.fresh) continue;
+        if (await backend().trigger.claimedLocally(repo, issue.number, opts)) continue;
         const since = await runningSince(repo, issue.number, opts).catch(() => null);
         if (since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
         vanished.push(issue.number);
@@ -115,7 +115,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   {
     for (const issue of issues) {
       // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
-      if (!routedHere(issue)) continue;
+      if (!backend().trigger.routes(issue)) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) continue;

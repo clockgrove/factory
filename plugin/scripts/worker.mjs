@@ -209,7 +209,7 @@ async function main() {
   credentialBasis = cred.basis;
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true }); // a record from an earlier attempt must not speak for this one
-  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.harness === "claude" && inputs.compactionWindow ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: inputs.compactionWindow } : {}) };
+  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}) };
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
@@ -225,10 +225,10 @@ async function main() {
   writeFileSync(join(usageDir, "task-card.md"), prompt.split("\n---\n")[0]);
   const session = { id: null, canResume: true };
   // Resume policy: under fix-passes, a rebase send-back that conflicts resumes the worker's saved
-  // session (its transcript rides the usage artifact); every other entry starts fresh.
+  // session (on Actions it rides the usage artifact; locally it is on the box); every other entry starts fresh.
   let restored = null;
-  if (inputs.harness === "claude" && inputs.resumePolicy === "fix-passes" && rebaseConflict) {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
+  if (inputs.resumePolicy === "fix-passes" && rebaseConflict) {
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
   if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);

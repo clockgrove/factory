@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -125,7 +125,11 @@ test("harness command lines follow RESEARCH.md; the prompt goes on stdin for cla
   assert.ok(c.args.includes("--exclude-dynamic-system-prompt-sections"), "the system prompt prefix is shared across machines");
   const e = harnessCommand({ harness: "claude", model: "claude-opus-5-5", prompt: "P", maxUsd: 25, effort: "medium" });
   assert.ok(e.args.join(" ").includes("--effort medium"), "a pinned effort reaches the CLI");
-  assert.ok(!harnessCommand({ harness: "codex", prompt: "P", maxUsd: 0, effort: "medium" }).args.includes("--effort"), "codex takes no effort flag");
+  const xe = harnessCommand({ harness: "codex", prompt: "P", maxUsd: 0, effort: "high", compaction: "300000" });
+  assert.ok(xe.args.includes('model_reasoning_effort="high"') && xe.args.includes("model_auto_compact_token_limit=300000") && !xe.args.includes("--effort"));
+  const pe = harnessCommand({ harness: "copilot", prompt: "P", effort: "high", compaction: "300000" });
+  assert.deepEqual(pe.args.slice(pe.args.indexOf("--reasoning-effort"), pe.args.indexOf("--reasoning-effort") + 2), ["--reasoning-effort", "high"]);
+  assert.deepEqual(harnessCommand({ harness: "claude", prompt: "P", compaction: "300000" }).env, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" });
   assert.ok(c.args.includes("--output-format") && c.args.includes("--max-budget-usd") && c.args.includes("25"));
   assert.equal(c.stdin, "P");
   const r = harnessCommand({ harness: "claude", prompt: "fix", maxUsd: 0, resume: "sid" });
@@ -202,4 +206,33 @@ test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach t
   const out = runnerFileEnv({ PATH: "/usr/bin:/bin", GITHUB_PATH: join(dir, "path"), GITHUB_ENV: join(dir, "env") });
   assert.deepEqual(out, { PATH: "/usr/lib/postgresql/18/bin:/usr/bin:/bin", PGHOST: "localhost", NOTE: "line one\nline two" });
   assert.deepEqual(runnerFileEnv({ PATH: "/bin" }), {});
+});
+
+test("sessions: a Codex rollout is saved into the usage directory and restored locally from the newest earlier stage", async () => {
+  const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
+  const root = mkdtempSync(join(tmpdir(), "sess-"));
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  process.env.CODEX_HOME = join(root, "codex");
+  process.env.FACTORY_LOCAL = "1";
+  try {
+    const rel = join("2026", "11", "06", "rollout-2026-11-06T16-42-54-t1.jsonl");
+    mkdirSync(join(root, "codex", "sessions", "2026", "11", "06"), { recursive: true });
+    writeFileSync(join(root, "codex", "sessions", rel), '{"secret":"sk-live-0123456789"}\n');
+    const ws = join(root, "ws");
+    const usageDir = join(ws, "usage-work-1");
+    mkdirSync(usageDir, { recursive: true });
+    const s = saveTranscript({ harness: "codex", sessionId: "t1", usageDir, checkout: "/c", secrets: ["sk-live-0123456789"] });
+    assert.deepEqual(s, { harness: "codex", id: "t1", files: [rel], checkout: "/c" });
+    assert.match(readFileSync(join(usageDir, "transcript", rel), "utf8"), /\*\*\*/);
+    writeFileSync(join(usageDir, "result.json"), JSON.stringify({ session: s }));
+    rmSync(join(root, "codex", "sessions"), { recursive: true });
+    assert.deepEqual(await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" }), { id: "t1", from: "usage-work-1", reason: "" });
+    assert.ok(existsSync(join(root, "codex", "sessions", rel)));
+    assert.match((await restoreTranscript({ checkout: "/c", workDir: ws, harness: "copilot" })).reason, /codex's; this stage runs copilot/);
+    assert.match((await restoreTranscript({ checkout: "/other", workDir: ws, harness: "codex" })).reason, /checkout path differs/);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

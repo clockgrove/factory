@@ -1,6 +1,6 @@
 ---
 name: setup
-description: /factory:setup. Install Factory in the current repository on the user's consent: write .github/workflows/factory.yml from the Action's template, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board. Use when the user asks to set up, install or configure Factory for a repository.
+description: /factory:setup. Install Factory in the current repository on the user's consent: write .github/workflows/factory.yml from the Action's template, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Factory for a repository.
 ---
 
 # /factory:setup
@@ -30,6 +30,10 @@ Then the model credential: `gh secret set ANTHROPIC_API_KEY` or `CODEX_API_KEY` 
 ## 4. Skills in the repository
 
 Offer to commit the Factory skills and agent definitions, which the vendors' cloud sessions need and the Action does not: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say that a committed Factory skill is thereafter a repository override: it pins that version until the user updates it.
+
+## Local mode, instead of or beside the Action
+
+For Factory on the user's own machine, walk `docs/LOCAL.md` instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates a fine-grained token for this one repository (Contents, Issues and Pull requests read and write; Actions read), and for Copilot a Copilot Requests token. They save the tokens themselves with the command in that page; never ask for or read a token. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone, which lists anything missing and creates the `factory:local` label. An Objective with that label is the local loop's, and the Action leaves it alone.
 
 ## After
 

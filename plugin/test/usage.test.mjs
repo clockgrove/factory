@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { credentialEnv, finalText, harnessCommand, scrubbedEnv } from "../scripts/lib/harness.mjs";
+import { localSandbox } from "../scripts/lib/local.mjs";
 import { CODEX_PRICES, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex } from "../scripts/lib/usage.mjs";
 
 const fixture = (f) => readFileSync(join(import.meta.dirname, "fixtures", f), "utf8");
@@ -150,8 +152,23 @@ test("harness command lines follow RESEARCH.md; the prompt goes on stdin for cla
   const lx = harnessCommand({ harness: "codex", prompt: "P", local });
   assert.ok(lx.args.includes('default_permissions="factory"') && lx.args.includes("features.network_proxy=true") && !lx.args.includes("--dangerously-bypass-approvals-and-sandbox"));
   assert.match(lx.args.find((a) => a.startsWith("shell_environment_policy.exclude")), /"CODEX_API_KEY"/);
+  assert.ok(lx.args.includes("--ignore-user-config") && lx.args.includes("features.apps=false") && lx.args.includes('projects={"/c"={trust_level="untrusted"}}'));
   const lp = harnessCommand({ harness: "copilot", prompt: "P", local });
-  assert.ok(lp.args.includes("--sandbox"));
+  assert.ok(lp.args.includes("--sandbox") && !lp.args.includes("--allow-all") && !lp.args.includes("--allow-all-paths"), "copilot keeps path checks on locally");
+  assert.deepEqual(lp.args.slice(lp.args.indexOf("--add-dir"), lp.args.indexOf("--add-dir") + 2), ["--add-dir", "/u"]);
+});
+
+test("localSandbox: a writable directory swapped for a symlink is refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "ls-"));
+  const real = join(root, "real");
+  mkdirSync(real);
+  const env = (dir) => ({ FACTORY_LOCAL: "1", FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [dir], clone: null }) });
+  assert.deepEqual(localSandbox(env(real)).addDirs, [real]);
+  const swapped = join(root, "swapped");
+  symlinkSync(real, swapped);
+  assert.throws(() => localSandbox(env(swapped)), /now resolves to/);
+  assert.throws(() => localSandbox({ FACTORY_LOCAL: "1" }), /refusing to run the harness unsandboxed/);
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("credential: on a developer's machine, api with no key falls back to the CLI login; inside Actions it refuses", async () => {

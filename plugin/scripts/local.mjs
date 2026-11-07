@@ -16,7 +16,7 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -134,7 +134,8 @@ class Local {
     // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
     process.env.FACTORY_LOCAL = "1";
     if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
-    this.dev = sh("git", ["-C", resolve(flags.dir || process.cwd()), "rev-parse", "--show-toplevel"]);
+    // Canonical, so every sandbox path derived from it is real (lib/local.mjs refuses one that resolves elsewhere).
+    this.dev = realpathSync(sh("git", ["-C", resolve(flags.dir || process.cwd()), "rev-parse", "--show-toplevel"]));
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
     if (!this.repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
     this.repo = repoOf(this.repoFull);
@@ -161,14 +162,16 @@ class Local {
 
   /**
    * Codex reports success even when its sandbox cannot start (the command just never runs), so a local Codex loop
-   * first runs one command under the same profile and refuses when it does not run.
+   * first runs one command under the same profile, which must run and must fail to write the home directory.
    */
   codexSelfTest() {
     if (this.harness !== "codex") return;
+    const probe = 'f="$HOME/.factory-sandbox-check"; if touch "$f" 2>/dev/null; then rm -f "$f"; exit 9; fi';
     try {
-      execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains() }), "--", "true"], { cwd: this.dev, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+      execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains(), clone: this.dev }), "--", "sh", "-c", probe], { cwd: this.dev, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     } catch (e) {
-      throw new Error(`local mode cannot start: Codex's sandbox does not run here (${String(e.stderr || e.message).trim().slice(0, 200)})`);
+      const why = e.status === 9 ? "a command in it could write the home directory" : `it does not run here (${String(e.stderr || e.message).trim().slice(0, 200)})`;
+      throw new Error(`local mode cannot start: Codex's sandbox is not confining: ${why}`);
     }
   }
 
@@ -224,7 +227,11 @@ class Local {
     const sandboxDir = join(ws, ".sandbox");
     mkdirSync(sandboxDir, { recursive: true });
     const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, tmpdir()], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
+    // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
+    // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
+    // a symlink into the home directory before the next sandbox opens it. The stage removes it when it ends.
+    const stageTmp = mkdtempSync(join(tmpdir(), `factory-${issue}-`));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
     // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
@@ -234,7 +241,7 @@ class Local {
       chmodSync(join(binDir, tool), 0o755);
     }
     const base = this.baseEnv();
-    const extra = this.harnessEnv(issue, usageDir, npmCache, clone);
+    const extra = this.harnessEnv(issue, usageDir, npmCache, clone, stageTmp);
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
     base.PATH = `${base.PATH || ""}:${binDir}`;
@@ -254,24 +261,20 @@ class Local {
       npm_config_cache: npmCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache, ...(extra.TMPDIR ? [extra.TMPDIR] : [])], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
+      TMPDIR: stageTmp,
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache, stageTmp], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
       ...extra,
     };
   }
 
-  /** What the harness's own sandbox needs beyond the shared env: Codex a writable temp directory, Copilot its home and token. */
-  harnessEnv(issue, usageDir, npmCache, clone) {
-    if (this.harness === "codex") {
-      // Codex's profile leaves /tmp read-only, so the stage gets its own temp directory, writable and short: srt
-      // puts its sockets there too, and a socket path has a 108-byte limit. The stage removes it when it ends.
-      return { TMPDIR: mkdtempSync(join(tmpdir(), `factory-${issue}-`)) };
-    }
+  /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
+  harnessEnv(issue, usageDir, npmCache, clone, stageTmp) {
     if (this.harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
     mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs: [usageDir, npmCache], readOnly: [join(usageDir, "bin")] }), null, 2));
+    writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs: [usageDir, npmCache, stageTmp], readOnly: [join(usageDir, "bin")] }), null, 2));
     return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken };
   }
 

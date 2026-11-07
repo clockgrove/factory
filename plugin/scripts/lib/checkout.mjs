@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec, git } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
+import { localSandbox } from "./local.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -130,6 +131,7 @@ export async function sh(checkout, command, { timeoutMs, env = process.env, extr
   // With FACTORY_LOCAL_DB=1 each command also gets a fresh Postgres inside that sandbox (plugin/bin/factory-db).
   // `--` ends srt's own options: srt has a -c of its own, which would otherwise take the inner bash's -c.
   const inner = ["bash", "-eo", "pipefail", "-c", command];
+  if (childEnv.FACTORY_LOCAL_SRT) localSandbox(childEnv); // refuses when a writable directory was swapped for a symlink
   const [cmd, args] = childEnv.FACTORY_LOCAL_SRT ? ["srt", ["-s", childEnv.FACTORY_LOCAL_SRT, "--", ...(childEnv.FACTORY_LOCAL_DB === "1" && childEnv.FACTORY_DB_WRAP === "1" ? ["factory-db"] : []), ...inner]] : [inner[0], inner.slice(1)];
   const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo: true });
   return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, output: `${r.stdout}\n${r.stderr}`.trim() };

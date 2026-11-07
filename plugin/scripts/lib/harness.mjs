@@ -144,7 +144,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
       const args = resume ? ["exec", "resume", resume] : ["exec"];
-      const perms = local ? codexLocalConfig({ domains: local.domains, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS] }) : ["--dangerously-bypass-approvals-and-sandbox"];
+      // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code.
+      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS] })] : ["--dangerously-bypass-approvals-and-sandbox"];
       args.push("--json", ...perms, "--skip-git-repo-check");
       if (model && !resume) args.push("-m", model);
       return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true };
@@ -153,7 +154,10 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
       // Locally --sandbox puts every command in Copilot's sandbox under the policy in $COPILOT_HOME/settings.json,
       // which the local backend writes (lib/local.mjs copilotLocalSettings); --allow-all then only skips prompts.
-      const args = ["-p", prompt, ...(local ? ["--sandbox"] : []), "--allow-all", "--output-format", "json"];
+      // Its file tools are not OS-sandboxed, so locally path checks stay on: tools and URLs are allowed, paths only in
+      // the working directory and the added directories (without --allow-all-paths, any other path is refused headless).
+      const perms = local ? ["--sandbox", "--allow-all-tools", "--allow-all-urls", ...local.addDirs.flatMap((d) => ["--add-dir", d])] : ["--allow-all"];
+      const args = ["-p", prompt, ...perms, "--output-format", "json"];
       if (model) args.push("--model", model);
       if (agent) args.push("--agent", agent);
       if (resume) args.push("--resume", resume);

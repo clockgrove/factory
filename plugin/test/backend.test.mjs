@@ -46,3 +46,12 @@ test("whichSync: a PATH scan, never a shell; names with separators or shell synt
   assert.ok(whichSync("node"));
   for (const bad of ["node;touch /tmp/factory-which-probe", "$(id)", "../node", "/usr/bin/node", ""]) assert.equal(whichSync(bad), null);
 });
+
+test("spend lines: a local run's dollars round-trip through its progress comment; prose and junk count 0", async () => {
+  const { spendMarker, spendOf } = await import("../scripts/lib/logic.mjs");
+  const body = `<!-- factory:7:progress:work:1 -->\nFactory work run 1\n- 01:00Z exit: delivered; usd 0.34\n${spendMarker(0.3392)}`;
+  assert.equal(spendOf(body), 0.3392);
+  assert.equal(spendOf("- 01:00Z exit: delivered; usd 0.34"), 0, "the prose exit line is never read");
+  assert.equal(spendOf('<!-- factory:spend {"usd":"x"} -->'), 0);
+  assert.equal(spendOf('<!-- factory:spend {"usd":-5} -->'), 0);
+});

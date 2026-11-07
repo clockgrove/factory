@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -25,7 +25,7 @@ export async function appToken(inputs) {
   return minted.token;
 }
 
-export async function dispatch(inputs, { token, now = new Date(), dryRun = false, localSpentUsd = 0 }) {
+export async function dispatch(inputs, { token, now = new Date(), dryRun = false }) {
   const repo = repoOf(inputs.repo);
   const opts = { token };
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -170,8 +170,15 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     usageError = e.message.slice(0, 200);
     log(`today's usage could not be read (${usageError}); treating daily_usd as reached`);
   }
-  // A local loop adds what it spent today: its runs upload no artifacts.
-  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records) + (Number(localSpentUsd) || 0);
+  // Local runs (any machine) upload no artifacts; each records its dollars in its progress comment instead.
+  let localUsd = 0;
+  try {
+    localUsd = await localSpendToday(repo, { dateIso: now.toISOString().slice(0, 10), token });
+  } catch (e) {
+    usageError = usageError || e.message.slice(0, 200);
+    log(`today's local spend could not be read (${e.message.slice(0, 120)}); treating daily_usd as reached`);
+  }
+  const spentToday = usageError ? Number.POSITIVE_INFINITY : sumSpend(records) + localUsd;
 
   const picked = selectReady({
     issues: wanted,

@@ -483,3 +483,20 @@ export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
  */
 export const trustedAuthor = (item) => item?.user?.type === "Bot" || PUSH_ASSOCIATIONS.has(item?.author_association);
 
+/**
+ * The spend line a run without a usage artifact (local mode) writes into its progress comment: structured, so a
+ * dispatcher reads the number, never the prose exit line. Parsed by spendOf().
+ */
+export const spendMarker = (usd) => `<!-- factory:spend ${JSON.stringify({ usd })} -->`;
+const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
+/** The dollars a progress comment's spend line records, or 0. */
+export function spendOf(body) {
+  const m = SPEND.exec(body || "");
+  if (!m) return 0;
+  try {
+    const usd = Number(JSON.parse(m[1]).usd);
+    return Number.isFinite(usd) && usd > 0 ? usd : 0;
+  } catch {
+    return 0;
+  }
+}

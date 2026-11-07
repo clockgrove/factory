@@ -17,6 +17,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { MODEL_SECRET_KEYS } from "../plugin/scripts/lib/harness.mjs";
+import { BACKENDS } from "../plugin/scripts/lib/backend.mjs";
 import { LOCAL_DOMAINS, claudeLocalSettings, codexLocalConfig, copilotLocalSettings, srtSettings } from "../plugin/scripts/lib/local.mjs";
 
 const PLUGIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin");
@@ -32,7 +33,7 @@ if (platform() === "win32") {
 }
 
 // The bar, per probe: true = must work, false = must not.
-const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false };
+const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "private TMPDIR": true };
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sbx-check-")));
 const clone = join(root, "clone");
@@ -65,6 +66,8 @@ r "git commit" 'cd "${clone}" && git add probe-file && git -c user.name=t -c use
 r "write .git/hooks" 'echo x > "${clone}/.git/hooks/probe"'
 r "write .git/config" 'echo "# probe" >> "${clone}/.git/config"'
 r "write stage dir" 'echo x > "${usage}/probe-file"'
+r "pnpm lock dir" 'd="$XDG_RUNTIME_DIR/pnpm-store-operation-locks-$(id -u)"; mkdir -p "$d" && chmod 700 "$d"'
+r "private TMPDIR" 'case "$TMPDIR" in "${stageTmp}"|"${stageTmp}"/*) ;; *) echo "TMPDIR=$TMPDIR"; false ;; esac'
 r "write stage bin" 'echo x > "${bin}/probe-file"'
 sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://github.com/); case "$code" in 2*|3*) ok=yes;; *) ok=no;; esac; printf 'GET allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
@@ -82,7 +85,7 @@ const addDirs = [usage, stageTmp];
 // Like a local stage: no model key in the env but the harness's own sign-in, where the CLI has no saved login.
 const OWN = { claude: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"], copilot: ["COPILOT_GITHUB_TOKEN"], srt: [] };
 const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !MODEL_SECRET_KEYS.includes(k)));
-const envFor = (h) => ({ ...base, ...Object.fromEntries(OWN[h].filter((k) => process.env[k]).map((k) => [k, process.env[k]])), TMPDIR: stageTmp });
+const envFor = (h) => ({ ...base, ...Object.fromEntries(OWN[h].filter((k) => process.env[k]).map((k) => [k, process.env[k]])), TMPDIR: stageTmp, XDG_RUNTIME_DIR: stageTmp, CLAUDE_CODE_TMPDIR: stageTmp });
 const ask = `Run exactly this one shell command and nothing else, then reply "done": sh ${probe}`;
 
 const runners = {
@@ -90,7 +93,10 @@ const runners = {
     if (!onPath("srt")) return "srt not on PATH";
     const f = join(root, "srt.json");
     writeFileSync(f, JSON.stringify(srtSettings({ domains, writable: [clone, ...addDirs], clone, readOnly })));
-    spawnSync("srt", ["-s", f, "--", "sh", probe], { cwd: clone, env: envFor("srt"), stdio: "ignore", timeout: 120_000 });
+    // Through the wrapper Factory's own commands use, so the probe sees what validation sees.
+    const env = { ...envFor("srt"), FACTORY_LOCAL_SRT: f, FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs, clone, readOnly }) };
+    const [cmd, args] = BACKENDS.local.sandbox.command(["sh", probe], env);
+    spawnSync(cmd, args, { cwd: clone, env, stdio: "ignore", timeout: 120_000 });
   },
   codex: () => {
     if (!onPath("codex")) return "codex not on PATH";

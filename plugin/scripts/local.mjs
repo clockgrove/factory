@@ -26,7 +26,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
 import { whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, prepareProtectedPaths, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 
@@ -212,6 +212,7 @@ class Local {
     const bunCache = join(clone, "node_modules", ".bun-cache");
     const caches = [npmCache, yarnCache];
     for (const d of [...caches, pnpmStore, bunCache]) mkdirSync(d, { recursive: true });
+    prepareProtectedPaths(clone);
     // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
     // the model could loosen the sandbox its own validation runs in.
     const sandboxDir = join(ws, ".sandbox");

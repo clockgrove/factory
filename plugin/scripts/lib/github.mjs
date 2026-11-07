@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluateChecks, isPlaceholder, marker, spendOf, trustedAuthor } from "./logic.mjs";
+import { evaluateChecks, setWriters, isPlaceholder, marker, spendOf, trustedAuthor } from "./logic.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
@@ -240,7 +240,7 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  */
 export async function resolveFactoryThreads(repo, number, issue, opts) {
   const data = await graphql(
-    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body authorAssociation author { __typename } } } } } } } } }`,
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
     { owner: repo.owner, name: repo.name, n: Number(number) },
     opts,
   );
@@ -252,7 +252,7 @@ export async function resolveFactoryThreads(repo, number, issue, opts) {
     const comments = t.comments?.nodes || [];
     const root = comments[0];
     const review = root?.pullRequestReview;
-    if (!root || !String(review?.body || "").includes(mark) || !trustedAuthor({ user: { type: review?.author?.__typename }, author_association: review?.authorAssociation })) continue;
+    if (!root || !String(review?.body || "").includes(mark) || !trustedAuthor({ user: { type: review?.author?.__typename, login: review?.author?.login }, author_association: review?.authorAssociation })) continue;
     const answered = comments.length > 1 || isPlaceholder(root.body);
     if (!answered) continue;
     await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);
@@ -597,6 +597,27 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
   };
   if (existing) return rest(`repos/${repo.full}/rulesets/${existing.id}`, { ...opts, method: "PUT", body });
   return rest(`repos/${repo.full}/rulesets`, { ...opts, method: "POST", body });
+}
+
+/**
+ * Learn the repository's writers (push or more; org members and owners included, whatever their membership's
+ * visibility) so trustedAuthor can tell them apart from strangers. Once per process per repository; a failed read
+ * leaves the association check alone, logged.
+ */
+const WRITERS_TTL_MS = 10 * 60_000;
+const primed = new Map();
+export async function primeWriters(repo, opts) {
+  // A long-lived loop (local serve) re-reads them, so access revoked meanwhile stops counting within minutes.
+  if (Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return;
+  try {
+    const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
+    setWriters(repo.full, list.map((u) => u.login));
+    primed.set(repo.full, Date.now());
+    process.stdout.write(`[factory] ${list.length} writer(s) of ${repo.full} known\n`);
+  } catch (e) {
+    // Not marked primed: the next call tries again.
+    process.stdout.write(`[factory] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
+  }
 }
 
 export async function collaboratorPermission(repo, login, opts) {

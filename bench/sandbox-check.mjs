@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { MODEL_SECRET_KEYS } from "../plugin/scripts/lib/harness.mjs";
 import { BACKENDS } from "../plugin/scripts/lib/backend.mjs";
+import { prepareProtectedPaths } from "../plugin/scripts/lib/local.mjs";
 import { LOCAL_DOMAINS, claudeLocalSettings, codexLocalConfig, copilotLocalSettings, srtSettings } from "../plugin/scripts/lib/local.mjs";
 
 const PLUGIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin");
@@ -33,7 +34,7 @@ if (platform() === "win32") {
 }
 
 // The bar, per probe: true = must work, false = must not.
-const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "write /tmp/claude": false, "private TMPDIR": true };
+const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "write /tmp/claude": false, "clone walkable": true, "private TMPDIR": true };
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sbx-check-")));
 const clone = join(root, "clone");
@@ -45,6 +46,8 @@ mkdirSync(clone);
 const git = (...a) => execFileSync("git", ["-C", clone, ...a], { stdio: "ignore" });
 git("init", "-q");
 git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
+// As a local stage does before any sandbox opens: srt then protects real, empty paths instead of /dev/null stand-ins.
+prepareProtectedPaths(clone);
 const initSha = execFileSync("git", ["-C", clone, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 mkdirSync(join(clone, ".git", "hooks"), { recursive: true });
 const canaryDir = join(homedir(), ".config", "factory");
@@ -70,6 +73,7 @@ r "write .git/config" 'echo "# probe" >> "${clone}/.git/config"'
 r "write stage dir" 'echo x > "${usage}/probe-file"'
 r "pnpm lock dir" 'd="$XDG_RUNTIME_DIR/pnpm-store-operation-locks-$(id -u)"; mkdir -p "$d" && chmod 700 "$d"'
 r "package caches" 'for d in "$npm_config_cache" "$pnpm_config_store_dir" "$BUN_INSTALL_CACHE_DIR" "$YARN_CACHE_FOLDER"; do [ -n "$d" ] && touch "$d/probe" || exit 1; done'
+r "clone walkable" 'cd "${clone}" && odd="$(find . -path ./.git -prune -o -path ./.claude -prune -o -print | while read -r f; do [ -c "$f" ] && printf "%s " "$f"; done)"; [ -z "$odd" ] || { echo "device stand-ins: $odd"; false; }'
 r "private TMPDIR" 'case "$TMPDIR" in "${stageTmp}"|"${stageTmp}"/*) ;; *) echo "TMPDIR=$TMPDIR"; false ;; esac'
 r "write stage bin" 'echo x > "${bin}/probe-file"'
 sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeShared}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null

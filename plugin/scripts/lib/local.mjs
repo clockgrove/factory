@@ -2,7 +2,7 @@
 // local loop off each other's Objectives, the sandbox the harness and Factory's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
-import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { join } from "node:path";
 import { listComments, rest, upsertComment } from "./github.mjs";
@@ -55,6 +55,47 @@ export async function dropClaim(repo, issue, holder, opts) {
 }
 
 /** The hosts a sandboxed command may reach: GitHub and the npm registry, plus the adopter's list. */
+/**
+ * The paths srt write-protects in the working directory on its own (its DANGEROUS_FILES and dangerous directories,
+ * sandbox-runtime 0.0.81). Where one is absent, srt mounts /dev/null in its place for the command, which a repository
+ * check that walks the tree cannot open (nodev: EACCES) or reads as a file where it expects a directory. Factory
+ * makes each absent one before any sandbox opens: an empty directory, or an empty file listed in the clone's
+ * .git/info/exclude, so srt protects a real, harmless path and git status stays clean.
+ */
+export const SRT_PROTECTED = {
+  dirs: [".vscode", ".idea", ".claude/commands", ".claude/agents"],
+  files: [".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ripgreprc", ".mcp.json"],
+};
+
+/** Make the absent SRT_PROTECTED paths in the clone (host side, before a stage). Never writes through an existing path. */
+export function prepareProtectedPaths(clone) {
+  const made = [];
+  for (const d of SRT_PROTECTED.dirs) {
+    try {
+      mkdirSync(join(clone, d), { recursive: true });
+    } catch {
+      // something else is there (a file, a symlink): srt protects it as it is
+    }
+  }
+  for (const f of SRT_PROTECTED.files) {
+    try {
+      // wx: O_CREAT|O_EXCL, so an existing file or symlink is left alone and never followed.
+      writeFileSync(join(clone, f), f === ".mcp.json" ? '{"mcpServers":{}}\n' : "", { flag: "wx" });
+      made.push(f);
+    } catch {
+      // already there
+    }
+  }
+  if (made.length) {
+    const exclude = join(clone, ".git", "info", "exclude");
+    mkdirSync(join(clone, ".git", "info"), { recursive: true });
+    const have = existsSync(exclude) ? readFileSync(exclude, "utf8").split("\n") : [];
+    const add = made.map((f) => `/${f}`).filter((l) => !have.includes(l));
+    if (add.length) appendFileSync(exclude, `${have.length && have.at(-1) !== "" ? "\n" : ""}# Factory: srt's protected paths, made empty so the sandbox protects a real path\n${add.join("\n")}\n`);
+  }
+  return made;
+}
+
 /** srt's and Claude Code's own scratch directory, writable in every one of their sandboxes on the box; Factory points nothing there. */
 export const SHARED_TMP = ["/tmp/claude", "/private/tmp/claude"];
 

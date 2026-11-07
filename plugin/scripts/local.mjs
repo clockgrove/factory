@@ -423,6 +423,30 @@ class Local {
     return out;
   }
 
+  /**
+   * Remove the Objective directories (clone, caches, stage logs and sessions) of Objectives that are closed: done or
+   * abandoned, nothing will resume them. Open ones stay, Blocked included, for a human re-label to pick up where they
+   * stood. Not while running here, and never on a failed lookup.
+   */
+  async cleanup(running) {
+    const root = join(this.dev, ".factory");
+    let names = [];
+    try {
+      names = readdirSync(root).filter((n) => /^\d+$/.test(n));
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const issue = Number(name);
+      if (running.has(issue)) continue;
+      const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+      if (data?.state !== "closed") continue;
+      // .factory is writable by no sandbox, so each entry is the directory Factory made; rmSync removes a link, not its target.
+      rmSync(join(root, name), { recursive: true, force: true });
+      log(`#${issue}: closed; removed its local directory .factory/${name}`);
+    }
+  }
+
   /** Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions. */
   async resume(issue) {
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
@@ -517,7 +541,13 @@ class Local {
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+    let cleaned = 0;
     while (!this.stopping) {
+      // Every 10 minutes, and at start: closed Objectives' directories go.
+      if (Date.now() - cleaned > 10 * 60_000) {
+        cleaned = Date.now();
+        await this.cleanup(running).catch((e) => log(`cleanup: ${e.message.slice(0, 160)}`));
+      }
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
       const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));

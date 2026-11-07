@@ -37,8 +37,9 @@ export function scrubbedEnv(base = process.env, extra = {}) {
  *   claude  api : ANTHROPIC_API_KEY, or a federated short-lived token (see federate())
  *           plan: CLAUDE_CODE_OAUTH_TOKEN (a developer's own repository only)
  *   codex   api : CODEX_API_KEY, set on this child only
- *   copilot     : COPILOT_GITHUB_TOKEN = the job's GITHUB_TOKEN (copilot-requests: write),
- *                 which wins over GH_TOKEN so the App token is never billed for Copilot
+ *   copilot     : COPILOT_GITHUB_TOKEN = the copilot_github_token input (a Copilot Requests token
+ *                 that bills its owner's seat), else the job's GITHUB_TOKEN (copilot-requests: write);
+ *                 it wins over GH_TOKEN so the App token is never billed for Copilot
  *   any   login : the CLI's own login on this machine (PLAN.md's development fallback:
  *                 "the worker run locally uses whatever the CLI is logged in as");
  *                 refused inside Actions, where only API credentials run unattended.
@@ -48,7 +49,7 @@ export function scrubbedEnv(base = process.env, extra = {}) {
 export function hasApiCredential({ harness, inputs, env = process.env }) {
   if (harness === "claude") return !!(inputs.anthropicApiKey || env.ANTHROPIC_API_KEY || (env.ACTIONS_ID_TOKEN_REQUEST_URL && inputs.anthropicOidcExchangeUrl));
   if (harness === "codex") return !!(inputs.codexApiKey || env.CODEX_API_KEY);
-  if (harness === "copilot") return !!(env.COPILOT_GITHUB_TOKEN || inputs.githubToken);
+  if (harness === "copilot") return !!(inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN || inputs.githubToken);
   return false;
 }
 
@@ -86,10 +87,10 @@ export async function credentialEnv({ harness, credential, inputs, env = process
     return { env: out, basis: "CODEX_API_KEY (step-scoped)" };
   }
   if (harness === "copilot") {
-    const tok = env.COPILOT_GITHUB_TOKEN || inputs.githubToken;
-    if (!tok) throw new Error("no Copilot credential: the job token needs copilot-requests: write");
+    const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN || inputs.githubToken;
+    if (!tok) throw new Error("no Copilot credential: set copilot_github_token, or give the job token copilot-requests: write");
     out.COPILOT_GITHUB_TOKEN = tok;
-    return { env: out, basis: env.COPILOT_GITHUB_TOKEN ? "COPILOT_GITHUB_TOKEN" : "job token (copilot-requests: write)" };
+    return { env: out, basis: inputs.copilotGithubToken ? "copilot_github_token (step-scoped)" : env.COPILOT_GITHUB_TOKEN ? "COPILOT_GITHUB_TOKEN" : "job token (copilot-requests: write)" };
   }
   throw new Error(`unknown harness ${harness}`);
 }

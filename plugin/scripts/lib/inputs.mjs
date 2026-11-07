@@ -51,11 +51,12 @@ export const DEFAULTS = {
   anthropic_oidc_exchange_url: "",
   claude_code_oauth_token: "",
   codex_api_key: "",
+  copilot_github_token: "",
   github_token: "",
   app_token: "",
 };
 
-export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "github_token", "app_token"]);
+export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "github_token", "app_token"]);
 
 /** Parse `--name value`, `--name=value` and bare `--flag` into {name: value}. Names use underscores. */
 export function parseArgs(argv) {
@@ -140,6 +141,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     anthropicOidcExchangeUrl: get("anthropic_oidc_exchange_url"),
     claudeCodeOauthToken: get("claude_code_oauth_token"),
     codexApiKey: get("codex_api_key"),
+    copilotGithubToken: get("copilot_github_token"),
     githubToken: get("github_token") || env.GITHUB_TOKEN || "",
     appToken: get("app_token") || env.FACTORY_APP_TOKEN || "",
   };

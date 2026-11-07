@@ -102,8 +102,11 @@ inputs:
   codex_api_key:
     description: CODEX_API_KEY for the Codex harness; passed to the harness child process only, never to the job environment.
     required: false
+  copilot_github_token:
+    description: 'A fine-grained token with the Copilot Requests permission, from a user with a Copilot seat, for the Copilot harness; it bills that seat. Passed to the harness child process only. When empty, Copilot bills the job token (`copilot-requests: write`), which needs the organization''s Copilot CLI billing policy.'
+    required: false
   github_token:
-    description: 'The job''s GITHUB_TOKEN; used only to read code and, for Copilot, as the billing token (`copilot-requests: write`). Defaults to `github.token`.'
+    description: 'The job''s GITHUB_TOKEN; used only to read code and, for Copilot without `copilot_github_token`, as the billing token (`copilot-requests: write`). Defaults to `github.token`.'
     required: false
     default: ${{ github.token }}
 
@@ -193,6 +196,7 @@ runs:
         FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
         FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         FACTORY_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
+        FACTORY_INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_github_token }}
         FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
         FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage

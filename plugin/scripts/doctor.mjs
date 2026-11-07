@@ -62,11 +62,12 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     else out.push(PASS("codex credential", "CODEX_API_KEY present, step-scoped"));
   }
   if (h === "copilot") {
-    if (env.COPILOT_GITHUB_TOKEN) out.push(PASS("copilot credential", "COPILOT_GITHUB_TOKEN present (bills the token owner's seat)"));
+    if (inputs.copilotGithubToken) out.push(PASS("copilot credential", "copilot_github_token present, step-scoped (bills the token owner's Copilot seat)"));
+    else if (env.COPILOT_GITHUB_TOKEN) out.push(PASS("copilot credential", "COPILOT_GITHUB_TOKEN present (bills the token owner's seat)"));
     else if (inputs.githubToken) {
       const r = await exec("sh", ["-c", "copilot --version"], { env: { ...env, COPILOT_GITHUB_TOKEN: inputs.githubToken } }).catch(() => ({ code: 1 }));
-      out.push(r.code === 0 ? PASS("copilot credential", "job token in use; copilot-requests: write must be on the job and the org policy must allow CLI billing") : WARN("copilot credential", "copilot CLI not runnable here", "install @github/copilot on the runner"));
-    } else out.push(FAIL("copilot credential", "no token for Copilot", "permissions: copilot-requests: write on the worker job"));
+      out.push(r.code === 0 ? PASS("copilot credential", "job token in use; copilot-requests: write must be on the job and the organization's Copilot CLI billing policy on (or set copilot_github_token, a Copilot Requests token from a user with a seat)") : WARN("copilot credential", "copilot CLI not runnable here", "install @github/copilot on the runner"));
+    } else out.push(FAIL("copilot credential", "no token for Copilot", "set copilot_github_token (a fine-grained token with the Copilot Requests permission; gh secret set COPILOT_GITHUB_TOKEN), or permissions: copilot-requests: write on the worker job with the organization's Copilot CLI billing policy on"));
   }
   if (probe) out.push(await probeHarness({ inputs, env }));
   return out;

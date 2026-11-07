@@ -40,7 +40,7 @@ permissions: # the job token reads code and Actions; every write goes through th
   actions: read # the dispatcher sums today's usage artifacts; doctor lists the CI workflow's triggers
   issues: write
   # id-token: write         # Claude workload identity federation only
-  # copilot-requests: write # Copilot only (bills the org or the owner's seat)
+  # copilot-requests: write # Copilot without copilot_github_token only (bills the org or the owner's seat)
 jobs:
   dispatch:
     # Ticks: the cron, a manual run, a new Objective's label, or the review job's last step (a worker slot freed).
@@ -76,6 +76,7 @@ jobs:
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
           codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }} # Copilot; a Copilot Requests token, else the job token bills (copilot-requests: write)
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
       - uses: actions/upload-artifact@v7
@@ -107,6 +108,7 @@ jobs:
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       - uses: actions/upload-artifact@v7

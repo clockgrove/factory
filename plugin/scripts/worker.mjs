@@ -17,32 +17,8 @@ import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPl
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, costByPhase, decideExit, maintainerDecisions, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import {
-  TASK_CARD_TEMPLATE,
-  applyExit,
-  gitIdentity,
-  buildPrompt,
-  configureGit,
-  crashed,
-  deadline,
-  ensurePr,
-  exitRecord,
-  lastMessage,
-  liveActivity,
-  markRunning,
-  maskFile,
-  restoreTranscript,
-  saveTranscript,
-  observe,
-  postValidated,
-  progressReporter,
-  push,
-  pushError,
-  remainingMs,
-  validationLoop,
-  writeUsage,
-} from "./lib/session.mjs";
+import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, configureGit, crashed, deadline, ensurePr, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, push, pushError, remainingMs, restoreTranscript, saveTranscript, validationLoop, writeUsage } from "./lib/session.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { exec, git } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -219,7 +195,7 @@ async function main() {
   rmSync(exitFile, { force: true }); // a record from an earlier attempt must not speak for this one
   const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}) };
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
-  const decisions = maintainerDecisions([...(await listComments(repo, issue, token).catch(() => [])), ...(openPr ? await listComments(repo, openPr.number, token).catch(() => []) : [])]);
+  const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),

@@ -16,9 +16,9 @@ import { join, resolve } from "node:path";
 import { TokenKeeper } from "./lib/token-keeper.mjs";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { closingIssues, enableAutoMerge, getIssue, getPr, listComments, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
+import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, decisionsSection, diffLines, maintainerDecisions, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, decisionsSection, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import {
@@ -43,6 +43,8 @@ import {
   unaddressedReviewComments,
   validationLoop,
   writeUsage,
+  objectiveDecisions,
+  questionRaisedAt,
 } from "./lib/session.mjs";
 
 /**
@@ -50,7 +52,7 @@ import {
  * parses. Claude and Copilot run as the pinned reviewer agent (--agent); Codex has
  * no such flag, so the prompt names the definition file.
  */
-export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
+export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [] }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   return [
     `You are the Factory reviewer for the pull request on issue #${issue}: ${issueTitle}.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the review-pr skill (in .claude/skills/review-pr and .agents/skills/review-pr) exactly. Read the repository as you need to.`,
@@ -61,6 +63,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     "## Issue",
     issueBody || "(no body)",
     "",
+    ...(decisionsSection(decisions) ? [decisionsSection(decisions), ""] : []),
     "## PR body",
     prBody || "(no body)",
     "",
@@ -209,8 +212,20 @@ async function main() {
 
   const issueData = await getIssue(repo, issue, token);
   // The maintainers' word since the issue was filed: a Question's answer, a decision recorded in a comment.
-  const decisions = maintainerDecisions([...(await listComments(repo, issue, token).catch(() => [])), ...(await listComments(repo, pr.number, token).catch(() => []))]);
-  if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments`);
+  const decisions = await objectiveDecisions(repo, { issue, prNumber: pr.number }, token);
+  if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR`);
+  // A person marked a Question ready: only what a maintainer said after the Question answers it. With nothing new and
+  // the question still in the body, the PR goes back to a Question rather than merging an unanswered one.
+  const questionAt = humanReady ? await questionRaisedAt(repo, pr, token) : null;
+  const newDecisions = humanReady ? decisions.filter((d) => Date.parse(d.at) > Date.parse(questionAt)) : [];
+  if (humanReady && !newDecisions.length && /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUESTION:/.test(pr.body || "")) {
+    const reason = "marked ready, but no maintainer answer since the question; answer in a comment on the issue or the PR, then mark it ready again";
+    log(`PR #${pr.number}: ${reason}`);
+    await dropLabel();
+    await applyExit(repo, { issue, pr, exit: "question", reason, notify: inputs.notify, stage: "review" }, token);
+    await finish("question", reason);
+    return;
+  }
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true });
@@ -266,7 +281,7 @@ async function main() {
   const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
-    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
     maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
     cwd: checkout,
@@ -288,7 +303,7 @@ async function main() {
       harness: inputs.harness,
       model: inputs.reviewerFallback.model,
       effort: inputs.reviewerFallback.effort,
-      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
       cwd: checkout,
@@ -326,7 +341,7 @@ async function main() {
   };
   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
-  const answerQuestion = humanReady && decisions.length > 0;
+  const answerQuestion = newDecisions.length > 0;
   const answering = toAnswer.length > 0 || answerQuestion;
   if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${answerQuestion ? " and the maintainers' answer" : ""}` : "answer pass: the maintainers' answer to the question");
 

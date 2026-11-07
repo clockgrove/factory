@@ -10,10 +10,12 @@ import { branchDelta, runValidation } from "./checkout.mjs";
 import { finalText, runHarness } from "./harness.mjs";
 import {
   awaitChecks,
+  collaboratorPermission,
   createPr,
   findPr,
   findProject,
   getPr,
+  listComments,
   listReviewComments,
   moveCard,
   prComment,
@@ -24,7 +26,7 @@ import {
   upsertComment,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, decisionsSection, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, decisionsSection, harnessActivity, isPlaceholder, maintainerDecisions, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
 import { spendMarker, sumSpend, trustedAuthor } from "./logic.mjs";
@@ -265,6 +267,34 @@ export async function gitIdentity(app, token) {
 }
 
 /** Render the task card and append the issue verbatim: the prompt the harness gets. */
+/**
+ * The maintainers' decisions on an Objective: comments on its issue and PR, the PR's review bodies and inline review
+ * comments, by people with write access or more to the repository (checked per author: an author association of
+ * COLLABORATOR or MEMBER can be read-only), oldest first. A failed permission read keeps nothing from that author.
+ */
+export async function objectiveDecisions(repo, { issue, prNumber = null }, opts) {
+  const all = [...(await listComments(repo, issue, opts).catch(() => []))];
+  if (prNumber) {
+    all.push(...(await listComments(repo, prNumber, opts).catch(() => [])));
+    for (const r of (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || []) all.push({ ...r, created_at: r.submitted_at });
+    for (const c of await listReviewComments(repo, prNumber, opts).catch(() => [])) all.push({ ...c, body: `${c.path}:${c.line ?? c.original_line ?? "?"}: ${c.body || ""}` });
+  }
+  const candidates = maintainerDecisions(all);
+  const can = new Map();
+  for (const login of new Set(candidates.map((d) => d.author))) {
+    const perm = await collaboratorPermission(repo, login, opts).catch(() => null);
+    can.set(login, ["admin", "maintain", "write"].includes(perm));
+  }
+  return candidates.filter((d) => can.get(d.author));
+}
+
+/** When the PR last became a Question: its latest conversion to draft, else its creation (a Question opens as a draft). */
+export async function questionRaisedAt(repo, pr, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${pr.number}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+  const drafted = events.filter((e) => e.event === "convert_to_draft").map((e) => e.created_at).sort();
+  return drafted.at(-1) || pr.created_at;
+}
+
 export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));

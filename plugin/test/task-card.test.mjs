@@ -73,11 +73,14 @@ test("maintainer decisions: people who can push, no bots or Factory markers, old
   ]);
   // Who may decide is checked by write access in objectiveDecisions, not here: a private org member reads as CONTRIBUTOR.
   assert.deepEqual(decisions.map((d) => d.author), ["member", "stranger", "owner"]);
-  const { addWriters, pushAuthor, trustedAuthor } = await import("../scripts/lib/logic.mjs");
+  const { setWriters, pushAuthor, trustedAuthor, knownWriter } = await import("../scripts/lib/logic.mjs");
   const privateMember = { user: { login: "kirk-private", type: "User" }, author_association: "CONTRIBUTOR" };
   assert.equal(trustedAuthor(privateMember), false);
-  addWriters(["kirk-private"]);
+  assert.equal(knownWriter("kirk-private"), null);
+  setWriters("o/r", ["kirk-private"]);
   assert.equal(trustedAuthor(privateMember), true);
+  setWriters("o/other", []);
+  assert.equal(trustedAuthor(privateMember), false);
   assert.equal(pushAuthor({ user: { login: "someone", type: "User" }, author_association: "NONE" }), false);
   assert.match(decisionsSection(decisions), /Keep the 1024-octet bound[\s\S]*participant set/);
   assert.equal(decisionsSection([]), "");

@@ -497,20 +497,24 @@ export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${
 /** People who can push; on a public repository anyone else may still comment and review. */
 export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 /**
+ * The writers of the one repository this process works on, by login (primeWriters in github.mjs fills and refreshes
+ * it). author_association alone is not enough: an App's token sees an organization member whose membership is private
+ * as CONTRIBUTOR or NONE. Set for another repository, the list starts over, so one repository's writers never count in
+ * another.
+ */
+let WRITERS = { repo: null, logins: new Set() };
+export const setWriters = (repoFull, logins) => {
+  WRITERS = { repo: repoFull, logins: new Set((logins || []).filter(Boolean)) };
+};
+/** Whether the writer list holds this login (null: no list is known, so only the association can say). */
+export const knownWriter = (login) => (WRITERS.repo ? WRITERS.logins.has(login) : null);
+
+/** A person who can push: by the association the reader sees, or by the repository's writer list. */
+export const pushAuthor = (item) => PUSH_ASSOCIATIONS.has(item?.author_association) || knownWriter(item?.user?.login) === true;
+/**
  * Whether Factory may act on a marker in this comment or review: written by an App (Factory's own bot; a stranger's
  * app cannot act on the repository without being installed) or by someone who can push. Anyone can paste a marker.
  */
-/**
- * The repository's writers by login (primeWriters in github.mjs fills it once per run). author_association alone is
- * not enough: an App's token sees an organization member whose membership is private as CONTRIBUTOR or NONE.
- */
-const WRITERS = new Set();
-export const addWriters = (logins) => {
-  for (const l of logins || []) if (l) WRITERS.add(l);
-};
-
-/** A person who can push: by the association the reader sees, or by the repository's writer list. */
-export const pushAuthor = (item) => PUSH_ASSOCIATIONS.has(item?.author_association) || WRITERS.has(item?.user?.login);
 export const trustedAuthor = (item) => item?.user?.type === "Bot" || pushAuthor(item);
 
 /**

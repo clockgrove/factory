@@ -15,8 +15,6 @@ export const CLAIM_PAUSE_MS = 24 * 60 * 60_000;
 export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
 const CLAIM_SKEW_MS = 2 * 60_000;
-/** Only people who can push may claim (a local loop writes as its developer, never as the App). */
-
 export const claimMarker = (issue) => marker(issue, "local");
 
 /** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
@@ -42,6 +40,7 @@ export function parseClaim(body, now = Date.now()) {
 export async function localClaim(repo, issue, opts, now = Date.now()) {
   const mark = claimMarker(issue);
   await primeWriters(repo, opts);
+  // Only people who can push may claim (a local loop writes as its developer, never as the App).
   const c = (await listComments(repo, issue, opts)).find((x) => (x.body || "").includes(mark) && x?.user?.type !== "Bot" && pushAuthor(x));
   if (!c) return null;
   const parsed = parseClaim(c.body, now);

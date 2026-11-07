@@ -19,6 +19,7 @@ import {
   listReviewComments,
   moveCard,
   prComment,
+  primeWriters,
   requestReviewers,
   rest,
   setDraft,
@@ -26,7 +27,7 @@ import {
   upsertComment,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, decisionsSection, harnessActivity, isPlaceholder, maintainerDecisions, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
 import { spendMarker, sumSpend, trustedAuthor } from "./logic.mjs";
@@ -282,7 +283,14 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts)
   const candidates = maintainerDecisions(all);
   const can = new Map();
   const failed = [];
+  await primeWriters(repo, opts);
   for (const login of new Set(candidates.map((d) => d.author))) {
+    // The repository's writer list answers without a call; a per-author read only when no list is known.
+    const listed = knownWriter(login);
+    if (listed !== null) {
+      can.set(login, listed);
+      continue;
+    }
     const perm = await collaboratorPermission(repo, login, opts).catch((e) => {
       failed.push(`${login} (${e.status || e.message?.slice(0, 60)})`);
       return null;

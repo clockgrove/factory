@@ -17,7 +17,7 @@ import { PLUGIN_ROOT, branchIdentity, defaultBranchOf, installCommand, installPl
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, enableAutoMerge, findPr, getIssue, getRepo, listComments, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend } from "./lib/logic.mjs";
+import { REVIEW_LABEL, costByPhase, decideExit, marker, protectedPaths, protectedTouched, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit,
@@ -158,7 +158,7 @@ async function main() {
   const openPr = resumed ? await findPr(repo, branch, token).catch(() => null) : null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
-  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
+  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => trustedAuthor(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
   if (openPr && sentBack) {
     const behind = Number((await git(checkout, ["rev-list", "--count", `HEAD..origin/${defaultBranch}`])).stdout.trim()) || 0;
     if (behind > 0) {
@@ -347,7 +347,7 @@ async function main() {
     // A conflicting PR gets no pull_request runs at all (GitHub cannot build its merge ref), so it may reach
     // rebase mode without a review pass. Reviewed already: re-arm auto-merge, which the queue or GitHub dropped
     // when the PR went stale. Not yet reviewed: relabel (remove, then add) so the review job fires now.
-    const reviewed = rebaseMode ? (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => [])).some((r) => (r.body || "").includes(marker(issue, "review"))) : false;
+    const reviewed = rebaseMode ? (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => [])).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))) : false;
     if (rebaseMode && reviewed && inputs.autoMerge) {
       try {
         const how = await enableAutoMerge(repo, pr.number, token);

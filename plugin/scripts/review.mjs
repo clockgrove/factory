@@ -18,7 +18,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, defaultBranchOf, installComman
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { closingIssues, enableAutoMerge, getIssue, getPr, postReview, prDiff, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
 import { eventAction, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, costByPhase, decideExit, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend , trustedAuthor } from "./lib/logic.mjs";
 import { git } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import {
@@ -172,7 +172,7 @@ async function main() {
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
-  const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => (r.body || "").includes(marker(issue, "review")));
+  const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 
   // Git identity and the credential helper first (the fetch needs the App's token on a runner), then the branch and the plugin.
@@ -301,11 +301,11 @@ async function main() {
   }
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
-  // Factory's own reviews on this PR (the marker in the body): their comments are the reviewer's, whoever posted them.
+  // Factory's own reviews on this PR (the marker in the body, from Factory or someone who can push): their comments are the reviewer's.
   // A failed read falls back to the author filter (null), not a crashed review run.
   const factoryReviewIds = async () => {
     try {
-      return new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
+      return new Set(((await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })) || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))).map((r) => r.id));
     } catch {
       return null;
     }

@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
+import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 
@@ -126,7 +126,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       // A human recovery (re-applying factory:objective) starts the count over: only markers newer than
       // the issue's last objective label count.
       const since = await objectiveLabeledAt(repo, issue.number, inputs.objectiveLabel, opts).catch(() => null);
-      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => (c.body || "").includes(prefix) && (!since || Date.parse(c.created_at) > Date.parse(since)));
+      const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => trustedAuthor(c) && (c.body || "").includes(prefix) && (!since || Date.parse(c.created_at) > Date.parse(since)));
       const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing });

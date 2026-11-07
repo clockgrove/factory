@@ -6,15 +6,15 @@ import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { join } from "node:path";
 import { listComments, rest, upsertComment } from "./github.mjs";
-import { marker } from "./logic.mjs";
+import { PUSH_ASSOCIATIONS, marker } from "./logic.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away. */
 export const CLAIM_FRESH_MS = 15 * 60_000;
 export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
 const CLAIM_SKEW_MS = 2 * 60_000;
-/** Only people who can push may claim: anyone can comment on a public repository. */
-const CLAIM_AUTHORS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+/** Only people who can push may claim (a local loop writes as its developer, never as the App). */
+const CLAIM_AUTHORS = PUSH_ASSOCIATIONS;
 
 export const claimMarker = (issue) => marker(issue, "local");
 

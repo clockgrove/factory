@@ -13,6 +13,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: The Action's manifest and the workflows parse as YAML
+        run: python3 -c 'import glob, yaml; [yaml.safe_load(open(f)) for f in ["action.yml", *glob.glob(".github/workflows/*.yml")]]'
       - name: Plugin tests
         run: node --test plugin/test/*.test.mjs
       - name: Bench tests

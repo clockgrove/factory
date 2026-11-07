@@ -111,6 +111,13 @@ export async function githubChecks({ inputs, repo, token, app, env = process.env
     const text = readFileSync(wf, "utf8");
     const ro = /contents:\s*read/.test(text) && !/contents:\s*write/.test(text);
     out.push(ro ? PASS("job token", "contents: read in the workflow") : FAIL("job token", "the workflow grants contents: write", "set permissions: contents: read; writes go through the App"));
+    // A pin older than local mode does not know factory:local, so its jobs would also run Objectives a local loop holds.
+    const pin = /uses:\s*clockgrove\/factory@v(\d+)\.(\d+)\.(\d+)\b/.exec(text);
+    if (pin) {
+      const [maj, min, pat] = pin.slice(1).map(Number);
+      const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
+      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.slice(1).join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.slice(1).join(".")}`));
+    }
     if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
   }
 

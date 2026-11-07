@@ -16,6 +16,9 @@ export const MODEL_DEFAULTS = {
   copilot: { model: "", subagent_model: "", reviewer_model: "" },
 };
 
+/** This plugin's version (its manifest), the tag the Action default and setup's fallback pin name. */
+export const FACTORY_VERSION = JSON.parse(readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8")).version;
+
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
@@ -39,7 +42,7 @@ export const DEFAULTS = {
   ci_checks: "",
   harness_version: "latest",
   node_version: "22",
-  action: "clockgrove/factory@v0.7.0",
+  action: `clockgrove/factory@v${FACTORY_VERSION}`,
   objective_label: "factory:objective",
   mode: "",
   issue: "",

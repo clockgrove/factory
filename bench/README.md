@@ -36,6 +36,15 @@ node bench/drill.mjs --repo OWNER/SCRATCH --set conflict --dispatch            #
 
 A Question or Blocked exit ends the drill's wait for that Objective. The drill files Objectives on a scratch repository (never Factory's own, never a product repository), lets the Action take them, waits, and scores them. The medium set is the instrument for changes to the worker's skills; the reviewer's is `bench/review-replay.mjs` against the private replay set.
 
+## Sandbox check
+
+```sh
+node bench/sandbox-check.mjs                          # srt, Claude Code, Codex and Copilot, as local mode configures them
+node bench/sandbox-check.mjs --harness srt,codex      # the two that need no model call
+```
+
+Local mode's sandbox bar, probed on this machine. One probe script runs under srt (Factory's own commands) and under each harness's own sandbox, and every result is checked: the credential store unreadable, writes only in the clone and the stage directories (the clone's hooks and config and the stage's `bin` not), escapes to /tmp and the home directory looked for on the host, the allow-listed host reachable for GET and POST and others not, no model key in the commands' environment. Claude Code and Copilot take one model call each. On Windows it checks that local mode refuses and names WSL2. The scratch adopter runs it on hosted Linux, macOS and Windows from its `sandbox-check` workflow.
+
 ## Skills, versioned
 
 `node bench/skills.mjs` records every plugin skill (SHA-256, lines, words) and a digest in `bench/skills.json`; each scorecard row carries that digest, so a row names the skills it ran on. `node bench/skills.mjs --check` fails when a skill changed without a new record, and both forms fail when a skill is over the one-page cap (60 lines, 700 words). Record after the scored Objective that justified the change, never before.

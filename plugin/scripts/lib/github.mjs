@@ -187,6 +187,20 @@ export async function getPr(repo, number, opts) {
   return rest(`repos/${repo.full}/pulls/${number}`, opts);
 }
 
+/**
+ * The PR once GitHub has worked out whether it still merges. Right after a sibling merges its state is `unknown`
+ * for a few seconds (the read starts the computation); a decision on that would miss the conflict, and on Actions
+ * nothing else wakes the dispatcher. Gives up after `tries` and returns the last answer.
+ */
+export async function getPrSettled(repo, number, opts, { tries = 6, waitMs = 2500 } = {}) {
+  let pr = await getPr(repo, number, opts);
+  for (let i = 1; i < tries && pr && !pr.merged && pr.state === "open" && (pr.mergeable === null || pr.mergeable_state === "unknown"); i += 1) {
+    await new Promise((r) => setTimeout(r, waitMs));
+    pr = await getPr(repo, number, opts);
+  }
+  return pr;
+}
+
 export async function createPr(repo, { head, base, title, body, draft }, opts) {
   return rest(`repos/${repo.full}/pulls`, { ...opts, method: "POST", body: { head, base, title, body, draft: !!draft } });
 }

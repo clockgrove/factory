@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPr, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -119,7 +119,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) continue;
-      const pr = await getPr(repo, open.number, opts).catch(() => null);
+      const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it does not count as the one rebase allowed; the issue is sent again.
       const prefix = marker(issue.number, "rebase").replace(/ -->$/, "");

@@ -19,9 +19,9 @@ export const MODEL_DEFAULTS = {
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
-  effort: "", // empty: MODEL_DEFAULTS for the harness (the worker's effort; Claude only)
-  compaction_window: "", // empty: the CLI default (Claude only)
-  resume_policy: "fresh", // fresh | fix-passes (Claude only): which re-entries resume the worker's saved session
+  effort: "", // empty: MODEL_DEFAULTS for the harness (the worker's effort)
+  compaction_window: "", // empty: the CLI default (Claude and Codex; Copilot has no such setting)
+  resume_policy: "fresh", // fresh | fix-passes: which re-entries resume the worker's saved session
   subagent_model: "",
   reviewer_model: "",
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)

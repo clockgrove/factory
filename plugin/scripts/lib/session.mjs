@@ -2,7 +2,7 @@
 // protected-path commit guard, the PR, Factory's own validation passes with the
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { branchDelta, runValidation } from "./checkout.mjs";
@@ -57,28 +57,57 @@ export function maskFile(file, secrets) {
   if (hits) writeFileSync(file, text);
   return hits;
 }
+/** Where a harness keeps its sessions: Claude Code's projects, Codex's sessions, Copilot's session-state. */
+export function sessionRoot(harness, env = process.env) {
+  if (harness === "claude") return join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  if (harness === "codex") return join(env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
+  if (harness === "copilot") return join(env.COPILOT_HOME || join(homedir(), ".copilot"), "session-state");
+  return null;
+}
+
 /**
- * Copy the Claude Code session transcript into the usage directory so a later job for the same
- * Objective can resume it: `<config>/projects/<dir>/<id>.jsonl` (and its `<id>/` side directory
- * when present) to `<usageDir>/transcript/<dir>/`, each file masked like the event log. Returns
- * `{id, projectDir, checkout, files}` for the usage record, or null when there is nothing to save.
- * The project directory name is Claude Code's encoding of the checkout path; a restore is only
- * valid on a runner whose checkout path is the same, which the record's `checkout` lets it check.
+ * One session's files and directories, relative to its root: Claude Code `<project>/<id>.jsonl` and its `<id>/`
+ * side directory, Codex `YYYY/MM/DD/rollout-<time>-<id>.jsonl`, Copilot `<id>/`.
+ */
+export function sessionFiles(harness, root, id) {
+  if (!root || !id || !existsSync(root)) return [];
+  if (harness === "claude") {
+    const dir = readdirSync(root).find((d) => existsSync(join(root, d, `${id}.jsonl`)));
+    return dir ? [join(dir, `${id}.jsonl`), ...(existsSync(join(root, dir, id)) ? [join(dir, id)] : [])] : [];
+  }
+  if (harness === "codex") {
+    const out = [];
+    const walk = (rel, depth) => {
+      for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+        const r = join(rel, e.name);
+        if (e.isDirectory() && depth < 3) walk(r, depth + 1);
+        else if (e.isFile() && e.name.endsWith(`-${id}.jsonl`)) out.push(r);
+      }
+    };
+    walk("", 0);
+    return out;
+  }
+  if (harness === "copilot") return existsSync(join(root, id)) ? [id] : [];
+  return [];
+}
+
+/**
+ * Copy the harness session into the usage directory so a later stage of the same Objective can resume it: its
+ * files under `<usageDir>/transcript/`, each masked like the event log. Returns `{harness, id, files, checkout}`
+ * for the usage record, or null when there is nothing to save. A session is only valid in the same checkout path,
+ * which the record's `checkout` lets the restore check.
  */
 export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets = [] }) {
-  if (harness !== "claude" || !sessionId) return null;
-  const root = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
-  if (!existsSync(root)) return null;
-  const dir = readdirSync(root).find((d) => existsSync(join(root, d, `${sessionId}.jsonl`)));
-  if (!dir) return null;
-  const dest = join(usageDir, "transcript", dir);
-  mkdirSync(dest, { recursive: true });
-  const files = [];
-  cpSync(join(root, dir, `${sessionId}.jsonl`), join(dest, `${sessionId}.jsonl`));
-  files.push(`${sessionId}.jsonl`);
-  if (existsSync(join(root, dir, sessionId))) {
-    cpSync(join(root, dir, sessionId), join(dest, sessionId), { recursive: true });
-    files.push(`${sessionId}/`);
+  const root = sessionRoot(harness);
+  const files = sessionFiles(harness, root, sessionId);
+  if (!files.length) return null;
+  const dest = join(usageDir, "transcript");
+  // Locally the usage directory is writable from the sandbox: start from an empty copy, so nothing the model left
+  // there (a symlink out of the sandbox) is written through or restored later. rmSync does not follow links.
+  rmSync(dest, { recursive: true, force: true });
+  for (const rel of files) {
+    mkdirSync(join(dest, rel, ".."), { recursive: true });
+    cpSync(join(root, rel), join(dest, rel), { recursive: true });
   }
   const mask = (p) => {
     for (const name of readdirSync(p, { withFileTypes: true })) {
@@ -88,31 +117,26 @@ export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets
     }
   };
   mask(dest);
-  return { id: sessionId, projectDir: dir, checkout, files };
+  return { harness, id: sessionId, files, checkout };
 }
 
 /**
- * Restore the newest saved transcript for this Objective (from the work or review usage
- * artifact, whichever is newer) into Claude Code's projects directory, so the next harness call
- * can `--resume` it. `token` must read Actions artifacts (the job token). Returns
- * `{id, from, reason}`: `id` is the session to resume, or null with the reason it is not.
+ * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
+ * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
+ * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
+ * alone: locally the live session is the newer copy. Returns `{id, from, reason}`: `id` is the session to resume,
+ * or null with the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir }) {
-  const arts = [];
-  for (const name of [`factory-usage-${issue}`, `factory-usage-${issue}-review`]) {
-    const r = await rest(`repos/${repo.full}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=20`, { token }).catch(() => null);
-    arts.push(...(r?.artifacts || []).filter((a) => !a.expired && a.workflow_run?.id));
-  }
-  if (!arts.length) return { id: null, from: null, reason: "no earlier usage artifact" };
-  arts.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  // A newer job that ran no harness (a clean rebase, an already-reviewed PR) saved no session:
-  // look past it, newest first, to the most recent run that did.
-  let last = "no earlier run saved a transcript";
-  for (const a of arts.slice(0, 3)) {
-    const dir = join(workDir, `factory-restore-${a.id}`);
-    const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: token }, timeoutMs: 120_000 });
-    if (d.code !== 0) {
-      last = `artifact download failed (exit ${d.code ?? "timeout"})`;
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness }) {
+  const sources = process.env.FACTORY_LOCAL === "1" ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
+  if (!sources.length) return { id: null, from: null, reason: process.env.FACTORY_LOCAL === "1" ? "no earlier stage here" : "no earlier usage artifact" };
+  // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
+  // newest first, to the most recent one that did.
+  let last = "no earlier run saved a session";
+  for (const src of sources.slice(0, 3)) {
+    const dir = await src.dir();
+    if (!dir) {
+      last = src.error || last;
       continue;
     }
     let s = null;
@@ -121,16 +145,54 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir 
     } catch {
       continue;
     }
-    if (!s?.id || !s.projectDir) continue;
-    if (s.checkout !== checkout) return { id: null, from: a.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
-    const src = join(dir, "transcript", s.projectDir);
-    if (!existsSync(join(src, `${s.id}.jsonl`))) return { id: null, from: a.name, reason: "the transcript file is missing from the artifact" };
-    const dest = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects", s.projectDir);
-    mkdirSync(dest, { recursive: true });
-    cpSync(src, dest, { recursive: true });
-    return { id: s.id, from: a.name, reason: "" };
+    if (!s?.id || !s.files?.length) continue;
+    if (s.harness !== harness) return { id: null, from: src.name, reason: `the earlier session is ${s.harness ?? "another harness"}'s; this stage runs ${harness}` };
+    if (s.checkout !== checkout) return { id: null, from: src.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
+    const root = sessionRoot(harness);
+    for (const rel of s.files) {
+      const from = join(dir, "transcript", rel);
+      if (!existsSync(from)) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
+      if (!existsSync(join(root, rel))) {
+        mkdirSync(join(root, rel, ".."), { recursive: true });
+        cpSync(from, join(root, rel), { recursive: true });
+      }
+    }
+    return { id: s.id, from: src.name, reason: "" };
   }
   return { id: null, from: null, reason: last };
+}
+
+/** Local mode: the Objective's earlier stage directories, newest first. */
+function localSessionSources(workDir) {
+  if (!workDir || !existsSync(workDir)) return [];
+  return readdirSync(workDir)
+    .filter((n) => /^usage-(work|review)-/.test(n) && existsSync(join(workDir, n, "result.json")))
+    .map((n) => ({ name: n, at: statSync(join(workDir, n, "result.json")).mtimeMs, dir: async () => join(workDir, n) }))
+    .sort((a, b) => b.at - a.at);
+}
+
+/** Actions: the Objective's work and review usage artifacts, newest first, each downloaded on demand. */
+async function artifactSessionSources({ repo, issue, token, workDir }) {
+  const arts = [];
+  for (const name of [`factory-usage-${issue}`, `factory-usage-${issue}-review`]) {
+    const r = await rest(`repos/${repo.full}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=20`, { token }).catch(() => null);
+    arts.push(...(r?.artifacts || []).filter((a) => !a.expired && a.workflow_run?.id));
+  }
+  arts.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  return arts.map((a) => {
+    const src = {
+      name: a.name,
+      error: null,
+      dir: async () => {
+        const dir = join(workDir, `factory-restore-${a.id}`);
+        const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: token }, timeoutMs: 120_000 });
+        if (d.code === 0) return dir;
+        src.error = `artifact download failed (exit ${d.code ?? "timeout"})`;
+        return null;
+      },
+    };
+    return src;
+  });
 }
 
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());

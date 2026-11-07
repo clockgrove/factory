@@ -121,7 +121,7 @@ export async function federate({ exchangeUrl, env = process.env, audience = "ant
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, local = null }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null }) {
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
   // lib/local.mjs to one bar; on a runner the VM is disposable, so permissions are skipped.
   switch (harness) {
@@ -139,7 +139,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
-      return { cmd: "claude", args, stdin: prompt, canResume: true };
+      return { cmd: "claude", args, stdin: prompt, canResume: true, env: compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {} };
     }
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
@@ -148,7 +148,9 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS] })] : ["--dangerously-bypass-approvals-and-sandbox"];
       args.push("--json", ...perms, "--skip-git-repo-check");
       if (model && !resume) args.push("-m", model);
-      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true };
+      if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+      if (compaction) args.push("-c", `model_auto_compact_token_limit=${Number(compaction)}`);
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: {} };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
@@ -159,10 +161,12 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const perms = local ? ["--sandbox", "--allow-all-tools", "--allow-all-urls", ...local.addDirs.flatMap((d) => ["--add-dir", d])] : ["--allow-all"];
       const args = ["-p", prompt, ...perms, "--output-format", "json"];
       if (model) args.push("--model", model);
+      if (effort) args.push("--reasoning-effort", effort);
+      // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.
       if (agent) args.push("--agent", agent);
       if (resume) args.push("--resume", resume);
       if (usageFile) args.push("--usage-output-file", usageFile);
-      return { cmd: "copilot", args, stdin: undefined, canResume: true };
+      return { cmd: "copilot", args, stdin: undefined, canResume: true, env: {} };
     }
     default:
       throw new Error(`unknown harness ${harness}`);
@@ -189,14 +193,15 @@ export function harnessVersion(harness) {
 
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
-  const { cmd, args, stdin } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, local: localSandbox(env) });
+  const compaction = env?.FACTORY_COMPACTION_WINDOW || null;
+  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, local: localSandbox(env) });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });
     appendFileSync(eventsFile, `${JSON.stringify({ type: "factory.run", label, harness, model: model || null, started: new Date().toISOString(), resume: !!resume })}\n`);
   }
   const started = new Date().toISOString();
-  const r = await exec(cmd, args, { cwd, env, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs });
+  const r = await exec(cmd, args, { cwd, env: { ...env, ...extraEnv }, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs });
   const ended = new Date().toISOString();
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile });
   rec.label = label;

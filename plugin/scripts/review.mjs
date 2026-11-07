@@ -203,7 +203,7 @@ async function main() {
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
   const exitFile = join(usageDir, "exit.json");
   rmSync(exitFile, { force: true });
-  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.harness === "claude" && inputs.compactionWindow ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: inputs.compactionWindow } : {}) };
+  const harnessEnv = { ...childBase, ...cred.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, FACTORY_EXIT_FILE: exitFile, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}) };
   const taskCard = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     issue,
@@ -219,8 +219,8 @@ async function main() {
   // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer
   // passes; the reviewer always runs in its own fresh session.
   let restored = null;
-  if (inputs.harness === "claude" && inputs.resumePolicy === "fix-passes") {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, "..") });
+  if (inputs.resumePolicy === "fix-passes") {
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
   if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);

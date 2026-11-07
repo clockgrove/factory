@@ -209,8 +209,8 @@ class Local {
     const wf = { ...this.wf };
     // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
     if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT"]) delete wf[k];
-    // The developer's own harness and model settings win over the workflow's.
-    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT"]) if (process.env[k]) wf[k] = process.env[k];
+    // The developer's own harness, model and session settings win over the workflow's.
+    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW"]) if (process.env[k]) wf[k] = process.env[k];
     const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...wf };
     // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
     for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && k !== "FACTORY_LOCAL_TOKEN") env[k] = v;

@@ -18,6 +18,7 @@ export const MEASURES = [
   ["ciWaitMinutes", (r) => r.phases?.ciWaitMinutes ?? null, "CI wait min"],
   ["dispatchSeconds", (r) => r.dispatch?.maxSeconds ?? null, "dispatch s"],
   ["setupMinutes", (r) => r.phases?.setupMinutes ?? null, "setup min"],
+  ["firstSetupMinutes", (r) => r.phases?.firstSetupMinutes ?? null, "first-time setup min"],
   ["wallMinutes", (r) => r.wallMinutes ?? null, "wall min"],
   ["sessions", (r) => r.activity?.sessions ?? null, "sessions"],
 ];

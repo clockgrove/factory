@@ -2,12 +2,14 @@
 //
 // Each run (work, review) edits one `<!-- factory:N:progress:... -->` comment with a line per
 // phase: `- HH:MMZ <phase>`. The minutes between consecutive lines belong to the earlier line's
-// phase. Categories: setup (setup, install), model (harness, fix runs, reviewer, answer passes,
+// phase. Categories: firstSetup (a local Objective's first stage on a machine: the clone, whose seconds its line
+// carries, and the cold install), setup (setup, install), model (harness, fix runs, reviewer, answer passes,
 // rebase), ciWait (waiting for required checks), other. The exit line ends a run.
 const MARK = (issue) => `<!-- factory:${issue}:progress`;
 const LINE = /^- (\d\d):(\d\d)Z (.*)$/gm;
 
 export function phaseOf(text) {
+  if (/^first-time setup\b|^install \(first time/.test(text)) return "firstSetup";
   if (/^(setup|install)\b/.test(text)) return "setup";
   if (/^waiting for required checks/.test(text)) return "ciWait";
   if (/^exit:/.test(text)) return "exit";
@@ -18,17 +20,19 @@ export function phaseOf(text) {
 /** `{runs, setupMinutes, modelMinutes, ciWaitMinutes, otherMinutes, basis}`; minutes null without a progress comment. */
 export function phaseMinutes(comments, issue) {
   const runs = (comments || []).filter((c) => (c.body || "").startsWith(MARK(issue)));
-  const sums = { setup: 0, model: 0, ciWait: 0, other: 0 };
+  const sums = { firstSetup: 0, setup: 0, model: 0, ciWait: 0, other: 0 };
   for (const c of runs) {
     const lines = [...c.body.matchAll(LINE)].map((m) => ({ t: Number(m[1]) * 60 + Number(m[2]), phase: phaseOf(m[3]) }));
+    // The clone happened before the run's first line: its seconds ride the line.
+    for (const m of c.body.matchAll(/^- \d\d:\d\dZ first-time setup: cloned in (\d+) s$/gm)) sums.firstSetup += Number(m[1]) / 60;
     for (let i = 0; i + 1 < lines.length; i++) {
       let d = lines[i + 1].t - lines[i].t;
       if (d < 0) d += 24 * 60; // the run crossed midnight UTC
       if (lines[i].phase !== "exit") sums[lines[i].phase] += d;
     }
   }
-  if (!runs.length) return { runs: 0, setupMinutes: null, modelMinutes: null, ciWaitMinutes: null, otherMinutes: null, basis: "no progress comment" };
-  return { runs: runs.length, setupMinutes: sums.setup, modelMinutes: sums.model, ciWaitMinutes: sums.ciWait, otherMinutes: sums.other, basis: `${runs.length} progress comment(s)` };
+  if (!runs.length) return { runs: 0, firstSetupMinutes: null, setupMinutes: null, modelMinutes: null, ciWaitMinutes: null, otherMinutes: null, basis: "no progress comment" };
+  return { runs: runs.length, firstSetupMinutes: Math.round(sums.firstSetup * 10) / 10, setupMinutes: sums.setup, modelMinutes: sums.model, ciWaitMinutes: sums.ciWait, otherMinutes: sums.other, basis: `${runs.length} progress comment(s)` };
 }
 
 // Dispatch latency: for each run, the seconds from the GitHub event that should start it to the run

@@ -128,11 +128,12 @@ async function main() {
   if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
   // The work lineage's session (a restored worker session, a fix pass, the answer pass): what finish saves.
   const session = { id: null, canResume: true };
+  let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: session.id, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: session.id, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     if (backend().name === "local") progress.spend(usage.usd);
@@ -225,7 +226,9 @@ async function main() {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
-  if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);
+  // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
+  reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: "resume policy is fresh" };
+  await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
 
   // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
   // carries the marker; a head a human pushed or marked ready does not, so Factory's own
@@ -340,6 +343,7 @@ async function main() {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
       await progress("re-entry: resume failed; answering fresh");
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume failed" };
       session.id = null;
       rec = await runHarness(answerArgs(null));
     }

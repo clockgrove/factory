@@ -75,12 +75,13 @@ async function main() {
   const app = keeper.app;
   const progress = progressReporter(repo, issue, token, { stage: "work" });
 
+  let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+    const usage = writeUsage(usageDir, { harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: saveTranscript({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     if (backend().name === "local") progress.spend(usage.usd);
@@ -181,6 +182,11 @@ async function main() {
   // Children (setup, install, the harness) act as the App through gh's hosts.yml and the
   // git credential helper, both re-written by the keeper; no token sits in their env.
   const childBase = scrubbedEnv(process.env, { ...keeper.childEnv(), CI: "true", ...branchIdentity(branch) });
+  // A local Objective's first stage on a machine: a fresh clone and a cold install, reported apart from the run's own
+  // setup so the bench does not count a one-time cost against every run (bench/lib/phases.mjs: firstSetup).
+  const firstMs = Number(process.env.FACTORY_LOCAL_FIRST_SETUP_MS);
+  const first = Number.isFinite(firstMs) && firstMs >= 0;
+  if (first) await progress(`first-time setup: cloned in ${Math.round(firstMs / 1000)} s`);
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
     await progress("setup");
@@ -196,7 +202,7 @@ async function main() {
   const install = installCommand(checkout, inputs.install);
   if (install) {
     log(`install: ${install}`);
-    await progress("install");
+    await progress(first ? "install (first time on this machine)" : "install");
     const i = await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!i.ok) {
       const reason = `offline install failed: ${install}`;
@@ -233,7 +239,9 @@ async function main() {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
-  if (restored) await progress(`re-entry: ${restored.id ? `resumed session ${restored.id.slice(0, 8)} from ${restored.from}` : `fresh (${restored.reason})`}`);
+  // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
+  reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
+  await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
@@ -268,6 +276,7 @@ async function main() {
       log(`resumed session ${restored.id.slice(0, 8)} failed (${rec.error}); running fresh`);
       await progress("re-entry: resume failed; running fresh");
       restored = { ...restored, id: null, reason: "resume failed" };
+      reentry = { resumed: false, from: restored.from ?? null, reason: "resume failed" };
       session.id = null;
     }
     died += 1;

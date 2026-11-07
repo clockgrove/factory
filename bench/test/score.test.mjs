@@ -250,9 +250,15 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   const work = body(7, ["23:50Z setup", "23:52Z install", "00:01Z harness claude (claude-opus-5-5) attempt 1", "00:31Z waiting for required checks (quality) on abc1234", "00:45Z validation pass 1 red: required checks quality on abc1234; fix run", "00:55Z waiting for required checks (quality) on def5678", "01:05Z exit: delivered; usd 1.00"]);
   const review = `<!-- factory:7:progress:review:2 -->\nFactory review run 2\n- 01:10Z setup\n- 01:11Z reviewer claude-fable-5-1\n- 01:20Z answer pass: 2 comment(s)\n- 01:24Z exit: delivered; usd 0.50`;
   const p = phaseMinutes([{ body: "<!-- factory:7:plan -->" }, { body: work }, { body: review }], 7);
-  assert.deepEqual(p, { runs: 2, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, otherMinutes: 0, basis: "2 progress comment(s)" });
+  assert.deepEqual(p, { runs: 2, firstSetupMinutes: 0, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, otherMinutes: 0, basis: "2 progress comment(s)" });
   assert.equal(phaseMinutes([{ body: "<!-- factory:8:progress:work:1 -->\n- 01:00Z setup" }], 7).runs, 0);
   assert.equal(phaseMinutes([], 7).modelMinutes, null);
+  // A local Objective's first stage on a machine: the clone's seconds ride its line, the cold install is its own phase.
+  const firstRun = "<!-- factory:7:progress:work:9 -->\n- 10:00Z first-time setup: cloned in 90 s\n- 10:00Z install (first time on this machine)\n- 10:03Z harness\n- 10:13Z exit: delivered";
+  const f = phaseMinutes([{ body: firstRun }], 7);
+  assert.equal(f.firstSetupMinutes, 1.5 + 3);
+  assert.equal(f.setupMinutes, 0);
+  assert.equal(f.modelMinutes, 10);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
   assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Setup min \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);

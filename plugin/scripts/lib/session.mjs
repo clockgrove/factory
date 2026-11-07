@@ -27,7 +27,7 @@ import { log } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, harnessActivity, isPlaceholder, marker, parseExitRecord, renderTaskCard, taskCardValues } from "./logic.mjs";
 import { exec, git } from "./proc.mjs";
 import { mergeUsage } from "./usage.mjs";
-import { sumSpend, trustedAuthor } from "./logic.mjs";
+import { spendMarker, sumSpend, trustedAuthor } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -331,6 +331,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = proces
   const links = [];
   const started = Date.now();
   let status = "";
+  let spend = null;
   let lastWrite = 0;
   let writing = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
@@ -338,7 +339,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = proces
   const write = async () => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}`;
+    const tail = spend === null ? "" : `\n${spendMarker(spend)}`;
+    const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
     lastWrite = Date.now();
     await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
   };
@@ -355,6 +357,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = proces
     writing = write().finally(() => {
       writing = null;
     });
+  };
+  /** A run with no usage artifact (local mode) records its dollars here, where any dispatcher can sum them. */
+  progress.spend = (usd) => {
+    if (Number.isFinite(usd)) spend = usd;
   };
   /** A link shown in the header (the PR, once it exists). */
   progress.link = (label, url) => {

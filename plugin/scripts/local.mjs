@@ -56,26 +56,6 @@ export function repoFromRemote(url) {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
-/** Today's local spend, from the spend lines each stage appends; the dispatcher adds it to the artifacts' sum. */
-export function localSpentToday(dev, day = new Date().toISOString().slice(0, 10)) {
-  const root = join(dev, ".factory");
-  if (!existsSync(root)) return 0;
-  let usd = 0;
-  for (const d of readdirSync(root)) {
-    const f = join(root, d, "spend.jsonl");
-    if (!existsSync(f)) continue;
-    for (const line of readFileSync(f, "utf8").split("\n")) {
-      try {
-        const r = JSON.parse(line);
-        if (String(r.at).startsWith(day) && Number.isFinite(r.usd)) usd += r.usd;
-      } catch {
-        // a partial line
-      }
-    }
-  }
-  return usd;
-}
-
 function preflight(harness, repoFull, token, copilotToken) {
   const problems = [];
   if (!["claude", "codex", "copilot"].includes(harness)) problems.push(`unknown harness ${harness}`);
@@ -308,7 +288,6 @@ class Local {
           // no record: the child failed before writing one
         }
         if (env.TMPDIR && env.TMPDIR !== process.env.TMPDIR) rmSync(env.TMPDIR, { recursive: true, force: true });
-        if (Number.isFinite(result?.usd)) appendFileSync(join(this.ws(issue), "spend.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: name, usd: result.usd })}\n`);
         done({ code, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir });
       });
     });
@@ -421,13 +400,13 @@ class Local {
     process.on("SIGTERM", stop);
     for (;;) {
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
-      const result = await dispatch(inputs, { token: this.token, localSpentUsd: localSpentToday(this.dev) }).catch((e) => {
+      const result = await dispatch(inputs, { token: this.token }).catch((e) => {
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
       });
       const picks = (result.ready || []).filter((n) => !running.has(n));
       const reviews = (await this.pendingReviews()).filter((r) => !running.has(r.issue) && !picks.includes(r.issue));
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${localSpentToday(this.dev).toFixed(2)} spent locally today`);
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, this.runObjective(n).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       for (const r of reviews) running.set(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr)).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));
       if (once) {

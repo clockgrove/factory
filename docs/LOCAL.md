@@ -13,6 +13,7 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
 - The model reaches GitHub with one fine-grained token for this one repository, never your `gh` login.
 - Each Objective gets its own clone under `<your clone>/.factory/<issue>/`, which is git-excluded.
 - GitHub holds all state. A claim comment with a heartbeat marks an Objective a local loop is running, so the Action and other loops leave it alone.
+- Each local run writes its dollars into its progress comment, so the `daily_usd` cap counts local and Actions spend together, on any machine.
 
 ## Platforms
 
@@ -72,6 +73,5 @@ The task card tells the model to do the same. It needs the Postgres server binar
 
 ## Known limits
 
-- The Action's `daily_usd` cap does not count local spend; the loop prints its own daily total.
 - The repository token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.

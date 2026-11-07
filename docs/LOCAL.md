@@ -60,6 +60,7 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_LOCAL_ENV` | names of more variables the stage may see (the stage env is an allow-list, not your shell) |
 | `FACTORY_LOCAL_SETUP` | the setup command for your machine (the workflow's assumes a fresh runner) |
 | `FACTORY_LOCAL_DB=1`, `FACTORY_LOCAL_DB_INIT`, `FACTORY_PG_BIN` | a throwaway Postgres per validation command (below) |
+| `FACTORY_LOCAL_MAX_CONCURRENT` | how many Objectives (work or review) this machine runs at once; default a quarter of its CPU threads, at most one per 8 GB of memory. The workflow's `max_concurrent` still caps the repository as a whole |
 
 Local mode runs the validation commands itself, so their order is its wall time. Mark a command `parallel:` (for example `parallel: pnpm test`) when it may run at the same time as the marked commands beside it: each run of consecutive marked commands starts together, and the next command waits for all of them. Unmarked commands run one at a time, in order. Each command gets its own sandbox and, with `FACTORY_LOCAL_DB=1`, its own Postgres. When a group fails, the fix run gets every failed command's tail and the path of its whole output.
 
@@ -76,6 +77,7 @@ The task card tells the model to do the same. It needs the Postgres server binar
 
 ## Known limits
 
+- Local mode runs while `serve` runs: a machine that sleeps or shuts down stops its Objectives. One left Running for 15 minutes without a heartbeat is Blocked, and re-applying its label brings it back. Your machine's size sets how many run at once (`FACTORY_LOCAL_MAX_CONCURRENT`).
 - Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.
 - `/tmp` is read-only in the sandboxes; temp files go to `$TMPDIR`. A tool that drops `TMPDIR` from its children falls back to `/tmp` and fails there: Turborepo's strict mode does, unless the repository's `turbo.json` lists `TMPDIR` in `globalPassThroughEnv`.

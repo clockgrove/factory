@@ -55,6 +55,9 @@ export async function dropClaim(repo, issue, holder, opts) {
 }
 
 /** The hosts a sandboxed command may reach: GitHub and the npm registry, plus the adopter's list. */
+/** srt's and Claude Code's own scratch directory, writable in every one of their sandboxes on the box; Factory points nothing there. */
+export const SHARED_TMP = ["/tmp/claude", "/private/tmp/claude"];
+
 export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"];
 
 /**
@@ -84,7 +87,7 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       allowUnsandboxedCommands: false,
       autoAllowBashIfSandboxed: true,
       network: { allowedDomains: [...new Set(domains)] },
-      filesystem: { denyRead: secrets, denyWrite: guards },
+      filesystem: { denyRead: secrets, denyWrite: [...guards, ...SHARED_TMP] },
     },
     // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
     // false), which is what confines it; without the rule, gh writes and commands with variables would need a
@@ -172,7 +175,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
 export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [] } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: credentialPaths(home), allowWrite: writable, denyWrite: [...(clone ? gitGuards(clone) : []), ...readOnly] },
+    filesystem: { denyRead: credentialPaths(home), allowWrite: writable, denyWrite: [...(clone ? gitGuards(clone) : []), ...readOnly, ...SHARED_TMP] },
   };
 }
 

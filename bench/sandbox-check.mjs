@@ -33,7 +33,7 @@ if (platform() === "win32") {
 }
 
 // The bar, per probe: true = must work, false = must not.
-const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "private TMPDIR": true };
+const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "write /tmp/claude": false, "private TMPDIR": true };
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sbx-check-")));
 const clone = join(root, "clone");
@@ -53,6 +53,8 @@ mkdirSync(canaryDir, { recursive: true });
 const canary = join(canaryDir, `sandbox-check-${process.pid}`);
 writeFileSync(canary, "canary\n", { mode: 0o600 });
 const escapeTmp = join(tmpdir(), `factory-sbx-escape-${process.pid}`);
+// srt's and Claude Code's shared scratch directory: Factory denies writes there.
+const escapeShared = `/tmp/claude/factory-sbx-escape-${process.pid}`;
 const escapeHome = join(homedir(), `.factory-sbx-escape-${process.pid}`);
 
 // The probe: one line per check, `name<TAB>yes|no<TAB>detail`, written to the stage directory (writable everywhere).
@@ -70,7 +72,7 @@ r "pnpm lock dir" 'd="$XDG_RUNTIME_DIR/pnpm-store-operation-locks-$(id -u)"; mkd
 r "package caches" 'for d in "$npm_config_cache" "$pnpm_config_store_dir" "$BUN_INSTALL_CACHE_DIR" "$YARN_CACHE_FOLDER"; do [ -n "$d" ] && touch "$d/probe" || exit 1; done'
 r "private TMPDIR" 'case "$TMPDIR" in "${stageTmp}"|"${stageTmp}"/*) ;; *) echo "TMPDIR=$TMPDIR"; false ;; esac'
 r "write stage bin" 'echo x > "${bin}/probe-file"'
-sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
+sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeShared}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://github.com/); case "$code" in 2*|3*) ok=yes;; *) ok=no;; esac; printf 'GET allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST https://api.github.com/repos/clockgrove/factory/issues); case "$code" in 401|404|422) ok=yes;; *) ok=no;; esac; printf 'POST allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
 r "other host" 'curl -sf -o /dev/null --max-time 10 https://example.com'
@@ -83,10 +85,10 @@ chmodSync(probe, 0o755);
 const domains = LOCAL_DOMAINS;
 const readOnly = [bin];
 // The package caches a local stage gives each Objective (local.mjs stageEnv).
-const caches = { npm_config_cache: "npm-cache", pnpm_config_store_dir: "pnpm-store", BUN_INSTALL_CACHE_DIR: "bun-cache", YARN_CACHE_FOLDER: "yarn-cache" };
-for (const d of Object.values(caches)) mkdirSync(join(root, d));
-const cacheEnv = Object.fromEntries(Object.entries(caches).map(([k, d]) => [k, join(root, d)]));
-const addDirs = [usage, ...Object.values(cacheEnv), stageTmp];
+// pnpm's store and Bun's cache sit in the clone's node_modules (hardlinks need the clone's mount); npm's and Yarn's beside it.
+const cacheEnv = { npm_config_cache: join(root, "npm-cache"), YARN_CACHE_FOLDER: join(root, "yarn-cache"), pnpm_config_store_dir: join(clone, "node_modules", ".pnpm-store"), BUN_INSTALL_CACHE_DIR: join(clone, "node_modules", ".bun-cache") };
+for (const d of Object.values(cacheEnv)) mkdirSync(d, { recursive: true });
+const addDirs = [usage, cacheEnv.npm_config_cache, cacheEnv.YARN_CACHE_FOLDER, stageTmp];
 // Like a local stage: no model key in the env but the harness's own sign-in, where the CLI has no saved login.
 const OWN = { claude: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"], copilot: ["COPILOT_GITHUB_TOKEN"], srt: [] };
 const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !MODEL_SECRET_KEYS.includes(k)));
@@ -130,6 +132,7 @@ for (const name of wanted) {
   if (!runners[name]) continue;
   rmSync(join(usage, "results.tsv"), { force: true });
   rmSync(escapeTmp, { force: true });
+  rmSync(escapeShared, { force: true });
   rmSync(escapeHome, { force: true });
   git("reset", "-q", "--hard", initSha);
   rmSync(join(clone, "probe-file"), { force: true });
@@ -149,6 +152,7 @@ for (const name of wanted) {
   }
   const got = Object.fromEntries(lines.slice(0, -1).map((l) => l.split("\t")).map(([k, v, d]) => [k, { ok: v === "yes", detail: d || "" }]));
   got["escape to /tmp"] = { ok: existsSync(escapeTmp), detail: "checked on the host" };
+  got["write /tmp/claude"] = { ok: existsSync(escapeShared), detail: "checked on the host" };
   got["escape to home"] = { ok: existsSync(escapeHome), detail: "checked on the host" };
   // A harness's own sign-in variable is in its env only where no saved login exists (a CI runner); locally the
   // stage env carries none. Any other model key visible to a command is off the bar.
@@ -167,6 +171,7 @@ if (values.json) writeFileSync(values.json, `${JSON.stringify(report, null, 2)}\
 rmSync(canary, { force: true });
 if (!canaryExisted) rmSync(canaryDir, { recursive: true, force: true });
 rmSync(escapeTmp, { force: true });
+rmSync(escapeShared, { force: true });
 rmSync(escapeHome, { force: true });
 rmSync(root, { recursive: true, force: true });
 rmSync(stageTmp, { recursive: true, force: true });

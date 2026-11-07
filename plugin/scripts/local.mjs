@@ -204,12 +204,14 @@ class Local {
     const ws = this.ws(issue);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
+    // pnpm and Bun hardlink from theirs, which only works on the clone's own mount (each writable directory is a
+    // separate mount in the sandboxes): those two live in the clone's node_modules, which every tool already skips.
     const npmCache = join(ws, "npm-cache");
-    const pnpmStore = join(ws, "pnpm-store");
-    const bunCache = join(ws, "bun-cache");
     const yarnCache = join(ws, "yarn-cache");
-    const caches = [npmCache, pnpmStore, bunCache, yarnCache];
-    for (const d of caches) mkdirSync(d, { recursive: true });
+    const pnpmStore = join(clone, "node_modules", ".pnpm-store");
+    const bunCache = join(clone, "node_modules", ".bun-cache");
+    const caches = [npmCache, yarnCache];
+    for (const d of [...caches, pnpmStore, bunCache]) mkdirSync(d, { recursive: true });
     // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
     // the model could loosen the sandbox its own validation runs in.
     const sandboxDir = join(ws, ".sandbox");
@@ -248,9 +250,8 @@ class Local {
       // under the home directory beyond the working directory and the added directories.
       FACTORY_AUTH_DIR: join(usageDir, "auth"),
       npm_config_cache: npmCache,
-      // pnpm 12 reads pnpm_config_*, earlier pnpm npm_config_*.
+      // pnpm 12 reads pnpm_config_* (npm_config_store_dir would make npm warn on every command).
       pnpm_config_store_dir: pnpmStore,
-      npm_config_store_dir: pnpmStore,
       BUN_INSTALL_CACHE_DIR: bunCache,
       YARN_CACHE_FOLDER: yarnCache,
       FACTORY_LOCAL_SRT: srtFile,

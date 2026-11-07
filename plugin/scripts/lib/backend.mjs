@@ -4,10 +4,22 @@
 // (lib/local.mjs). A stage asks backend() rather than testing for local mode itself, so a third backend is one
 // more entry here.
 import { getIssue } from "./github.mjs";
-import { hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
+import { CLAIM_PAUSE_MS, hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
 
 /** A local loop holds the Objective while its claim's heartbeat is fresh. */
 const claimedLocally = async (repo, issue, opts) => (await localClaim(repo, issue, opts).catch(() => null))?.fresh === true;
+
+/**
+ * A local loop's hold on a Running Objective: "alive" while its heartbeat is fresh, "paused" while it is stale but
+ * younger than CLAIM_PAUSE_MS (the machine sleeps or serve stopped; that machine's serve resumes it), "expired" past
+ * that, and null with no claim. `holder` names the loop.
+ */
+const localHold = async (repo, issue, opts, now = Date.now()) => {
+  const c = await localClaim(repo, issue, opts, now).catch(() => null);
+  if (!c) return null;
+  const state = c.fresh ? "alive" : now - Date.parse(c.heartbeat) < CLAIM_PAUSE_MS ? "paused" : "expired";
+  return { state, holder: c.holder, heartbeat: c.heartbeat, commentId: c.commentId };
+};
 
 const ACTIONS = {
   name: "actions",
@@ -17,6 +29,7 @@ const ACTIONS = {
     /** A runner job steps aside from an Objective a local loop holds: labelled factory:local, or freshly claimed. */
     stepsAside: async (repo, issue, opts, issueData) => hasLocalLabel(issueData ?? (await getIssue(repo, issue, opts).catch(() => null))) || (await claimedLocally(repo, issue, opts)),
     claimedLocally,
+    localHold,
   },
   sandbox: {
     /** Factory's own commands run as they are: the runner VM is the sandbox. */
@@ -39,6 +52,7 @@ const LOCAL = {
     /** The local loop's claim is how it holds an Objective (local.mjs withClaim); a stage never steps aside. */
     stepsAside: async () => false,
     claimedLocally,
+    localHold,
   },
   sandbox: {
     /**

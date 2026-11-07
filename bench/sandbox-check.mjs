@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { MODEL_SECRET_KEYS } from "../plugin/scripts/lib/harness.mjs";
 import { BACKENDS } from "../plugin/scripts/lib/backend.mjs";
-import { prepareProtectedPaths } from "../plugin/scripts/lib/local.mjs";
+import { prepareProtectedPaths, stageTmpBase } from "../plugin/scripts/lib/local.mjs";
 import { LOCAL_DOMAINS, claudeLocalSettings, codexLocalConfig, copilotLocalSettings, srtSettings } from "../plugin/scripts/lib/local.mjs";
 
 const PLUGIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "plugin");
@@ -40,7 +40,7 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "sbx-check-")));
 const clone = join(root, "clone");
 const usage = join(root, "usage");
 const bin = join(usage, "bin");
-const stageTmp = realpathSync(mkdtempSync(join(tmpdir(), "fsc-")));
+const stageTmp = realpathSync(mkdtempSync(join(stageTmpBase(), "fsc-")));
 mkdirSync(bin, { recursive: true });
 mkdirSync(clone);
 const git = (...a) => execFileSync("git", ["-C", clone, ...a], { stdio: "ignore" });

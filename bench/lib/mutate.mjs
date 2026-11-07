@@ -47,7 +47,7 @@ const SWAPS = [
 ].map(([from, to]) => ({
   from,
   to,
-  pattern: new RegExp(`(?<= )${from.replace(/[|+]/g, "\\$&")}(?= )`, "g"),
+  pattern: new RegExp(`(?<= )${from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?= )`, "g"),
 }));
 const BOOLEANS = [
   ["true", "false"],

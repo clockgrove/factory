@@ -172,7 +172,10 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
 
 /** The one-line reason from the worker's Blocked comment (session.mjs applyExit): "Blocked (stage): <reason> — ..." */
 function blockedReason(body) {
-  const text = String(body || "").replace(/<!--[^>]*-->/g, "").replace(/^\s*@\S+\s*/, "").trim();
+  // Strip HTML comments until none is left: one pass can leave a comment that two overlapping ones formed.
+  let text = String(body || "");
+  for (let prev = null; prev !== text; ) [prev, text] = [text, text.replace(/<!--[^>]*-->/g, "")];
+  text = text.replace(/^\s*@\S+\s*/, "").trim();
   const m = /Blocked \(([^)]*)\):\s*([^\n]*?)(?:\s+—\s+PR #\d+|\s+Fix by pushing|$)/m.exec(text);
   return m ? `${m[2].trim()} (${m[1]})`.slice(0, 200) : text.split("\n")[0].slice(0, 200);
 }
@@ -338,7 +341,7 @@ const fmtTokens = (t) => {
 };
 const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === "number" ? `${n}` : String(n));
 /** One table cell: no pipe, no line break (a Blocked reason may carry either). */
-const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 /** The Markdown table: one row per Objective, oldest issue first. */
 export function markdownTable(rows) {

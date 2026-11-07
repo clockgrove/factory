@@ -442,6 +442,7 @@ export async function createProject(repo, opts) {
 
 /** An artifact never changes once uploaded: a long-lived dispatcher (factory serve) reads each one once. */
 const usageCache = new Map();
+const USAGE_DOWNLOADS = 8;
 
 /** Usage artifacts uploaded today (UTC), as parsed result.json records. */
 export async function todaysUsage(repo, { prefix = "factory-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
@@ -449,17 +450,27 @@ export async function todaysUsage(repo, { prefix = "factory-usage-", token, date
   const pages = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
   const artifacts = (Array.isArray(pages) ? pages : [pages]).flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || []));
   const today = artifacts.filter((a) => a.name?.startsWith(prefix) && !a.expired && String(a.created_at || "").startsWith(dateIso));
-  const records = [];
-  for (const a of today) {
+  // One download is about a second and a busy day has a hundred artifacts, so eight at a time: the
+  // dispatcher's tick, and with it every Objective's pickup, waits on this sum.
+  const one = async (a) => {
     try {
       const rec = usageCache.has(a.id) ? usageCache.get(a.id) : await (download ?? downloadArtifactResult)(repo, a, token);
       if (!download) usageCache.set(a.id, rec);
-      if (rec) records.push({ artifact: a.name, ...rec });
+      return rec ? { artifact: a.name, ...rec } : null;
     } catch (e) {
-      records.push({ artifact: a.name, usd: null, basis: `unreadable: ${e.message.slice(0, 120)}` });
+      return { artifact: a.name, usd: null, basis: `unreadable: ${e.message.slice(0, 120)}` };
     }
-  }
-  return records;
+  };
+  const records = new Array(today.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < today.length) {
+      const i = next++;
+      records[i] = await one(today[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(USAGE_DOWNLOADS, today.length) }, lane));
+  return records.filter(Boolean);
 }
 
 /** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */

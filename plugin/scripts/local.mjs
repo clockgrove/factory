@@ -2,7 +2,7 @@
 // Factory local mode: the same worker and reviewer the Action runs, on a developer's own box.
 //   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--dir CLONE] [--wait]
 //   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
-//   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all]
+//   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all] [--interval SECONDS (30)]
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
 // serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (logged in), srt (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on
@@ -346,7 +346,7 @@ class Local {
   }
 
   /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here. */
-  async serve({ once = false, intervalMs = 60_000 } = {}) {
+  async serve({ once = false, intervalMs = 30_000 } = {}) {
     const running = new Map();
     let stopping = false;
     const stop = async () => {
@@ -397,7 +397,7 @@ async function main() {
     return;
   }
   if (cmd === "serve") {
-    await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 60) * 1000 });
+    await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 30) * 1000 });
     return;
   }
   throw new Error("usage: local.mjs run <issue> [--wait] | review <pr> [--wait] | serve [--once] [--all]");

@@ -16,6 +16,7 @@ export const MEASURES = [
   ["cachedTokens", (r) => r.cost?.tokens?.cached ?? null, "cached tok"],
   ["writtenTokens", (r) => r.cost?.tokens?.written ?? null, "written tok"],
   ["ciWaitMinutes", (r) => r.phases?.ciWaitMinutes ?? null, "CI wait min"],
+  ["dispatchSeconds", (r) => r.dispatch?.maxSeconds ?? null, "dispatch s"],
   ["setupMinutes", (r) => r.phases?.setupMinutes ?? null, "setup min"],
   ["wallMinutes", (r) => r.wallMinutes ?? null, "wall min"],
   ["sessions", (r) => r.activity?.sessions ?? null, "sessions"],

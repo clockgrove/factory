@@ -17,13 +17,13 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, homedir, hostname, platform, tmpdir, totalmem } from "node:os";
+import { availableParallelism, homedir, hostname, platform, tmpdir, totalmem, uptime } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
+import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, listIssuesByLabel, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
 import { whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, prepareProtectedPaths, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
@@ -59,6 +59,57 @@ export function localMaxConcurrent(setting, { cpus = availableParallelism(), mem
   const n = Number.parseInt(setting, 10);
   if (Number.isFinite(n) && n > 0) return n;
   return Math.max(1, Math.min(Math.floor(cpus / 4), Math.floor(memBytes / 8 / 2 ** 30)));
+}
+
+const readId = (file) => {
+  try {
+    return readFileSync(file, "utf8").trim().replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
+  } catch {
+    return "";
+  }
+};
+
+/**
+ * Who this machine is and which boot it is on, for claim holders: a host name alone is not unique (a devcontainer on
+ * host networking, two laptops called the same), and a pid is only meaningful within one boot. Linux gives both ids;
+ * elsewhere the machine is its host name and the boot its start minute.
+ */
+export function machineIdentity() {
+  const machine = readId("/etc/machine-id") || readId("/var/lib/dbus/machine-id");
+  const boot = readId("/proc/sys/kernel/random/boot_id") || String(Math.round((Date.now() / 1000 - uptime()) / 60));
+  return { host: hostname(), machine, boot };
+}
+
+/** A loop's claim holder: `host:pid:nonce:machine:boot`. */
+export const holderId = (id = machineIdentity(), pid = process.pid) => `${id.host}:${pid}:${randomBytes(3).toString("hex")}:${id.machine}:${id.boot}`;
+
+const parseHolder = (holder) => {
+  const [host, pid, , machine = "", boot = ""] = String(holder || "").split(":");
+  return { host, pid: Number(pid), machine, boot };
+};
+
+/** True when the holder is a loop on this machine (same host name and, where known, the same machine id). */
+export function sameMachineHolder(holder, id = machineIdentity()) {
+  const h = parseHolder(holder);
+  return h.host === id.host && h.machine === id.machine;
+}
+
+/**
+ * A claim left by a loop on this machine whose process is gone (serve stopped, crashed, the machine restarted): its
+ * Objective is this machine's to resume at once, fresh heartbeat or not.
+ */
+export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid } = {}) {
+  if (!sameMachineHolder(holder, id)) return false;
+  const { pid, boot } = parseHolder(holder);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === self) return false;
+  // Another boot: every process of that one is gone, whatever pid now runs.
+  if (boot && boot !== id.boot) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === "ESRCH";
+  }
 }
 
 export function repoFromRemote(url) {
@@ -139,7 +190,7 @@ class Local {
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.opts = { token: this.token };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
-    this.holder = `${hostname()}:${process.pid}:${randomBytes(3).toString("hex")}`;
+    this.holder = holderId();
     this.children = new Set();
     this.excludeWorkspaces();
   }
@@ -293,6 +344,8 @@ class Local {
 
   /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */
   async stage(issue, name, script, args) {
+    // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
+    if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const usageDir = join(this.ws(issue), `usage-${name}-${stamp}`);
     mkdirSync(usageDir, { recursive: true });
@@ -330,12 +383,14 @@ class Local {
       return { exit: "skipped" };
     }
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
-    if (held?.fresh && held.holder !== this.holder) {
+    if (held?.fresh && held.holder !== this.holder && !deadHereHolder(held.holder)) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
       return { exit: "skipped" };
     }
     await writeClaim(this.repo, issue, this.holder, this.opts);
-    // Two loops writing at once: the comment's last writer holds it, and the other steps aside.
+    // Two loops writing at once: the comment's last writer holds it, and the other steps aside. A short random wait
+    // lets both writes land before either reads back, so both cannot read their own.
+    await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
     const mine = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (mine?.holder !== this.holder) {
       log(`#${issue}: another local loop claimed it first; leaving it alone`);
@@ -346,8 +401,40 @@ class Local {
       return await fn();
     } finally {
       clearInterval(beat);
-      await dropClaim(this.repo, issue, this.holder, this.opts);
+      // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it.
+      if (!this.stopping) await dropClaim(this.repo, issue, this.holder, this.opts);
     }
+  }
+
+  /**
+   * Running or In-review Objectives a loop on this machine held when it went away (serve stopped, the machine slept or
+   * restarted): ours to resume, at once when that loop's process is gone, else once its heartbeat is stale.
+   */
+  async pausedHere(running) {
+    const out = [];
+    const issues = [];
+    for (const label of ["factory:running", "factory:in-review"]) issues.push(...(await listIssuesByLabel(this.repo, label, this.opts).catch(() => [])));
+    for (const issue of issues) {
+      if (running.has(issue.number) || out.includes(issue.number)) continue;
+      if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
+      const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
+      if (c && sameMachineHolder(c.holder) && c.holder !== this.holder && (!c.fresh || deadHereHolder(c.holder))) out.push(issue.number);
+    }
+    return out;
+  }
+
+  /** Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions. */
+  async resume(issue) {
+    const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
+    // send-back rebase) runs again; anything else (reviewed, waiting in the merge queue) needs nothing here.
+    if (pr && !pr.draft && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.withClaim(issue, () => this.review(issue, pr.number));
+    const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+    if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) return this.runObjective(issue);
+    log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
+    const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
+    if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});
+    return { exit: "skipped" };
   }
 
   async review(issue, prNumber, { wait = false } = {}) {
@@ -422,16 +509,22 @@ class Local {
     const stop = async () => {
       if (stopping) return;
       stopping = true;
-      log(`stopping: ending ${this.children.size} stage process(es) and releasing their claims; an Objective left Running is Blocked by the dispatcher after 15 min, and re-applying its label brings it back`);
+      this.stopping = true;
+      log(`stopping: ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and serve on this machine resumes them (the dispatcher Blocks one only after a day away)`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.allSettled(running.values()), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(130);
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
-    for (;;) {
+    while (!this.stopping) {
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
-      // Reviews finish work already in flight, so they take this box's free slots first; new work gets the rest.
+      // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
+      const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
+      for (const n of resumes) {
+        log(`#${n}: resuming (this machine held it when it went away)`);
+        running.set(n, this.resume(n).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
+      }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
       const reviews = pending.slice(0, Math.max(0, limit - running.size));
       const result = await dispatch(inputs, { token: this.token, localSlots: Math.max(0, limit - running.size - reviews.length) }).catch((e) => {

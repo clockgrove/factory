@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { listComments, rest, upsertComment } from "./github.mjs";
 import { PUSH_ASSOCIATIONS, marker } from "./logic.mjs";
 
-/** A claim whose heartbeat is older than this is stale: the box went away. */
+/** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
+/** A stale claim pauses its Objective this long, for the same machine's serve to resume it; past it, Blocked. */
+export const CLAIM_PAUSE_MS = 24 * 60 * 60_000;
 export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
 const CLAIM_SKEW_MS = 2 * 60_000;

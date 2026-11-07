@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
+import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -81,6 +81,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   // is Blocked with the reason, and the human re-applies the label as for any Blocked card.
   const readToken = { token: inputs.githubToken || token };
   const vanished = [];
+  const paused = [];
   const runningIssues = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running");
   if (runningIssues.length) {
     const alive = await activeWorkIssues(repo, readToken).catch((e) => {
@@ -90,16 +91,27 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
     if (alive) {
       for (const issue of runningIssues) {
         if (alive.has(issue.number)) continue;
-        // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh.
-        if (await backend().trigger.claimedLocally(repo, issue.number, opts)) continue;
+        // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
+        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day.
         const since = await runningSince(repo, issue.number, opts).catch(() => null);
-        if (since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
+        let hold = await backend().trigger.localHold(repo, issue.number, opts);
+        // A claim from before this Running stint (left on a Blocked one that a human re-labelled) says nothing now.
+        if (hold && since && Date.parse(hold.heartbeat) < Date.parse(since)) hold = null;
+        if (hold?.state === "alive") continue;
+        if (hold?.state === "paused") {
+          paused.push(issue.number);
+          continue;
+        }
+        if (!hold && since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         if (!dryRun) {
           const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
-          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: "worker job vanished: Running with no job in progress", notify: inputs.notify, stage: "dispatch" }, opts);
+          const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day` : "worker job vanished: Running with no job in progress";
+          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason, notify: inputs.notify, stage: "dispatch" }, opts);
+          // The expired claim goes with the Block, so the next Running stint starts clean.
+          if (hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
         }
       }
     }
@@ -221,7 +233,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
   }
-  return { ...picked, updated, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done, vanished, sentBack, queue };
+  return { ...picked, updated, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, done, vanished, paused, sentBack, queue };
 }
 
 async function main() {
@@ -241,6 +253,7 @@ async function main() {
     reset: result.reset,
     done: result.done,
     vanished: result.vanished,
+    paused: result.paused,
     sent_back_to_rebase: result.sentBack,
     branches_updated: result.updated,
     merge_queue: result.queue,
@@ -251,6 +264,7 @@ async function main() {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
     log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
+    for (const n of result.paused || []) log(`  #${n}: paused; the local machine holding it is away, and its serve resumes it`);
     for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
     for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
   }

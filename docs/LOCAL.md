@@ -46,7 +46,7 @@ node plugin/scripts/local.mjs review <pr> [--wait]                     # a revie
 ```
 
 - **Routing:** label an Objective `factory:local` and the local loop takes it, while the Action leaves it alone. `--all` (or `FACTORY_LOCAL_ALL=1`) takes every Objective.
-- **Stopping:** stop `serve` with Ctrl-C. It ends its stages and releases their claims. An Objective left Running is Blocked by the dispatcher after 15 minutes, and re-applying its label brings it back.
+- **Stopping and pausing:** stop `serve` with Ctrl-C and its Objectives pause: they stay Running with their claims. The same happens when the machine sleeps or shuts down. The next `serve` on the same machine resumes them first (an open PR goes to review, otherwise the work restarts in the Objective's clone with its saved session), before reviews and new work. Other machines and the Action leave a paused Objective alone; the dispatcher Blocks one only after a day away, and re-applying its label brings it back.
 
 ## Configuration
 
@@ -77,7 +77,7 @@ The task card tells the model to do the same. It needs the Postgres server binar
 
 ## Known limits
 
-- Local mode runs while `serve` runs: a machine that sleeps or shuts down stops its Objectives. One left Running for 15 minutes without a heartbeat is Blocked, and re-applying its label brings it back. Your machine's size sets how many run at once (`FACTORY_LOCAL_MAX_CONCURRENT`).
+- Local mode runs while `serve` runs: a machine that sleeps or shuts down pauses its Objectives until `serve` runs there again (Blocked after a day). A paused Objective keeps its place in the repository's `max_concurrent`. Your machine's size sets how many run at once (`FACTORY_LOCAL_MAX_CONCURRENT`).
 - Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.
 - `/tmp` is read-only in the sandboxes; temp files go to `$TMPDIR`. A tool that drops `TMPDIR` from its children falls back to `/tmp` and fails there: Turborepo's strict mode does, unless the repository's `turbo.json` lists `TMPDIR` in `globalPassThroughEnv`.

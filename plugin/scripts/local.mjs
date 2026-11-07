@@ -275,7 +275,9 @@ class Local {
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs: [usageDir, npmCache, stageTmp], readOnly: [join(usageDir, "bin")] }), null, 2));
-    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken };
+    // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
+    // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
+    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken, GIT_CONFIG_GLOBAL: "/dev/null" };
   }
 
   /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */

@@ -109,7 +109,7 @@ const runners = {
     const home = join(root, "copilot-home");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains, clone, addDirs, readOnly })));
-    spawnSync("copilot", ["-p", ask, "--sandbox", "--allow-all-tools", "--allow-all-urls", ...addDirs.flatMap((d) => ["--add-dir", d]), "--output-format", "text"], { cwd: clone, env: { ...envFor("copilot"), COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: token }, stdio: "ignore", timeout: 300_000 });
+    spawnSync("copilot", ["-p", ask, "--sandbox", "--allow-all-tools", "--allow-all-urls", ...addDirs.flatMap((d) => ["--add-dir", d]), "--output-format", "text"], { cwd: clone, env: { ...envFor("copilot"), COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: token, GIT_CONFIG_GLOBAL: "/dev/null" }, stdio: "ignore", timeout: 300_000 });
   },
 };
 

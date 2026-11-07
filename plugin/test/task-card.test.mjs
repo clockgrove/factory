@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
 import { FACTORY_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
+import { validationGroups } from "../scripts/lib/logic.mjs";
 import { buildPrompt } from "../scripts/lib/session.mjs";
 
 const template = readFileSync(join(PLUGIN_ROOT, "templates", "task-card.md"), "utf8");
@@ -51,4 +52,10 @@ test("task card: with required checks the harness runs the tests it touched; wit
   assert.match(withChecks.validation_note, /required check \(quality\) on the head you push.*tests your change touches/);
   const without = taskCardValues({ issue: 2, maxUsd: 5, timeoutMinutes: 60, validation: ["pnpm test"], budgetCommand: "", protectedPaths: FACTORY_PROTECTED });
   assert.equal(without.validation_note, "Run the validation commands before you push; Factory runs them again.");
+});
+
+test("validation commands: consecutive parallel: marks share a group, unmarked ones run alone, the card shows no marks", () => {
+  const commands = ["pnpm install-check", "parallel: pnpm test", "parallel: pnpm run test:db", "pnpm build", "parallel: pnpm lint"];
+  assert.deepEqual(validationGroups(commands), [["pnpm install-check"], ["pnpm test", "pnpm run test:db"], ["pnpm build"], ["pnpm lint"]]);
+  assert.equal(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: commands, protectedPaths: [] }).validation, "pnpm install-check; pnpm test; pnpm run test:db; pnpm build; pnpm lint");
 });

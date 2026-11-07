@@ -1,6 +1,25 @@
 // Pure logic shared by the Factory scripts: no I/O, no GitHub, no harness.
 // Everything here is covered by test/ with `node --test`.
 
+// ---------------------------------------------------------------- validation commands
+
+/** An adopter marks a validation command `parallel:` when it may run at the same time as the marked ones beside it. */
+const PARALLEL = /^parallel:\s*/;
+
+/** A validation command as it runs, without its `parallel:` mark. */
+export const commandText = (command) => String(command).replace(PARALLEL, "");
+
+/** The commands in run order as groups: each run of consecutive `parallel:` commands is one group, every other command its own. */
+export function validationGroups(commands) {
+  const groups = [];
+  for (const command of commands || []) {
+    const parallel = PARALLEL.test(command);
+    if (parallel && groups.at(-1)?.parallel) groups.at(-1).commands.push(commandText(command));
+    else groups.push({ parallel, commands: [commandText(command)] });
+  }
+  return groups.map((g) => g.commands);
+}
+
 // ---------------------------------------------------------------- task card
 
 /** Render a `{{key}}` template. Every placeholder must be supplied; none may be left. */
@@ -25,7 +44,7 @@ export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budg
     issue: String(issue),
     usd: String(maxUsd),
     hours: String(hours),
-    validation: (validation || []).length ? validation.join("; ") : "none",
+    validation: (validation || []).length ? validation.map(commandText).join("; ") : "none",
     validation_note: checks.length
       ? `Factory's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head you push, run by CI in parallel; before you push, run the tests your change touches, not the whole suite.`
       : "Run the validation commands before you push; Factory runs them again.",

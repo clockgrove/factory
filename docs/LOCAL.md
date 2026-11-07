@@ -61,6 +61,8 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_LOCAL_SETUP` | the setup command for your machine (the workflow's assumes a fresh runner) |
 | `FACTORY_LOCAL_DB=1`, `FACTORY_LOCAL_DB_INIT`, `FACTORY_PG_BIN` | a throwaway Postgres per validation command (below) |
 
+Local mode runs the validation commands itself, so their order is its wall time. Mark a command `parallel:` (for example `parallel: pnpm test`) when it may run at the same time as the marked commands beside it: each run of consecutive marked commands starts together, and the next command waits for all of them. Unmarked commands run one at a time, in order. Each command gets its own sandbox and, with `FACTORY_LOCAL_DB=1`, its own Postgres. When a group fails, the fix run gets every failed command's tail and the path of its whole output.
+
 ## Databases
 
 A sandbox has no route to the machine's services. With `FACTORY_LOCAL_DB=1` (Linux and WSL2), each validation command runs through `plugin/bin/factory-db`. It works in five steps:

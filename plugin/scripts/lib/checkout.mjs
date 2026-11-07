@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { exec, git } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
+import { validationGroups } from "./logic.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -124,10 +125,10 @@ export async function branchDelta(checkout, base, branch = "HEAD") {
 }
 
 /** Run one shell command in the checkout with the model secrets scrubbed from its env, in the backend's sandbox. */
-export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {} } = {}) {
+export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {}, echo = true } = {}) {
   const childEnv = scrubbedEnv(env, extraEnv);
   const [cmd, args] = backend(childEnv).sandbox.command(["bash", "-eo", "pipefail", "-c", command], childEnv);
-  const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo: true });
+  const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo });
   return { ok: r.code === 0 && !r.timedOut, code: r.code, timedOut: r.timedOut, output: `${r.stdout}\n${r.stderr}`.trim() };
 }
 
@@ -171,18 +172,36 @@ export function runnerFileEnv(env = process.env) {
   return out;
 }
 
-/** Run the validation commands in order; stop at the first failure. GITHUB_SHA is the HEAD under test. */
+/**
+ * Run the validation commands in order, each group of `parallel:` ones at once (validationGroups); stop after the
+ * first group with a failure. Every failure of that group is reported (`failures`, `failed` the first), and with
+ * `logDir` each failed command's whole output is kept there (`logFile`) for the fix run to read. GITHUB_SHA is the
+ * HEAD under test.
+ */
 export async function runValidation(checkout, commands, opts = {}) {
   const results = [];
   const head = (await git(checkout, ["rev-parse", "HEAD"]).catch(() => ({ stdout: "" }))).stdout.trim();
   // FACTORY_DB_WRAP: only validation commands get a throwaway database (sh), not setup or install.
   const extraEnv = { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}), FACTORY_DB_WRAP: "1" };
-  for (const command of commands) {
-    const r = await sh(checkout, command, { ...opts, extraEnv });
-    results.push({ command, ...r, output: r.output.slice(-20_000) });
-    if (!r.ok) return { green: false, results, failed: results.at(-1) };
+  const { logDir, ...shOpts } = opts;
+  for (const group of validationGroups(commands)) {
+    // Interleaved live output from several commands helps no one; a group's commands report as each ends.
+    const runs = await Promise.all(group.map((command) => sh(checkout, command, { ...shOpts, extraEnv, echo: group.length === 1 })));
+    const done = runs.map((r, i) => {
+      let logFile = null;
+      if (!r.ok && logDir) {
+        mkdirSync(logDir, { recursive: true });
+        logFile = join(logDir, `command-${results.length + i + 1}.log`);
+        writeFileSync(logFile, r.output);
+      }
+      return { command: group[i], ...r, output: r.output.slice(-20_000), logFile };
+    });
+    if (group.length > 1) for (const r of done) process.stdout.write(`[factory] ${r.ok ? "passed" : r.timedOut ? "timed out" : `failed (exit ${r.code})`}: ${r.command}\n`);
+    results.push(...done);
+    const failures = done.filter((r) => !r.ok);
+    if (failures.length) return { green: false, results, failed: failures[0], failures };
   }
-  return { green: true, results, failed: null };
+  return { green: true, results, failed: null, failures: [] };
 }
 
 /** Pick the offline install command from the lockfile present. `install: none` skips; a given command wins. */

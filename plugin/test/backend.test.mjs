@@ -40,3 +40,9 @@ test("trustedAuthor: Factory acts on a marker only from an App or someone who ca
   for (const a of ["OWNER", "MEMBER", "COLLABORATOR"]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), true);
   for (const a of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", undefined]) assert.equal(trustedAuthor({ user: { type: "User" }, author_association: a }), false);
 });
+
+test("whichSync: a PATH scan, never a shell; names with separators or shell syntax resolve to nothing", async () => {
+  const { whichSync } = await import("../scripts/lib/proc.mjs");
+  assert.ok(whichSync("node"));
+  for (const bad of ["node;touch /tmp/factory-which-probe", "$(id)", "../node", "/usr/bin/node", ""]) assert.equal(whichSync(bad), null);
+});

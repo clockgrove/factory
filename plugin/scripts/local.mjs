@@ -25,12 +25,13 @@ import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
+import { whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
-const onPath = (bin) => !!sh("sh", ["-c", `command -v ${bin} || true`]);
+const onPath = (bin) => whichSync(bin) !== null;
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
 function parse(argv) {

@@ -1,7 +1,8 @@
 // Child processes: run to completion with optional stdin, a wall clock, and captured
 // stdout/stderr. Used for gh, git and the harness CLIs. No dependencies.
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 
 /**
  * Run a command. Resolves {code, signal, stdout, stderr, timedOut}; rejects only when
@@ -88,7 +89,29 @@ export async function must(cmd, args, opts = {}) {
 export const git = (cwd, args, opts = {}) => must("git", args, { cwd, ...opts });
 
 /** Whether a command is on PATH. */
+/**
+ * The executable `cmd` resolves to on PATH, or null. A plain scan of PATH, never a shell: the name can come from a
+ * repository's workflow file or the developer's env (FACTORY_HARNESS), and must not be able to run anything.
+ */
+export function whichSync(cmd, env = process.env) {
+  const name = String(cmd);
+  if (!name || name.includes("/") || name.includes("\\")) return null;
+  for (const dir of String(env.PATH || "").split(delimiter)) {
+    if (!dir) continue;
+    const file = join(dir, name);
+    try {
+      if (statSync(file).isFile()) {
+        accessSync(file, constants.X_OK);
+        return file;
+      }
+    } catch {
+      // not here
+    }
+  }
+  return null;
+}
+
+/** The command's path when it is on PATH, else null (doctor prints the path). */
 export async function onPath(cmd) {
-  const r = await exec("sh", ["-c", 'command -v "$1"', "_", String(cmd)]);
-  return r.code === 0 ? r.stdout.trim() : null;
+  return whichSync(cmd);
 }

@@ -67,5 +67,8 @@ const LOCAL = {
 
 export const BACKENDS = { actions: ACTIONS, local: LOCAL };
 
-/** The backend this process runs as: local when FACTORY_LOCAL=1 (local.mjs sets it), else the Action's runner. */
-export const backend = (env = process.env) => (isLocal(env) ? LOCAL : ACTIONS);
+/**
+ * The backend this process runs as: local when FACTORY_LOCAL=1 (local.mjs sets it), else the Action's runner. Local
+ * sandbox settings without the flag still mean local: a stage never falls back to a runner's skipped permissions.
+ */
+export const backend = (env = process.env) => (isLocal(env) || env.FACTORY_LOCAL_SANDBOX || env.FACTORY_LOCAL_SRT ? LOCAL : ACTIONS);

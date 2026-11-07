@@ -7,6 +7,7 @@ const issue = (...labels) => ({ labels: labels.map((name) => ({ name })) });
 test("backend: FACTORY_LOCAL=1 picks local, anything else the Action's runner", () => {
   assert.equal(backend({ FACTORY_LOCAL: "1" }).name, "local");
   assert.equal(backend({}).name, "actions");
+  assert.equal(backend({ FACTORY_LOCAL_SANDBOX: "{}" }).name, "local", "sandbox settings alone still mean local");
 });
 
 test("trigger: the Action takes unlabelled Objectives, a local loop the factory:local ones (or all with FACTORY_LOCAL_ALL)", () => {

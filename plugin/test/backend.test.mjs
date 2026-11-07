@@ -25,6 +25,7 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   const env = { FACTORY_LOCAL: "1", FACTORY_LOCAL_SRT: "/s.json", FACTORY_LOCAL_DB: "1", FACTORY_DB_WRAP: "1", FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }) };
   assert.deepEqual(BACKENDS.local.sandbox.command(inner, env), ["srt", ["-s", "/s.json", "--", "factory-db", ...inner]]);
   assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, FACTORY_DB_WRAP: "" }), ["srt", ["-s", "/s.json", "--", ...inner]]);
+  assert.deepEqual(BACKENDS.local.sandbox.command(inner, { ...env, TMPDIR: "/tmp/factory-7-ab" }), ["srt", ["-s", "/s.json", "--", "env", "TMPDIR=/tmp/factory-7-ab", "factory-db", ...inner]]);
   assert.equal(BACKENDS.actions.sandbox.harness({ FACTORY_LOCAL_SANDBOX: "{}" }), null);
   assert.throws(() => BACKENDS.local.sandbox.harness({ FACTORY_LOCAL: "1" }), /unsandboxed/);
   assert.equal(BACKENDS.actions.sandbox.cardNotes(), "");

@@ -202,8 +202,11 @@ class Local {
   /** One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in. */
   stageEnv(issue, usageDir, clone) {
     const ws = this.ws(issue);
+    // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
+    // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
     const npmCache = join(ws, "npm-cache");
-    mkdirSync(npmCache, { recursive: true });
+    const pnpmStore = join(ws, "pnpm-store");
+    for (const d of [npmCache, pnpmStore]) mkdirSync(d, { recursive: true });
     // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
     // the model could loosen the sandbox its own validation runs in.
     const sandboxDir = join(ws, ".sandbox");
@@ -213,7 +216,7 @@ class Local {
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. The stage removes it when it ends.
     const stageTmp = mkdtempSync(join(tmpdir(), `factory-${issue}-`));
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, pnpmStore, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
     // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
@@ -223,7 +226,8 @@ class Local {
       chmodSync(join(binDir, tool), 0o755);
     }
     const base = this.baseEnv();
-    const extra = this.harnessEnv(issue, usageDir, npmCache, clone, stageTmp);
+    const addDirs = [usageDir, npmCache, pnpmStore, stageTmp];
+    const extra = this.harnessEnv(issue, addDirs, clone, usageDir);
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
     base.PATH = `${base.PATH || ""}:${binDir}`;
@@ -241,22 +245,30 @@ class Local {
       // under the home directory beyond the working directory and the added directories.
       FACTORY_AUTH_DIR: join(usageDir, "auth"),
       npm_config_cache: npmCache,
+      // pnpm 12 reads pnpm_config_*, earlier pnpm npm_config_*.
+      pnpm_config_store_dir: pnpmStore,
+      npm_config_store_dir: pnpmStore,
       FACTORY_LOCAL_SRT: srtFile,
-      // Writable beyond the clone: this stage's usage directory and the npm cache only (not the spend log).
+      // Writable beyond the clone: this stage's usage directory, the package caches and its temp directory (not the spend log).
       TMPDIR: stageTmp,
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [usageDir, npmCache, stageTmp], domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
+      // pnpm 12 locks its stores in $XDG_RUNTIME_DIR (else /tmp) and chmods that directory: both are read-only in the
+      // sandboxes, so every pnpm command failed there. The stage's own temp directory is writable and owner-only.
+      XDG_RUNTIME_DIR: stageTmp,
+      // Claude Code points its sandboxed commands' TMPDIR at /tmp/claude, shared by every sandbox on the box, unless told.
+      CLAUDE_CODE_TMPDIR: stageTmp,
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs, domains: this.domains(), clone, readOnly: [join(usageDir, "bin")] }),
       ...extra,
     };
   }
 
   /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
-  harnessEnv(issue, usageDir, npmCache, clone, stageTmp) {
+  harnessEnv(issue, addDirs, clone, usageDir) {
     if (this.harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
     mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs: [usageDir, npmCache, stageTmp], readOnly: [join(usageDir, "bin")] }), null, 2));
+    writeFileSync(join(home, "settings.json"), JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [join(usageDir, "bin")] }), null, 2));
     // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
     // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
     return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken, GIT_CONFIG_GLOBAL: "/dev/null" };

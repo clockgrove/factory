@@ -49,7 +49,9 @@ const LOCAL = {
     command: (inner, env) => {
       if (!env.FACTORY_LOCAL_SRT) return [inner[0], inner.slice(1)];
       localSandbox(env);
-      return ["srt", ["-s", env.FACTORY_LOCAL_SRT, "--", ...(env.FACTORY_LOCAL_DB === "1" && env.FACTORY_DB_WRAP === "1" ? ["factory-db"] : []), ...inner]];
+      // srt points TMPDIR at /tmp/claude, writable in every srt sandbox on the box; the stage's own one goes back in.
+      const tmp = env.TMPDIR ? ["env", `TMPDIR=${env.TMPDIR}`] : [];
+      return ["srt", ["-s", env.FACTORY_LOCAL_SRT, "--", ...tmp, ...(env.FACTORY_LOCAL_DB === "1" && env.FACTORY_DB_WRAP === "1" ? ["factory-db"] : []), ...inner]];
     },
     /** The harness runs its model's commands in its own sandbox (lib/local.mjs), and refuses without the settings. */
     harness: (env) => localSandbox(env),

@@ -8,7 +8,7 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
 - Factory's own commands (setup, install, validation) run in `srt`, Anthropic's sandbox runtime, with the same reach as the model, since they run on a tree the model edited.
 - In every sandbox:
   - **Credential stores are unreadable:** `~/.ssh`, `~/.aws`, `~/.config/gh`, the harness logins, `~/.config/factory`, and the rest.
-  - **Writes are limited:** the Objective's clone and its stage directories only. The clone's `.git/hooks`, `.git/config` and the stage's `bin` are read-only.
+  - **Writes are limited:** the Objective's clone, its stage directories and its own package caches (npm, pnpm) only. The clone's `.git/hooks`, `.git/config` and the stage's `bin` are read-only. `TMPDIR` and `XDG_RUNTIME_DIR` point at the stage's private temp directory.
   - **The network is limited:** GitHub and the npm registry, plus your `FACTORY_LOCAL_DOMAINS`.
 - The model reaches GitHub with one fine-grained token for this one repository, never your `gh` login.
 - Each Objective gets its own clone under `<your clone>/.factory/<issue>/`, which is git-excluded.
@@ -76,3 +76,5 @@ The task card tells the model to do the same. It needs the Postgres server binar
 
 - Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.
+- Each Objective downloads its packages into its own caches, since a cache shared between Objectives would let one plant code in another. Your own caches are not used.
+- Your default pnpm must be the version the repository pins in `packageManager` (pnpm 12.9 or newer): inside the sandbox pnpm can neither download nor switch to another version.

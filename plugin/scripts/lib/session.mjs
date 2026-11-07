@@ -3,7 +3,7 @@
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { branchDelta, runValidation } from "./checkout.mjs";
@@ -396,9 +396,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   const localFirst = byChecks && commands.length && backend().gate.commandsFirst;
   const validate = async () => {
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all).
-    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+    // A failed command's whole output stays in the stage's temp directory (never the uploaded usage directory: it can
+    // hold anything the commands print), where the fix run can read it; the prompt carries each one's tail.
+    const logDir = join(tmpdir(), "factory-validation", `${label}-${passes}`);
+    if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env, logDir });
     if (localFirst) {
-      const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
+      const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env, logDir });
       if (!local.green) return local;
     }
     if (push) await push();
@@ -416,21 +419,29 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     last = v;
     if (v.green) return { green: true, passes, lastOutput: "", usage };
     const failed = v.failed;
+    const failures = v.failures?.length ? v.failures : [failed];
+    // One 6000-character window shared by the failures of the group that went red; each full log is on disk.
+    const share = Math.floor(6000 / failures.length);
     const tail = failed.output.slice(-6000);
-    log(`${label} pass ${passes} red: ${failed.command}${failed.timedOut ? " (timed out)" : ""}`);
+    log(`${label} pass ${passes} red: ${failures.map((f) => `${f.command}${f.timedOut ? " (timed out)" : ""}`).join("; ")}`);
     if (onPhase && passes < maxPasses) await onPhase(`${label} pass ${passes} red: ${failed.command}; fix run`);
     if (passes >= maxPasses) break;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
     const fix = [
-      `Factory's validation pass ${passes} failed on the branch you delivered.`,
-      `Command: ${failed.command}`,
-      `Exit: ${failed.timedOut ? "timed out" : failed.code}`,
-      "Output (tail):",
-      "```",
-      tail,
-      "```",
+      `Factory's validation pass ${passes} failed on the branch you delivered${failures.length > 1 ? ` (${failures.length} commands)` : ""}.`,
+      ...failures.flatMap((f) => [
+        "",
+        `Command: ${f.command}`,
+        `Exit: ${f.timedOut ? "timed out" : f.code}`,
+        ...(f.logFile ? [`Whole output: ${f.logFile}`] : []),
+        "Output (tail):",
+        "```",
+        f.output.slice(-share),
+        "```",
+      ]),
+      "",
       `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""}, commit on the same branch and push. Then update the PR body's Validation section. Do not ask questions.`,
     ].join("\n");
     const resume = session.canResume ? session.id : null;

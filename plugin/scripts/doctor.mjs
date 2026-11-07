@@ -12,7 +12,7 @@ import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
-import { protectedPaths } from "./lib/logic.mjs";
+import { commandText, protectedPaths } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { parseUsage } from "./lib/usage.mjs";
@@ -218,7 +218,7 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
   const install = installCommand(checkout, inputs.install);
   out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
   const pkg = existsSync(join(checkout, "package.json")) ? JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")) : null;
-  for (const cmd of inputs.validation) {
+  for (const cmd of inputs.validation.map(commandText)) {
     // `pnpm <script>` / `pnpm run <script>` must name a package.json script; `pnpm exec|dlx|x|-r|--filter …` and
     // `env …` prefixes are not scripts and are only warned about when their binary is absent here.
     const m = /^(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/.exec(cmd);

@@ -17,7 +17,7 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, hostname, platform, tmpdir } from "node:os";
+import { availableParallelism, homedir, hostname, platform, tmpdir, totalmem } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -51,6 +51,16 @@ function parse(argv) {
 }
 
 /** OWNER/NAME from the clone's origin remote. */
+/**
+ * How many Objective stages (work or review) this box runs at once: FACTORY_LOCAL_MAX_CONCURRENT, else a quarter of
+ * its CPU threads and at most one per 8 GB of memory (each stage runs a harness, validation and maybe Postgres).
+ */
+export function localMaxConcurrent(setting, { cpus = availableParallelism(), memBytes = totalmem() } = {}) {
+  const n = Number.parseInt(setting, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return Math.max(1, Math.min(Math.floor(cpus / 4), Math.floor(memBytes / 8 / 2 ** 30)));
+}
+
 export function repoFromRemote(url) {
   const m = /github\.com[:/]([^/]+)\/([^/]+?)(\.git)?\/?$/.exec(url || "");
   return m ? `${m[1]}/${m[2]}` : null;
@@ -403,9 +413,11 @@ class Local {
     return false;
   }
 
-  /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here. */
+  /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, up to this box's limit. */
   async serve({ once = false, intervalMs = 30_000 } = {}) {
     const running = new Map();
+    const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
+    log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
     let stopping = false;
     const stop = async () => {
       if (stopping) return;
@@ -419,12 +431,15 @@ class Local {
     process.on("SIGTERM", stop);
     for (;;) {
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
-      const result = await dispatch(inputs, { token: this.token }).catch((e) => {
+      // Reviews finish work already in flight, so they take this box's free slots first; new work gets the rest.
+      const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
+      const reviews = pending.slice(0, Math.max(0, limit - running.size));
+      const result = await dispatch(inputs, { token: this.token, localSlots: Math.max(0, limit - running.size - reviews.length) }).catch((e) => {
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
       });
-      const picks = (result.ready || []).filter((n) => !running.has(n));
-      const reviews = (await this.pendingReviews()).filter((r) => !running.has(r.issue) && !picks.includes(r.issue));
+      const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
+      if (pending.length > reviews.length) log(`${pending.length - reviews.length} review(s) wait for a free slot on this box`);
       log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, this.runObjective(n).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       for (const r of reviews) running.set(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr)).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));

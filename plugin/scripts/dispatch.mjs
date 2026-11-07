@@ -25,7 +25,7 @@ export async function appToken(inputs) {
   return minted.token;
 }
 
-export async function dispatch(inputs, { token, now = new Date(), dryRun = false }) {
+export async function dispatch(inputs, { token, now = new Date(), dryRun = false, localSlots = null }) {
   const repo = repoOf(inputs.repo);
   const opts = { token };
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -192,6 +192,11 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);
     picked.ready = [...sentBack, ...picked.ready.filter((n) => !sentBack.includes(n))].slice(0, slots);
+  }
+  // A local loop's own capacity (local.mjs serve): it starts no more than the box runs, so none is labelled Running idle.
+  if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
+    picked.ready = picked.ready.slice(0, Math.max(0, localSlots));
+    picked.reason = picked.reason || `this box is full (FACTORY_LOCAL_MAX_CONCURRENT)`;
   }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
   // state label and its card moves to Done. No job runs on merge, so the cron does it.

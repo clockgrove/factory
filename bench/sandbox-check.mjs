@@ -33,7 +33,7 @@ if (platform() === "win32") {
 }
 
 // The bar, per probe: true = must work, false = must not.
-const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "private TMPDIR": true };
+const BAR = { "read credential store": false, "write clone": true, "git commit": true, "write .git/hooks": false, "write .git/config": false, "write stage dir": true, "write stage bin": false, "escape to /tmp": false, "escape to home": false, "GET allowed host": true, "POST allowed host": true, "other host": false, "model key in env": false, "pnpm lock dir": true, "package caches": true, "private TMPDIR": true };
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "sbx-check-")));
 const clone = join(root, "clone");
@@ -67,6 +67,7 @@ r "write .git/hooks" 'echo x > "${clone}/.git/hooks/probe"'
 r "write .git/config" 'echo "# probe" >> "${clone}/.git/config"'
 r "write stage dir" 'echo x > "${usage}/probe-file"'
 r "pnpm lock dir" 'd="$XDG_RUNTIME_DIR/pnpm-store-operation-locks-$(id -u)"; mkdir -p "$d" && chmod 700 "$d"'
+r "package caches" 'for d in "$npm_config_cache" "$pnpm_config_store_dir" "$BUN_INSTALL_CACHE_DIR" "$YARN_CACHE_FOLDER"; do [ -n "$d" ] && touch "$d/probe" || exit 1; done'
 r "private TMPDIR" 'case "$TMPDIR" in "${stageTmp}"|"${stageTmp}"/*) ;; *) echo "TMPDIR=$TMPDIR"; false ;; esac'
 r "write stage bin" 'echo x > "${bin}/probe-file"'
 sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
@@ -81,11 +82,15 @@ chmodSync(probe, 0o755);
 
 const domains = LOCAL_DOMAINS;
 const readOnly = [bin];
-const addDirs = [usage, stageTmp];
+// The package caches a local stage gives each Objective (local.mjs stageEnv).
+const caches = { npm_config_cache: "npm-cache", pnpm_config_store_dir: "pnpm-store", BUN_INSTALL_CACHE_DIR: "bun-cache", YARN_CACHE_FOLDER: "yarn-cache" };
+for (const d of Object.values(caches)) mkdirSync(join(root, d));
+const cacheEnv = Object.fromEntries(Object.entries(caches).map(([k, d]) => [k, join(root, d)]));
+const addDirs = [usage, ...Object.values(cacheEnv), stageTmp];
 // Like a local stage: no model key in the env but the harness's own sign-in, where the CLI has no saved login.
 const OWN = { claude: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"], codex: ["CODEX_API_KEY", "OPENAI_API_KEY"], copilot: ["COPILOT_GITHUB_TOKEN"], srt: [] };
 const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !MODEL_SECRET_KEYS.includes(k)));
-const envFor = (h) => ({ ...base, ...Object.fromEntries(OWN[h].filter((k) => process.env[k]).map((k) => [k, process.env[k]])), TMPDIR: stageTmp, XDG_RUNTIME_DIR: stageTmp, CLAUDE_CODE_TMPDIR: stageTmp });
+const envFor = (h) => ({ ...base, ...Object.fromEntries(OWN[h].filter((k) => process.env[k]).map((k) => [k, process.env[k]])), ...cacheEnv, TMPDIR: stageTmp, XDG_RUNTIME_DIR: stageTmp, CLAUDE_CODE_TMPDIR: stageTmp });
 const ask = `Run exactly this one shell command and nothing else, then reply "done": sh ${probe}`;
 
 const runners = {

@@ -58,7 +58,7 @@ const escapeHome = join(homedir(), `.factory-sbx-escape-${process.pid}`);
 const probe = join(clone, "sbx-probe.sh");
 writeFileSync(probe, `#!/bin/sh
 out="${usage}/results.tsv"; : > "$out"
-r() { if sh -c "$2" >/dev/null 2>&1; then printf '%s\\tyes\\t\\n' "$1" >> "$out"; else printf '%s\\tno\\t\\n' "$1" >> "$out"; fi; }
+r() { if e=$(sh -c "$2" 2>&1); then printf '%s\\tyes\\t\\n' "$1" >> "$out"; else printf '%s\\tno\\t%s\\n' "$1" "$(printf '%s' "$e" | tr '\\t\\n' '  ' | cut -c1-160)" >> "$out"; fi; }
 r "read credential store" 'cat "${canary}"'
 r "write clone" 'date +%s%N > "${clone}/probe-file"'
 r "git commit" 'cd "${clone}" && git add probe-file && git -c user.name=t -c user.email=t@t commit -qm probe'

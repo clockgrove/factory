@@ -172,10 +172,8 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
 
 /** The one-line reason from the worker's Blocked comment (session.mjs applyExit): "Blocked (stage): <reason> — ..." */
 function blockedReason(body) {
-  // Strip HTML comments until none is left: one pass can leave a comment that two overlapping ones formed.
-  let text = String(body || "");
-  for (let prev = null; prev !== text; ) [prev, text] = [text, text.replace(/<!--[^>]*-->/g, "")];
-  text = text.replace(/^\s*@\S+\s*/, "").trim();
+  // Display text only: drop Factory's HTML comments, then any angle bracket a malformed one left behind.
+  const text = String(body || "").replace(/<!--[\s\S]*?-->/g, "").replace(/[<>]/g, "").replace(/^\s*@\S+\s*/, "").trim();
   const m = /Blocked \(([^)]*)\):\s*([^\n]*?)(?:\s+—\s+PR #\d+|\s+Fix by pushing|$)/m.exec(text);
   return m ? `${m[2].trim()} (${m[1]})`.slice(0, 200) : text.split("\n")[0].slice(0, 200);
 }

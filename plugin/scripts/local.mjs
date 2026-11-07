@@ -191,6 +191,7 @@ class Local {
     this.opts = { token: this.token };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
     this.holder = holderId();
+    this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
   }
@@ -238,12 +239,15 @@ class Local {
     const dir = join(this.ws(issue), "repo");
     if (existsSync(join(dir, ".git"))) return dir;
     mkdirSync(this.ws(issue), { recursive: true });
+    const started = Date.now();
     const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
     const code = await new Promise((done) => {
       const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token }, stdio: ["ignore", "inherit", "inherit"] });
       child.on("close", done);
     });
     if (code !== 0) throw new Error(`git clone of ${this.repoFull} failed (exit ${code})`);
+    // The Objective's first stage on this machine pays for this clone and a cold install: reported apart (worker.mjs).
+    this.firstSetup.set(issue, Date.now() - started);
     return dir;
   }
 
@@ -353,6 +357,10 @@ class Local {
     const clone = await this.ensureClone(issue);
     return new Promise((done) => {
       const env = this.stageEnv(issue, usageDir, clone);
+      if (this.firstSetup.has(issue)) {
+        env.FACTORY_LOCAL_FIRST_SETUP_MS = String(this.firstSetup.get(issue));
+        this.firstSetup.delete(issue);
+      }
       const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir], { env, stdio: ["ignore", "pipe", "pipe"] });
       this.children.add(child);
       const relay = (chunk) => {

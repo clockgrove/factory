@@ -459,7 +459,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
 }
 
 /** Write usage/result.json and return the merged record. */
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const result = {
@@ -476,6 +476,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     passes,
     exit,
     reason,
+    // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
+    reentry,
     credential: credentialBasis,
     turns: merged.turns ?? null,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,

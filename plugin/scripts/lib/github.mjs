@@ -527,13 +527,20 @@ export async function activeWorkIssues(repo, opts) {
   return (await activeFactoryJobs(repo, opts)).work;
 }
 
-/** The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed. */
-export async function activeFactoryJobs(repo, opts) {
+/**
+ * The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed.
+ * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
+ */
+export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
   const out = { work: new Set(), review: new Set() };
+  const read = (path) => rest(path, opts).catch((e) => {
+    if (strict) throw e;
+    return null;
+  });
   for (const status of ["in_progress", "queued", "waiting", "requested", "pending"]) {
-    const runs = (await rest(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?status=${status}&per_page=50`, opts).catch(() => null))?.workflow_runs || [];
+    const runs = (await read(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?status=${status}&per_page=50`))?.workflow_runs || [];
     for (const run of runs) {
-      const jobs = (await rest(`repos/${repo.full}/actions/runs/${run.id}/jobs?per_page=100`, opts).catch(() => null))?.jobs || [];
+      const jobs = (await read(`repos/${repo.full}/actions/runs/${run.id}/jobs?per_page=100`))?.jobs || [];
       for (const j of jobs) {
         if (j.status === "completed") continue;
         const w = /^work \((\d+)\)$/.exec(j.name || "");

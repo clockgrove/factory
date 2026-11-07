@@ -145,8 +145,10 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // Only a conflicting PR under review needs the live jobs read (once per tick).
-      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) liveJobs = await activeFactoryJobs(repo, readToken).catch(() => ({ work: new Set(), review: new Set([issue.number]) }));
-      const reviewRunning = !!liveJobs?.review.has(issue.number);
+      // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
+      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+      const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
+      if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing, reviewRunning });
       if (decision === "update") {
         // Behind, not conflicting: one API call brings the branch up to date and its checks re-run; auto-merge

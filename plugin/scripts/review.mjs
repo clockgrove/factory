@@ -390,14 +390,6 @@ async function main() {
   records.push(...validation.usage);
   passes += validation.passes;
   if (validation.usage.length) await push(checkout, branch, childBase);
-  if (validation.conflict) {
-    // The answers are pushed; the merge conflict is the dispatcher's send-back (it rebases once, then reviews again).
-    const reason = "conflicts with the default branch after a sibling merged; answers pushed, the dispatcher sends it back to rebase";
-    log(`PR #${pr.number}: ${reason}`);
-    await dropLabel();
-    await finish("delivered", reason);
-    return;
-  }
 
   // Answered threads (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR.

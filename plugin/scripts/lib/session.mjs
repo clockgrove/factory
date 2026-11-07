@@ -15,7 +15,6 @@ import {
   findPr,
   findProject,
   getPr,
-  getPrSettled,
   listComments,
   listReviewComments,
   moveCard,
@@ -452,10 +451,6 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (!local.green) return local;
     }
     if (push) await push();
-    // A sibling merged and the PR now conflicts: GitHub builds no merge ref, so no check will ever report on it.
-    // Validation ends here; the caller hands the PR back for the dispatcher's send-back instead of a fix run.
-    const settled = await getPrSettled(checks.repo, checks.prNumber, { token: checks.token }).catch(() => null);
-    if (settled?.mergeable_state === "dirty") return { green: false, conflict: true, results: [], failed: { command: "merge with the default branch", ok: false, code: null, timedOut: false, output: "the PR conflicts with the default branch after a sibling merged" } };
     const sha = (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     const r = await awaitChecks(checks.repo, sha, checks.names, { token: checks.token, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
@@ -469,10 +464,6 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const v = await validate();
     last = v;
     if (v.green) return { green: true, passes, lastOutput: "", usage };
-    if (v.conflict) {
-      log(`${label} pass ${passes}: the PR conflicts with the default branch; no fix run (the dispatcher sends it back to rebase)`);
-      return { green: false, conflict: true, passes, lastOutput: v.failed.output, command: v.failed.command, usage };
-    }
     const failed = v.failed;
     const failures = v.failures?.length ? v.failures : [failed];
     // One 6000-character window shared by the failures of the group that went red; each full log is on disk.

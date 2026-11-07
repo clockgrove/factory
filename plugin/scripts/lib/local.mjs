@@ -55,7 +55,7 @@ export async function dropClaim(repo, issue, holder, opts) {
 }
 
 /** The hosts a sandboxed command may reach: GitHub and the npm registry, plus the adopter's list. */
-export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "registry.npmjs.org"];
+export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"];
 
 /**
  * Credential stores under the home directory that no sandboxed command and no file tool may read.

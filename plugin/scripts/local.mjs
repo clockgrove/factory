@@ -206,7 +206,10 @@ class Local {
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
     const npmCache = join(ws, "npm-cache");
     const pnpmStore = join(ws, "pnpm-store");
-    for (const d of [npmCache, pnpmStore]) mkdirSync(d, { recursive: true });
+    const bunCache = join(ws, "bun-cache");
+    const yarnCache = join(ws, "yarn-cache");
+    const caches = [npmCache, pnpmStore, bunCache, yarnCache];
+    for (const d of caches) mkdirSync(d, { recursive: true });
     // The settings Factory's own commands run under sit outside every writable directory: in the usage directory
     // the model could loosen the sandbox its own validation runs in.
     const sandboxDir = join(ws, ".sandbox");
@@ -216,7 +219,7 @@ class Local {
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. The stage removes it when it ends.
     const stageTmp = mkdtempSync(join(tmpdir(), `factory-${issue}-`));
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, npmCache, pnpmStore, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, usageDir, ...caches, stageTmp], clone, readOnly: [join(usageDir, "bin")] }), null, 2));
     // Factory's helpers (factory-db) are copied into the stage's usage directory and lead PATH: Claude Code's sandbox
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
@@ -226,7 +229,7 @@ class Local {
       chmodSync(join(binDir, tool), 0o755);
     }
     const base = this.baseEnv();
-    const addDirs = [usageDir, npmCache, pnpmStore, stageTmp];
+    const addDirs = [usageDir, ...caches, stageTmp];
     const extra = this.harnessEnv(issue, addDirs, clone, usageDir);
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -248,6 +251,8 @@ class Local {
       // pnpm 12 reads pnpm_config_*, earlier pnpm npm_config_*.
       pnpm_config_store_dir: pnpmStore,
       npm_config_store_dir: pnpmStore,
+      BUN_INSTALL_CACHE_DIR: bunCache,
+      YARN_CACHE_FOLDER: yarnCache,
       FACTORY_LOCAL_SRT: srtFile,
       // Writable beyond the clone: this stage's usage directory, the package caches and its temp directory (not the spend log).
       TMPDIR: stageTmp,

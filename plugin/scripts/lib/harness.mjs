@@ -6,7 +6,8 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { exec, onPath } from "./proc.mjs";
 import { parseUsage } from "./usage.mjs";
-import { claudeLocalSettings, codexLocalConfig, localSandbox } from "./local.mjs";
+import { backend } from "./backend.mjs";
+import { claudeLocalSettings, codexLocalConfig } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -195,7 +196,7 @@ export function harnessVersion(harness) {
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS }) {
   const usageFile = harness === "copilot" && eventsFile ? join(dirname(eventsFile), `copilot-usage-${label}.json`) : undefined;
   const compaction = env?.FACTORY_COMPACTION_WINDOW || null;
-  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, local: localSandbox(env) });
+  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, local: backend(env).sandbox.harness(env) });
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });

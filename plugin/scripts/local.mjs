@@ -25,8 +25,9 @@ import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, ensureLabel, findPr, findProject, getIssue, getPr, moveCard, repoOf, rest, setStateLabel } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, routedHere, srtSettings, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, codexLocalConfig, copilotLocalSettings, dropClaim, localBaseEnv, localClaim, readWorkflowEnv, srtSettings, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL } from "./lib/logic.mjs";
+import { BACKENDS } from "./lib/backend.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => !!sh("sh", ["-c", `command -v ${bin} || true`]);
@@ -374,7 +375,7 @@ class Local {
       const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
       if (!issue || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) continue;
       const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-      if (!data || !routedHere(data, this.baseEnv())) continue;
+      if (!data || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
       out.push({ issue, pr: pr.number });
     }

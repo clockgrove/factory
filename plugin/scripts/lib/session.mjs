@@ -5,6 +5,7 @@
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { backend } from "./backend.mjs";
 import { branchDelta, runValidation } from "./checkout.mjs";
 import { finalText, runHarness } from "./harness.mjs";
 import {
@@ -128,8 +129,9 @@ export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets
  * or null with the reason it is not.
  */
 export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness }) {
-  const sources = process.env.FACTORY_LOCAL === "1" ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
-  if (!sources.length) return { id: null, from: null, reason: process.env.FACTORY_LOCAL === "1" ? "no earlier stage here" : "no earlier usage artifact" };
+  const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
+  const sources = fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
+  if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
   // newest first, to the most recent one that did.
   let last = "no earlier run saved a session";
@@ -266,15 +268,8 @@ export async function gitIdentity(app, token) {
 export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
-  // Local mode with a database (FACTORY_LOCAL_DB=1): the sandbox cannot reach the box's Postgres, so tests that need
-  // one run through factory-db, which starts a fresh one inside the sandbox for that command.
-  const localDb = process.env.FACTORY_LOCAL === "1" && process.env.FACTORY_LOCAL_DB === "1"
-    ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards."
-    : "";
-  // Locally the sandboxes give /tmp no lasting space (Codex's is read-only, Copilot's is fresh for each command);
-  // the stage's own temp directory is TMPDIR.
-  const localTmp = process.env.FACTORY_LOCAL === "1" ? "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this sandbox /tmp may be read-only or emptied between commands." : "";
-  return `${card.trimEnd()}${localTmp}${localDb}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
+  // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
+  return `${card.trimEnd()}${backend().sandbox.cardNotes()}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n`;
 }
 
 /** Push the branch with the App credential (GH_TOKEN in env). */
@@ -391,8 +386,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // parallel. The commands stay the harness's own tool (the task card names them).
   const byChecks = !!(checks && checks.names?.length && checks.prNumber);
   if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
-  // In local mode the heavy suites run on the box, not in CI: the commands run first (sandboxed), then the checks.
-  const localFirst = byChecks && commands.length && process.env.FACTORY_LOCAL === "1";
+  // The backend's gate: locally the heavy suites run on the box, not in CI (the commands first, then the checks).
+  const localFirst = byChecks && commands.length && backend().gate.commandsFirst;
   const validate = async () => {
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all).
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });

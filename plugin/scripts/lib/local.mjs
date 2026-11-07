@@ -25,8 +25,6 @@ export const hasLocalLabel = (issue) => (issue?.labels || []).some((l) => (typeo
 /** True when this process is the local backend (factory run / serve set it). */
 export const isLocal = (env = process.env) => env.FACTORY_LOCAL === "1";
 
-/** Which path takes an Objective: Actions takes the unlabelled ones; a local loop takes the labelled ones, or all with FACTORY_LOCAL_ALL=1. */
-export const routedHere = (issue, env = process.env) => (isLocal(env) ? env.FACTORY_LOCAL_ALL === "1" || hasLocalLabel(issue) : !hasLocalLabel(issue));
 
 /** The claim comment Factory writes, read back by structure: which loop holds it and its last heartbeat. */
 export const claimBody = (holder, at = new Date()) => `Running in local mode (${holder}).\nholder: ${holder}\nheartbeat: ${at.toISOString()}`;

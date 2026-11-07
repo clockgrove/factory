@@ -63,7 +63,7 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_LOCAL_DB=1`, `FACTORY_LOCAL_DB_INIT`, `FACTORY_PG_BIN` | a throwaway Postgres per validation command (below) |
 | `FACTORY_LOCAL_MAX_CONCURRENT` | how many Objectives (work or review) this machine runs at once; default a quarter of its CPU threads, at most one per 8 GB of memory. The workflow's `max_concurrent` still caps the repository as a whole |
 
-Local mode runs the validation commands itself, so their order is its wall time. Mark a command `parallel:` (for example `parallel: pnpm test`) when it may run at the same time as the marked commands beside it: each run of consecutive marked commands starts together, and the next command waits for all of them. Unmarked commands run one at a time, in order. Each command gets its own sandbox and, with `FACTORY_LOCAL_DB=1`, its own Postgres. When a group fails, the fix run gets every failed command's tail and the path of its whole output.
+Local mode runs the validation commands itself, so their order is its wall time. Mark a command `parallel:` (for example `parallel: pnpm test`) when it may run at the same time as the marked commands beside it, and quote the whole value in the workflow's env block (`FACTORY_VALIDATION: 'pnpm check, parallel: pnpm test'`), since an unquoted `: ` makes it a YAML mapping and GitHub then runs none of the workflow: each run of consecutive marked commands starts together, and the next command waits for all of them. Unmarked commands run one at a time, in order. Each command gets its own sandbox and, with `FACTORY_LOCAL_DB=1`, its own Postgres. When a group fails, the fix run gets every failed command's tail and the path of its whole output.
 
 ## Databases
 

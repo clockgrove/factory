@@ -33,6 +33,9 @@ export const LABELS = [
   ["P2", "FBCA04", "Priority 2"],
 ];
 
+/** A YAML plain scalar where it is safe, else the value in single quotes ('' for a quote inside). */
+export const yamlQuoted = (v) => (/: |\s#|^[\s'"&*!|>%@`{}[\],?-]/.test(v) ? `'${v.replace(/'/g, "''")}'` : v);
+
 /** Render workflow-template.yml: `{{key}}` from inputs, with the script default when empty. */
 export function renderWorkflow(template, values) {
   return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
@@ -100,7 +103,8 @@ function applyWorkflow({ inputs, args, checkout, latest }) {
     runs_on: args.runs_on || "ubuntu-latest",
     setup: inputs.setup,
     install: inputs.install,
-    validation: inputs.validation.join(", "),
+    // `parallel: ` marks would make a plain YAML value a mapping: the line goes in single quotes.
+    validation: yamlQuoted(inputs.validation.join(", ")),
     budget_command: inputs.budgetCommand,
     protected_paths: inputs.protectedAdditions.join(", "),
     ci_checks: inputs.ciChecks.join(", "),

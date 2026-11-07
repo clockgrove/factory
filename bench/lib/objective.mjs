@@ -13,7 +13,7 @@
 //   operator   minutes from --minutes; 0 on a clean merge; `unknown` else.
 //   cost       lib/cost.mjs, with unit and basis per harness.
 //   wall       filed (label) to merged; runner minutes from the job log.
-import { phaseMinutes } from "./phases.mjs";
+import { dispatchLatency, phaseMinutes } from "./phases.mjs";
 import { costOf } from "./cost.mjs";
 
 export const ROW_VERSION = 1;
@@ -269,6 +269,7 @@ export function scoreObjective(collected, opts = {}) {
 
   const runner = runnerMinutes(collected);
   const phases = phaseMinutes(collected.issueComments, issue.number);
+  const dispatch = dispatchLatency(collected, issue.number);
   if (collected.jobs === null || collected.jobs === undefined) missing.push("job log");
   const wall = merged ? minutes(since, merged.merged_at) : null;
 
@@ -312,6 +313,7 @@ export function scoreObjective(collected, opts = {}) {
     operator,
     cost,
     phases,
+    dispatch,
     activity: cost.activity,
     runnerMinutes: runner.minutes,
     runnerBasis: runner.basis,
@@ -340,13 +342,13 @@ const cell = (s) => String(s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ")
 
 /** The Markdown table: one row per Objective, oldest issue first. */
 export function markdownTable(rows) {
-  const head = ["Issue", "Exit", "Walk-away", "Quality", "Operator min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Setup min", "Model min", "CI wait min", "Turns", "Runs", "Sessions", "Harness"];
+  const head = ["Issue", "Exit", "Walk-away", "Quality", "Operator min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Setup min", "Model min", "CI wait min", "Turns", "Runs", "Sessions", "Harness"];
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
     const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     const cost = r.cost.usd !== null && r.cost.tokens.input !== null ? `${fmtUsd(r.cost.usd)} (${fmtTokens(r.cost.tokens)})` : fmtUsd(r.cost.usd);
-    const cells = [`#${r.issue}`, r.exit, walk, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.phases?.setupMinutes), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
+    const cells = [`#${r.issue}`, r.exit, walk, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.phases?.setupMinutes), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];

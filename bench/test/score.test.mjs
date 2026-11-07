@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { collectObjective, snapshotApi, usageFromDir } from "../lib/collect.mjs";
 import { costOf, loadPrices, parseUsageText, priceTokens, sessionsOf } from "../lib/cost.mjs";
 import { humanActions, markdownTable, scoreObjective } from "../lib/objective.mjs";
-import { phaseMinutes } from "../lib/phases.mjs";
+import { dispatchLatency, phaseMinutes } from "../lib/phases.mjs";
 import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
@@ -255,7 +255,33 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   assert.equal(phaseMinutes([], 7).modelMinutes, null);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
-  assert.match(markdownTable([row]), /\| Setup min \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Setup min \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);
+});
+
+test("dispatchLatency: each run's pickup against the latest trigger since the previous run; skipped duplicates and Running are not triggers", () => {
+  const progress = (stage, id, at, lines) => ({ created_at: at, body: `<!-- factory:7:progress:${stage}:${id} -->\nFactory ${stage} run\n${lines.map((l) => `- ${l}`).join("\n")}` });
+  const collected = {
+    issue: { created_at: "2026-11-06T08:20:13Z" },
+    issueTimeline: [
+      { event: "labeled", label: { name: "factory:objective" }, created_at: "2026-11-06T08:20:13Z" },
+      { event: "labeled", label: { name: "factory:running" }, created_at: "2026-11-06T08:20:40Z" },
+      { event: "commented", body: "<!-- factory:7:local -->", created_at: "2026-11-06T08:20:41Z" },
+      { event: "unlabeled", label: { name: "factory:question" }, created_at: "2026-11-06T09:00:00Z" },
+    ],
+    issueComments: [
+      progress("work", 1, "2026-11-06T08:21:02Z", ["08:21Z setup", "08:24Z exit: delivered"]),
+      progress("review", 2, "2026-11-06T08:24:19Z", ["08:24Z exit: skipped (ready_for_review is not a review cue)"]),
+      progress("review", 3, "2026-11-06T08:24:41Z", ["08:24Z setup", "08:26Z exit: delivered"]),
+      progress("work", 4, "2026-11-06T09:20:00Z", ["09:20Z setup"]),
+      progress("work", 5, "2026-11-06T09:40:00Z", ["09:40Z setup"]),
+    ],
+    pullDetails: { 8: { timeline: [{ event: "ready_for_review", created_at: "2026-11-06T08:24:04Z" }, { event: "labeled", label: { name: "factory:review" }, created_at: "2026-11-06T08:24:05Z" }] } },
+  };
+  const d = dispatchLatency(collected, 7);
+  assert.deepEqual(d.runs, [{ stage: "work", seconds: 49 }, { stage: "review", seconds: 36 }, { stage: "work", seconds: 1200 }, { stage: "work", seconds: null }]);
+  assert.equal(d.maxSeconds, 1200);
+  assert.equal(d.basis, "3/4 run(s) matched to an event");
+  assert.equal(dispatchLatency({ issueComments: [] }, 7).maxSeconds, null);
 });
 
 test("activity: turns, harness calls, sessions and run counts come from the artifacts", () => {

@@ -15,12 +15,12 @@ One row per Objective, read from the issue, the PR on `factory/<issue>`, the job
 
 A missing input shows as `missing: <which>` in the row, never as a guess.
 
-Beside the four numbers the row carries, from the same sources: `phases` (setup and install, model, CI-wait and other minutes, read from each run's progress comment), `activity` (turns, harness calls, distinct sessions, work and review run counts, read from the usage artifacts), cost by component (uncached, cached, written and output tokens, and a per-model split), and the harness CLI version. The table shows them as Setup min, Model min, CI wait min, Turns, Runs and Sessions, and the cost cell as `$ (in / cached / written / out)`.
+Beside the four numbers the row carries, from the same sources: `phases` (setup and install, model, CI-wait and other minutes, read from each run's progress comment), `dispatch` (for each run, the seconds from the GitHub event that started it to its progress comment appearing, on either path; the latest trigger since the previous run counts, and a run no event explains has none), `activity` (turns, harness calls, distinct sessions, work and review run counts, read from the usage artifacts), cost by component (uncached, cached, written and output tokens, and a per-model split), and the harness CLI version. The table shows them as Dispatch s (max), Setup min, Model min, CI wait min, Turns, Runs and Sessions, and the cost cell as `$ (in / cached / written / out)`.
 
 ## Baseline
 
 ```sh
-node bench/baseline.mjs --scorecard scorecard.json --repo OWNER/NAME --label wave0 --append   # median and p25..p75 of model minutes, turns, cost, cached and written tokens, CI wait, setup, wall minutes and sessions, plus walk-away rate
+node bench/baseline.mjs --scorecard scorecard.json --repo OWNER/NAME --label wave0 --append   # median and p25..p75 of model minutes, turns, cost, cached and written tokens, CI wait, dispatch seconds, setup, wall minutes and sessions, plus walk-away rate
 node bench/baseline.mjs --scorecard scorecard.json --repo OWNER/NAME --since 2026-11-06 --last 5
 ```
 

@@ -67,7 +67,7 @@ r "write .git/config" 'echo "# probe" >> "${clone}/.git/config"'
 r "write stage dir" 'echo x > "${usage}/probe-file"'
 r "write stage bin" 'echo x > "${bin}/probe-file"'
 sh -c 'echo x > "${escapeTmp}"' 2>/dev/null; sh -c 'echo x > "${escapeHome}"' 2>/dev/null
-r "GET allowed host" 'curl -sf -o /dev/null --max-time 15 https://api.github.com/'
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://github.com/); case "$code" in 2*|3*) ok=yes;; *) ok=no;; esac; printf 'GET allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST https://api.github.com/repos/clockgrove/factory/issues); case "$code" in 401|404|422) ok=yes;; *) ok=no;; esac; printf 'POST allowed host\\t%s\\tHTTP %s\\n' "$ok" "$code" >> "$out"
 r "other host" 'curl -sf -o /dev/null --max-time 10 https://example.com'
 seen=""; for k in ${MODEL_SECRET_KEYS.join(" ")}; do eval "v=\\\${$k:-}"; [ -n "$v" ] && seen="$seen $k"; done

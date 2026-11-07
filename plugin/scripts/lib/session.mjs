@@ -2,7 +2,7 @@
 // protected-path commit guard, the PR, Factory's own validation passes with the
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { branchDelta, runValidation } from "./checkout.mjs";
@@ -102,6 +102,9 @@ export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets
   const files = sessionFiles(harness, root, sessionId);
   if (!files.length) return null;
   const dest = join(usageDir, "transcript");
+  // Locally the usage directory is writable from the sandbox: start from an empty copy, so nothing the model left
+  // there (a symlink out of the sandbox) is written through or restored later. rmSync does not follow links.
+  rmSync(dest, { recursive: true, force: true });
   for (const rel of files) {
     mkdirSync(join(dest, rel, ".."), { recursive: true });
     cpSync(join(root, rel), join(dest, rel), { recursive: true });

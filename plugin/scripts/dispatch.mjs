@@ -11,7 +11,7 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, enableAutoMerge, findPr, findProject, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, marker, selectReady, staleDecision, stateOf, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -127,6 +127,7 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
   const updated = [];
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
+    let liveJobs = null;
     for (const issue of issues) {
       // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
       if (!backend().trigger.routes(issue)) continue;
@@ -143,7 +144,10 @@ export async function dispatch(inputs, { token, now = new Date(), dryRun = false
       const markers = (await listComments(repo, open.number, opts).catch(() => [])).filter((c) => trustedAuthor(c) && (c.body || "").includes(prefix) && (!since || Date.parse(c.created_at) > Date.parse(since)));
       const effective = markers.filter((c) => !(c.body || "").includes(`${prefix}:${pr?.head?.sha} -->`)).length;
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
-      const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing });
+      // Only a conflicting PR under review needs the live jobs read (once per tick).
+      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) liveJobs = await activeFactoryJobs(repo, readToken).catch(() => ({ work: new Set(), review: new Set([issue.number]) }));
+      const reviewRunning = !!liveJobs?.review.has(issue.number);
+      const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing, reviewRunning });
       if (decision === "update") {
         // Behind, not conflicting: one API call brings the branch up to date and its checks re-run; auto-merge
         // stays armed (re-armed here if GitHub dropped it). No worker, no model.

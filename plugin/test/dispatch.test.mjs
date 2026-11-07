@@ -70,6 +70,9 @@ test("integration failure: a behind (no queue) or conflicting (any) In-review PR
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" } }), "rebase");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, rebaseMarkers: 1 }), "blocked", "second conflict is integration failed twice");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "clean" } }), "ignore");
+  // A review job that began before a sibling's merge made the PR conflict is still running: no send-back to race it.
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: true }), "ignore");
+  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: false }), "rebase", "labelled but no review job alive: back to rebase");
   assert.equal(staleDecision({ pr: { ...behind, draft: true } }), "ignore");
   assert.equal(staleDecision({ pr: null }), "ignore");
   assert.equal(staleDecision({ pr: behind, queue: true }), "ignore", "with a queue, behind is the queue's job");

@@ -477,13 +477,13 @@ export function parseFindings(text) {
  * "rebase" sends it back to a worker job once; "blocked" is the second time (integration failed
  * twice); "ignore" covers drafts, clean and unknown states.
  */
-export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing = false }) {
+export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing = false, reviewRunning = false }) {
   if (!pr || pr.draft) return "ignore";
   // A review job is running on it (the label comes off at that job's exit): its answer pass may
   // push and its own validation decides; a send-back now would race it (two jobs on one branch).
-  // ...except a conflicting PR: GitHub cannot build its merge ref and fires no pull_request run, so no
-  // review job can be running on it whatever label it carries; it goes back for the rebase.
-  if (reviewing && pr.mergeable_state !== "dirty") return "ignore";
+  // A conflicting PR fires no new pull_request run, but a review job that began before a sibling's merge made it
+  // conflict is still running: only when none is (reviewRunning, from the live jobs) does it go back for the rebase.
+  if (reviewing && (pr.mergeable_state !== "dirty" || reviewRunning)) return "ignore";
   const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
   if (!stale) return "ignore";
   if (!queue && pr.mergeable_state === "behind") return "update";

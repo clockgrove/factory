@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "825cb70c3fa2",
+  "digest": "5b6527a04501",
   "skills": {
     "deliver-pr": {
       "sha256": "408e1ee16ee807119f0941420782deba41cfae3d0cf37bc14ac06e360d586d99",
@@ -43,9 +43,9 @@
       "words": 693
     },
     "run": {
-      "sha256": "2eb5ea08ac9cd06f98d7fb31d34da57ab3645b972a3b4c296e585559e863a0be",
-      "lines": 42,
-      "words": 527
+      "sha256": "fdecfba70a299716a6dfa018c5cd302dd1593a2ad62ce3a704f9ca339d04c1d1",
+      "lines": 48,
+      "words": 654
     },
     "score": {
       "sha256": "c2ad81b5851fec521ba9053770f1a186acb487333830a85676e43b7bbcb58e67",
@@ -57,11 +57,16 @@
       "lines": 35,
       "words": 648
     },
+    "serve": {
+      "sha256": "ebd2ccd6a360468a806a960afea645b0fe438d4ee62944c8972c03273923d8d5",
+      "lines": 24,
+      "words": 335
+    },
     "setup": {
       "sha256": "f2c37b4649fbb978177237f8cf0b7fdbbaa40e86e00872aa0ca4b7d8d95999dd",
       "lines": 41,
       "words": 698
     }
   },
-  "recordedAt": "2026-11-07T02:56:26.438Z"
+  "recordedAt": "2026-11-07T08:10:26.744Z"
 }

@@ -35,14 +35,14 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
 
    Save it with `mkdir -p ~/.config/factory/tokens/OWNER && (umask 077; read -rsp 'token: ' t && printf '%s' "$t" > ~/.config/factory/tokens/OWNER/NAME)`, or export `FACTORY_LOCAL_TOKEN`. Local mode refuses a classic token or `gh` login, and refuses a token that can write to any other repository.
 3. For Copilot only: create a fine-grained token with the Copilot Requests permission (Read) from a user with a Copilot seat, and save it to `~/.config/factory/copilot-token`, or export `COPILOT_GITHUB_TOKEN`. Copilot's sandbox reads its policy from a home Factory owns, so your own `copilot login` is not used there.
-4. Run it from a clone of the repository: `node <factory>/plugin/scripts/local.mjs serve`. On its first start it creates the `factory:local` label.
+4. Run it from a clone of the repository: `factory serve` (the plugin's `bin/`, on PATH in Claude Code; elsewhere `node <factory>/plugin/bin/factory serve`), or `/factory:serve` in a session. On its first start it creates the `factory:local` label.
 
 ## Run it
 
 ```sh
-node plugin/scripts/local.mjs serve [--once] [--all] [--interval 30]   # a loop: the dispatcher's rules, every 30 s
-node plugin/scripts/local.mjs run <issue> [--wait]                     # one Objective, work then review (and, with --wait, to merged)
-node plugin/scripts/local.mjs review <pr> [--wait]                     # a review re-run
+factory serve [--once] [--all] [--interval 30]   # a loop: the dispatcher's rules, every 30 s (/factory:serve)
+factory run <issue> [--wait]                     # one Objective, work then review (and, with --wait, to merged) (/factory:run)
+factory review <pr> [--wait]                     # a review re-run
 ```
 
 - **Routing:** label an Objective `factory:local` and the local loop takes it, while the Action leaves it alone. `--all` (or `FACTORY_LOCAL_ALL=1`) takes every Objective.

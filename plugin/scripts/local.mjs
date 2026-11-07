@@ -292,7 +292,8 @@ class Local {
     // shows nothing under the home directory beyond the working and added directories, so plugin/bin is out of its sight.
     const binDir = join(usageDir, "bin");
     mkdirSync(binDir, { recursive: true });
-    for (const tool of readdirSync(join(PLUGIN_ROOT, "bin"))) {
+    // Only the sandbox's own helpers: the `factory` front end (local mode itself) has no business inside a stage.
+    for (const tool of readdirSync(join(PLUGIN_ROOT, "bin")).filter((t) => t !== "factory")) {
       copyFileSync(join(PLUGIN_ROOT, "bin", tool), join(binDir, tool));
       chmodSync(join(binDir, tool), 0o755);
     }

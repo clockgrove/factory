@@ -31,6 +31,7 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
 2. Create a fine-grained token on GitHub (Settings, Developer settings, Fine-grained tokens):
    - **Repository access:** this one repository only.
    - **Permissions:** Contents, Issues and Pull requests read and write; Actions read.
+   - **Optional, for the Project board:** when the repository belongs to an organization, make the organization the token's resource owner and add Organization permissions → Projects: Read and write. Local runs then move board cards the way the Action does; without it, labels carry the state and doctor says so.
 
    Save it with `mkdir -p ~/.config/factory/tokens/OWNER && (umask 077; read -rsp 'token: ' t && printf '%s' "$t" > ~/.config/factory/tokens/OWNER/NAME)`, or export `FACTORY_LOCAL_TOKEN`. Local mode refuses a classic token or `gh` login, and refuses a token that can write to any other repository.
 3. For Copilot only: create a fine-grained token with the Copilot Requests permission (Read) from a user with a Copilot seat, and save it to `~/.config/factory/copilot-token`, or export `COPILOT_GITHUB_TOKEN`. Copilot's sandbox reads its policy from a home Factory owns, so your own `copilot login` is not used there.
@@ -73,5 +74,5 @@ The task card tells the model to do the same. It needs the Postgres server binar
 
 ## Known limits
 
-- The repository token cannot move Project cards, so labels carry the state.
+- Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.

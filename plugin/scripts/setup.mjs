@@ -2,7 +2,7 @@
 // Factory setup: apply the GitHub fixes doctor names, on consent.
 //   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
-//                          [--action clockgrove/factory@v0.7.0]   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
+//                          [--action clockgrove/factory@vX.Y.Z]   (default: the latest Factory release)   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 // Without --yes it prints what each step would do and exits. It never creates a
 // GitHub App: it verifies the one whose app_id and app_private_key it is given
 // (or FACTORY_APP_TOKEN) and tells the adopter the App's permissions.
@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, repoOf, rest } from "./lib/github.mjs";
-import { DEFAULTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
+import { DEFAULTS, FACTORY_VERSION, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 
 export const LABELS = [
   ["factory:objective", "1D76DB", "An Objective for Factory to build unattended"],
@@ -83,7 +83,7 @@ async function applyProtection(repo, { ciChecks, autoMerge, queue }, opts) {
   return note;
 }
 
-function applyWorkflow({ inputs, args, checkout }) {
+function applyWorkflow({ inputs, args, checkout, latest }) {
   const template = readFileSync(join(PLUGIN_ROOT, "workflow-template.yml"), "utf8");
   const values = {
     harness: inputs.harness,
@@ -105,13 +105,19 @@ function applyWorkflow({ inputs, args, checkout }) {
     protected_paths: inputs.protectedAdditions.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",
-    action: args.action || `clockgrove/factory@${args.version || "v0.7.0"}`,
+    action: args.action || `clockgrove/factory@${args.version || latest}`,
   };
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));
   const text = renderWorkflow(template, values);
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, text);
   return `wrote ${out}; commit it on the default branch to start the cron (through a pull request once the ruleset is on: direct pushes to a protected branch are refused)`;
+}
+
+/** The newest Factory release tag, so a new install never pins a stale one; this plugin's own version offline. */
+async function latestRelease() {
+  const tag = await rest("repos/clockgrove/factory/releases/latest", {}).then((r) => r?.tag_name, () => null);
+  return /^v\d+\.\d+\.\d+$/.test(tag || "") ? tag : `v${FACTORY_VERSION}`;
 }
 
 async function main() {
@@ -151,7 +157,7 @@ async function main() {
     if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await applyProject(repo, opts);
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, autoMerge: inputs.autoMerge, queue: args.merge_queue !== "false" }, { token: null });
-    else if (s === "workflow") note = applyWorkflow({ inputs, args, checkout });
+    else if (s === "workflow") note = applyWorkflow({ inputs, args, checkout, latest: await latestRelease() });
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);
   }

@@ -51,7 +51,7 @@ Four optional inputs on the Action, all off or at the harness default unless set
 Every stage runs behind three interfaces: trigger, sandbox and gate (`plugin/scripts/lib/backend.mjs`). GitHub is the only state on every backend: the branch, the PR, the issue's comments and labels, the board and the usage artifact. Measured on a real adopter, an Objective's active minutes are about three quarters model time, a sixth waiting on CI, and under a tenth setup, so Factory's work on cost goes to turns first.
 
 - **Actions (the default):** every job is a fresh hosted runner. It installs the adopter's toolchain, runs the harness, pushes, waits for the required checks, and is discarded. The install is this Action plus the App's two secrets.
-- **Local mode:** the same worker and reviewer on a developer's own machine, started by `plugin/scripts/local.mjs serve` or `run <issue>`. The harness runs on its own login, and every command the model or Factory runs goes through a sandbox. That means no credential stores, writes only in the Objective's clone, and the network limited to GitHub and an allow-list. Its GitHub reach is one fine-grained token for this repository. An Objective labelled `factory:local` is the local loop's, and the Action leaves it alone. Linux, WSL2 and macOS; Claude Code, Codex and Copilot. See [docs/LOCAL.md](docs/LOCAL.md).
+- **Local mode:** the same worker and reviewer on a developer's own machine, started by `factory serve` or `factory run <issue>` (the plugin's `bin/`; `/factory:serve` and `/factory:run` in a session). The harness runs on its own login, and every command the model or Factory runs goes through a sandbox. That means no credential stores, writes only in the Objective's clone, and the network limited to GitHub and an allow-list. Its GitHub reach is one fine-grained token for this repository. An Objective labelled `factory:local` is the local loop's, and the Action leaves it alone. Linux, WSL2 and macOS; Claude Code, Codex and Copilot. See [docs/LOCAL.md](docs/LOCAL.md).
 - **Next, a sandbox backend:** one pausable cloud sandbox per Objective, built from the adopter's own setup, started by short Action jobs on GitHub events. It does not exist yet.
 
 ## Contributing
@@ -60,4 +60,4 @@ No outside pull requests until 1.0; issues and private security reports are welc
 
 ## Uninstall
 
-Delete `.github/workflows/factory.yml`, the App and its two secrets, and any model key. Optionally delete the `factory` ruleset, the labels and the Project. Nothing is installed on anyone's machine.
+Delete `.github/workflows/factory.yml`, the App and its two secrets, and any model key. Optionally delete the `factory` ruleset, the labels and the Project. For local mode, also delete `~/.config/factory` (the tokens), the `.factory/` directory in each clone that ran it, and the `factory:local` label; nothing else is installed.

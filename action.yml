@@ -46,7 +46,7 @@ inputs:
     description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.
     required: false
   daily_usd:
-    description: The dispatcher starts nothing once today's spend passes this many dollars (UTC day): the usage artifacts of Actions runs plus the spend lines local runs write into their progress comments.
+    description: 'The dispatcher starts nothing once today''s spend passes this many dollars (UTC day): the usage artifacts of Actions runs plus the spend lines local runs write into their progress comments.'
     required: false
   max_usd:
     description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it; Claude gets what is left as `--max-budget-usd`, Codex and Copilot are checked after each run. The review job has the same cap of its own.

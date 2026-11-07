@@ -11,7 +11,7 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
   - **Writes are limited:** the Objective's clone, its stage directories and its own package caches (npm, pnpm, Bun, Yarn) only. The clone's `.git/hooks`, `.git/config` and the stage's `bin` are read-only. `TMPDIR` and `XDG_RUNTIME_DIR` point at the stage's private temp directory, and the sandboxes' shared `/tmp/claude` is read-only.
   - **The network is limited:** GitHub and the npm and Yarn registries, plus your `FACTORY_LOCAL_DOMAINS`.
 - The model reaches GitHub with one fine-grained token for this one repository, never your `gh` login.
-- Each Objective gets its own clone under `<your clone>/.factory/<issue>/`, which is git-excluded.
+- Each Objective gets its own clone under `<your clone>/.factory/<issue>/`, which is git-excluded. `serve` removes it once the issue is closed; a Blocked Objective keeps its directory so a re-label picks up where it stood.
 - GitHub holds all state. A claim comment with a heartbeat marks an Objective a local loop is running, so the Action and other loops leave it alone.
 - Each local run writes its dollars into its progress comment, so the `daily_usd` cap counts local and Actions spend together, on any machine.
 

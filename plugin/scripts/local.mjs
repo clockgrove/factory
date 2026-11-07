@@ -308,6 +308,9 @@ class Local {
       FACTORY_CREDENTIAL: "login",
       // The workflow's setup assumes a runner (sudo, a fresh VM); on a box the toolchain is the box's own.
       FACTORY_SETUP: process.env.FACTORY_LOCAL_SETUP ?? this.wf.FACTORY_LOCAL_SETUP ?? "",
+      // The commands that can run in this machine's sandboxes, when not all can (a suite that needs a unix socket):
+      // the task card names these, and the repository's required checks on GitHub still run the full set.
+      ...((process.env.FACTORY_LOCAL_VALIDATION ?? this.wf.FACTORY_LOCAL_VALIDATION) ? { FACTORY_VALIDATION: process.env.FACTORY_LOCAL_VALIDATION ?? this.wf.FACTORY_LOCAL_VALIDATION } : {}),
       FACTORY_APP_TOKEN: this.token,
       GH_TOKEN: this.token,
       FACTORY_INPUT_GITHUB_TOKEN: this.token,

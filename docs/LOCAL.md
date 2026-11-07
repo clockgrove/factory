@@ -59,6 +59,7 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_LOCAL_DOMAINS` | more hosts the sandboxes may reach, space or comma separated |
 | `FACTORY_LOCAL_ENV` | names of more variables the stage may see (the stage env is an allow-list, not your shell) |
 | `FACTORY_LOCAL_SETUP` | the setup command for your machine (the workflow's assumes a fresh runner) |
+| `FACTORY_LOCAL_VALIDATION` | the validation commands local mode runs, when some of the workflow's cannot run in a sandbox; the required checks on GitHub still run the full set before a merge |
 | `FACTORY_LOCAL_DB=1`, `FACTORY_LOCAL_DB_INIT`, `FACTORY_PG_BIN` | a throwaway Postgres per validation command (below) |
 | `FACTORY_LOCAL_MAX_CONCURRENT` | how many Objectives (work or review) this machine runs at once; default a quarter of its CPU threads, at most one per 8 GB of memory. The workflow's `max_concurrent` still caps the repository as a whole |
 
@@ -80,6 +81,7 @@ The task card tells the model to do the same. It needs the Postgres server binar
 - Local mode runs while `serve` runs: a machine that sleeps or shuts down pauses its Objectives until `serve` runs there again (Blocked after a day). A paused Objective keeps its place in the repository's `max_concurrent`. Your machine's size sets how many run at once (`FACTORY_LOCAL_MAX_CONCURRENT`).
 - Without the optional Projects permission, the token cannot move Project cards, so labels carry the state.
 - `FACTORY_LOCAL_DB` is Linux and WSL2 only.
+- No sandbox may create a unix socket (srt's seccomp filter; Codex's sandbox likewise). A suite that starts a server on one, such as a test Postgres with `listen_addresses=` and a socket directory, cannot run locally: leave it out of `FACTORY_LOCAL_VALIDATION`, and the required checks run it on GitHub. A server on `127.0.0.1` works, since each sandbox has its own loopback.
 - `/tmp` is read-only in the sandboxes; temp files go to `$TMPDIR`. A tool that drops `TMPDIR` from its children falls back to `/tmp` and fails there: Turborepo's strict mode does, unless the repository's `turbo.json` lists `TMPDIR` in `globalPassThroughEnv`.
 - srt write-protects shell, git and editor settings in the clone (`.bashrc`, `.gitconfig`, `.mcp.json`, `.vscode`, `.claude/agents` and the like). Factory creates the absent ones empty, and git-excludes the files, so the sandbox protects a real path and a tool walking the tree sees ordinary empty files. Claude Code's own sandbox also stands in for its settings under `.claude/` (`settings.json`, `skills`, `hooks` and others, varying by version) with `/dev/null`, which cannot be opened there: a repository check that walks `.claude/` must skip what is not a regular file or directory, or walk `git ls-files`.
 - Each Objective downloads its packages into its own caches, since a cache shared between Objectives would let one plant code in another. Your own caches are not used. pnpm's store and Bun's cache sit in the clone's `node_modules`, so their packages are hardlinked, not copied. Proven with pnpm 12.9, Bun 1.4 and Yarn 1; Yarn 4 is untested.

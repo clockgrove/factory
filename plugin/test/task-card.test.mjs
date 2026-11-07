@@ -59,3 +59,22 @@ test("validation commands: consecutive parallel: marks share a group, unmarked o
   assert.deepEqual(validationGroups(commands), [["pnpm install-check"], ["pnpm test", "pnpm run test:db"], ["pnpm build"], ["pnpm lint"]]);
   assert.equal(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: commands, protectedPaths: [] }).validation, "pnpm install-check; pnpm test; pnpm run test:db; pnpm build; pnpm lint");
 });
+
+test("maintainer decisions: people who can push, no bots or Factory markers, oldest first; the answer prompt carries them", async () => {
+  const { maintainerDecisions, decisionsSection } = await import("../scripts/lib/logic.mjs");
+  const { answerPrompt } = await import("../scripts/review.mjs");
+  const c = (login, assoc, type, at, body) => ({ user: { login, type }, author_association: assoc, created_at: at, body });
+  const decisions = maintainerDecisions([
+    c("owner", "OWNER", "User", "2026-11-07T09:52:00Z", "Answer: follow the participant set."),
+    c("factory[bot]", "NONE", "Bot", "2026-11-07T09:40:00Z", "Plan."),
+    c("owner", "OWNER", "User", "2026-11-07T09:30:00Z", "<!-- factory:14:plan -->\nnot a decision"),
+    c("stranger", "NONE", "User", "2026-11-07T09:31:00Z", "Answer: ship it as is."),
+    c("member", "MEMBER", "User", "2026-11-07T09:10:00Z", "Keep the 1024-octet bound."),
+  ]);
+  assert.deepEqual(decisions.map((d) => d.author), ["member", "owner"]);
+  assert.match(decisionsSection(decisions), /Keep the 1024-octet bound[\s\S]*participant set/);
+  assert.equal(decisionsSection([]), "");
+  const p = answerPrompt({ taskCard: "", prNumber: 32, comments: [], decisions });
+  assert.match(p, /answered PR #32's question/);
+  assert.match(p, /participant set/);
+});

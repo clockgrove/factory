@@ -419,7 +419,7 @@ test("queue drops: a Block on drops whose merge_group jobs GitHub never started 
     const blocked = {};
     assert.equal(await merge(blocked), "dropped");
     const why = mergeBlockReason("dropped", blocked);
-    assert.match(why, new RegExp(`GitHub did not start the required job Quality: ${lock.replace(/\./g, "\\.")}`));
+    assert.ok(why.includes(`GitHub did not start the required job Quality: ${lock}`), why);
     assert.match(why, /infrastructure, not the change/);
     assert.doesNotMatch(why, /Check that the required checks run/, "not blamed on the checks");
 

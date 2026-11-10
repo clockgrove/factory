@@ -5,7 +5,7 @@
  * repository's `greet`, named uniquely), lets the Action take them (the opened-issue tick,
  * or `--dispatch` to fire one manually), waits until every one is closed or Blocked, then
  * scores them with bench/score.mjs. Exit 0 when every Objective merged with no human
- * input; 1 otherwise; 64 usage. What took a night by hand on Nov 2 runs in ~15 minutes.
+ * input; 1 otherwise; 64 usage.
  *
  *   --repo OWNER/NAME        the scratch adopter (never Factory's own repository, never a product repository)
  *   --set small|medium|conflict  small: one-function additions over greet (default); conflict: two

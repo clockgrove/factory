@@ -11,10 +11,10 @@ Load the `scoring` skill first; it defines the four numbers, their units and the
 
 - **Issue.** `gh issue view <issue> --json title,labels,closedAt,comments` and the timeline (`gh api repos/{owner}/{repo}/issues/<issue>/timeline`) for the label event, the plan comment, a Blocked comment and the human actions after the label.
 - **PR.** `gh pr list --head factory/<issue> --state all --json number,mergedAt,isDraft,reviews,comments,body`, then the review comments for the reviewer's pass and the worker's replies.
-- **Job log.** The runs that uploaded this issue's usage artifacts (`gh api repos/{owner}/{repo}/actions/artifacts?name=factory-usage-<issue>`, and `-review`; each carries its `workflow_run.id`), then `gh run view <id> --log` for runner minutes, validation reruns and the exit line. The worker job is named `work (<issue>)`; the review job is `review`.
-- **Usage artifact.** `gh run download <id> -n factory-usage-<issue>` (and `-n factory-usage-<issue>-review` from the review run) into a scratch directory. Every harness uploads `result.json` (normalized) and `events.jsonl` (the raw stream); read `result.json`. Copilot's carries no dollars: use the billing window.
+- **Job log.** The runs that uploaded this issue's usage artifacts (`gh api repos/{owner}/{repo}/actions/artifacts?name=factory-usage-<issue>`, and `-review`; each carries its `workflow_run.id`), then `gh run view <id> --log` for runner minutes, validation reruns and the exit line. The worker job is named `work (<issue>)`; the review job is `review (factory/<issue>)`.
+- **Usage artifact.** `gh run download <id> -n factory-usage-<issue>` (and `-n factory-usage-<issue>-review` from the review run) into a scratch directory. Every harness uploads `result.json` (normalized) and `events.jsonl` (the raw stream); read `result.json`. Copilot's dollars are its AI credits at `copilot_credit_usd`; an artifact without credits is `unmetered`.
 
-For a run made with `/factory:run <issue>` in a session, there is no job log or artifact: take the harness's usage from the session's own output if the user has it, else mark the dollars `unmetered` and the runner minutes `n/a`.
+For a run made with `/factory:run <issue> --here` there is no job log or artifact: take the harness's usage from the session's own output if the user has it, else mark the dollars `unmetered` and the runner minutes `n/a`. A local-mode run (`factory run`, `factory serve`) uploads no artifact either; `bench/score.mjs` reads its dollars from the `<!-- factory:spend -->` lines in Factory's progress comments.
 
 ## Write the row
 

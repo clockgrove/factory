@@ -1,4 +1,4 @@
-# Factory bench (0.6)
+# Factory bench
 
 The scorecard, the blind pairwise judge and the auto-grader. Plain Node 22, no dependencies beyond `gh` (logged in, for anything that reads GitHub; `gh run download` unpacks artifacts).
 
@@ -20,7 +20,7 @@ Beside the four numbers the row carries, from the same sources: `phases` (setup 
 ## The streak
 
 ```sh
-node bench/score.mjs --streak --repo OWNER/NAME --since v0.7.132 [--append scorecard.json]
+node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0 [--append scorecard.json]
 ```
 
 Consecutive walk-away merges per harness from a Factory tag (its Release's time, read from `--factory`, default `clockgrove/factory`): the Objectives whose clock started at or after it, in the order they ended. A walk-away merge with no P1 escape and every input source read extends the harness's streak; any human input, a Blocked card, a stall, an unmerged end, a P1 escape in `quality.escapes`, or an input source the scorer could not read (`walkAway.unseen`: the workflow runs without Actions read, or more than GitHub's 1,000 in the window; the body edits without GraphQL) resets it, and the sequence says which. The harness is the usage artifact's, else the `<!-- factory:harness -->` line or the `harness <name>` start line in Factory's own progress comments; a row with none, or with two (a relabel that switched harness), is listed as `unknown`: it extends no harness's streak, and when it breaks, it breaks every harness's. In local mode a re-run by the operator's login on a head Factory's triage record names is Factory's own. A re-run of a run created before the first label is not listed. Objectives still running are listed as in flight; ones whose clock started before the tag are left out by number. The adopter's pin is not read: score a repository only while it is pinned to the tag.
@@ -66,7 +66,7 @@ node bench/sandbox-check.mjs                          # srt, Claude Code, Codex 
 node bench/sandbox-check.mjs --harness srt,codex      # the two that need no model call
 ```
 
-Local mode's sandbox bar, probed on this machine. One probe script runs under srt (Factory's own commands) and under each harness's own sandbox, and every result is checked: the credential store unreadable, writes only in the clone and the stage directories (the clone's hooks and config, the stage's `bin` and another stage's temp directory not), escapes to /tmp and the home directory looked for on the host, the allow-listed host reachable for GET and POST and others not, no model key in the commands' environment, `TMPDIR` inside the stage's private temp directory, pnpm's lock directory writable, and the npm, pnpm, Bun and Yarn caches writable. Claude Code and Copilot take one model call each. On Windows it checks that local mode refuses and names WSL2. The scratch adopter runs it on hosted Linux, macOS and Windows from its `sandbox-check` workflow.
+Local mode's sandbox bar, probed on this machine. One probe script runs under srt (Factory's own commands) and under each harness's own sandbox, and every result is checked: the credential store unreadable, writes only in the clone and the stage directories (the clone's hooks and config, the stage's `bin` and another stage's temp directory not), escapes to /tmp and the home directory looked for on the host, the allow-listed host reachable for GET and POST and others not, no model key in the commands' environment, `TMPDIR` inside the stage's private temp directory, pnpm's lock directory writable, and the npm, pnpm, Bun and Yarn caches writable. Claude Code and Copilot take one model call each. On Windows it checks that local mode refuses and names WSL2.
 
 ## Skills, versioned
 
@@ -92,4 +92,4 @@ node bench/grade-auto.mjs --repo widgets --commit factory/811 --base main~3 --ob
     --check "pnpm check" --check "pnpm test" --out grades/811.json
 ```
 
-`judge.mjs` runs the 0.5 judge contract blind (which ref is A comes from a hash of the two names) and unblinds the answer to refs. `grade-auto.mjs` and `lib/judge.mjs` are kept from 0.5 unchanged; their flags are in their headers. Tests: `node --test 'bench/test/*.test.mjs'`.
+`judge.mjs` runs the judge blind (which ref is A comes from a hash of the two names) and unblinds the answer to refs. `judge.mjs` and `grade-auto.mjs` take the flags in their headers. Tests: `node --test 'bench/test/*.test.mjs'`.

@@ -11,12 +11,12 @@ Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/
 
 ## In this session (--here)
 
-Work the Objective in this session, without local mode's sandbox, when the user wants to watch or steer: the Action's worker, only the sandbox differs.
+Work the Objective here, unsandboxed, when the user wants to watch or steer: the Action's worker otherwise.
 
 ### Preconditions
 
-- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token (docs/LOCAL.md) or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`. Otherwise ask once for whatever is missing, before the run starts.
-- The issue carries `factory:objective` and is open. Stop and say so if not.
+- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token (docs/LOCAL.md) or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`, `FACTORY_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts.
+- The issue carries `factory:objective` and is open; else stop and say so.
 - Never on Factory's own repository (`clockgrove/factory`); stop and say so.
 
 ### Render the task card
@@ -28,6 +28,7 @@ Read `templates/task-card.md` in this plugin's root (`${CLAUDE_PLUGIN_ROOT}`; in
 | `{{issue}}` | the issue number |
 | `{{usd}}`, `{{hours}}` | the budget: `FACTORY_MAX_USD` and `FACTORY_TIMEOUT_MINUTES / 60`, else what the user said |
 | `{{validation}}` | the repository's validation commands, separated by `; ` |
+| `{{validation_note}}` | the `validation_note` sentence in this plugin's `scripts/lib/logic.mjs`, chosen by `FACTORY_CI_CHECKS` |
 | `{{budget_command}}` | the test-budget command, or `none` |
 | `{{protected_paths}}` | `.github/`, CODEOWNERS, `.agents/skills/`, `.claude/`, `.codex/`, plus `FACTORY_PROTECTED_PATHS` |
 | `{{branch}}` | `factory/<issue>` |
@@ -44,4 +45,4 @@ Run `factory deliver <issue>` from the clone (else `node <plugin root>/scripts/l
 
 ### After
 
-Tell the user in three lines: the PR link and whether it is a draft, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file).
+Tell the user in three lines: the PR link and draft state, the validation results, and the usage the harness reported (Claude: `total_cost_usd`; Codex: token totals; Copilot: the usage file).

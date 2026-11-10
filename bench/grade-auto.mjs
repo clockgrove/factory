@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `node bench/grade-auto.mjs`: grade any Objective's result (#2273), with
+ * `node bench/grade-auto.mjs`: grade any Objective's result, with
  * a grader, a quality reviewer, an adversary and a verifier, each a
  * headless agent (bench/lib/grade-auto.mjs).
  *

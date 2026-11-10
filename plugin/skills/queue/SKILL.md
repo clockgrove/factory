@@ -24,10 +24,10 @@ If `/factory:doctor` has not run on this repository in this session, run it firs
 
 ## When the workflow is absent
 
-Say that the Action is the primary path and `/factory:setup` installs it in about three minutes, then explain the cloud path for this harness, which bills the user's plan:
+Say that the Action is the primary path and `/factory:setup` installs it, and that local mode on this machine (`/factory:serve`) needs no workflow; then explain the cloud path for this harness, which bills the user's plan:
 
-- **Claude Code.** Claude's cloud sessions load committed `.claude/` directories but not repository-declared plugins, so the skills and agent definitions must be committed under `.claude/skills/` and `.claude/agents/` first (see `/factory:setup`, step 4). Create a scheduled task in Claude's cloud whose prompt is the rendered task card for `/factory:run <issue>` and whose setup script installs the toolchain (the repository's `setup` command); the cloud proxy blocks GraphQL, so the prompt must say to use `gh api` REST calls, not `gh pr` or `gh issue`.
+- **Claude Code.** Claude's cloud sessions load committed `.claude/` directories but not repository-declared plugins, so the skills and agent definitions must be committed under `.claude/skills/` and `.claude/agents/` first (see `/factory:setup`, step 4). Create a scheduled task in Claude's cloud whose prompt is the rendered task card for `/factory:run <issue>` and whose setup script installs the toolchain (the repository's `setup` command).
 - **Codex.** Commit the skills under `.agents/skills/` and the agents under `.codex/agents/`. Create a Codex cloud task from the same task card with network enabled for the agent phase (it is offline by default) and the toolchain in its setup script.
 - **Copilot.** Commit the skills under `.agents/skills/` (Copilot reads it) and the agents under `.github/agents/`. Assign the issue to the Copilot coding agent with the task card as the first comment; its session is an Actions job capped at 59 minutes, so an Objective that needs more must be split per `implement-split`.
 
-In each case the merge path (App token, merge queue, reviewer) still needs the Action, so a cloud run ends at an open PR unless the workflow is installed. Say that plainly.
+In each case the session only commits and leaves its hand-off files: the task card forbids GitHub writes and nothing in the vendor's cloud runs `factory deliver`, so a cloud run opens no PR. For runs that end in a merged PR, use the Action or local mode (`/factory:serve`). Say that plainly.

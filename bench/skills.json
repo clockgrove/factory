@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "26499e74008d",
+  "digest": "7f45fb711c12",
   "skills": {
     "deliver-pr": {
       "sha256": "59b4b5766dbb964c08e604bc47395d0b726392627a9b2b92ae3323c6f666d684",
@@ -15,9 +15,9 @@
       }
     },
     "doctor": {
-      "sha256": "ba7874838d9ff625fedf0a792a68c59dd6a60ab2690c2c740086e9cda96a9101",
+      "sha256": "82cc26bbbab8f73cfb6d0d680dd6b9489ae87b76cf5f1303ea1fee95f75ba15d",
       "lines": 41,
-      "words": 622
+      "words": 599
     },
     "implement-split": {
       "sha256": "16949a7de99d47e1c465070770db6d0cb7eaf50c2d28aab1fdd6ca059e8b2e60",
@@ -35,9 +35,9 @@
       "words": 668
     },
     "queue": {
-      "sha256": "76615e705e229fc7c78d51266b5f0ff371d551be58de3a07b01378957248f663",
+      "sha256": "ceae7edc340991a0910d2d8a5fe35889b0bf069d50156c5fe82219c0082cde4b",
       "lines": 34,
-      "words": 494
+      "words": 499
     },
     "review": {
       "sha256": "37f9a199de3b70aa2a894bc54447ac19e22b6e87b9c32878ff607fd3e977b790",
@@ -57,14 +57,14 @@
       }
     },
     "run": {
-      "sha256": "5244c7fa0b377848aabded88d4ebade88848de7009c758ef9a5e7b267b2a4537",
-      "lines": 48,
-      "words": 696
+      "sha256": "a444221850cb04366eaa24d895c9ce6ef9e7f2974c66dd9451c670871c892f6a",
+      "lines": 49,
+      "words": 699
     },
     "score": {
-      "sha256": "d000a2e52f3ee0f16eb4d3d7fae1adbec87106fd8fa8d7bcb601ea5a917bd3b4",
+      "sha256": "3009f4a2dcb11bae83b1c94f04188793ce511c17697c0852e67409cf3caef78d",
       "lines": 28,
-      "words": 443
+      "words": 473
     },
     "scoring": {
       "sha256": "3a724832c2cfec747ae236af4bd8c3a15447871321e02e052d0a375926824eaa",
@@ -72,9 +72,9 @@
       "words": 619,
       "files": {
         "reference.md": {
-          "sha256": "6b46cca02d194766f3b2f4b0dd89aee676b287c256c3bc50d3fd7f4920433026",
+          "sha256": "80d6939a076fb8f044eecae824f0259621410c6dcdc30dd7e184a5b8074db5f9",
           "lines": 24,
-          "words": 446
+          "words": 445
         }
       }
     },
@@ -84,10 +84,10 @@
       "words": 335
     },
     "setup": {
-      "sha256": "e2e1c3018d466576016ac7f7fb382437518be3763ea3e0d7bd76eb54f3e45f0a",
+      "sha256": "046fec72f29e0fa893d418a7c0b5b67142d39be77b862e2c07fd9c51e9f8cee8",
       "lines": 41,
-      "words": 700
+      "words": 694
     }
   },
-  "recordedAt": "2026-11-10T04:04:39.504Z"
+  "recordedAt": "2026-11-10T17:54:59.072Z"
 }

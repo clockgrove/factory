@@ -257,10 +257,10 @@ export function harnessVersion(harness, env = process.env) {
   }
 }
 
-// The running totals each Claude or Copilot session last reported in this process, so a resumed pass counts only its
-// own share (both report a resumed session's usage as the session's total; Codex reports each turn).
+// The running totals each session (a Codex thread) last reported in this process, so a resumed pass counts only its own
+// share: every harness reports a resumed session's usage as the session's total.
 const SESSION_TOTALS = new Map();
-const RUNNING_TOTALS = new Set(["claude", "copilot"]);
+const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 
 /**
  * The dollars per Copilot AI credit: the `copilot_credit_usd` setting, else GitHub's published $0.01. A value that is

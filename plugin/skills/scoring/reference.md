@@ -5,7 +5,7 @@ Lookup detail for the scoring skill. SKILL.md says when to load each section; ev
 ## Dollars by harness
 
 - **Claude.** The JSON result's `total_cost_usd`, and `modelUsage` keyed by model, which includes sub-agents; the top-level `usage` excludes them, so never use it for the whole run. Unit: USD. Basis: harness-reported.
-- **Codex.** The JSONL's `turn.completed` events carry `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` per turn; reasoning tokens may be missing, and sub-agent totals may be folded in. Sum per model and price from the bench's price table, naming the table's date. Unit: USD. Basis: tokens priced by table.
+- **Codex.** Each run's JSONL ends in one `turn.completed` whose `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` are the thread's running total; `output_tokens` already includes `reasoning_output_tokens`, and sub-agent totals may be folded in. A resumed thread reports its running total, so each pass counts only its own share. Sum per model and price from the bench's price table, naming the table's date. Unit: USD. Basis: tokens priced by table.
 - **Copilot.** Token counts, premium requests and AI credits (`totalNanoAiu`, billionths of a credit) from `copilot --usage-output-file`, which the worker writes beside `events.jsonl`. Dollars are the credits at `copilot_credit_usd`, GitHub's published $0.01 per credit by default. A resumed session reports its running total, so each pass counts only its own share. An artifact with no credits is `unmetered`. Unit: USD. Basis: harness-reported AI credits.
 
 ## Reading the artifacts

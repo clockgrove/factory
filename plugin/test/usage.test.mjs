@@ -57,9 +57,9 @@ test("codex: JSONL turn.completed usage summed and priced from the table", () =>
   assert.equal(rec.sessionId, "thr_01HZX");
   assert.equal(rec.tokens.input, 150000);
   assert.equal(rec.tokens.cached, 115000);
-  assert.equal(rec.tokens.output, 10500);
+  assert.equal(rec.tokens.output, 10000, "output_tokens already includes the reasoning tokens");
   const p = CODEX_PRICES.perMillion["gpt-6.1-sol"];
-  const expected = Math.round(((150000 - 115000) * p.input + 115000 * p.cached + 10500 * p.output) / 1e6 * 10000) / 10000;
+  const expected = Math.round(((150000 - 115000) * p.input + 115000 * p.cached + 10000 * p.output) / 1e6 * 10000) / 10000;
   assert.equal(rec.usd, expected);
   assert.match(rec.basis, new RegExp(`priced from table dated ${CODEX_PRICES.date}`));
   assert.equal(finalText("codex", fixture("codex-events.jsonl")).split("\n")[0], "Plan posted.");
@@ -332,6 +332,56 @@ test("a session restored from an earlier job counts its own share: the transcrip
   const own = sinceSession(reported, prior);
   assert.ok(Math.abs(own.usd - 0.00034886) < 1e-9, `resumed pass usd ${own.usd}`);
   assert.equal(own.models["claude-haiku-5-5"].output, 32);
+});
+
+test("a resumed Codex pass counts its own share, in this process and from an earlier stage; output is priced once", async () => {
+  const { runHarness } = await import("../scripts/lib/harness.mjs");
+  const { restoreTranscript } = await import("../scripts/lib/session.mjs");
+  // Real Codex 0.167.0 streams: `codex exec`, then `codex exec resume` on its thread at high effort. turn.completed
+  // carries the thread's running total; the rollout's own last_token_usage for the resumed turn was input 22888,
+  // cached 12288, output 50 of which reasoning 43 (total_tokens 22938 = input + output).
+  const bin = mkdtempSync(join(tmpdir(), "factory-codex-resume-"));
+  const fixtures = join(import.meta.dirname, "fixtures");
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}
+const fs = require("node:fs");
+const resume = process.argv[3] === "resume" ? process.argv[4] : null;
+const text = fs.readFileSync(${JSON.stringify(fixtures)} + (resume ? "/codex-0.167-thread-resumed.jsonl" : "/codex-0.167-thread.jsonl"), "utf8");
+process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e724", resume) : text);
+`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  process.env.PATH = `${bin}:${saved.PATH}`;
+  const model = "gpt-6.1-sol";
+  const run = (resume, label) => runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label });
+  const near = (a, b, why) => assert.ok(Math.abs(a - b) < 1e-3, `${why}: ${a} vs ${b}`);
+  try {
+    const first = await run(null, "work-1");
+    const thread = first.sessionId;
+    assert.deepEqual(first.tokens, { input: 16151, output: 5, cached: 12288, written: null });
+    const fix = await run(thread, "validation-fix-1");
+    assert.deepEqual(fix.tokens, { input: 22888, output: 50, cached: 12288, written: null }, "the resumed pass's own share, reasoning inside output");
+    near(fix.usd, priceCodex(model, fix.tokens), "priced on its own share");
+    assert.deepEqual(fix.sessionTotal.tokens, { input: 39039, output: 55, cached: 24576, written: null });
+    near(mergeUsage([first, fix]).usd, priceCodex(model, fix.sessionTotal.tokens), "the run costs what the thread reported last");
+
+    // A later stage restores the thread: the prior total is the one Factory recorded in the saving stage's result.json.
+    const root = mkdtempSync(join(tmpdir(), "factory-codex-stage-"));
+    process.env.CODEX_HOME = join(root, "codex");
+    process.env.FACTORY_LOCAL = "1";
+    const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-t2.jsonl");
+    const usageDir = join(root, "ws", "usage-work-1");
+    mkdirSync(join(usageDir, "transcript", "2026", "11", "10"), { recursive: true });
+    writeFileSync(join(usageDir, "transcript", rel), "{}\n");
+    writeFileSync(join(usageDir, "result.json"), JSON.stringify({ session: { harness: "codex", id: "t2", files: [rel], checkout: "/c" }, sessionTotal: first.sessionTotal }));
+    assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id, "t2");
+    delete process.env.FACTORY_LOCAL;
+    const review = await run("t2", "review-fix-1");
+    assert.deepEqual(review.tokens, fix.tokens, "a restored thread counts only its own share too");
+    rmSync(root, { recursive: true, force: true });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    rmSync(bin, { recursive: true, force: true });
+  }
 });
 
 test("a session total is only subtracted when it is a running total", async () => {

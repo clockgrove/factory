@@ -90,17 +90,17 @@ test("cost: Codex tokens are priced from prices.json, with its date in the basis
   const row = scoreObjective(cleanMerge(46, usage("codex")), { prices, now: NOW });
   assert.equal(row.harness, "codex");
   assert.equal(row.cost.unit, "usd"); // dollars priced from the table are the measure
-  // 35,000 uncached in, 115,000 cached, 10,500 out at the gpt-6.1-sol standard rates (2.00 / 0.10 / 10.00)
-  assert.equal(row.cost.usd, priceTokens(prices, "gpt-6.1-sol", { input: 150000, cached: 115000, output: 10500 }));
-  assert.equal(row.cost.usd, 0.1865);
+  // 35,000 uncached in, 115,000 cached, 10,000 out (reasoning is inside output_tokens) at the gpt-6.1-sol standard rates (2.00 / 0.10 / 10.00)
+  assert.equal(row.cost.usd, priceTokens(prices, "gpt-6.1-sol", { input: 150000, cached: 115000, output: 10000 }));
+  assert.equal(row.cost.usd, 0.1815);
   assert.match(row.cost.basis, /prices\.json dated 2026-11-05$|prices\.json dated 2026-11-05;/);
   assert.equal(row.cost.priceTableDate, "2026-11-05");
   assert.equal(row.cost.note, null);
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);
   const raw = parseUsageText(read(join(USAGE, "codex", "events.jsonl")), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 150000, output: 10500, cached: 115000, written: null });
-  assert.equal(costOf([raw], prices).usd, 0.1865);
+  assert.deepEqual(raw.tokens, { input: 150000, output: 10000, cached: 115000, written: null });
+  assert.equal(costOf([raw], prices).usd, 0.1815);
   assert.equal(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).usd, null);
   assert.match(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
 });

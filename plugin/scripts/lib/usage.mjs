@@ -235,10 +235,12 @@ export function priceCodex(model, tokens) {
 }
 
 /**
- * Codex: `codex exec --json` prints JSONL. Each `turn.completed` carries
- * `usage.{input_tokens, cached_input_tokens, output_tokens[, reasoning_output_tokens]}`;
- * `input_tokens` already includes the cached part. Sub-agent threads are folded in by
- * Codex where it reports them at all. Dollars come from the price table.
+ * Codex: `codex exec --json` prints JSONL ending in one `turn.completed` whose
+ * `usage.{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens}` is the
+ * thread's running total, restored by `codex exec resume` (sinceSession takes a resumed pass's
+ * share). `input_tokens` already includes the cached part and `output_tokens` the reasoning
+ * part, so reasoning is not added again. Sub-agent threads are folded in by Codex where it
+ * reports them at all. Dollars come from the price table.
  */
 export function parseCodex(stdout, model) {
   const rec = empty("codex", model);
@@ -261,7 +263,7 @@ export function parseCodex(stdout, model) {
       // Codex reports usage per turn, not per request, and no cache writes (OpenAI's caching has no write charge).
       if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: null };
       input = add(input, num(u.input_tokens));
-      output = add(output, add(num(u.output_tokens), num(u.reasoning_output_tokens)));
+      output = add(output, num(u.output_tokens));
       cached = add(cached, num(u.cached_input_tokens));
     }
     if (e.type === "turn.failed" || e.type === "error") failed = e.error?.message || e.message || e.type;
@@ -470,9 +472,9 @@ function mergeModels(a, b) {
 const less = (a, b) => (a === null || a === undefined ? null : Math.max(0, a - (b ?? 0)));
 
 /**
- * Claude Code reports a resumed session's cost and tokens as the session's running total (`total_cost_usd`,
- * `modelUsage`), so a pass that resumes an earlier session is counted as its own share: the total minus the total that
- * session had already reported (in this process, or in its restored transcript). Turns are per process and stay.
+ * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
+ * that resumes an earlier session is counted as its own share: the total minus the total that session had already
+ * reported (in this process, or in its restored transcript or Factory's record of it). Turns are per process and stay.
  */
 export function sinceSession(rec, prior) {
   if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;

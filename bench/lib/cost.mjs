@@ -145,7 +145,7 @@ export function vendorOf(records) {
   return { usd, parts: withVendor.length, upperBound: upper > 0, basis, storedUsd: round4(withVendor.reduce((s, r) => s + (num(r.vendor.storedUsd) ?? 0), 0)) };
 }
 
-/** Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). */
+/** Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already includes the reasoning tokens. */
 export function fromCodexEvents(text, model = null) {
   const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
   for (const e of jsonLines(text)) {
@@ -153,7 +153,7 @@ export function fromCodexEvents(text, model = null) {
     rec.turns += 1;
     const u = e.usage || {};
     rec.tokens.input = add(rec.tokens.input, num(u.input_tokens));
-    rec.tokens.output = add(rec.tokens.output, add(num(u.output_tokens), num(u.reasoning_output_tokens)));
+    rec.tokens.output = add(rec.tokens.output, num(u.output_tokens));
     rec.tokens.cached = add(rec.tokens.cached, num(u.cached_input_tokens));
   }
   return rec;

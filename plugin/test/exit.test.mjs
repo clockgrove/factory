@@ -371,6 +371,16 @@ test("fixRunAllowed: a red the required checks find first gets a fix run, even o
   assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: true, checksFixed: true }), false);
 });
 
+test("fixRunAllowed: each catch-up merge of Factory's own found red is one pass more, never the change's last (#10)", () => {
+  // Pass 1 was red in the checks and fixed; pass 2 is red on Factory's catch-up merge: it gets its fix run.
+  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: true, checksFixed: true, catchUps: 1 }), true);
+  // Pass 3, on the agent's own commit, is the last: a red there stops.
+  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: true, checksFixed: true, catchUps: 1 }), false);
+  // A second catch-up merge found red gets its own pass too; with none, the cap is as before.
+  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: false, checksFixed: true, catchUps: 2 }), true);
+  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: false, checksFixed: false }), false);
+});
+
 
 test("evaluateChecks: required checks from a head's check-runs, latest run per name, missing is not red", async () => {
   const { evaluateChecks } = await import("../scripts/lib/logic.mjs");

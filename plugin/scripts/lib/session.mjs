@@ -625,8 +625,8 @@ export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
 /**
  * Factory's own validation: run the commands; on red, send the failure back to the
  * same harness (resume where the harness can) and run them once more. `maxPasses`
- * passes at most, plus one when the required checks are first red on the last of them
- * (logic.mjs fixRunAllowed). `spentUsd` is what the job has spent before this loop; each fix run gets what
+ * passes at most, plus one when the required checks are first red on the last of them and one for each catch-up merge
+ * of Factory's own found red (logic.mjs fixRunAllowed). `spentUsd` is what the job has spent before this loop; each fix run gets what
  * is left of `maxUsd`, and nothing is run once it is gone. Returns {green, passes, lastOutput, usage: [records],
  * harness?: {timedOut|budgetExceeded|died}}.
  */
@@ -750,6 +750,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   let last = null;
   // Whether a fix run has had a red from the required checks (logic.mjs fixRunAllowed).
   let checksFixed = false;
+  // Factory's own catch-up merges (outbox.mjs caughtUp) validated red: each gets one fix pass that is not counted.
+  const caughtRed = new Set();
   // With required checks configured, the repository's CI is Factory's validation: the head is
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
@@ -845,7 +847,11 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const share = Math.floor(6000 / failures.length);
     const tail = failed.output.slice(-6000);
     log(`${label} pass ${passes} red: ${failures.map((f) => `${f.command}${f.timedOut ? " (timed out)" : ""}`).join("; ")}`);
-    const fixing = fixRunAllowed({ passes, maxPasses, fromChecks: !!v.fromChecks, checksFixed });
+    // The head validated (the checks' or the checkout's) is a merge Factory made and pushed itself: its red is not the
+    // change's last pass. Decided on the commit id the outbox recorded, once per merge.
+    const validated = v.sha || v.head || "";
+    if (validated && outbox?.caughtUp?.(validated)) caughtRed.add(validated);
+    const fixing = fixRunAllowed({ passes, maxPasses, fromChecks: !!v.fromChecks, checksFixed, catchUps: caughtRed.size });
     if (onPhase && fixing) await onPhase(`${label} pass ${passes} red: ${failed.command}; fix run`);
     if (!fixing) break;
     if (v.fromChecks) checksFixed = true;

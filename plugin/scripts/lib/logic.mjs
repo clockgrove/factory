@@ -75,9 +75,10 @@ export function protectedPaths(additions = []) {
  * Whether a red validation pass gets a fix run: `maxPasses` passes at most, plus one when the red is the first the
  * required checks found. Locally the commands run before the checks, so a change they do not exercise (a browser test
  * only CI runs) is first red in the checks, possibly on the last pass; that red gets its fix run. Each later red stops
- * at `maxPasses`.
+ * at `maxPasses`. `catchUps`: the catch-up merges of Factory's own (outbox.mjs catchUp) found red so far, each one
+ * pass more: a pass on a merge Factory chose is not the change's, so it never takes the change's last pass.
  */
-export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed }) => passes < maxPasses + (fromChecks && !checksFixed ? 1 : 0);
+export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catchUps = 0 }) => passes < maxPasses + catchUps + (fromChecks && !checksFixed ? 1 : 0);
 
 /**
  * Whether a protected entry covers `path` (from the repository root). A directory entry ends with `/` and matches from

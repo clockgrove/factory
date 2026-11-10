@@ -236,9 +236,9 @@ export async function runValidation(checkout, commands, opts = {}) {
     if (group.length > 1) for (const r of done) process.stdout.write(`[factory] ${r.ok ? "passed" : r.timedOut ? "timed out" : `failed (exit ${r.code})`}: ${r.command}\n`);
     results.push(...done);
     const failures = done.filter((r) => !r.ok);
-    if (failures.length) return { green: false, results, failed: failures[0], failures };
+    if (failures.length) return { green: false, results, failed: failures[0], failures, head };
   }
-  return { green: true, results, failed: null, failures: [] };
+  return { green: true, results, failed: null, failures: [], head };
 }
 
 /** Pick the offline install command from the lockfile present. `install: none` skips; a given command wins. */

@@ -494,6 +494,41 @@ test("outbox: a default branch that changed a workflow file during the run is me
   assert.deepEqual((await box.delta()).files, ["app.txt"]);
 });
 
+test("outbox: a red first seen on Factory's own catch-up merge gets a fix pass that is not the change's last (#10)", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const r = repos();
+  const box = await withWorkflow(r);
+  box.author = { name: "factory[bot]", email: "1+factory[bot]@users.noreply.github.com" };
+  r.put(r.work, "app.txt", "v2\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  const work = r.run(r.work, "rev-parse", "HEAD");
+  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
+  r.run(r.other, "commit", "-q", "-m", "ci v2");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  assert.equal(await box.push(), true, box.error);
+  const merge = r.run(r.origin, "rev-parse", "factory/1");
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), merge, "the checkout took Factory's merge");
+  assert.equal(box.caughtUp(merge), true, "Factory recorded its own merge");
+  assert.equal(box.caughtUp(work), false, "the agent's head is not Factory's merge");
+  // The last allowed pass (maxPasses 1) is red on the merge: it still gets its fix run. Under a minute left, the fix
+  // run is reached but never started (the loop returns the time cap instead of running a harness).
+  const loop = () => validationLoop({ checkout: r.work, commands: ["false"], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: { ...process.env, ...quiet }, deadlineAt: Date.now() + 30_000, maxPasses: 1, outbox: box });
+  const onMerge = await loop();
+  assert.deepEqual(onMerge.harness, { timedOut: true }, "the red on the catch-up merge went on to a fix run");
+  assert.equal(onMerge.passes, 1);
+  // The agent's own commit on top of the merge is the change's: red on the last pass, it stops there as before.
+  r.put(r.work, "app.txt", "v3\n");
+  r.run(r.work, "commit", "-q", "-m", "fix");
+  assert.equal(await box.push(), true, box.error);
+  const fix = r.run(r.origin, "rev-parse", "factory/1");
+  assert.equal(box.merged, null);
+  assert.equal(box.caughtUp(fix), false);
+  const onFix = await loop();
+  assert.equal(onFix.harness, undefined, "no fix run past the last pass");
+  assert.equal(onFix.green, false);
+  assert.equal(onFix.passes, 1);
+});
+
 test("outbox: a checkout that cannot take Factory's merge keeps the branch on it; later pushes only move it forward", async () => {
   const r = repos();
   const box = await withWorkflow(r);

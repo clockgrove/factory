@@ -252,6 +252,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
   // New-branch conflicts with the default branch seen so far (catchUp): the second is refused.
   let conflicts = 0;
+  // The catch-up merges (catchUp) this outbox pushed, by commit id: a validated head that is one of them is Factory's
+  // own merge, not the agent's change (box.caughtUp).
+  const catchUps = new Set();
   // A merge of Factory's the checkout could not take (box.synced false): {from: the agent's head it was made from, to:
   // the merge pushed}. The next push builds on that merge instead of making a fresh one that would replace it.
   let unsynced = null;
@@ -705,6 +708,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     if (now !== head) return refuse(`after the push GitHub's ${branch} is ${now.slice(0, 7) || "missing"}, not the checked ${head.slice(0, 7)}`);
     expected = head;
+    if (caught.merged) catchUps.add(head);
     await git(["update-ref", `refs/remotes/origin/${branch}`, head]);
     // The agent's checkout takes Factory's merge, so its next commits build on it (sync). A push of a commit Factory
     // made (`sha`, its rebase) leaves the checkout to the caller, which re-points it.
@@ -712,6 +716,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     else unsynced = null;
     return true;
   };
+
+  /** Whether `sha` is a catch-up merge (catchUp) this outbox made and pushed: Factory's own commit, never the agent's. */
+  box.caughtUp = (sha) => catchUps.has(sha);
 
   /** The branch as pushed: its commits beyond the default branch and the paths this stage changed (protected check). */
   box.delta = async () => {

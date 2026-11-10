@@ -14,7 +14,7 @@ The issue gives the label time, the plan comment, the Blocked comment and any qu
 
 ## Stalls
 
-The walk-away rule's stall (#2597), as `bench/score.mjs` applies it:
+The walk-away rule's stall, as `bench/score.mjs` applies it:
 
 - The threshold is 60 minutes by default (`--stall-minutes`), GitHub's default merge-queue timeout, so one healthy CI wait, on the PR or in the queue, fits under it.
 - A merge that sat idle longer than the threshold between Factory's acts is a stall, not a walk-away: `walkAway.stall` gives the minutes and the span, and every merged row carries its longest idle span as `walkAway.longestIdleMinutes`.

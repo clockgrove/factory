@@ -5,19 +5,19 @@ description: /factory:doctor. Check that this repository, its GitHub settings, i
 
 # /factory:doctor
 
-Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:setup` applies fixes on consent. When the plugin's `scripts/doctor.mjs` exists (it ships with this plugin), run it and render its output:
+Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:setup` applies fixes on consent. Run the plugin's `scripts/doctor.mjs` and render its output:
 
 ```sh
 node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup] [--local]
 ```
 
-The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or passes `--app-id` and `--app-private-key <path>`; without one every GitHub line FAILs with "no installation token". `--probe` makes the one-call harness probe; `--run-setup` executes the repository's `setup` command instead of only finding it. `--local` adds local mode's checks: a repository that uses Postgres needs `FACTORY_LOCAL_DB=1` there. The list below is what the script checks and the fallback when it is absent.
+The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, in their own shell; without one every GitHub line FAILs with "no installation token". `--probe` makes the one-call harness probe; `--run-setup` executes the repository's `setup` command instead of only finding it. `--local` adds local mode's checks: a repository that uses Postgres needs `FACTORY_LOCAL_DB=1` there. The list below is what the script checks.
 
 ## Credentials
 
 - The harness's credential is present and is an API credential: Claude `ANTHROPIC_API_KEY` or workload identity federation (`id-token: write` on the job and the Anthropic organization linked); Codex `CODEX_API_KEY`; Copilot `copilot_github_token`, which a probe shows cannot write to the repository. Fix: add the secret the workflow names.
 - Warn when `CLAUDE_CODE_OAUTH_TOKEN` is set: plan limits assume ordinary individual use, and a present API key silently wins. Fix: `credential: plan` only on your own repository.
-- With `--probe`, a one-call probe (`claude -p 'reply ok' --output-format json`, `codex exec --json 'reply ok'`, `copilot` with `reply ok` on stdin) reports the resolved model and that usage output is present. Fix: install or log in to the CLI; for Codex confirm the key is on the step, not the job.
+- With `--probe`, a one-call probe through the worker's own harness command reports the resolved model and that usage output is present. Fix: install or log in to the CLI; for Codex confirm the key is on the step, not the job.
 
 ## GitHub
 

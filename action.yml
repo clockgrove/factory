@@ -69,7 +69,7 @@ inputs:
     description: '`true` (default): Factory merges the reviewed, validated head itself once its required checks are green (it enqueues that exact head on a merge queue), with no human read; nothing is armed that a later push could ride. `false` leaves a ready-for-review PR.'
     required: false
   notify:
-    description: 'The GitHub handle that Blocked comments @mention, Question drafts request as reviewer, and the digest @mentions, written `login#id` (its numeric user id, as setup writes it) so Factory also trusts it as a maintainer by id; a bare login is mentioned but not trusted.'
+    description: 'The GitHub handle that Blocked comments @mention, and Question drafts request as reviewer, written `login#id` (its numeric user id, as setup writes it) so Factory also trusts it as a maintainer by id; a bare login is mentioned but not trusted.'
     required: false
   maintainers:
     description: 'More maintainers Factory trusts beside `notify`, comma-separated, each `login#id` (the numeric user id). Their comments answer a Question and their markers count, whatever the App can see of their access (an organization member with private membership looks like a contributor to it). Matched by id, so a login renamed away is a stranger; a bare login is trusted for nothing.'

@@ -7,7 +7,7 @@
  *   node bench/score.mjs --repo OWNER/NAME --issue N [--issue M ...]
  *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed factory:objective issue
  *
- *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.7.132   consecutive walk-away merges per harness from a tag
+ *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0     consecutive walk-away merges per harness from a tag
  *
  *   --since DATE|TAG       a date, or a Factory tag (its Release's time, read from --factory)
  *   --streak               print the streak per harness instead of the row table: Objectives whose clock started at or
@@ -135,7 +135,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (issues.some((n) => !Number.isSafeInteger(n) || n <= 0)) usage("--issue takes issue numbers");
   if (!issues.length && !values.since) usage("Give --issue N (one or more) or --since DATE");
   const sinceTag = values.since && /^v\d+(\.\d+){0,2}$/.test(values.since) ? values.since : null;
-  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Factory tag, such as v0.7.132");
+  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Factory tag, such as v0.9.0");
   if (values.streak && !values.since) usage("--streak needs --since TAG (or a date): the streak counts from there");
   const factoryRepo = values.factory ?? "clockgrove/factory";
   if (!/^[^/]+\/[^/]+$/.test(factoryRepo)) usage("--factory takes OWNER/NAME");

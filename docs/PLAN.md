@@ -30,9 +30,9 @@ Job one: file an Objective, walk away, and come back to correct, merged work at 
 
 The standing scorecard is one row per Objective, kept by the bench (`bench/score.mjs`, `/factory:score`).
 
-## The 0.9.x candidate bar
+## 0.9.x releases
 
-Factory is at 0.9.x, the release candidate for 1.0, run on real work: its surface is expected to hold and its releases to be fixes underneath, with no stability promise until 1.0. Each 0.9.x candidate is proven on its one frozen tag when all of these hold on it:
+Factory is at 0.9.x, the release candidate for 1.0, run on real work: its surface is expected to hold and its releases to be fixes underneath, with no stability promise until 1.0. Later 0.9.x releases are batched fixes that ship on CI and the review. 0.9.0 itself was tagged once one frozen candidate tag met this bar:
 
 - **Five in a row per harness.** Claude Code, Codex and Copilot each merge five consecutive Objectives of the scratch medium set (`bench/drill.mjs --set medium`) as walk-aways.
 - **Every route covered.** Together those runs cover the Actions, local and cloud-sandbox routes.
@@ -43,7 +43,6 @@ Counting rules:
 - An answer, un-block, hand-started run or re-run by anyone, an owner's agent session included, is operator input: that row is not a walk-away and the streak breaks.
 - A P1 defect found later in a counted merge breaks the streak. The owner reads the counted diffs.
 - The streak is counted by `node bench/score.mjs --streak --repo OWNER/NAME --since <candidate tag>` (bench/README.md, The streak): a stall, an unmerged end or an input source the scorer could not read resets it too.
-- Real adopters' walk-away rate is published with the release as evidence; for a 0.9.x candidate it is not a gate.
 
 ## The 1.0 bar
 
@@ -51,9 +50,10 @@ Counting rules:
 
 - **Real adopters only:** `clockgrove/clockgrove`, `clockgrove/assetforge` and `clockgrove/raccoon-world` together, never the scratch drill repositories.
 - **One pooled streak:** the Objectives of all three, ordered by when each ended, on any harness (Claude Code, Codex or Copilot). Any miss on any of them resets it.
+- **It spans 0.9.x releases:** the streak counts from v0.9.0 and keeps counting when the adopters move to a later 0.9.x release; only a miss resets it.
 - **The same counting rules as above:** any human input (an answer, un-block, hand-started run or re-run by anyone, an owner's agent session included), a Blocked card, a stall, an unmerged end, an input source the scorer could not read, or a P1 defect found later in a counted merge breaks the streak. The owner reads the counted diffs.
 
-Counting it: the scorer runs per repository and keeps a streak per harness, so the pooled streak is not one command. Run `node bench/score.mjs --streak --since <tag> --repo <adopter> --out <adopter>.json` for each of the three adopters, then merge by hand: take every entry of each file's `streak.harnesses.*.sequence` (`{issue, endedAt, ok, why}`), keep one per adopter and issue (a row of unknown harness is listed under `unknown`, and under every other harness when it breaks), order them all by `endedAt`, and count the `ok` entries since the last one that is not. Five is the bar. An Objective in flight (`inFlight`) has not ended and does not count yet.
+Counting it: the scorer runs per repository and keeps a streak per harness, so the pooled streak is not one command. Run `node bench/score.mjs --streak --since v0.9.0 --repo <adopter> --out <adopter>.json` for each of the three adopters, then merge by hand: take every entry of each file's `streak.harnesses.*.sequence` (`{issue, endedAt, ok, why}`), keep one per adopter and issue (a row of unknown harness is listed under `unknown`, and under every other harness when it breaks), order them all by `endedAt`, and count the `ok` entries since the last one that is not. Five is the bar. An Objective in flight (`inFlight`) has not ended and does not count yet.
 
 At 1.0 the surface README's Versioning section proposes (input names, labels, markers, the App's permission set, the template's jobs) freezes for 1.x.
 

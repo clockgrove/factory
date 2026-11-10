@@ -325,6 +325,8 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       const events = join(dir, "transcript", s.id, "events.jsonl");
       if (existsSync(events) && lstatSync(events).isFile()) seedSessionTotal(s.id, clampTotal(copilotSessionTotal(readFileSync(events, "utf8"), copilotCreditUsd()), recorded));
     }
+    // Codex too (its thread's token totals): the prior total is the one Factory recorded for the stage.
+    if (harness === "codex" && typeof recorded.sessionTotal?.usd === "number") seedSessionTotal(s.id, recorded.sessionTotal);
     const agent = agentUser();
     if (agent) {
       // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into

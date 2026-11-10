@@ -134,6 +134,15 @@ test("pooled: at most `size` at once, results in order", async () => {
   assert.deepEqual(await pooled([], 6, async () => 1), []);
 });
 
+test("queueSince: drops count from the latest of the review, the head's commit and the last re-entry or Block; unknown or future times are left out (#9)", async () => {
+  const { queueSince } = await import("../scripts/lib/logic.mjs");
+  const now = Date.parse("2026-11-10T12:00:00Z");
+  assert.equal(queueSince(["2026-11-09T10:00:00Z", "2026-11-10T09:00:00Z", "2026-11-10T08:00:00Z"], now), "2026-11-10T09:00:00Z");
+  assert.equal(queueSince(["2026-11-09T10:00:00Z", null, "2026-11-10T08:00:00Z"], now), "2026-11-10T08:00:00Z", "a re-entry after the review moves the bound");
+  assert.equal(queueSince(["2026-11-09T10:00:00Z", "2027-01-01T00:00:00Z", "x"], now), "2026-11-09T10:00:00Z", "a commit date in the future never puts every drop out of count");
+  assert.equal(queueSince([null, undefined], now), null);
+});
+
 test("queueRetry: a PR the merge queue dropped goes back in once; dropped again since its review, it Blocks with the queue's codes", async () => {
   const { HUNG_CODE, QUEUE_TRIES, STALL_CODE, queueRetry } = await import("../scripts/lib/logic.mjs");
   const since = "2026-11-09T09:30:00Z";

@@ -31,6 +31,10 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     failEnqueue: 0, // enqueue calls GitHub answers with a 502
     jobs: {}, // Actions jobs by id (a check run's id is its job's)
     history: [], // the Quality workflow's recent green runs: { stepName: ms }
+    headAt: new Date(clock() - 3 * 3600_000).toISOString(), // the PR head's committer date
+    timeline: {}, // issue timeline events (REST) by number
+    queueRuns: [], // the merge_group workflow runs (REST actions/runs)
+    annotations: {}, // check-run annotations by check-run id
   };
   let id = 200;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -74,6 +78,13 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
       return json(200, { jobs: [{ name: "Quality", steps: Object.entries(steps).map(([name, ms]) => ({ name, conclusion: "success", started_at: new Date(t).toISOString(), completed_at: new Date(t + ms).toISOString() })) }] });
     }
     if (method === "GET" && /\/actions\/runs\/\d+$/.test(u)) return json(200, { workflow_id: 77 });
+    if (method === "GET" && /\/actions\/runs\?/.test(u)) {
+      const q = new URL(u).searchParams;
+      const from = Date.parse((q.get("created") || "").replace(/^>=/, ""));
+      return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from)) });
+    }
+    if (method === "GET" && (m = /\/check-runs\/(\d+)\/annotations/.exec(u))) return json(200, s.annotations[m[1]] || []);
+    if (method === "GET" && (m = /\/commits\/([0-9a-z]+)$/.exec(u))) return json(200, { sha: m[1], commit: { committer: { date: s.headAt } }, parents: [] });
     if (method === "GET" && /\/actions\/workflows\/77\/runs/.test(u)) return json(200, { workflow_runs: s.history.map((_, k) => ({ id: 1000 + k, event: k % 2 ? "merge_group" : "push", head_branch: k % 2 ? "gh-readonly-queue/main/pr-1" : "main" })) });
     if (method === "GET" && /\/repos\/o\/r\/rulesets\?/.test(u)) return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
     if (method === "GET" && /\/repos\/o\/r\/rulesets\/1$/.test(u))
@@ -101,7 +112,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     if (method === "GET" && (m = /\/commits\/([0-9a-z]+)\/check-runs/.exec(u))) return json(200, { total_count: (s.runs[m[1]] || []).length, check_runs: s.runs[m[1]] || [] });
     if (method === "GET" && /\/commits\/[0-9a-z]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && /\/commits\/[0-9a-z]+\/check-suites/.test(u)) return json(200, { check_suites: [] });
-    if (method === "GET" && /\/timeline/.test(u)) return json(200, []);
+    if (method === "GET" && (m = /\/issues\/(\d+)\/timeline/.exec(u))) return json(200, s.timeline[m[1]] || []);
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
   /**
@@ -343,6 +354,80 @@ test("hung queue check: the merge pass uses the bound its caller read once, as t
     // With no bound given, the pass reads the queue's own once: 20 minutes.
     assert.equal(await merge({}), "queued");
     assert.equal(fake.s.dequeued, 1);
+  });
+});
+
+// #9: the queue dropped the PR twice (GitHub never started its merge_group jobs: a billing lock), the Objective Blocked,
+// and a re-entry pushed a new head and delivered with the old review standing. The old drops are not this head's.
+const ago = (ms) => new Date(Date.now() - ms).toISOString();
+const queueDrop = (at) => ({ createdAt: at, reason: "FAILED_CHECKS", actor: { login: "github-merge-queue", __typename: "Bot" } });
+const labeled = (name, at) => ({ event: "labeled", label: { name }, created_at: at });
+
+test("queue drops: drops before the issue's last re-entry or Block, or before the head's commit, do not count; drops after them still Block (#9)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.reviewedAt = ago(5 * 3600_000);
+    fake.s.headAt = ago(5 * 3600_000);
+    fake.s.removals = [queueDrop(ago(4 * 3600_000)), queueDrop(ago(3.5 * 3600_000))];
+    fake.s.timeline[ISSUE] = [labeled("factory:blocked", ago(3.4 * 3600_000)), labeled("factory:objective", ago(3 * 3600_000))];
+    const report = {};
+    assert.equal(await merge(report), "queued", "the re-entry starts the count over: the new head is enqueued");
+    assert.equal(fake.s.enqueued.length, 1);
+    assert.equal(requeues(fake.s).length, 0, "no drop counted, so no re-enqueue notice");
+
+    // The Block alone (no re-entry yet read) moves the count too, and so does a head committed after the drops.
+    fake.s.entry = null;
+    fake.s.timeline[ISSUE] = [labeled("factory:blocked", ago(3.4 * 3600_000))];
+    assert.equal(await merge({}), "queued");
+    fake.s.entry = null;
+    fake.s.timeline[ISSUE] = [];
+    fake.s.headAt = ago(3 * 3600_000);
+    assert.equal(await merge({}), "queued", "a head committed after the drops: they were the old head's");
+
+    // A head date in the future is no time GitHub recorded: it never puts the drops out of count.
+    fake.s.entry = null;
+    fake.s.headAt = new Date(Date.now() + 24 * 3600_000).toISOString();
+    assert.equal(await merge({}), "dropped", "the review is the bound again: two drops since it Block");
+
+    // Two drops after the re-entry still Block.
+    fake.s.entry = null;
+    fake.s.headAt = ago(5 * 3600_000);
+    fake.s.timeline[ISSUE] = [labeled("factory:objective", ago(3 * 3600_000))];
+    fake.s.removals.push(queueDrop(ago(2 * 3600_000)), queueDrop(ago(3600_000)));
+    const blocked = {};
+    assert.equal(await merge(blocked), "dropped");
+    assert.match(mergeBlockReason("dropped", blocked), /dropped the reviewed PR 2 times/);
+  });
+});
+
+test("queue drops: a Block on drops whose merge_group jobs GitHub never started is infrastructure, quoting GitHub's annotation (#9)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const lock = "The job was not started because your account is locked due to a billing issue.";
+    const queueRun = (k, at) => {
+      const sha = String(k).repeat(40);
+      fake.s.queueRuns.push({ id: 900 + k, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR}-${"f".repeat(40)}`, head_sha: sha, created_at: at, conclusion: "failure" });
+      fake.s.runs[sha] = [{ id: 700 + k, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 800 + k }, started_at: at, completed_at: at }];
+      fake.s.jobs[700 + k] = { id: 700 + k, name: "Quality", status: "completed", conclusion: "failure", steps: [], runner_id: null, runner_name: null };
+      fake.s.annotations[700 + k] = [{ annotation_level: "failure", message: lock }];
+    };
+    // Another PR's queue run on the same window is not this PR's.
+    fake.s.queueRuns.push({ id: 990, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR + 1}-${"f".repeat(40)}`, head_sha: "9".repeat(40), created_at: ago(30 * MIN), conclusion: "failure" });
+    queueRun(1, ago(2 * 3600_000));
+    queueRun(2, ago(3600_000));
+    fake.s.removals = [queueDrop(ago(2 * 3600_000 - MIN)), queueDrop(ago(3600_000 - MIN))];
+    const blocked = {};
+    assert.equal(await merge(blocked), "dropped");
+    const why = mergeBlockReason("dropped", blocked);
+    assert.match(why, new RegExp(`GitHub did not start the required job Quality: ${lock.replace(/\./g, "\\.")}`));
+    assert.match(why, /infrastructure, not the change/);
+    assert.doesNotMatch(why, /Check that the required checks run/, "not blamed on the checks");
+
+    // A job that ran and failed on the queue's commit is the checks': the queue's own words stay.
+    for (const k of [1, 2]) fake.s.jobs[700 + k] = { ...fake.s.jobs[700 + k], steps: [{ name: "Run npm test", conclusion: "failure" }], runner_id: 5, runner_name: "r" };
+    const ran = {};
+    assert.equal(await merge(ran), "dropped");
+    assert.match(mergeBlockReason("dropped", ran), /Check that the required checks run on the queue's merge_group commits/);
   });
 });
 

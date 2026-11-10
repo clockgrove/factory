@@ -1465,14 +1465,26 @@ const botless = (l) => String(l ?? "").trim().replace(/^@/, "").replace(/\[bot\]
 const queueCode = (c) => (typeof c === "string" && /^[a-z_]{1,40}$/i.test(c) ? c.toLowerCase() : "unknown");
 
 /**
+ * From when the merge queue's removals of a PR count (queueRetry's `since`): the latest of `times` (ISO strings or null:
+ * the review the merge rests on, the current head's commit, the issue's last re-entry or Block), or null when none is
+ * known. A time after `now` is not one GitHub recorded (a commit date can be set by whoever made the commit) and is
+ * left out, so it can never put every drop out of count.
+ */
+export function queueSince(times, now = Date.now()) {
+  const known = (times || []).map((t) => [t, Date.parse(t)]).filter(([, ms]) => Number.isFinite(ms) && ms <= now);
+  return known.length ? known.reduce((a, b) => (b[1] > a[1] ? b : a))[0] : null;
+}
+
+/**
  * What the merge pass does with a reviewed, green PR that is not in the merge queue, from GitHub's own record of its
  * removals from the queue (timeline `removed_from_merge_queue` events: `{at, reason, actor, person}`, or `{self: true}`
- * for a removal Factory made this pass that the timeline does not show yet). Only removals after `since` (the review
- * the merge rests on) count, and a removal because it merged is none. Who removed it decides what it is:
+ * for a removal Factory made this pass that the timeline does not show yet). Only removals after `since` (queueSince:
+ * the review the merge rests on, the head's push, the last re-entry or Block) count, and a removal because it merged is
+ * none. Who removed it decides what it is:
  * - Factory (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
  *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
- *   the PR out (`{hold}`) until a person enqueues it again or a new review moves `since`;
+ *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code.
  * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop `{at, code}`); at
  * QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop codes); `last` has

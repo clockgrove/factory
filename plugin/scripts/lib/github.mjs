@@ -571,6 +571,21 @@ export async function mergeQueueEntry(repo, number, opts) {
   return e ? { state: e.state ?? null, enqueuedAt: e.enqueuedAt ?? null, head: e.headCommit?.oid ?? null, headAt: e.headCommit?.committedDate ?? null } : null;
 }
 
+/**
+ * The failed Actions runs the merge queue started for the PR since `since` (event `merge_group`), newest first:
+ * `{id, sha, at}`, `sha` the queue's merge_group commit. A run is the PR's when its branch is GitHub's queue ref for it,
+ * `gh-readonly-queue/<base>/pr-<number>-<base sha>`. Read with a token that reads Actions.
+ */
+export async function mergeGroupRuns(repo, number, base, since, opts) {
+  const created = since ? `&created=${encodeURIComponent(`>=${since}`)}` : "";
+  const runs = (await rest(`repos/${repo.full}/actions/runs?event=merge_group&status=failure&exclude_pull_requests=true&per_page=100${created}`, { ...opts, paginate: true })) || [];
+  const prefix = `gh-readonly-queue/${base}/pr-${Number(number)}-`;
+  return runs
+    .filter((r) => typeof r?.head_branch === "string" && r.head_branch.startsWith(prefix) && /^[0-9a-f]{40,64}$/.test(r.head_branch.slice(prefix.length)) && r.head_sha)
+    .map((r) => ({ id: r.id, sha: r.head_sha, at: r.created_at ?? null }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+}
+
 /** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */
 export async function dequeuePr(repo, nodeId, opts) {
   await graphql(`mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }`, { id: nodeId }, opts);
@@ -921,11 +936,12 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
   return out;
 }
 
-/** When the Objective label was last applied (a human's recovery re-applies it), or null. */
+/** When `label` (one name, or any of several) was last applied (a human's recovery re-applies the Objective label), or null. */
 export async function objectiveLabeledAt(repo, number, label, opts) {
+  const names = [].concat(label);
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   let last = null;
-  for (const e of events) if (e.event === "labeled" && e.label?.name === label) last = e.created_at;
+  for (const e of events) if (e.event === "labeled" && names.includes(e.label?.name) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
   return last;
 }
 

@@ -11,6 +11,7 @@ import { copilotCreditUsd, finalText, runHarness, seedSessionTotal } from "./har
 import {
   addLabels,
   awaitChecks,
+  checkRuns,
   checksOn,
   collaboratorPermission,
   getCommit,
@@ -20,6 +21,7 @@ import {
   dequeuePr,
   inMergeQueue,
   mergeQueueEntry,
+  mergeGroupRuns,
   mergeQueueRemovals,
   mergeVerified,
   onDefaultBranch,
@@ -59,7 +61,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTo
 import { mergeTriage, notStartedJobs, notStartedReason, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -1318,6 +1320,30 @@ export function rebaseNotice(issue, pr) {
 }
 
 /**
+ * The required jobs GitHub never started (triage.mjs notStartedJobs) on the merge_group commits of the PR's failed queue
+ * runs since `since`, newest first, at most `tries` commits: the first commit with any is the answer, or [] (none, or
+ * nothing readable: the Block then says what queueRetry says). Actions are read with `actionsToken`, else `opts.token`.
+ */
+export async function queueNotStarted(repo, { prNumber, base, since, names, tries, actionsToken = null }, opts) {
+  if (!base || !names?.length) return [];
+  const aopts = { ...opts, token: actionsToken || opts.token };
+  const runs = await mergeGroupRuns(repo, prNumber, base, since, aopts).catch((e) => {
+    log(`PR #${prNumber}'s merge_group runs are unreadable (${errCode(e)}); the Block names the queue's codes only`);
+    return [];
+  });
+  const shas = [...new Set(runs.map((r) => r.sha))].slice(0, Math.max(1, tries || 1));
+  for (const sha of shas) {
+    const failedRuns = (await checkRuns(repo, sha, opts).catch(() => []))
+      .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
+      .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
+    if (!failedRuns.length) continue;
+    const stuck = await notStartedJobs({ repo, failedRuns, required: names, token: opts.token, actionsToken: aopts.token }).catch(() => []);
+    if (stuck.length) return stuck;
+  }
+  return [];
+}
+
+/**
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
  * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
  */
@@ -1335,16 +1361,18 @@ export function mergeBlockReason(how, report = {}) {
  * "red" (a required check failed on the recorded head; the caller Blocks), "conflict" (the PR conflicts with the
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for the
  * one rebase, rebaseMarkers, and a conflict after that rebase Blocks with REBASED_TWICE), "dropped" (the merge queue
- * dropped it QUEUE_TRIES times since its review: logic.mjs queueRetry; the caller Blocks with mergeBlockReason) or
- * "held" (a person took it out of the queue: it stays out until they enqueue it again or it is reviewed again). In the
+ * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
+ * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
+ * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters). In the
  * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
- * as a drop. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason), and
+ * as a drop. A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
+ * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason), and
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {} }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective" }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A sibling merged first and this PR conflicts with the default branch: no merge or enqueue can take it (#2647).
@@ -1407,7 +1435,8 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
   }
   if (!reviewed) return "not-recorded";
-  const state = await checksOn(repo, sha, checkNames?.length ? checkNames : await requiredChecks(repo, opts), opts);
+  const names = checkNames?.length ? checkNames : await requiredChecks(repo, opts);
+  const state = await checksOn(repo, sha, names, opts);
   if (state.failed.length) return "red";
   if (!state.green) return "pending";
   const { unread } = await unreadNow(repo, { issue, prNumber, self: selfLogin() || (await primeSelf(opts)) }, opts);
@@ -1437,19 +1466,37 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       if (recent.length) removals.splice(removals.indexOf(recent.at(-1)), 1);
       removals.push({ at: stalledAt, reason: STALL_CODE, code: hung ? HUNG_CODE : STALL_CODE, self: true });
     }
-    retry = queueRetry(removals, { since: reviewedAt, self: selfLogin() || (await primeSelf(opts)) });
+    // Drops count from the latest of the review, the head's commit (GitHub keeps no push time for a branch push, and a
+    // push is never before its commit) and the issue's last re-entry or Block: a re-entry's new head, or a re-entry with
+    // no new review, starts the count over rather than Blocking on the drops that caused the last Block.
+    let since = reviewedAt;
+    if (removals.length) {
+      let unread = null;
+      const marks = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked"], opts).catch((e) => ((unread = e), null));
+      const head = await getCommit(repo, pr.head.sha, opts).catch((e) => ((unread = e), null));
+      if (unread) {
+        log(`#${issue}: the issue's timeline or PR #${prNumber}'s head is unreadable (${errCode(unread)}); next tick`);
+        return "pending";
+      }
+      since = queueSince([reviewedAt, head?.commit?.committer?.date ?? null, marks]);
+    }
+    retry = queueRetry(removals, { since, self: selfLogin() || (await primeSelf(opts)) });
     if (retry.hold) {
-      log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again or reviewed again`);
+      log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
       return "held";
     }
     if (retry.block) {
       delete report.watch;
+      // A drop whose merge_group jobs GitHub never started (a billing lock, a spending limit): infrastructure, not the checks.
+      const stuck = hung ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
       report.reason = hung
-        ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops since the review: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
-        : retry.block;
+        ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
+        : stuck.length
+          ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then re-apply the label`
+          : retry.block;
       return "dropped";
     }
-    if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review; enqueuing it again (try ${retry.drops + 1})`);
+    if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + 1})`);
   }
   // The squash commit says what Factory says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
   const parts = await partsRecord(repo, issue, opts).catch(() => null);

@@ -1,0 +1,7 @@
+=== RUN   TestAdd
+    math_test.go:9: got 2, want 3
+--- FAIL: TestAdd (0.00s)
+FAIL
+FAIL	example.com/m/math	0.004s
+FAIL
+##[error]Process completed with exit code 1.

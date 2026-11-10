@@ -1,0 +1,18 @@
+2026-11-08T10:00:00.0000001Z ##[group]Run actions/setup-java@v5
+2026-11-08T10:00:00.0000002Z with:
+2026-11-08T10:00:00.0000003Z   distribution: temurin
+2026-11-08T10:00:00.0000004Z ##[endgroup]
+2026-11-08T10:00:02.0000001Z Error: Cache service responded with 503
+2026-11-08T10:00:02.0000002Z ##[warning]Failed to restore: Cache service responded with 503
+2026-11-08T10:00:03.0000001Z ##[group]Run ./gradlew test
+2026-11-08T10:00:03.0000002Z ./gradlew test
+2026-11-08T10:00:03.0000003Z ##[endgroup]
+2026-11-08T10:00:40.0000001Z > Task :app:test
+2026-11-08T10:00:40.0000002Z
+2026-11-08T10:00:40.0000003Z MathTest > adds() FAILED
+2026-11-08T10:00:40.0000004Z     org.opentest4j.AssertionFailedError at MathTest.java:12
+2026-11-08T10:00:40.0000005Z
+2026-11-08T10:00:40.0000006Z 2 tests completed, 1 failed
+2026-11-08T10:00:40.0000007Z
+2026-11-08T10:00:40.0000008Z BUILD FAILED in 38s
+2026-11-08T10:00:40.0000009Z ##[error]Process completed with exit code 1.

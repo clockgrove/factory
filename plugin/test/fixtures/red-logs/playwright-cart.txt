@@ -1,0 +1,17 @@
+Running 12 tests using 2 workers
+  ✘  3 [chromium] › tests/cart.spec.ts:10:5 › cart › adds an item (2.1s)
+  1) [chromium] › tests/cart.spec.ts:10:5 › cart › adds an item ─────────────
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+
+      12 |   await page.click('#add');
+    > 13 |   expect(await count(page)).toBe(2);
+         |                             ^
+        at /home/runner/work/app/app/tests/cart.spec.ts:13:29
+
+  1 failed
+    [chromium] › tests/cart.spec.ts:10:5 › cart › adds an item ─────────────
+  11 passed (14.2s)
+##[error]Process completed with exit code 1.

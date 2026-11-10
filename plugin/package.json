@@ -1,0 +1,13 @@
+{
+  "name": "factory-plugin",
+  "private": true,
+  "description": "Runtime dependencies of Factory's optional adapters. Nothing else in the plugin needs an install.",
+  "dependencies": {
+    "@vercel/sandbox": "3.9.1"
+  },
+  "overrides": {
+    "@vercel/cli-config": {
+      "zod": "4.6.7"
+    }
+  }
+}

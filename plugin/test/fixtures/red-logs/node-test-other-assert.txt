@@ -1,0 +1,29 @@
+2026-11-08T10:00:00.0000000Z ##[group]Run npm test
+2026-11-08T10:00:01.1234567Z ✖ totally different feature: totals the invoice (0.889157ms)
+2026-11-08T10:00:01.1234567Z ℹ tests 1
+2026-11-08T10:00:01.1234567Z ℹ suites 0
+2026-11-08T10:00:01.1234567Z ℹ pass 0
+2026-11-08T10:00:01.1234567Z ℹ fail 1
+2026-11-08T10:00:01.1234567Z ℹ cancelled 0
+2026-11-08T10:00:01.1234567Z ℹ skipped 0
+2026-11-08T10:00:01.1234567Z ℹ todo 0
+2026-11-08T10:00:01.1234567Z ℹ duration_ms 47.223779
+2026-11-08T10:00:01.1234567Z 
+2026-11-08T10:00:01.1234567Z ✖ failing tests:
+2026-11-08T10:00:01.1234567Z 
+2026-11-08T10:00:01.1234567Z test at y.test.mjs:2:1
+2026-11-08T10:00:01.1234567Z ✖ totally different feature: totals the invoice (0.889157ms)
+2026-11-08T10:00:01.1234567Z   AssertionError [ERR_ASSERTION]: 6 == 7
+2026-11-08T10:00:01.1234567Z       at TestContext.<anonymous> (file:///home/runner/work/app/app/y.test.mjs:2:68)
+2026-11-08T10:00:01.1234567Z       at Test.runInAsyncScope (node:async_hooks:227:14)
+2026-11-08T10:00:01.1234567Z       at Test.run (node:internal/test_runner/test:1397:25)
+2026-11-08T10:00:01.1234567Z       at Test.start (node:internal/test_runner/test:1257:17)
+2026-11-08T10:00:01.1234567Z       at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17) {
+2026-11-08T10:00:01.1234567Z     generatedMessage: true,
+2026-11-08T10:00:01.1234567Z     code: 'ERR_ASSERTION',
+2026-11-08T10:00:01.1234567Z     actual: 6,
+2026-11-08T10:00:01.1234567Z     expected: 7,
+2026-11-08T10:00:01.1234567Z     operator: '==',
+2026-11-08T10:00:01.1234567Z     diff: 'simple'
+2026-11-08T10:00:01.1234567Z   }
+2026-11-08T10:00:02.0000000Z ##[error]Process completed with exit code 1.

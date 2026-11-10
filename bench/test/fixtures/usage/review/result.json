@@ -1,0 +1,16 @@
+{
+  "harness": "claude",
+  "model": "claude-fable-5-1",
+  "usd": 0.8,
+  "tokens": { "input": 400000, "output": 6000, "cached": 350000 },
+  "basis": "harness-reported: total_cost_usd, modelUsage (sub-agents included)",
+  "started": "2031-03-02T02:20:00Z",
+  "ended": "2031-03-02T02:35:00Z",
+  "runs": 1,
+  "passes": 1,
+  "exit": "delivered",
+  "reason": "",
+  "credential": "see worker",
+  "turns": 9,
+  "priceTableDate": null
+}

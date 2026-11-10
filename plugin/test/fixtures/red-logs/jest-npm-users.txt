@@ -1,0 +1,19 @@
+2026-11-08T10:00:01Z   ● users › renders the name
+2026-11-08T10:00:01Z     expect(received).toBe(expected)
+2026-11-08T10:00:01Z     Expected: "Bob"
+2026-11-08T10:00:01Z     Received: undefined
+2026-11-08T10:00:01Z       at Object.<anonymous> (src/users.test.js:4:21)
+2026-11-08T10:00:01Z 
+2026-11-08T10:00:01Z Test Suites: 1 failed, 4 passed, 5 total
+2026-11-08T10:00:01Z Tests:       2 failed, 29 passed, 31 total
+2026-11-08T10:00:01Z Snapshots:   0 total
+2026-11-08T10:00:01Z Time:        2.31 s
+2026-11-08T10:00:01Z Ran all test suites.
+2026-11-08T10:00:01Z npm error Lifecycle script `test` failed with error:
+2026-11-08T10:00:01Z npm error code 1
+2026-11-08T10:00:01Z npm error path /home/runner/work/app/app
+2026-11-08T10:00:01Z npm error workspace app@1.0.0
+2026-11-08T10:00:01Z npm error location /home/runner/work/app/app
+2026-11-08T10:00:01Z npm error command failed
+2026-11-08T10:00:01Z npm error command sh -c jest
+2026-11-08T10:00:02Z ##[error]Process completed with exit code 1.

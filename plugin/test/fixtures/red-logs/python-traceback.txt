@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/home/runner/work/app/app/app/models.py", line 12, in total
+    return sum(line.amount for line in self.lines)
+  File "/opt/hostedtoolcache/Python/3.13.1/x64/lib/python3.13/functools.py", line 88, in wrapper
+    return func(*args)
+TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'
+##[error]Process completed with exit code 1.

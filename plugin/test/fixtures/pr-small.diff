@@ -1,0 +1,208 @@
+diff --git a/plugin/.claude-plugin/plugin.json b/plugin/.claude-plugin/plugin.json
+index 043d36ada..9e1ca1a2b 100644
+--- a/plugin/.claude-plugin/plugin.json
++++ b/plugin/.claude-plugin/plugin.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "factory",
+-  "version": "0.7.79",
++  "version": "0.7.80",
+   "description": "File a GitHub Objective, walk away, come back to merged work: the Factory worker, reviewer and scorecard as skills.",
+   "author": {
+     "name": "Clockgrove",
+diff --git a/plugin/.codex-plugin/plugin.json b/plugin/.codex-plugin/plugin.json
+index 6fecdd4b9..7395c5d99 100644
+--- a/plugin/.codex-plugin/plugin.json
++++ b/plugin/.codex-plugin/plugin.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "factory",
+-  "version": "0.7.79",
++  "version": "0.7.80",
+   "description": "File a GitHub Objective, walk away, come back to merged work: the Factory worker, reviewer and scorecard as skills.",
+   "author": {
+     "name": "Clockgrove",
+diff --git a/plugin/scripts/lib/logic.mjs b/plugin/scripts/lib/logic.mjs
+index 93db1aeb5..45718ff25 100644
+--- a/plugin/scripts/lib/logic.mjs
++++ b/plugin/scripts/lib/logic.mjs
+@@ -238,6 +238,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
+ 
+ export const EXITS = ["delivered", "question", "blocked"];
+ 
++/** Whether a job's dollar cap is spent: max_usd set and the runs so far at or past it (no cap when max_usd is 0). */
++export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records) >= maxUsd;
++
+ /** Copilot's own units beside the dollars on the progress line: "; 3 premium requests, 41.2 AI credits"; "" for others. */
+ export function copilotCount(usage) {
+   if (typeof usage?.premiumRequests !== "number" && typeof usage?.aiCredits !== "number") return "";
+diff --git a/plugin/scripts/review.mjs b/plugin/scripts/review.mjs
+index 43e3be637..fd10f9bd8 100644
+--- a/plugin/scripts/review.mjs
++++ b/plugin/scripts/review.mjs
+@@ -20,7 +20,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installPlugin,
+ import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
+ import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft } from "./lib/github.mjs";
+ import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+-import { PLACEHOLDER_MARKER, REVIEW_LABEL, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor } from "./lib/logic.mjs";
++import { PLACEHOLDER_MARKER, REVIEW_LABEL, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, protectedPaths, protectedTouched, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+ import { agentUser } from "./lib/proc.mjs";
+ import { backend } from "./lib/backend.mjs";
+ import { openOutbox } from "./lib/outbox.mjs";
+@@ -129,6 +129,31 @@ async function main() {
+   const protectedList = protectedPaths(inputs.protectedAdditions);
+   const records = [];
+   let passes = 0;
++  // The job's dollar cap (max_usd), kept as the worker job keeps it: no harness run starts once it is spent, and a run
++  // that ends at or past it (Codex and Copilot have no in-run cap) is marked and ends the job Blocked.
++  let overBudget = false;
++  const over = (...pending) => capReached(inputs.maxUsd, [...records, ...pending]);
++  // A Copilot run that did work but reported no priced AI credits leaves the cap unenforceable: the same stop.
++  let unmetered = false;
++  const capReason = () => (unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached");
++  const mark = (rec, ...pending) => {
++    if (rec && over(...pending)) {
++      rec.budgetExceeded = true;
++      overBudget = true;
++    }
++    if (rec && inputs.maxUsd > 0 && unmeteredRun(rec)) {
++      Object.assign(rec, { budgetExceeded: true, unmetered: true });
++      overBudget = true;
++      unmetered = true;
++    }
++    return rec;
++  };
++  const blockedAtCap = async (before) => {
++    log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced (a run reported no priced AI credits)" : "spent"} before ${before}; not running it`);
++    await dropLabel();
++    await applyExit(repo, { issue, pr, exit: "blocked", reason: capReason(), notify: inputs.notify, stage: "review" }, token);
++    await finish("blocked", capReason());
++  };
+ 
+   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
+   const factoryTree = checkout;
+@@ -368,7 +393,9 @@ async function main() {
+     await postValidated(repo, pr.number, issue, pr.head.sha, token);
+   }
+ 
+-  // The reviewer: one call, comment-only, findings parsed from its last message.
++  // The reviewer: one call, comment-only, findings parsed from its last message. With the cap spent it is not run and
++  // nothing is posted, so a later run (the cap raised, the label re-applied) still reviews.
++  if (!alreadyReviewed && over()) return blockedAtCap("the reviewer");
+   const diff = await prDiff(repo, pr.number, token);
+   if (!alreadyReviewed) await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
+   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
+@@ -386,6 +413,7 @@ async function main() {
+     onLine: reviewLive?.onLine,
+   });
+   reviewLive?.finish();
++  if (!alreadyReviewed) mark(reviewRec, reviewRec);
+   // Fable's quota can run out mid-day: a reviewer call that failed (non-zero exit, no result) reruns once on the
+   // fallback model (Opus 5.5 at xhigh effort) rather than posting "the reviewer call failed". The harness
+   // reports no error code for quota, so any failure of the call is the cue; a second failure is posted.
+@@ -393,6 +421,7 @@ async function main() {
+   if (!alreadyReviewed && !reviewRec.ok && inputs.reviewerFallback) {
+     log(`reviewer on ${inputs.reviewerModel} failed (exit ${reviewRec.exitCode ?? reviewRec.signal ?? "?"}); falling back to ${inputs.reviewerFallback.model} at ${inputs.reviewerFallback.effort}`);
+     records.push(reviewRec);
++    if (over() || unmetered) return blockedAtCap("the fallback reviewer");
+     reviewRecord = await runHarness({
+       harness: inputs.harness,
+       model: inputs.reviewerFallback.model,
+@@ -406,6 +435,7 @@ async function main() {
+       eventsFile,
+       label: "review-fallback",
+     });
++    mark(reviewRecord, reviewRecord);
+   }
+   if (!alreadyReviewed) records.push(reviewRecord);
+   const findings = parseFindings(reviewRecord.finalText || "");
+@@ -436,7 +466,13 @@ async function main() {
+   const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
+   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
+   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
+-  const answering = toAnswer.length > 0 || answerQuestion;
++  let answering = toAnswer.length > 0 || answerQuestion;
++  // With the cap spent the answer pass is not run; the job Blocks below with what the reviewer left.
++  if (answering && (over() || unmetered)) {
++    log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced" : "spent"} before the answer pass; not running it`);
++    overBudget = true;
++    answering = false;
++  }
+   if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${answerQuestion ? " and the maintainers' answer" : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)` : "answer pass: the maintainers' answer to the question");
+ 
+   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
+@@ -470,8 +506,8 @@ async function main() {
+       };
+     };
+     let rec = await runHarness(answerArgs(resumeAnswer));
+-    // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card.
+-    if (resumeAnswer && crashed(rec)) {
++    // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
++    if (resumeAnswer && crashed(rec) && !mark(rec, rec).budgetExceeded) {
+       records.push(rec);
+       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
+       await progress("re-entry: resume failed; answering fresh");
+@@ -479,6 +515,7 @@ async function main() {
+       session.id = null;
+       rec = await runHarness(answerArgs(null));
+     }
++    mark(rec, rec);
+     answerLive.finish();
+     records.push(rec);
+     if (rec.sessionId) session.id = rec.sessionId;
+@@ -492,8 +529,10 @@ async function main() {
+       return 0;
+     });
+     if (toAnswer.length) log(`${replied} of ${toAnswer.length} reviewer comment(s) answered`);
+-    const asked = await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
++    // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
++    const asked = unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records) });
+     records.push(...asked.usage);
++    for (const r of asked.usage) mark(r);
+     answerRecord = asked.record;
+     // Read means applied: only a pass that finished and did not stop blocked records the decisions it was given.
+     if (rec.ok && answerRecord.exit !== "blocked") {
+@@ -502,7 +541,8 @@ async function main() {
+     }
+     if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
+   }
+-  const validation = answering
++  // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
++  const validation = answering && !unmetered
+     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }) })
+     : { green: true, passes: 0, usage: [] };
+   records.push(...validation.usage);
+@@ -548,6 +588,7 @@ async function main() {
+     lfsRefused: outbox.lfsRefused,
+   });
+   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused });
++  if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason() });
+   await dropLabel();
+   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
+   // back to draft (locally nothing runs an unlabelled ready PR, so the Question stands there). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
+diff --git a/plugin/test/exit.test.mjs b/plugin/test/exit.test.mjs
+index 7f022f395..6ebdadde0 100644
+--- a/plugin/test/exit.test.mjs
++++ b/plugin/test/exit.test.mjs
+@@ -4,7 +4,7 @@ import { join } from "node:path";
+ import { test } from "node:test";
+ import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
+ import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
+-import { decideExit, diffLines, fixRunAllowed, isPlaceholder, marker, parseExitRecord, parseFindings, snapComments } from "../scripts/lib/logic.mjs";
++import { capReached, decideExit, diffLines, fixRunAllowed, isPlaceholder, marker, parseExitRecord, parseFindings, snapComments } from "../scripts/lib/logic.mjs";
+ import { renderWorkflow } from "../scripts/setup.mjs";
+ 
+ const ok = { ok: true };
+@@ -608,3 +608,12 @@ test("a Question raised in review is answered during the run only by a writer's
+   assert.equal(answerDuring({ ...base, self: "kirk", unread: answer, events: marked }), "", "local mode: Factory marks ready as the developer's login");
+   assert.equal(answerDuring({ ...base, self: "someone-else", local: true, unread: answer, events: marked }), "", "local mode keeps the Question: no local loop runs an unlabelled ready PR");
+ });
++
++test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is 0; unmetered runs add nothing", () => {
++  const runs = [{ usd: 20 }, { usd: null }, { usd: 4.5 }];
++  assert.equal(capReached(25, runs), false);
++  assert.equal(capReached(24.5, runs), true, "at the cap is spent: the review job starts no further run");
++  assert.equal(capReached(10, runs), true);
++  assert.equal(capReached(0, runs), false, "max_usd 0 is no cap");
++  assert.equal(capReached(25, []), false);
++});

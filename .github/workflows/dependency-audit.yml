@@ -1,0 +1,106 @@
+# Weekly dependency audit: every lockfile goes through its ecosystem's auditor, production dependencies only.
+# A high or critical finding opens one P1 issue, or refreshes the open one; a clean run closes it. This is never a
+# required check, so a new upstream advisory cannot block unrelated merges. pip-audit and cargo audit carry no
+# uniform severity, so each of their findings counts. Part of the clockgrove repository standard
+# (~/work/ops/repo-standard.sh).
+name: Dependency audit
+on:
+  schedule:
+    - cron: "17 14 * * 1" # Mondays 14:17 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: dependency-audit
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+      - name: Audit every lockfile
+        id: audit
+        run: |
+          FOUND="$RUNNER_TEMP/findings.md"; : > "$FOUND"; failed=0; out="$RUNNER_TEMP/audit.json"
+          err() { echo "::error::$1"; failed=1; }
+          locks=$(git ls-files | grep -Ev '(^|/)(node_modules|vendor|fixtures|testdata|__fixtures__)/' \
+            | grep -E '(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|uv\.lock|poetry\.lock|Pipfile\.lock|requirements[^/]*\.txt|Cargo\.lock)$' || true)
+          [ -n "$locks" ] || echo "no lockfiles"
+          for lock in $locks; do
+            dir=$(dirname "$lock"); rm -f "$out"
+            echo "::group::$lock"
+            case "$(basename "$lock")" in
+              package-lock.json|npm-shrinkwrap.json)
+                (cd "$dir" && npm audit --package-lock-only --omit=dev --json) > "$out" || true
+                if jq -e .vulnerabilities "$out" >/dev/null 2>&1; then
+                  jq -r --arg lock "$lock" '.vulnerabilities[] as $v | $v.via[] | objects
+                    | select(.severity == "high" or .severity == "critical")
+                    | "- **\(.severity)** [\(.url | split("/") | last)](\(.url)) `\(.name)` \(.range): \(.title). `\($lock)`: \($v.nodes | join(", "))"' "$out" >> "$FOUND"
+                else err "npm audit failed on $lock"; cat "$out" 2>/dev/null || true; fi ;;
+              pnpm-lock.yaml)
+                ver=$(jq -r '.packageManager // "" | select(startswith("pnpm@")) | sub("^pnpm@"; "") | split("+")[0]' "$dir/package.json" 2>/dev/null || true)
+                (cd "$dir" && npx --yes "pnpm@${ver:-latest}" audit --prod --json) > "$out" || true
+                if jq -e .advisories "$out" >/dev/null 2>&1; then
+                  jq -r --arg lock "$lock" '.advisories[] | select(.severity == "high" or .severity == "critical")
+                    | "- **\(.severity)** [\(.github_advisory_id // .id)](\(.url)) `\(.module_name)` \(.vulnerable_versions): \(.title). `\($lock)`: \([.findings[].paths[]] | .[:5] | join(", "))"' "$out" >> "$FOUND"
+                else err "pnpm audit failed on $lock"; cat "$out" 2>/dev/null || true; fi ;;
+              uv.lock|requirements*.txt)
+                req="$RUNNER_TEMP/requirements.txt"
+                if [ "$(basename "$lock")" = uv.lock ]; then
+                  pipx run uv export --directory "$dir" --frozen --no-dev --all-packages --no-emit-workspace --no-hashes \
+                    --format requirements.txt -o "$req" && flags=(--no-deps --disable-pip) || { err "uv export failed on $lock"; echo "::endgroup::"; continue; }
+                else cp "$lock" "$req"; flags=(); fi
+                pipx run pip-audit -r "$req" "${flags[@]}" --format json -o "$out" || true
+                if jq -e .dependencies "$out" >/dev/null 2>&1; then
+                  jq -r --arg lock "$lock" '.dependencies[] | .name as $n | .version as $ver | (.vulns // [])[]
+                    | "- **unrated** [\(.id)](https://osv.dev/vulnerability/\(.id)) `\($n)` \($ver), fixed in \(.fix_versions | join(", ")). `\($lock)`"' "$out" >> "$FOUND"
+                else err "pip-audit failed on $lock"; cat "$out" 2>/dev/null || true; fi ;;
+              Cargo.lock)
+                command -v cargo-audit >/dev/null || cargo install cargo-audit --locked --quiet
+                cargo audit --file "$lock" --json > "$out" || true
+                if jq -e .vulnerabilities "$out" >/dev/null 2>&1; then
+                  jq -r --arg lock "$lock" '.vulnerabilities.list[]
+                    | "- **unrated** [\(.advisory.id)](https://rustsec.org/advisories/\(.advisory.id)) `\(.package.name)` \(.package.version): \(.advisory.title). `\($lock)`"' "$out" >> "$FOUND"
+                else err "cargo audit failed on $lock"; cat "$out" 2>/dev/null || true; fi ;;
+              *) echo "::warning::$lock has no auditor in this workflow" ;;
+            esac
+            echo "::endgroup::"
+          done
+          sort -u -o "$FOUND" "$FOUND"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          if [ -s "$FOUND" ]; then cat "$FOUND"; else echo "no high or critical advisories"; fi
+      - name: Open, refresh or close the P1 issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILED: ${{ steps.audit.outputs.failed }}
+        run: |
+          title="Dependency audit: high or critical advisories"; FOUND="$RUNNER_TEMP/findings.md"
+          open=$(gh issue list --state open --limit 1000 --json number,title --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -s "$FOUND" ]; then
+            body="$RUNNER_TEMP/body.md"
+            { echo "The weekly dependency audit found high or critical advisories in production dependencies ($RUN)."
+              echo; cat "$FOUND"; echo
+              echo "Upgrade each one, or override it to the patched version, then run the Dependency audit workflow again. A clean run closes this issue."
+            } > "$body"
+            if [ -n "$open" ]; then gh issue edit "$open" --body-file "$body"; echo "refreshed #$open"; exit 0; fi
+            gh label create P1 --color B60205 2>/dev/null || true
+            gh issue create --title "$title" --body-file "$body" --label P1 --type Bug \
+              || gh issue create --title "$title" --body-file "$body" --label P1
+          elif [ -n "$open" ] && [ "$FAILED" = 0 ]; then
+            gh issue close "$open" --comment "The dependency audit is clean as of $RUN."
+          fi
+      - name: Fail on findings or auditor errors
+        env:
+          FAILED: ${{ steps.audit.outputs.failed }}
+        run: |
+          FOUND="$RUNNER_TEMP/findings.md"
+          [ "$FAILED" = 0 ] || { echo "::error::an auditor failed; see the audit step"; exit 1; }
+          [ ! -s "$FOUND" ] || { echo "::error::high or critical advisories; see the P1 issue"; exit 1; }

@@ -1,0 +1,340 @@
+# clockgrove/factory: one composite Action, eight modes (dispatch | work | review | gate | launch | image | sweep | watch).
+# The adopter's workflow (see workflow-template.yml) calls it once per job: dispatch, then work and review on the
+# runner, or, with a cloud sandbox (`sandbox: vercel`), launch jobs that start each stage in the Objective's sandbox and an
+# image job that builds the sandbox image every stage starts from. Every
+# GitHub write goes through the adopter's Factory GitHub App (app_id + app_private_key,
+# minted into a short-lived installation token here and kept in memory); the harness runs as
+# its own uid with a read-only token and writes nothing (plugin/scripts/lib/agent.mjs). The job's own GITHUB_TOKEN
+# reads usage artifacts and never reaches the harness. This Action never creates an App.
+name: Factory
+description: Build a labelled GitHub issue unattended, review it, and hand it to the merge queue.
+author: Clockgrove
+
+inputs:
+  mode:
+    description: Which job this call runs. `dispatch` outputs the ready issue list; `work` builds one issue (needs `issue`); `review` reviews one PR (needs `pr`); `gate` decides whether an event starts anything (no install, no sandbox call); `launch` turns the event (or the dispatcher's pick, `issue`) into one stage start in the Objective's cloud sandbox (needs `sandbox`); `image` builds the sandbox image from the default branch's head with the repository's setup command (needs `sandbox` and a checkout); `sweep` destroys the Objective sandboxes no live Objective needs (needs `sandbox`); `watch` reads the merge queue entries of the PRs in `pr` (the dispatcher's `queue_watch`) until one leaves the queue or stalls there, and outputs `tick` (no install, reads only).
+    required: true
+  issue:
+    description: The Objective issue number (mode work), or one issue to dispatch alone (mode dispatch, from workflow_dispatch).
+    required: false
+  pr:
+    description: The pull request number to review (mode review), or the JSON list of PR numbers to watch (mode watch).
+    required: false
+  harness:
+    description: The harness that runs the worker and the reviewer. `claude`, `codex` or `copilot`.
+    required: false
+  model:
+    description: The worker session's model (the strong one); the harness default when empty.
+    required: false
+  effort:
+    description: The worker session's effort level (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`; the levels each model supports); the harness default when empty. Pinned so a CLI default change cannot move cost silently.
+    required: false
+  resume_policy:
+    description: Which re-entries resume the worker's saved session instead of starting fresh, on every harness. `fresh` (default) resumes none; `fix-passes` resumes the review job's fix and answer passes and a rebase send-back that conflicts. An answered Question always starts fresh.
+    required: false
+  compaction_window:
+    description: The context size, in tokens such as 300000, at which the worker and reviewer sessions compact (Claude and Codex; Copilot has no such setting and compacts on its own); the CLI default when empty. A measured lever for large Objectives, off by default.
+    required: false
+  prompt_cache_ttl:
+    description: 'Claude''s prompt-cache lifetime for the worker and reviewer sessions (`CLAUDE_CODE_PROMPT_CACHE_TTL`, the main conversation; sub-agents keep the CLI default). `off` (default) leaves the CLI default until the A/B in bench/README.md is run. `auto` asks for `1h` when the run bills an API key, which otherwise gets five minutes, so a fix pass after a CI wait re-writes the whole prefix; a plan token already gets an hour. `1h` or `5m` set that on every credential. Any other value is refused with a warning and reads as `off`. Codex and Copilot manage their own caching. The usage record''s `cache` shows the writes after each CI wait, so the setting is measured, not assumed.'
+    required: false
+  subagent_model:
+    description: The implementer sub-agents' model. Informational here; the model is pinned in the agent definitions the job writes into the checkout.
+    required: false
+  reviewer_model:
+    description: The reviewer's model for its one comment-only pass; `model` when empty.
+    required: false
+  reviewer_effort:
+    description: The reviewer's effort level for its one pass (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`). Empty is the harness's reviewer default, passed on every reviewer call - Codex `high` (its reviewer agent file), Claude and Copilot their CLI default (nothing passed) - since no harness applies its agent file's effort to that call.
+    required: false
+  credential:
+    description: '`api` (default) bills an API credential; `plan` uses CLAUDE_CODE_OAUTH_TOKEN and is for your own repository only. (`login`, the CLI''s own login, exists for a developer''s machine and is refused here.)'
+    required: false
+  max_concurrent:
+    description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.
+    required: false
+  daily_usd:
+    description: 'The dispatcher starts nothing once today''s spend passes this many dollars (UTC day): the usage artifacts of Actions runs plus the spend lines local runs write into their progress comments.'
+    required: false
+  copilot_credit_usd:
+    description: 'Dollars per GitHub AI credit for Copilot runs, a positive number; GitHub''s published $0.01 when empty (any other value is refused with a warning). Each Copilot run records the AI credits and premium requests its usage file reports, and its dollars (credits at this rate) count toward `max_usd`, `daily_usd` and the scorecard like the other harnesses''.'
+    required: false
+  max_usd:
+    description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it; Claude gets what is left as `--max-budget-usd` and Copilot as `--max-ai-credits` (Copilot takes no less than 30 credits, so with less than 30 credits' worth left no Copilot run starts); every harness is also checked after each run, and a Copilot run that reports no priced AI credits ends the job, since the cap cannot be enforced. The review job has the same cap of its own.
+    required: false
+  timeout_minutes:
+    description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.
+    required: false
+  auto_merge:
+    description: '`true` (default): Factory merges the reviewed, validated head itself once its required checks are green (it enqueues that exact head on a merge queue), with no human read; nothing is armed that a later push could ride. `false` leaves a ready-for-review PR.'
+    required: false
+  notify:
+    description: 'The GitHub handle that Blocked comments @mention, Question drafts request as reviewer, and the digest @mentions, written `login#id` (its numeric user id, as setup writes it) so Factory also trusts it as a maintainer by id; a bare login is mentioned but not trusted.'
+    required: false
+  maintainers:
+    description: 'More maintainers Factory trusts beside `notify`, comma-separated, each `login#id` (the numeric user id). Their comments answer a Question and their markers count, whatever the App can see of their access (an organization member with private membership looks like a contributor to it). Matched by id, so a login renamed away is a stranger; a bare login is trusted for nothing.'
+    required: false
+  setup:
+    description: The repository's toolchain command, run in the checkout before the worker (for example `scripts/ci/toolchain.sh postgresql`). Empty runs nothing.
+    required: false
+  install:
+    description: '`auto` (default) installs offline from the lockfile found; `none` skips; any other value is the command to run.'
+    required: false
+  validation:
+    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
+    required: false
+  budget_command:
+    description: The test-budget command named in the task card, if the repository has one.
+    required: false
+  protected_paths:
+    description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
+    required: false
+  ci_checks:
+    description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
+    required: false
+  harness_version:
+    description: The npm version of the harness CLI to install on the runner; `latest` by default.
+    required: false
+  node_version:
+    description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
+    required: false
+  app_id:
+    description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
+    required: true
+  app_private_key:
+    description: The App's private key PEM (secret FACTORY_APP_PRIVATE_KEY). Required; used only to mint a short-lived installation token.
+    required: true
+  anthropic_api_key:
+    description: 'ANTHROPIC_API_KEY for the Claude harness. Leave empty to use workload identity federation (needs `id-token: write` and `anthropic_oidc_exchange_url`).'
+    required: false
+  anthropic_oidc_exchange_url:
+    description: The endpoint that exchanges the job's OIDC token for a short-lived Anthropic credential, when using federation instead of a key.
+    required: false
+  claude_code_oauth_token:
+    description: 'A long-lived Claude Code token for `credential: plan`; your own repositories only, never for a product.'
+    required: false
+  codex_api_key:
+    description: CODEX_API_KEY for the Codex harness; passed to the harness child process only, never to the job environment.
+    required: false
+  copilot_github_token:
+    description: 'A fine-grained token with only the Copilot Requests permission, from a user with a Copilot seat, for the Copilot harness; it bills that seat. Passed to the harness process only; doctor checks it cannot write to the repository. Required for Copilot: the job token is never used.'
+    required: false
+  sandbox:
+    description: 'The cloud-sandbox vendor the launch jobs start stages in (docs/ADAPTERS.md): `vercel`. Empty (default) runs Objectives on the runner, in the work and review jobs.'
+    required: false
+  vercel_token:
+    description: 'VERCEL_TOKEN for `sandbox: vercel` (secret VERCEL_TOKEN). Read by the launcher only; never in a harness''s or command''s environment.'
+    required: false
+  vercel_team_id:
+    description: 'VERCEL_TEAM_ID for `sandbox: vercel`.'
+    required: false
+  vercel_project_id:
+    description: 'VERCEL_PROJECT_ID for `sandbox: vercel`: the Vercel project the sandboxes belong to.'
+    required: false
+  image_refresh:
+    description: '(image) `merge` (default) builds the sandbox image on every push to the default branch until today''s builds reach `image_daily_minutes`, then leaves the day''s last refresh to the nightly build; `nightly` builds on the nightly schedule only.'
+    required: false
+  image_daily_minutes:
+    description: '(image) Build minutes a day the image may take on merges before refreshes move to the nightly build. Default 5.'
+    required: false
+  sandbox_idle_days:
+    description: '(sweep) Days an Objective''s sandbox may stay stopped, the Objective neither Running nor In review, before the sweep destroys it. Default 7.'
+    required: false
+  sweep_max_destroys:
+    description: '(sweep) Sandboxes one sweep run destroys at most. Default 5.'
+    required: false
+  ai_gateway_api_key:
+    description: 'A Vercel AI Gateway key (secret AI_GATEWAY_API_KEY) for red-check triage. When a required check is red, each failing job is asked a decision model whether the change broke it or it is a flake; only when every failing job reads flaky at confidence 0.7 or more are the failed jobs rerun (once per head) instead of a fix pass. Each job''s log window and the PR''s file list go to the gateway. The same key turns on the drift advisory: while a worker''s harness runs, at most every two minutes, a decision model is asked whether it is on task, drifting into scope creep or looping (the plan''s items, its last 12 activity entries and the files it edited go to the gateway); a drift label at confidence 0.7 or more writes one line on the progress comment, and never changes the run. Empty turns both off. Used by Factory''s own process only, never passed to the harness or any command.'
+    required: false
+  triage_model:
+    description: The decision model red-check triage asks (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
+    required: false
+  drift_model:
+    description: The decision model the drift advisory asks (an AI Gateway decision model id); `baseten/elephant-1` when empty.
+    required: false
+  github_token:
+    description: 'The job''s GITHUB_TOKEN; Factory reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  issues:
+    description: (dispatch) JSON array of ready issue numbers for `strategy.matrix`.
+    value: ${{ steps.run.outputs.issues }}
+  count:
+    description: (dispatch) How many issues are in `issues`.
+    value: ${{ steps.run.outputs.count }}
+  queue_watch:
+    description: (dispatch) The JSON list of PRs the merge pass left in the merge queue, for the queue-watch job (`pr` in mode watch); empty when there are none.
+    value: ${{ steps.run.outputs.queue_watch }}
+  exit:
+    description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `tick`, `stopped`, `token`, `skipped` or `blocked`.
+    value: ${{ steps.run.outputs.exit }}
+  reason:
+    description: (work, review) The one-line reason for a blocked or question exit.
+    value: ${{ steps.run.outputs.reason }}
+  pr:
+    description: (work) The PR number for the branch, when one exists.
+    value: ${{ steps.run.outputs.pr }}
+  issue_number:
+    description: (review, gate, launch) The Objective issue number the reviewed PR or the event belongs to.
+    value: ${{ steps.run.outputs.issue }}
+  issue:
+    description: (gate, launch) The same as `issue_number`, the name installed workflows read for the launch job's concurrency group (one per Objective).
+    value: ${{ steps.run.outputs.issue }}
+  start:
+    description: (gate) `true` when the event starts a stage or answers a Question, for the launch job's `if:`.
+    value: ${{ steps.run.outputs.start }}
+  tick:
+    description: (gate) `true` when CI finished on an In-review Objective's PR head with no stage waiting on it, for the merge tick job's `if:` (the dispatcher's merge pass runs); (watch) `true` when a watched PR left the merge queue, or its queue commit started no check run in time or has a required check making no progress (its running step past max(3 × that step's normal duration, it + 15 minutes), or with no history past the queue's check timeout less 10 minutes), or the watch's time is up (the dispatcher's merge pass re-enqueues a drop or a stalled entry once, or Blocks).
+    value: ${{ steps.run.outputs.tick }}
+  usage_name:
+    description: (launch) The artifact name for `usage_dir` when a stage ended and its usage came out of the sandbox.
+    value: ${{ steps.run.outputs.usage_name }}
+  sandbox_id:
+    description: (launch) The id of the Objective's sandbox the stage started in.
+    value: ${{ steps.run.outputs.sandbox_id }}
+  latency_ms:
+    description: (launch) Milliseconds from the event to the stage command's start in the sandbox.
+    value: ${{ steps.run.outputs.latency_ms }}
+  snapshot:
+    description: (image) The snapshot id the build made, empty when it skipped.
+    value: ${{ steps.run.outputs.snapshot }}
+  build_ms:
+    description: (image) This build's milliseconds, sandbox create to snapshot.
+    value: ${{ steps.run.outputs.build_ms }}
+  destroyed:
+    description: (sweep) How many sandboxes this run destroyed.
+    value: ${{ steps.run.outputs.destroyed }}
+  usage_dir_1:
+    description: (sweep) A destroyed sandbox's uncollected usage, unpacked for upload as `usage_name_1`; also `_2` and `_3`.
+    value: ${{ steps.run.outputs.usage_dir_1 }}
+  usage_name_1:
+    description: (sweep) The artifact name for `usage_dir_1`.
+    value: ${{ steps.run.outputs.usage_name_1 }}
+  usage_dir_2:
+    description: (sweep) See `usage_dir_1`.
+    value: ${{ steps.run.outputs.usage_dir_2 }}
+  usage_name_2:
+    description: (sweep) See `usage_name_1`.
+    value: ${{ steps.run.outputs.usage_name_2 }}
+  usage_dir_3:
+    description: (sweep) See `usage_dir_1`.
+    value: ${{ steps.run.outputs.usage_dir_3 }}
+  usage_name_3:
+    description: (sweep) See `usage_name_1`.
+    value: ${{ steps.run.outputs.usage_name_3 }}
+  usage_dir:
+    description: (work, review) The directory holding usage/events.jsonl and usage/result.json to upload as `factory-usage-<issue>`; (launch) an ended sandbox stage's, named by `usage_name`.
+    value: ${{ steps.run.outputs.usage_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Node
+      uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
+
+    - name: Install the harness CLI
+      if: inputs.mode != 'dispatch' && inputs.mode != 'launch' && inputs.mode != 'gate' && inputs.mode != 'image' && inputs.mode != 'watch'
+      shell: bash
+      # The harness comes from `with:` when given, else the workflow's FACTORY_HARNESS env block
+      # (visible to composite steps at runtime), else claude: the same precedence as lib/inputs.mjs.
+      env:
+        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
+      run: |
+        HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
+        VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
+        # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
+        # asks for each package's scripts to be allowed by name, and this allows that one package's only.
+        case "$HARNESS" in
+          claude)  npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${VERSION}" ;;
+          codex)   npm install -g "@openai/codex@${VERSION}" ;;
+          copilot) npm install -g "@github/copilot@${VERSION}" ;;
+          *) echo "unknown harness $HARNESS" >&2; exit 1 ;;
+        esac
+        "$HARNESS" --version
+
+    # The sandbox modes alone load a vendor SDK (lib/adapters): installed from plugin/package-lock.json, exactly as
+    # pinned, with no package's install scripts run. The launcher starts the same install itself (launch.mjs
+    # installAdapter), beside its GitHub reads, so a launch does not wait for it first. The other modes need none.
+    - name: Install the sandbox adapter
+      if: inputs.mode == 'image' || inputs.mode == 'sweep'
+      shell: bash
+      run: npm ci --ignore-scripts --no-audit --no-fund --prefix "$GITHUB_ACTION_PATH/plugin"
+
+    - name: Run factory (${{ inputs.mode }})
+      id: run
+      shell: bash
+      # Inputs reach the scripts as FACTORY_INPUT_*; an empty `with:` value falls
+      # through to the workflow's FACTORY_* env block, then to the script default.
+      # The Codex key is set here, on this one step, and the script passes it to the
+      # harness child only; validation commands and git hooks never see it.
+      env:
+        FACTORY_INPUT_MODE: ${{ inputs.mode }}
+        FACTORY_INPUT_ISSUE: ${{ inputs.issue }}
+        FACTORY_INPUT_PR: ${{ inputs.pr }}
+        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_INPUT_MODEL: ${{ inputs.model }}
+        FACTORY_INPUT_SUBAGENT_MODEL: ${{ inputs.subagent_model }}
+        FACTORY_INPUT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
+        FACTORY_INPUT_REVIEWER_EFFORT: ${{ inputs.reviewer_effort }}
+        FACTORY_INPUT_EFFORT: ${{ inputs.effort }}
+        FACTORY_INPUT_COMPACTION_WINDOW: ${{ inputs.compaction_window }}
+        FACTORY_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
+        FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
+        FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
+        FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
+        FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
+        FACTORY_INPUT_MAX_USD: ${{ inputs.max_usd }}
+        FACTORY_INPUT_COPILOT_CREDIT_USD: ${{ inputs.copilot_credit_usd }}
+        FACTORY_INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        FACTORY_INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}
+        FACTORY_INPUT_NOTIFY: ${{ inputs.notify }}
+        FACTORY_INPUT_MAINTAINERS: ${{ inputs.maintainers }}
+        FACTORY_INPUT_SETUP: ${{ inputs.setup }}
+        FACTORY_INPUT_INSTALL: ${{ inputs.install }}
+        FACTORY_INPUT_VALIDATION: ${{ inputs.validation }}
+        FACTORY_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
+        FACTORY_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        FACTORY_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
+        FACTORY_INPUT_APP_ID: ${{ inputs.app_id }}
+        FACTORY_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
+        FACTORY_INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
+        FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        FACTORY_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
+        FACTORY_INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_github_token }}
+        FACTORY_INPUT_AI_GATEWAY_API_KEY: ${{ inputs.ai_gateway_api_key }}
+        FACTORY_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
+        FACTORY_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
+        FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        FACTORY_INPUT_SANDBOX: ${{ inputs.sandbox }}
+        FACTORY_INPUT_VERCEL_TOKEN: ${{ inputs.vercel_token }}
+        FACTORY_INPUT_VERCEL_TEAM_ID: ${{ inputs.vercel_team_id }}
+        FACTORY_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
+        FACTORY_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
+        FACTORY_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
+        FACTORY_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
+        FACTORY_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
+        FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage
+        # The scripts, skills, agents and task card are one tree: the plugin beside this action.
+        FACTORY_PLUGIN_ROOT: ${{ github.action_path }}/plugin
+      run: |
+        set -euo pipefail
+        # The launcher sets its own (an ended sandbox stage's usage, or none).
+        case "$FACTORY_INPUT_MODE" in work|review) echo "usage_dir=$FACTORY_USAGE_DIR" >> "$GITHUB_OUTPUT" ;; esac
+        mkdir -p "$FACTORY_USAGE_DIR"
+        case "$FACTORY_INPUT_MODE" in
+          dispatch) node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          work)     node "$FACTORY_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$FACTORY_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          review)   node "$FACTORY_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$FACTORY_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
+          gate)     node "$FACTORY_PLUGIN_ROOT/scripts/launch.mjs"   --repo "$GITHUB_REPOSITORY" --gate ;;
+          launch)   FACTORY_ADAPTER_INSTALL=1 node "$FACTORY_PLUGIN_ROOT/scripts/launch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          image)    node "$FACTORY_PLUGIN_ROOT/scripts/image.mjs"    --repo "$GITHUB_REPOSITORY" --checkout "$GITHUB_WORKSPACE" ;;
+          sweep)    node "$FACTORY_PLUGIN_ROOT/scripts/sweep.mjs"    --repo "$GITHUB_REPOSITORY" ;;
+          watch)    node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" --watch "${FACTORY_INPUT_PR:-[]}" ;;
+          *) echo "mode must be dispatch, work, review, gate, launch, image, sweep or watch" >&2; exit 1 ;;
+        esac

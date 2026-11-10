@@ -1,0 +1,21 @@
+{
+  "name": "clockgrove",
+  "interface": {
+    "displayName": "Clockgrove"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/clockgrove/factory.git",
+        "path": "plugin",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "source": "clockgrove/clockgrove run 42734286758, job 129568503169 (Actions billing-locked)",
+  "job": {
+    "id": 129568503169,
+    "run_id": 42734286758,
+    "name": "quality",
+    "status": "completed",
+    "conclusion": "failure",
+    "started_at": "2026-11-10T01:36:34Z",
+    "completed_at": "2026-11-10T01:36:36Z",
+    "steps": [],
+    "labels": [
+      "ubuntu-latest-m"
+    ],
+    "runner_id": 0,
+    "runner_name": "",
+    "runner_group_id": 0,
+    "runner_group_name": ""
+  },
+  "annotations": [
+    {
+      "annotation_level": "failure",
+      "message": "The job was not started because your account is locked due to a billing issue."
+    },
+    {
+      "annotation_level": "notice",
+      "message": "\"The ubuntu-latest label will migrate to Ubuntu 26 beginning October 19, 2026. For more information, see https://github.com/actions/runner-images/issues/14748\""
+    }
+  ]
+}

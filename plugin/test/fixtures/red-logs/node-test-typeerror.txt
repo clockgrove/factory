@@ -1,0 +1,25 @@
+2026-11-08T10:00:00.0000000Z ##[group]Run npm test
+2026-11-08T10:00:01.1234567Z ✖ parses the header (0.589729ms)
+2026-11-08T10:00:01.1234567Z ✔ ok2 (0.131084ms)
+2026-11-08T10:00:01.1234567Z ✔ ok3 (0.09122ms)
+2026-11-08T10:00:01.1234567Z ℹ tests 3
+2026-11-08T10:00:01.1234567Z ℹ suites 0
+2026-11-08T10:00:01.1234567Z ℹ pass 2
+2026-11-08T10:00:01.1234567Z ℹ fail 1
+2026-11-08T10:00:01.1234567Z ℹ cancelled 0
+2026-11-08T10:00:01.1234567Z ℹ skipped 0
+2026-11-08T10:00:01.1234567Z ℹ todo 0
+2026-11-08T10:00:01.1234567Z ℹ duration_ms 47.099749
+2026-11-08T10:00:01.1234567Z 
+2026-11-08T10:00:01.1234567Z ✖ failing tests:
+2026-11-08T10:00:01.1234567Z 
+2026-11-08T10:00:01.1234567Z test at x.test.mjs:2:1
+2026-11-08T10:00:01.1234567Z ✖ parses the header (0.589729ms)
+2026-11-08T10:00:01.1234567Z   TypeError: cannot read properties of undefined (reading 'foo')
+2026-11-08T10:00:01.1234567Z       at TestContext.<anonymous> (file:///home/runner/work/app/app/x.test.mjs:2:41)
+2026-11-08T10:00:01.1234567Z       at Test.runInAsyncScope (node:async_hooks:227:14)
+2026-11-08T10:00:01.1234567Z       at Test.run (node:internal/test_runner/test:1397:25)
+2026-11-08T10:00:01.1234567Z       at Test.start (node:internal/test_runner/test:1257:17)
+2026-11-08T10:00:01.1234567Z       at startSubtestAfterBootstrap (node:internal/test_runner/harness:387:17)
+2026-11-08T10:00:02.0000000Z ##[error]Process completed with exit code 1.
+2026-11-08T10:00:03.0Z Post job cleanup.

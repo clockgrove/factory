@@ -1,0 +1,17 @@
+Running 12 tests using 2 workers
+  ✘  3 [chromium] › tests/login.spec.ts:4:3 › login › shows the error count (2.1s)
+  1) [chromium] › tests/login.spec.ts:4:3 › login › shows the error count ─────────────
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 3
+    Received: 0
+
+      12 |   await page.click('#add');
+    > 13 |   expect(await count(page)).toBe(2);
+         |                             ^
+        at /home/runner/work/app/app/tests/login.spec.ts:9:7
+
+  1 failed
+    [chromium] › tests/login.spec.ts:4:3 › login › shows the error count ─────────────
+  11 passed (14.2s)
+##[error]Process completed with exit code 1.

@@ -1,0 +1,25 @@
+  math
+    1) adds
+    ✔ subtracts
+
+  1 passing (12ms)
+  1 failing
+
+  1) math
+       adds:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+2 !== 3
+
+      + expected - actual
+
+      -2
+      +3
+      
+      at Context.<anonymous> (/home/runner/actions-runner/_work/app/app/test/math.test.js:5:12)
+      at process.processImmediate (node:internal/timers:483:21)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+##[error]Process completed with exit code 1.

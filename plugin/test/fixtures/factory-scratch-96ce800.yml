@@ -1,0 +1,227 @@
+# Factory: unattended Objectives. Written by `/factory setup`; edit the env block, not the jobs.
+# Triggers: cron, manual (one issue), a new factory:objective label, the review job's own last step, and
+# pull_request when the Factory App labels a PR factory:review. Never from a fork: the Objective text (a writer) and the label (a
+# maintainer) are the only inputs. FACTORY_AUTO_MERGE is ON: Factory merges the reviewed head with
+# no human read. The gate is your CI workflow's checks on that exact head (and the merge queue's
+# commit), the comment-only reviewer pass, and the queue's own re-run. Set it false for ready PRs.
+name: factory
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+    - cron: "41 10 * * *" # the nightly sandbox image build (the image job)
+    - cron: "17 * * * *" # the hourly sandbox sweep (the sweep job)
+  workflow_dispatch:
+    inputs:
+      issue: { description: Objective issue number (empty runs the dispatcher), required: false }
+      harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
+      image: { description: "true builds the sandbox image from the default branch now", required: false }
+      sweep: { description: "true runs the sandbox sweep now", required: false }
+  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); the cron is only the sweep
+    types: [opened, labeled, closed] # closed: the sandbox sweep destroys the Objective's sandbox
+  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, or a Factory PR merged (siblings may be stale now)
+    types: [labeled, ready_for_review, closed]
+  push: # a merge to the default branch refreshes the sandbox image (the image job)
+    branches:
+      - "main"
+  repository_dispatch: # factory-tick: the webhook Worker's dispatcher tick after it requeues an answered Question (the App's contents write; no Actions permission); factory-stage: a stage in its sandbox asks for fresh tokens, or says it ended (only Factory's App sends these)
+    types: [factory-tick, factory-stage]
+  issue_comment: # a maintainer's comment on an Objective: the answer to its Question
+    types: [created]
+  check_suite: # CI from a GitHub App outside Actions finished on a factory/ branch: the stage waiting on it resumes
+    types: [completed]
+  workflow_run: # CI on Actions finished (GitHub sends no check_suite event for a suite Actions made)
+    workflows:
+      - Quality
+    types: [completed]
+env:
+  FACTORY_HARNESS: claude # claude | codex | copilot
+  FACTORY_MODEL: claude-opus-5-5
+  FACTORY_SUBAGENT_MODEL: claude-sonnet-5-5
+  FACTORY_REVIEWER_MODEL: claude-fable-5-1
+  FACTORY_CREDENTIAL: plan # api; plan only for your own repository
+  FACTORY_MAX_CONCURRENT: 2
+  FACTORY_DAILY_USD: 50
+  FACTORY_MAX_USD: 20
+  FACTORY_TIMEOUT_MINUTES: 90 # under 360 on hosted runners; mirrored in timeout-minutes below
+  FACTORY_AUTO_MERGE: "true"
+  FACTORY_NOTIFY: kirkmarple-clockgrove#318831919 # login#id: the id pins the account (setup writes it)
+  FACTORY_SETUP: scripts/ci/setup.sh
+  FACTORY_INSTALL: auto # auto (from the lockfile), none, or your own command
+  FACTORY_VALIDATION: npm run check, npm test, npm run test:db
+  FACTORY_BUDGET_COMMAND: ""
+  FACTORY_PROTECTED_PATHS: scripts/ci/setup.sh
+  FACTORY_CI_CHECKS: quality
+  FACTORY_NODE_VERSION: 22 # the Node.js your CI uses
+  FACTORY_SANDBOX: vercel # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
+  FACTORY_SANDBOX_VCPUS: 2 # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test
+  FACTORY_IMAGE_REFRESH: merge # merge: rebuild the sandbox image on each merge until the minutes below, then nightly; nightly: only nightly
+  FACTORY_IMAGE_DAILY_MINUTES: 5 # image build minutes a day on merges
+  FACTORY_SANDBOX_IDLE_DAYS: 7 # the sweep destroys a sandbox stopped this long, its Objective neither Running nor In review
+  FACTORY_SWEEP_MAX_DESTROYS: 5 # sandboxes one sweep run destroys at most
+permissions: # the job token reads code and Actions; every write goes through the App's token
+  contents: read
+  actions: read # the dispatcher sums today's usage artifacts; doctor lists the CI workflow's triggers
+  issues: write
+  # id-token: write         # Claude workload identity federation only
+jobs:
+  dispatch:
+    # Ticks: the cron, a manual run, a new Objective's label, or the review job's last step (a worker slot freed).
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'repository_dispatch' && github.event.action == 'factory-tick') ||
+      (github.event_name == 'issues' && (github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/'))
+    concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
+    runs-on: ubuntu-latest
+    outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}" }
+    steps:
+      - uses: clockgrove/factory@v0.7.106
+        id: f
+        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+  launch:
+    # The dispatcher's picks and its sweep's re-launches: each one's stage starts in its sandbox; this job starts it and exits.
+    name: launch (${{ matrix.issue }})
+    needs: dispatch
+    if: needs.dispatch.outputs.count != '' && needs.dispatch.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
+    permissions: { contents: read, actions: read } # the job token reads usage artifacts and this run; every write is the App's
+    concurrency: { group: "factory-launch-factory/${{ matrix.issue }}", cancel-in-progress: false } # one launcher per Objective at a time, with launch-event's
+    steps:
+      - uses: clockgrove/factory@v0.7.106
+        id: f
+        with:
+          mode: launch
+          issue: ${{ matrix.issue }}
+          harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          vercel_token: ${{ secrets.VERCEL_TOKEN }}
+          vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
+          vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
+          ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.usage_dir != ''
+        with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
+  launch-gate:
+    # An event on one Objective: a maintainer's comment, finished CI on its branch, its PR labelled for review or marked
+    # ready, its stage asking for tokens or saying it ended. The gate decides in no concurrency group, so an event that starts nothing (a stranger's comment, a fork's
+    # CI) never queues in the Objective's group, where it would replace a pending launch. No SDK install here.
+    name: launch gate (${{ github.event_name }})
+    # With the webhook Worker on (repository variable FACTORY_LAUNCH_WEBHOOK=on, docs/ADAPTERS.md) it takes these events
+    # and this job is skipped for them; a stage's own events (factory-stage) stay here, since their usage artifact is
+    # uploaded by the launch job, and the dispatcher's launch job and its sweep stay.
+    if: >-
+      (vars.FACTORY_LAUNCH_WEBHOOK != 'on' && (
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request && github.event.comment.user.type != 'Bot' &&
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.comment.author_association) || contains(fromJSON('[318831919]'), github.event.comment.user.id)) &&
+       !startsWith(github.event.comment.body, '<!-- factory:') && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
+      (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
+      (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
+       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')))) ||
+      (github.event_name == 'repository_dispatch' && github.event.action == 'factory-stage')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read }
+    outputs: { start: "${{ steps.f.outputs.start }}", issue: "${{ steps.f.outputs.issue_number }}" } # the Action's output is issue_number: an empty one would put every launch in one group
+    steps:
+      - uses: clockgrove/factory@v0.7.106
+        id: f
+        with: { mode: gate, app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+  launch-event:
+    name: launch (${{ needs.launch-gate.outputs.issue }})
+    needs: launch-gate
+    if: needs.launch-gate.outputs.start == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick after a requeue or a stop
+    # The group is the Objective's only when the gate said start; a skipped job's group is its own run's, whatever GitHub
+    # does with the group of a job it skips.
+    concurrency: { group: "${{ needs.launch-gate.outputs.start == 'true' && format('factory-launch-factory/{0}', needs.launch-gate.outputs.issue) || format('factory-launch-none-{0}', github.run_id) }}", cancel-in-progress: false }
+    steps:
+      - uses: clockgrove/factory@v0.7.106
+        id: f
+        with:
+          mode: launch
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          vercel_token: ${{ secrets.VERCEL_TOKEN }}
+          vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
+          vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
+          ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.usage_dir != ''
+        with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
+      - name: Dispatch tick (an answered Question is Queued, or a stage ended and its sandbox stopped)
+        if: steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh workflow run factory.yml || true
+  image:
+    # The sandbox image every stage starts from: FACTORY_SETUP run in a fresh sandbox beside a clone of the default
+    # branch's head, the dependency store and the harness CLIs, kept as a snapshot and recorded by the Factory App on
+    # its image issue (label factory:image). Built on each merge until today's builds reach FACTORY_IMAGE_DAILY_MINUTES,
+    # then nightly; by hand with the workflow's `image` input. Never on a pull request: the image is the default branch's.
+    if: >-
+      (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      github.event.schedule == '41 10 * * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.image == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions: { contents: read } # the job token reads the default branch; the record is the App's (a token for issues only)
+    # One build at a time; a newer merge replaces a pending one. Any run in this repository can join the group with
+    # cancel-in-progress and cancel a build (Actions cannot stop that); the next build destroys what it left.
+    concurrency: { group: factory-image, cancel-in-progress: false }
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0, persist-credentials: false } # the image's clone gets the whole history, from a bundle
+      - uses: clockgrove/factory@v0.7.106
+        with:
+          mode: image
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          vercel_token: ${{ secrets.VERCEL_TOKEN }}
+          vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
+          vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
+  sweep:
+    # The sandbox sweep: Factory's Objective sandboxes in the vendor's project that no live Objective needs (its issue
+    # closed, its record naming another sandbox, or stopped FACTORY_SANDBOX_IDLE_DAYS with the Objective neither Running
+    # nor In review) are destroyed, at most FACTORY_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A
+    # stage's usage the launcher never collected is uploaded as the launcher would. Hourly, by hand, and when an
+    # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage.
+    if: >-
+      github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.sweep == 'true') ||
+      (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: { contents: read } # every write is the App's
+    concurrency: { group: factory-sweep, cancel-in-progress: false }
+    steps:
+      - uses: clockgrove/factory@v0.7.106
+        id: f
+        with:
+          mode: sweep
+          app_id: ${{ secrets.FACTORY_APP_ID }}
+          app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          vercel_token: ${{ secrets.VERCEL_TOKEN }}
+          vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
+          vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.usage_dir_1 != ''
+        with: { name: "${{ steps.f.outputs.usage_name_1 }}", path: "${{ steps.f.outputs.usage_dir_1 }}", retention-days: 90, overwrite: true }
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.usage_dir_2 != ''
+        with: { name: "${{ steps.f.outputs.usage_name_2 }}", path: "${{ steps.f.outputs.usage_dir_2 }}", retention-days: 90, overwrite: true }
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.f.outputs.usage_dir_3 != ''
+        with: { name: "${{ steps.f.outputs.usage_name_3 }}", path: "${{ steps.f.outputs.usage_dir_3 }}", retention-days: 90, overwrite: true }

@@ -1,0 +1,45 @@
+# Dependabot: weekly version updates after a 7-day cooldown, grouped per ecosystem and directory as minor-and-patch
+# and majors, plus grouped security updates (no cooldown). Only minor-and-patch and non-major security PRs outside
+# github-actions and .github/ merge without review (dependabot-automerge.yml).
+# Rendered by the clockgrove repository standard (~/work/ops/repo-standard.sh files) from the manifests here;
+# render it again when a manifest or lockfile appears in a new directory.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /plugin
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      majors:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [major]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      majors:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [major]
+      github-actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+    ignore:
+      - dependency-name: clockgrove/factory

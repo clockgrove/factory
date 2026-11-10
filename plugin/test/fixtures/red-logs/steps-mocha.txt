@@ -1,0 +1,41 @@
+2026-11-08T10:00:00.0000001Z ##[group]Run actions/setup-node@v6
+2026-11-08T10:00:00.0000002Z with:
+2026-11-08T10:00:00.0000003Z   node-version: 24
+2026-11-08T10:00:00.0000004Z   cache: npm
+2026-11-08T10:00:00.0000005Z ##[endgroup]
+2026-11-08T10:00:01.0000001Z Attempting to download 24...
+2026-11-08T10:00:02.0000001Z Error: Cache service responded with 503
+2026-11-08T10:00:02.0000002Z ##[warning]Failed to restore: Cache service responded with 503
+2026-11-08T10:00:02.0000003Z    at restoreCache (/home/runner/work/_actions/actions/setup-node/v6/dist/setup/index.js:1:2)
+2026-11-08T10:00:02.0000004Z    at warnings (src/legacy.js:9:9)
+2026-11-08T10:00:03.0000001Z ##[group]Run npm ci
+2026-11-08T10:00:03.0000002Z npm ci
+2026-11-08T10:00:03.0000003Z ##[endgroup]
+2026-11-08T10:00:09.0000001Z npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported
+2026-11-08T10:00:09.0000002Z added 212 packages in 6s
+2026-11-08T10:00:09.0000003Z ##[group]Run npm test
+2026-11-08T10:00:09.0000004Z npm test
+2026-11-08T10:00:09.0000005Z ##[endgroup]
+2026-11-08T10:00:10.0000001Z   math
+2026-11-08T10:00:10.0000002Z     1) adds
+2026-11-08T10:00:10.0000003Z     ✔ subtracts
+2026-11-08T10:00:10.0000004Z
+2026-11-08T10:00:10.0000005Z   1 passing (12ms)
+2026-11-08T10:00:10.0000006Z   1 failing
+2026-11-08T10:00:10.0000007Z
+2026-11-08T10:00:10.0000008Z   1) math
+2026-11-08T10:00:10.0000009Z        adds:
+2026-11-08T10:00:10.0000010Z
+2026-11-08T10:00:10.0000011Z       AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+2026-11-08T10:00:10.0000012Z
+2026-11-08T10:00:10.0000013Z 2 !== 3
+2026-11-08T10:00:10.0000014Z
+2026-11-08T10:00:10.0000015Z       at Context.<anonymous> (test/math.test.js:5:12)
+2026-11-08T10:00:10.0000016Z       at process.processImmediate (node:internal/timers:483:21)
+2026-11-08T10:00:10.0000017Z
+2026-11-08T10:00:10.0000018Z npm error Lifecycle script `test` failed with error:
+2026-11-08T10:00:10.0000019Z npm error code 1
+2026-11-08T10:00:10.0000020Z ##[error]Process completed with exit code 1.
+2026-11-08T10:00:11.0000001Z ##[group]Post job cleanup.
+2026-11-08T10:00:11.0000002Z Error: post-step noise after the failure
+2026-11-08T10:00:11.0000003Z ##[endgroup]

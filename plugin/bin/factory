@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json>
+// Local mode from a clone of the repository: the same worker and reviewer as the Action, on this machine, in its
+// sandboxes (docs/LOCAL.md). A thin front for plugin/scripts/local.mjs; Claude Code puts a plugin's bin/ on PATH.
+import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const script = join(dirname(realpathSync(fileURLToPath(import.meta.url))), "..", "scripts", "local.mjs");
+const args = process.argv.slice(2);
+if (!["run", "serve", "review", "issue", "deliver", "post-review"].includes(args[0])) {
+  process.stderr.write("usage: factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json>\n");
+  process.exit(64);
+}
+// The terminal's Ctrl-C reaches local.mjs too (same process group); it pauses its work and exits on its own.
+process.on("SIGINT", () => {});
+const r = spawnSync(process.execPath, [script, ...args], { stdio: "inherit" });
+process.exit(r.status ?? 130);

@@ -1,0 +1,66 @@
+# Dependabot PRs that need no review join the merge queue by themselves (Kirk, 2026-11-09: App token + review).
+# Hourly on the default branch, never on a PR event, no checkout. With a Factory App installation token scoped to this
+# repository, it queues an open Dependabot PR only when it is not a draft, every commit is Dependabot's, it comes from
+# the minor-and-patch group or a security group with no major update, its ecosystem is not github-actions, and it
+# changes nothing under .github/ (the App has no workflows permission). The required checks and the merge queue still
+# decide. Everything else waits for a person's review. Without the Factory App secrets (a repository that is not a
+# Factory adopter) the job does nothing. Part of the clockgrove repository standard (~/work/ops/repo-standard.sh).
+name: Dependabot auto-merge
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: dependabot-automerge
+jobs:
+  automerge:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      HAS_APP: ${{ secrets.FACTORY_APP_ID != '' && secrets.FACTORY_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: No Factory App here
+        if: env.HAS_APP != 'true'
+        run: echo "::notice::no Factory App secrets in this repository (not a Factory adopter); nothing queued"
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: env.HAS_APP == 'true'
+        id: app
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Queue the Dependabot PRs that need no review
+        if: env.HAS_APP == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for pr in $(gh pr list --author app/dependabot --state open --limit 100 --json number --jq '.[].number'); do
+            info=$(gh pr view "$pr" --json isDraft,isCrossRepository,headRefName,headRefOid,commits,files,autoMergeRequest)
+            branch=$(jq -r .headRefName <<<"$info"); head=$(jq -r .headRefOid <<<"$info")
+            eco=$(cut -d/ -f2 <<<"$branch")
+            msgs=$(jq -r '.commits[].messageBody' <<<"$info")
+            group=$(sed -n 's/^ *dependency-group: *//p' <<<"$msgs" | sort -u | head -1)
+            why=""
+            if [ "$(jq .isDraft <<<"$info")" = true ]; then why="a draft"
+            elif [ "$(jq .isCrossRepository <<<"$info")" = true ]; then why="from a fork"
+            elif [ "$(jq '[.commits[].authors[].login | select(. != "dependabot[bot]")] | length' <<<"$info")" != 0 ]; then why="a commit not by Dependabot"
+            elif [ "$eco" = github_actions ]; then why="github-actions"
+            elif [ "$(jq '[.files[].path | select(startswith(".github/"))] | length' <<<"$info")" != 0 ]; then why="changes .github/"
+            elif grep -q 'update-type: version-update:semver-major' <<<"$msgs"; then why="a major update"
+            elif [ "$group" != minor-and-patch ] && [[ "$group" != *-security ]]; then why="not in minor-and-patch or a security group (${group:-ungrouped})"
+            fi
+            if [ -n "$why" ]; then echo "#$pr left for review: $why"; continue; fi
+            by=$(jq -r '.autoMergeRequest.enabledBy.login // ""' <<<"$info")
+            # An auto-merge GITHUB_TOKEN turned on never enters the merge queue: turn it off, then on as the App.
+            if [ "$by" = github-actions ]; then gh pr merge "$pr" --disable-auto; by=""; fi
+            if [ -n "$by" ]; then echo "#$pr queued already ($group, $eco)"; continue; fi
+            if gh pr merge "$pr" --auto --squash --match-head-commit "$head"; then echo "#$pr queued: $group, $eco"
+            else echo "::warning::#$pr: could not queue ($group, $eco)"; fi
+          done

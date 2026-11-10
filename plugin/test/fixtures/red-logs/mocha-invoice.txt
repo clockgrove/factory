@@ -1,0 +1,25 @@
+  invoices
+    1) totals the invoice with tax
+    ✔ rounds
+
+  1 passing (9ms)
+  1 failing
+
+  1) invoices
+       totals the invoice with tax:
+
+      AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+107 !== 110
+
+      + expected - actual
+
+      -107
+      +110
+      
+      at Context.<anonymous> (test/invoice.test.js:22:10)
+      at process.processImmediate (node:internal/timers:483:21)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+##[error]Process completed with exit code 1.

@@ -1,0 +1,7 @@
+=== RUN   TestTotal
+    invoice_test.go:30: got 107, want 110
+--- FAIL: TestTotal (0.00s)
+FAIL
+FAIL	example.com/m/invoice	0.004s
+FAIL
+##[error]Process completed with exit code 1.

@@ -1,0 +1,5 @@
+# Factory contributor rules
+
+Factory is a GitHub Action (`action.yml`), a plugin (`plugin/`: skills, agents, task card, scripts, tests, workflow template) and a bench (`bench/`). Never run Factory Objectives against this repository; the first adopter is a scratch repository.
+
+Read `docs/PLAN.md` (what Factory is, its contracts, the 0.9.x candidate bar and the 1.0 bar), `docs/LOCAL.md` (local mode: setup, sandboxes, settings), `docs/ADAPTERS.md` (third-party adapter contracts: the cloud sandbox) and `bench/README.md` (the scorecard and drills). Docs describe Factory as it is now; git is the history, so write no logs, dated narratives or ledgers. Code decides on structure only: JSON the harness writes, GitHub fields, exit codes, counts; never prose. Tests: `node --test plugin/test/*.test.mjs bench/test/*.test.mjs`; each test file imports `plugin/test/temp.mjs` first (its temp files then live in a root removed when the file ends), and CI fails when the suite leaves anything in the temp folder.

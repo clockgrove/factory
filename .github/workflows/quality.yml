@@ -1,0 +1,35 @@
+name: Quality
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: The Action's manifest and the workflows parse as YAML
+        run: python3 -c 'import glob, yaml; [yaml.safe_load(open(f)) for f in ["action.yml", *glob.glob(".github/workflows/*.yml")]]'
+      # The tests run with an empty temp folder of their own, and must leave it empty: a developer's box runs them many
+      # times a day, and what they left behind once filled /tmp's inodes (#2565).
+      - name: An empty temp folder for the tests
+        run: mkdir "$RUNNER_TEMP/tests"
+      - name: Plugin tests
+        run: node --test plugin/test/*.test.mjs
+        env:
+          TMPDIR: ${{ runner.temp }}/tests
+      - name: Bench tests
+        run: node --test bench/test/*.test.mjs
+        env:
+          TMPDIR: ${{ runner.temp }}/tests
+      - name: The tests left the temp folder empty
+        run: |
+          left="$(ls -A "$RUNNER_TEMP/tests")"
+          if [ -n "$left" ]; then echo "::error::the tests left these in their temp folder: $(echo $left)"; exit 1; fi
+      - name: Skills within the one-page cap
+        run: node bench/skills.mjs

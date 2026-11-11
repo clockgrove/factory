@@ -262,6 +262,102 @@ export async function runValidation(checkout, commands, opts = {}) {
   return { green: true, results, failed: null, failures: [], head };
 }
 
+// Run by `node` in the checkout's sandbox (installDeps), as Factory's other commands on the agent's tree are.
+// `check`: every direct dependency of each package.json (not below node_modules) that the install linked is whole: the
+// link resolves, its package.json is there and each bin it declares exists. A dependency not linked at all is skipped
+// (hoisted or filtered), and so are local packages (resolved outside node_modules: a workspace's bins may be build
+// output) and packages with install scripts (their files may come from the scripts Factory skips). Exit 3 with the
+// missing paths as JSON on the last line, 0 when nothing is missing. `clear`: each node_modules directory emptied,
+// the package caches Factory keeps in the clone (pnpm's store, Bun's cache) kept, nothing followed through a link.
+const INSTALL_CHECK = String.raw`
+const fs = require("fs"), path = require("path");
+const mode = process.argv[1], root = process.cwd();
+const keep = [process.env.pnpm_config_store_dir, process.env.npm_config_store_dir, process.env.BUN_INSTALL_CACHE_DIR].filter(Boolean).map((p) => path.resolve(root, p));
+const dirs = [], mods = [];
+const walk = (d) => {
+  let es;
+  try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+  if (es.some((e) => e.name === "package.json" && e.isFile())) dirs.push(d);
+  for (const e of es) {
+    if (!e.isDirectory() || e.name === ".git") continue;
+    if (e.name === "node_modules") { mods.push(path.join(d, e.name)); continue; }
+    walk(path.join(d, e.name));
+  }
+};
+walk(root);
+if (mode === "clear") {
+  for (const m of mods) for (const e of fs.readdirSync(m)) {
+    const p = path.join(m, e);
+    if (keep.some((k) => k === p || k.startsWith(p + path.sep))) continue;
+    fs.rmSync(p, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
+const missing = [];
+const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+const LOCAL = /^(workspace|link|file|portal):/;
+for (const d of dirs) {
+  const pkg = read(path.join(d, "package.json")) || {};
+  const optional = pkg.optionalDependencies || {};
+  const deps = { ...(pkg.devDependencies || {}), ...(pkg.dependencies || {}) };
+  for (const [name, spec] of Object.entries(deps)) {
+    if (name in optional || LOCAL.test(String(spec))) continue;
+    const at = path.join(d, "node_modules", name);
+    if (!fs.lstatSync(at, { throwIfNoEntry: false })) continue;
+    let real;
+    try { real = fs.realpathSync(at); } catch { missing.push(path.relative(root, at)); continue; }
+    if (!real.split(path.sep).includes("node_modules")) continue;
+    const dep = read(path.join(at, "package.json"));
+    if (!dep) { missing.push(path.relative(root, path.join(at, "package.json"))); continue; }
+    const s = dep.scripts || {};
+    if (s.preinstall || s.install || s.postinstall) continue;
+    const bins = typeof dep.bin === "string" ? [dep.bin] : Object.values(dep.bin || {});
+    for (const b of bins) if (typeof b === "string" && !fs.existsSync(path.join(at, b))) missing.push(path.relative(root, path.join(at, b)));
+  }
+}
+process.stdout.write("\n" + JSON.stringify({ missing }) + "\n");
+process.exit(missing.length ? 3 : 0);
+`;
+
+/** installDeps's install check: exit 3 means the install left paths missing, any other failure means no check ran. */
+async function installGaps(checkout, opts) {
+  if (!existsSync(join(checkout, "node_modules"))) return [];
+  const r = await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" check', { ...opts, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, echo: false });
+  if (r.code !== 3) return [];
+  try {
+    return JSON.parse(r.output.trim().split("\n").filter((l) => l.startsWith("{")).at(-1)).missing.map(String);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The repository's install in the checkout, checked: its exit code, then (for a Node install) whether it left a
+ * linked dependency or a declared binary missing. A failed or incomplete install gets one repair: the node_modules
+ * directories emptied (Factory's package caches kept) and the install run again. Returns {ok} or {ok: false, reason},
+ * the reason naming the install as infrastructure, never as a validation result: what follows an install that did not
+ * finish is no verdict on the branch. A timed-out install is not retried (the stage's deadline is spent).
+ */
+export async function installDeps(checkout, command, { timeoutMs, env = process.env, now = Date.now } = {}) {
+  const started = now();
+  const left = () => (timeoutMs ? Math.max(1000, timeoutMs - (now() - started)) : timeoutMs);
+  const attempt = async () => {
+    const r = await sh(checkout, command, { env, timeoutMs: left() });
+    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, missing: [] };
+    const missing = await installGaps(checkout, { env, timeoutMs: left() });
+    return { ok: !missing.length, code: 0, timedOut: false, missing };
+  };
+  const first = await attempt();
+  if (first.ok) return { ok: true, repaired: false };
+  const what = (a) => (a.timedOut ? "timed out" : a.missing.length ? `exited 0 but left ${a.missing.slice(0, 3).join(", ")}${a.missing.length > 3 ? ` and ${a.missing.length - 3} more` : ""} missing` : `exited ${a.code ?? "on a signal"}`);
+  const infra = (detail) => `install failed (infrastructure, not a validation result; validation did not run): ${command} ${detail}`;
+  if (first.timedOut) return { ok: false, reason: infra(what(first)), missing: [] };
+  const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" clear', { env, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
+  const second = await attempt();
+  if (second.ok) return { ok: true, repaired: true, first: what(first) };
+  return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}`), missing: second.missing };
+}
+
 /** Pick the offline install command from the lockfile present. `install: none` skips; a given command wins. */
 export function installCommand(checkout, setting = "auto") {
   if (setting && setting !== "auto") return setting === "none" ? null : setting;

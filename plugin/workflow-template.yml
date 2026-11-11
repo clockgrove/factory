@@ -29,7 +29,7 @@ on:
     types: [opened, labeled, closed]
     # {{/sandbox}}
     # {{#sandbox}}
-    types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox
+    types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so does the factory:blocked label, which stops one left running
     # {{/sandbox}}
   pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
@@ -358,10 +358,14 @@ jobs:
     # closed, its record naming another sandbox, or stopped FACTORY_SANDBOX_IDLE_DAYS with the Objective neither Running
     # nor In review) are destroyed, at most FACTORY_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A
     # stage's usage the launcher never collected is uploaded as the launcher would. Hourly, by hand, and when an
-    # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage.
+    # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage. A
+    # Block runs it too: a sandbox still running with no stage holding it is stopped and its cost booked at once. A stage
+    # that Blocks itself also says it ended, and the launcher's end answers that; this sweep leaves a stage that ended
+    # moments ago to it (logic.mjs sweepDecision), and its claim under the record lock keeps the two apart.
     if: >-
       github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.sweep == 'true') ||
       (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
+      (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'factory:blocked') ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15

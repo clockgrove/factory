@@ -2419,12 +2419,18 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * What the sweep does with one of Factory's Objective sandboxes (tags `factory=objective`, this repository's id;
  * the caller lists only those). `issue` is the Objective (null when GitHub has none by that number), `state` its
  * state, `record` its sandbox record, `holds` whether a stage holds the sandbox now. Returns
- * `{destroy: reason, collect}` (collect: the record's stage left a usage tarball not yet collected) or `{keep: reason}`.
+ * `{destroy: reason, collect}` (collect: the record's stage left a usage tarball not yet collected), `{stop: reason,
+ * collect}` (the record's own sandbox, running with no stage holding it on an Objective neither Running nor In review)
+ * or `{keep: reason}`.
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
-export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs }) {
+export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = START_LOST_MS }) {
   if (holds) return { keep: "a stage holds it" };
   const mine = record?.id === sandbox.id;
+  // A stage that said it ended moments ago: the launcher's end answers it (collects its usage, stops the sandbox, books
+  // its cost) within a launch job's time. The sweep a stage's own Block runs leaves it to that end, so the usage comes
+  // out once; an end whose event was lost is the sweep's after the grace.
+  if (mine && record.state === "ended" && now - Date.parse(record.at) < endGraceMs) return { keep: "its stage ended moments ago; the launcher's end answers it" };
   // The grace is for a sandbox no record names yet; the record's own sandbox is judged by the record at once, so a
   // short Objective's sandbox goes when it closes, not an hour later.
   if (!mine && now - Date.parse(sandbox.createdAt) < graceMs) return { keep: "created moments ago" };
@@ -2433,6 +2439,10 @@ export function sweepDecision({ sandbox, issue, state, record, holds, now = Date
   if (!record) return { destroy: "no sandbox record names it", collect: false };
   if (!mine) return { destroy: "its Objective's record names another sandbox", collect: false };
   if (state === "Running" || state === "In review") return { keep: `the Objective is ${state}` };
+  // Running with no stage holding it, on an Objective off the Running and review path (a Block for a vanished stage, a
+  // stage that died, a stop that failed): an end never answered. It stops, and its vendor cost is booked, as a stage's
+  // end would do; the stopped sandbox then waits out the idle days like any other.
+  if (sandbox.state === "running") return { stop: `running with no stage holding it, the Objective ${state}`, collect };
   const last = Date.parse(record.at) || Date.parse(sandbox.createdAt);
   if (sandbox.state === "stopped" && now - last > idleMs) return { destroy: `stopped ${Math.floor((now - last) / 86_400_000)} days, the Objective ${state}`, collect };
   return { keep: `${sandbox.state}, the Objective ${state}` };

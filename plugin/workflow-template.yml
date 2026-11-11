@@ -31,7 +31,7 @@ on:
     # {{#sandbox}}
     types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so does the factory:blocked label, which stops one left running
     # {{/sandbox}}
-  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
+  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready (the App's own ready mark starts no job), a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
   # {{#sandbox}}
   push: # a merge to the default branch refreshes the sandbox image (the image job)
@@ -194,7 +194,7 @@ jobs:
     name: review (${{ github.head_ref }})
     if: >-
       github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')
+      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
     permissions: { contents: read, issues: write, actions: write } # actions: write here, for the tick below and triage's rerun of failed CI jobs
@@ -272,7 +272,7 @@ jobs:
       (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
       (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository) ||
       (github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')) ||
+       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))) ||
       (github.event_name == 'repository_dispatch' && github.event.action == 'factory-stage')
     runs-on: ubuntu-latest
     timeout-minutes: 5

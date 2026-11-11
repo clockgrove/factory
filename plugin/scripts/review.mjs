@@ -283,7 +283,8 @@ async function main() {
     return;
   }
   // The worker marks the PR ready and then applies factory:review after its validation pass; the App's own
-  // ready_for_review is that transition seen first, never a review cue. A person marking it ready is how a Question is answered (PLAN.md): the review job runs, and the answer pass applies
+  // ready_for_review is that transition seen first, never a review cue (the workflow's `if:` filters it out; this skip
+  // covers a workflow rendered before that filter). A person marking it ready is how a Question is answered (PLAN.md): the review job runs, and the answer pass applies
   // the maintainers' decisions even when the PR was already reviewed.
   const humanReady = eventAction() === "ready_for_review" && eventSender()?.type !== "Bot";
   if (eventAction() === "ready_for_review" && !humanReady) {

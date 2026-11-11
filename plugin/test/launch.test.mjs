@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds } from "../scripts/lib/logic.mjs";
+import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds, stateOf } from "../scripts/lib/logic.mjs";
 import { START, launchCue } from "../scripts/launch.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
@@ -48,8 +48,9 @@ test("launchDecision: the stage each event starts; an answer requeues and never 
 
   const comment = { kind: "comment", issue: 1, human: true };
   assert.ok(launchDecision({ ev: comment, state: "Question", trusted: true }).requeue, "a maintainer's answer goes back to Queued for the dispatcher");
-  assert.ok(launchDecision({ ev: comment, state: "In review", question: true, trusted: true }).requeue, "on a board a Question's card is In review: the label says Question");
-  assert.match(launchDecision({ ev: comment, state: "Running", question: true, trusted: true }).skip, /starts nothing/, "a stale question label on a Running Objective is no answer");
+  const asked = { labels: [{ name: "factory:question" }] };
+  assert.ok(launchDecision({ ev: comment, state: stateOf(asked, "In review"), trusted: true }).requeue, "on a board a Question's card is In review: the label says Question");
+  assert.match(launchDecision({ ev: comment, state: stateOf(asked, "Running"), trusted: true }).skip, /starts nothing/, "a stale question label on a Running Objective is no answer");
   assert.match(launchDecision({ ev: comment, state: "Question", trusted: false }).skip, /not a maintainer/);
   assert.match(launchDecision({ ev: { ...comment, human: false }, state: "Question", trusted: true }).skip, /bot/);
 

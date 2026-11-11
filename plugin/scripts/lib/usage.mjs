@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
  * (bench/prices.json) when it sits beside the action, else this copy of it. Codex
  * reports tokens, not dollars, so the worker prices them here; the bench re-prices.
  * `status: "placeholder"` travels into every basis string until the rates are real.
- * Unknown models give usd: null and basis "unmetered: no price for <model>".
+ * Unknown models give usd: null and basis "unmetered: no price for <model>"; a run that reported no tokens at all (no
+ * turn completed) gives CODEX_NO_TOKENS instead, whatever the model.
  */
 const FALLBACK_PRICES = {
   status: "placeholder",
@@ -42,6 +43,12 @@ function loadPrices() {
   return FALLBACK_PRICES;
 }
 export const CODEX_PRICES = loadPrices();
+/**
+ * The basis of a Codex run that reported no token counts: no `turn.completed` (a refused request, a turn cut short). Its
+ * spend is unknown, not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
+ * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.
+ */
+export const CODEX_NO_TOKENS = "unmetered: no Codex turn completed, so Codex reported no tokens";
 const priceBasis = () => `priced from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -331,7 +338,7 @@ export function parseCodex(stdout, model) {
   const refusal = rec.ok ? null : providerRefusal("codex", events);
   if (refusal) rec.refusal = refusal;
   rec.usd = priceCodex(rec.model, rec.tokens);
-  rec.basis = rec.usd === null ? (rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
+  rec.basis = rec.usd === null ? (input === null && output === null ? CODEX_NO_TOKENS : rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
   return rec;
 }
 

@@ -210,3 +210,46 @@ test("#61: Claude Code's own TMPDIR on a runner is the /tmp its unit makes priva
   assert.equal(settings.permissions.blockReadsOutsideWorkingDirectories, true, "the bar it is fitted to");
   for (const v of Object.values(runner)) if (typeof v === "string") assert.ok(!/\.factory-claude\/tmp$/.test(v), "no own TMPDIR left in the agent's home");
 });
+
+test("services: the loopback ports that started listening after the setup began, at most SERVICES_MAX", async () => {
+  const { SERVICES_MAX, dropSetupStart, loopbackListeners, noteSetupStart, servicePorts } = await import("../scripts/lib/claude-runner.mjs");
+  const head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+  const row = (addr, port, st = "0A") => `   0: ${addr}:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000 0 0 1 1\n`;
+  let tcp = head + row("0100007F", 8080) + row("3500007F", 53);
+  let tcp6 = head;
+  const read = (p) => (p.endsWith("tcp6") ? tcp6 : tcp);
+  dropSetupStart();
+  assert.deepEqual(servicePorts(read), [], "no baseline, no service");
+  noteSetupStart(read);
+  tcp += row("00000000", 5432) + row("0100007F", 9999, "01") + row("0A000001", 7000);
+  tcp6 += row("00000000000000000000000001000000", 6379);
+  assert.deepEqual(loopbackListeners(read), [5432, 6379, 8080], "listening on loopback or every address; not 127.0.0.53, another address or a connected socket");
+  assert.deepEqual(servicePorts(read), [5432, 6379], "what was listening before the setup is no service of its");
+  for (let p = 20000; p < 20030; p++) tcp += row("0100007F", p);
+  assert.equal(servicePorts(read).length, SERVICES_MAX);
+  dropSetupStart();
+});
+
+test("services: the env file relays each port inside the sandbox through its proxy, only where the sandbox's proxy is set", async () => {
+  const layout = runnerLayout(AGENT);
+  assert.equal(envFileText(layout, []), "export HOME='/home/factory-agent'\nexport TMPDIR='/home/factory-agent/tmp'\n");
+  const text = envFileText(layout, [5432, 6379]);
+  assert.match(text, /for __f_p in 5432 6379; do/);
+  assert.match(text, /TCP4-LISTEN:\$__f_p,bind=127\.0\.0\.1/);
+  assert.match(text, /TCP6-LISTEN:\$__f_p,bind=\[::1\]/);
+  assert.match(text, /PROXY:\$\{__f_h%:\*\}:127\.0\.0\.1:\$__f_p,proxyport=/);
+  assert.match(text, /case "\$__f_a" in\n {2}srt\.\*:\*\)/, "only inside Claude Code's sandbox, whose proxy login starts with srt.");
+  execFileSync("bash", ["-n", "-c", text]);
+  // Outside the sandbox (no proxy set) sourcing it starts nothing and leaves no variable behind.
+  const out = execFileSync("bash", ["-c", `${text}\nset | grep -c '^__f_' || true`], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(out.trim(), "0");
+});
+
+test("services: their 127.0.0.1 ports join Claude's allowed hosts on a runner", () => {
+  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: {}, services: [5432] });
+  assert.deepEqual(runner.services, [5432]);
+  const { args } = harnessCommand({ harness: "claude", prompt: "p", runner });
+  const hosts = JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.network.allowedDomains;
+  assert.equal(hosts.at(-1), "127.0.0.1:5432");
+  assert.ok(!hosts.includes("localhost") && !hosts.includes("127.0.0.1"), "only the service's own port, never the whole loopback");
+});

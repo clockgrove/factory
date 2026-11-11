@@ -31,7 +31,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, TRANSIENT_START, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, TRANSIENT_START, settleStale, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -140,11 +140,11 @@ const READ_BACK_PAUSE_MS = 1000;
  * Write the sandbox record's claim comment (`<!-- factory:<n>:sandbox -->`), the one part with more than one writer:
  * launchers and the sweep, which claim the sandbox against each other. Each write holds the Objective's record lock
  * (`recordLock`, a create-only ref; the dispatcher's tick clears one left stale), reads the record (merged with the
- * stage's part, logic.mjs sandboxRecord), and writes `next(cur)` (cur: null when there is none), or nothing when that
- * is null. It reads its write back before it releases the lock, so the next holder reads it. Returns {ok, record},
+ * stage's part, logic.mjs sandboxRecord), settles what ended unseen (logic.mjs settleStale), and writes `next(cur)`
+ * (cur: null when there is none), or only the settled record when that is null. It reads its write back before it releases the lock, so the next holder reads it. Returns {ok, record},
  * {refused, record} (next said no: the caller reports) or {contended} (the lock stayed held on every try).
  */
-export async function writeSandboxRecord(repo, n, opts, next, { base, api = API, tries = RECORD_TRIES, pauseMs = RECORD_PAUSE_MS, readBackPauseMs = READ_BACK_PAUSE_MS } = {}) {
+export async function writeSandboxRecord(repo, n, opts, next, { base, api = API, tries = RECORD_TRIES, pauseMs = RECORD_PAUSE_MS, readBackPauseMs = READ_BACK_PAUSE_MS, now = Date.now } = {}) {
   const ref = recordLock(n);
   const head = marker(n, "sandbox");
   const list = async () => (await api.rest(`repos/${repo.full}/issues/${n}/comments?per_page=100`, { ...opts, paginate: true })) || [];
@@ -160,8 +160,13 @@ export async function writeSandboxRecord(repo, n, opts, next, { base, api = API,
     try {
       const comments = await list();
       const cur = sandboxRecord(comments, n);
-      const rec = next(cur ? strip(cur) : null);
-      if (!rec) return { refused: true, record: cur };
+      // Every launch attempt that ended unseen (a lost marker, a cut-off claim) is stored first, so no write erases it
+      // (logic.mjs settleStale, the one place an absence becomes a failure); then the writer's own change.
+      const read = cur ? strip(cur) : null;
+      const settled = settleStale(read, now());
+      const own = next(settled);
+      if (!own && settled === read) return { refused: true, record: cur };
+      const rec = own || settled;
       const body = `${head}\n${recordBody(rec)}`;
       const c = claimComment(comments);
       if (c) await api.rest(`repos/${repo.full}/issues/comments/${c.id}`, { ...opts, method: "PATCH", body: { body } });
@@ -170,7 +175,7 @@ export async function writeSandboxRecord(repo, n, opts, next, { base, api = API,
         if (k) await pause(readBackPauseMs);
         if (claimComment(await list())?.body === body) break;
       }
-      return { ok: true, record: rec };
+      return own ? { ok: true, record: rec } : { refused: true, record: rec };
     } finally {
       await releaseLock(repo, ref, { ...opts, oid: held.oid, base, api }).catch((e) => log(`#${n}: releasing ${ref} failed (${e.status ?? "error"}); it is taken over once stale`));
     }
@@ -921,7 +926,10 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   run.claim = claim;
   const leaseUntil = () => new Date(Date.now() + CLAIM_LEASE_MS).toISOString();
   // A quota streak (the vendor refusing starts for its quota) carries over the claim, so the next refusal counts on.
-  const claimed = await write((cur) => (sameRecord(cur, prior) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: settledLaunches(prior?.launches), ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
+  // The record must be the one this decision read, as the write settles it (a lost marker or a cut-off claim stored
+  // first). A dispatcher's marker written in between also refuses the claim: that is its own launch, named again, and
+  // this launcher starts nothing; the marked launch recovers on its own.
+  const claimed = await write((cur) => (sameRecord(cur, settleStale(prior ? strip(prior) : null, Date.now())) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: settledLaunches(prior?.launches), ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
   if (!claimed.ok) return out({ exit: "skipped", reason: `#${n}: ${claimed.refused ? "the sandbox record changed since it was read (another launcher's claim, a stage or the sweep)" : "another writer held the sandbox record's lock"}; nothing started` });
   watch.mark("claim");
 

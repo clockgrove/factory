@@ -15,7 +15,7 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -246,13 +246,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
             // launcher); one that never ran gets the grace for its own launch first.
             const again = startRetryAt(record, since);
+            const flight = inFlightUntil(record, since);
             if (transientHold(record, since)) vendorHeld.push(issue.number);
-            if (again !== null) {
+            relaunchStage[issue.number] = "work";
+            // A launch named less than START_LOST_MS ago is still in flight (its job may wait for a runner, or threw
+            // before it could record anything): it is not named again before its marker turns into an outcome.
+            if (flight !== null) due(issue.number, "start-retry", flight);
+            else if (again !== null) {
               if (Date.now() >= again) relaunch.push(issue.number);
               else due(issue.number, "start-retry", again);
             } else if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
             else graceDue(issue.number, "launch-grace", Date.parse(since) + RELAUNCH_GRACE_MS + 1000);
-            relaunchStage[issue.number] = "work";
             continue;
           }
         }
@@ -344,8 +348,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
         if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
           const again = startRetryAt(record, labelledAt);
+          const flight = inFlightUntil(record, labelledAt);
           if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
-          if (again !== null) {
+          if (flight !== null) due(issue.number, "start-retry", flight);
+          else if (again !== null) {
             if (Date.now() >= again) relaunch.push(issue.number);
             else due(issue.number, "start-retry", again);
           } else if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);

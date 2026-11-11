@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { KEEP_LAUNCHES, RETRY_WAKE_MS, START_LOST_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, failedSince, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, sandboxRecordOf, setSelf, startBackoffMs, startFailures, startRetryAt, transientHold, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
+import { KEEP_LAUNCHES, RETRY_WAKE_MS, START_LOST_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, failedSince, inFlightUntil, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, sandboxRecordOf, setSelf, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
+import { recordBody, writeSandboxRecord } from "../scripts/launch.mjs";
 import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
 
 const T = Date.parse("2026-11-10T12:00:00.000Z");
@@ -268,29 +269,66 @@ test("entries from before codes were recorded are no strikes, a quota refusal am
   assert.equal(failedSince({ launches: [fail(1, "quota"), fail(2, "quota"), fail(3, "quota")] }, SINCE), 0);
 });
 
-test("a starting marker with no outcome, and a claim cut off before its start, count as failed starts", async () => {
+test("every launch attempt ends stored: a lost marker and a cut-off claim become entries no later write erases", async () => {
   const { startingRecord } = await import("../scripts/dispatch.mjs");
   const { failedStartRecord, settledLaunches } = await import("../scripts/launch.mjs");
   const named = startingRecord(null, { vendor: "vercel", stage: "work", at: at(1), run: "5" });
   assert.equal(named.launches[0].ok, null);
   const later = Date.parse(at(1)) + START_LOST_MS + 1000;
-  // The launch never ran its course (its job never started, threw in its first reads, or its write failed): a real failure.
-  assert.deepEqual(startFailures(named, SINCE, later), [{ at: Date.parse(at(1)) + START_LOST_MS, code: "lost" }]);
-  assert.deepEqual(startFailures(named, SINCE, later - 2000), [], "not before a launch job's limit and its runner wait");
-  const three = [1, 15, 30].reduce((r, m) => startingRecord(r, { vendor: "vercel", stage: "work", at: at(m), run: String(m) }), null);
-  // Each marker is followed by the next one, so only the last is lost; three lost launches in a row each leave one.
-  assert.equal(failedSince(three, SINCE, Date.parse(at(60))), 1);
-  const lostThrice = { ...three, launches: three.launches.map((l, k) => ({ ...l, at: at([1, 15, 30][k]) })) };
-  assert.equal(startFailures({ ...lostThrice, launches: [lostThrice.launches[0]] }, SINCE, Date.parse(at(60))).length, 1);
-  // An outcome settles the marker: a claim or a recorded failure drops it.
+  assert.deepEqual(settleStale(named, later).launches, [{ stage: "work", event: "dispatch", ok: false, run: "5", at: iso(Date.parse(at(1)) + START_LOST_MS), code: "lost" }]);
+  assert.equal(settleStale(named, later - 2000), named, "not before a launch job's limit and its runner wait");
+  // A young marker is a launch in flight: not named again before it turns into an outcome.
+  assert.equal(inFlightUntil(named, SINCE, Date.parse(at(3))), Date.parse(at(1)) + START_LOST_MS + 1000);
+  assert.equal(inFlightUntil(named, SINCE, later), null);
+  // An outcome settles a pending marker; a stored failure is never dropped.
   assert.deepEqual(settledLaunches(named.launches), []);
-  const failed = failedStartRecord(named, { vendor: "vercel", stage: "work", event: "issues", run: "6", at: at(2), code: "error" });
-  assert.deepEqual(failed.launches.map((l) => l.ok), [false]);
-  // A launcher cut off in its vendor calls: its claim's lease ran out with no start after it. The vendor's, so transient.
-  const cut = { state: "running", claim: "abcabcabcabc", at: at(2), leaseUntil: at(12), launches: [] };
-  assert.deepEqual(startFailures(cut, SINCE, Date.parse(at(13))), [{ at: Date.parse(at(12)), code: "timeout" }]);
-  assert.equal(failedSince(cut, SINCE, Date.parse(at(13))), 0);
-  assert.equal(startFailures({ ...cut, launches: [{ stage: "work", ok: true, at: at(3) }] }, SINCE, Date.parse(at(13))).length, 0, "a stage that started is no failed start");
+  const stored = settleStale(named, later);
+  assert.deepEqual(settledLaunches(stored.launches).map((l) => l.code), ["lost"]);
+  const failed = failedStartRecord(stored, { vendor: "vercel", stage: "work", event: "issues", run: "6", at: at(13), code: "error" });
+  assert.deepEqual(failed.launches.map((l) => l.code), ["lost", "error"]);
+  // A launcher cut off in its vendor calls: its claim's lease ran out with no start after it.
+  const cut = { stage: "work", state: "running", claim: "abcabcabcabc", at: at(2), leaseUntil: at(12), launches: [] };
+  const settled = settleStale(cut, Date.parse(at(13)));
+  assert.deepEqual([settled.state, settled.leaseUntil, settled.launches.map((l) => [l.code, l.at])], ["failed", null, [["timeout", at(12)]]]);
+  assert.equal(settleStale({ ...cut, launches: [{ stage: "work", ok: true, at: at(3) }] }, Date.parse(at(13))).launches.length, 1, "a stage that started is no failed start");
+});
+
+const N7 = 7;
+const HEAD7 = marker(N7, "sandbox");
+const storeWrite = (s, next, nowMs) => writeSandboxRecord(REPO, N7, {}, next, { api: s.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0, now: () => nowMs });
+
+test("repeated cut-off launches Block after three in a row, and never hold the vendor's route", async () => {
+  setSelf(BOT.login);
+  const s = githubStore({ seed: 5 });
+  s.put(N7, `${HEAD7}\n${recordBody({ vendor: "vercel", stage: "work", state: "stopped", at: at(0), launches: [] })}`);
+  for (const [k, m] of [[1, 1], [2, 25], [3, 49]]) {
+    // Each launcher claims the record (its write stores the earlier claim's cut-off first), then is cut off.
+    const claim = `${k}`.repeat(12);
+    const w = await storeWrite(s, (cur) => ({ ...cur, stage: "work", state: "running", claim, at: at(m), leaseUntil: at(m + 10) }), Date.parse(at(m)));
+    assert.ok(w.ok);
+  }
+  // The next writer (the dispatcher's marker) stores the third cut-off before its own change.
+  await storeWrite(s, (cur) => ({ ...cur }), Date.parse(at(61)));
+  const rec = sandboxRecordOf(s.bodyOf(N7, HEAD7));
+  const now = Date.parse(at(62));
+  assert.deepEqual(startFailures(rec, SINCE, now).map((f) => f.code), ["timeout", "timeout", "timeout"]);
+  assert.match(launchDecision({ ev: { kind: "swept", issue: N7 }, state: "Running", runningSince: SINCE, record: rec, now }).block, /3 sandbox starts in a row ran past the launch job's limit \(timeout\)/);
+  assert.equal(transientHold(rec, SINCE, now), false, "a cut-off says nothing about the vendor");
+  assert.equal(startRetryAt(rec, SINCE, now), Date.parse(at(59)), "at once: the launcher Blocks it");
+  setSelf(null);
+});
+
+test("repeated lost launches reach three strikes, each stored as the next marker is written", async () => {
+  const { startingRecord } = await import("../scripts/dispatch.mjs");
+  setSelf(BOT.login);
+  const s = githubStore({ seed: 9 });
+  for (const m of [1, 13, 25]) await storeWrite(s, (cur) => startingRecord(cur, { vendor: "vercel", stage: "work", at: at(m), run: String(m) }), Date.parse(at(m)));
+  const rec = sandboxRecordOf(s.bodyOf(N7, HEAD7));
+  assert.deepEqual(rec.launches.map((l) => l.code ?? null), ["lost", "lost", null], "two stored as later markers were written; the last still pending");
+  const now = Date.parse(at(37));
+  assert.equal(failedSince(rec, SINCE, now), 3);
+  assert.match(launchDecision({ ev: { kind: "swept", issue: N7 }, state: "Running", runningSince: SINCE, record: rec, now }).block, /3 sandbox starts failed/);
+  setSelf(null);
 });
 
 test("recordFailedStart writes under the record lock: a sweep's destroy in between is kept, never the stale sandbox id", async () => {
@@ -324,8 +362,9 @@ test("dispatch: transient retries hold the route's new picks; a failed start wai
   // #20: the vendor failed its start 30 s ago (transient): its retry waits 2 minutes, and nothing new starts meanwhile.
   // #22: three real failures: named at once, so its launcher Blocks it. #24: Running a minute, its launch job just failed.
   // #30: Queued, held by #20's outage.
-  const since = { 20: 4 * min, 22: 30 * min, 24: min };
-  const comments = { 20: record(20, [f(30_000, "unavailable")]), 22: record(22, [f(20 * min, "error"), f(15 * min, "error"), f(10 * min, "error")]) };
+  // #26: Running 30 minutes; named 2 minutes ago and its launcher threw before it could record anything: in flight.
+  const since = { 20: 4 * min, 22: 30 * min, 24: min, 26: 30 * min };
+  const comments = { 20: record(20, [f(30_000, "unavailable")]), 22: record(22, [f(20 * min, "error"), f(15 * min, "error"), f(10 * min, "error")]), 26: record(26, [{ stage: "work", event: "dispatch", ok: null, run: "1", at: iso(now - 2 * min) }]) };
   const s = githubStore({ seed: 3 });
   for (const n of [20, 22]) s.put(n, comments[n][0].body);
   const realFetch = globalThis.fetch;
@@ -336,7 +375,7 @@ test("dispatch: transient retries hold the route's new picks; a failed start wai
     const method = init.method || "GET";
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
-    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [iss(20), iss(22), iss(24), iss(30, false)]);
+    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [iss(20), iss(22), iss(24), iss(26), iss(30, false)]);
     if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues/comments`) return json([]);
     if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json(comments[n] || []);
     if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(since[n] ? [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - since[n]) }] : []);
@@ -352,6 +391,7 @@ test("dispatch: transient retries hold the route's new picks; a failed start wai
     const kinds = Object.fromEntries(r.deadlines.filter((d) => d.issue).map((d) => [d.issue, [d.kind, d.at]]));
     assert.deepEqual(kinds[20], ["start-retry", iso(now - 30_000 + START_RETRY_MS)]);
     assert.equal(kinds[24][0], "start-retry", "a failed launch's grace is a wake of its own, not a wait for the cron");
+    assert.deepEqual(kinds[26], ["start-retry", iso(now - 2 * min + START_LOST_MS + 1000)], "an unrecordable throw is not named again inside its marker's window");
     const marked = sandboxRecordOf(s.bodyOf(22, marker(22, "sandbox")));
     assert.deepEqual(marked.launches.at(-1).ok, null, "the relaunch is marked as it is named");
   } finally {

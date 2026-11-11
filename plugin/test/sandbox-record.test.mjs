@@ -70,7 +70,7 @@ async function race(store, o, s, order, { stageFields = s.fields, stageLaunch = 
   const launcher = () => {
     const at = "2026-11-09T09:24:00.900Z";
     const entry = { ...s.launch, latencyMs: Date.parse(s.result.commandAt) - Date.parse(EVENT_AT), found: s.result.found, at, ms: MS };
-    return writeSandboxRecord(REPO, o.n, {}, (cur) => (cur?.claim === o.claim ? startedRecord(cur, { base: { vendor: "vercel", stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, budgetUsd: 20, home: null }, result: s.result, claim: o.claim, progress: stageProgressKey(RUN, o.claim), latencyMs: entry.latencyMs, at, leaseUntil: "2026-11-09T09:34:00.900Z", entry }) : null), { api: store.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0 });
+    return writeSandboxRecord(REPO, o.n, {}, (cur) => (cur?.claim === o.claim ? startedRecord(cur, { base: { vendor: "vercel", stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, budgetUsd: 20, home: null }, result: s.result, claim: o.claim, progress: stageProgressKey(RUN, o.claim), latencyMs: entry.latencyMs, at, leaseUntil: "2026-11-09T09:34:00.900Z", entry }) : null), { api: store.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0, now: () => Date.parse(at) });
   };
   const write = stageWriter({
     issue: o.n,

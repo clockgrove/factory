@@ -103,10 +103,10 @@ test("refresh: merges until today's minutes, then nightly, unless no build was t
   const now = new Date("2026-11-08T15:00:00Z");
   const base = { refresh: "merge", head: SHA, current: { sha: OTHER, builtAt: "2026-11-08T09:00:00Z" }, lastAttemptAt: "2026-11-08T12:00:00Z", todayMs: 0, dailyMinutes: 5, now };
   assert.deepEqual(imageDecision({ ...base, trigger: "merge" }), { build: true });
-  assert.match(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000 }).skip, /nightly build refreshes it/);
+  assert.match(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000 }).skip, /the next UTC day's first dispatcher tick builds it$/, "an owed build runs on that tick (#52)");
   assert.equal(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000, lastAttemptAt: "2026-11-08T09:00:00Z" }).build, true, "nothing was tried since the nightly time");
-  assert.match(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000, lastAttemptAt: "2026-11-08T11:00:00Z" }).skip, /nightly/, "a failed attempt since the nightly time closes the window");
-  assert.match(imageDecision({ ...base, trigger: "merge", refresh: "nightly" }).skip, /nightly/);
+  assert.match(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000, lastAttemptAt: "2026-11-08T11:00:00Z" }).skip, /next UTC day/, "a failed attempt since the nightly time closes the window");
+  assert.match(imageDecision({ ...base, trigger: "merge", refresh: "nightly" }).skip, /^image_refresh is nightly; the next UTC day's first dispatcher tick builds it$/);
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", todayMs: 99 * 60_000 }), { build: true });
   assert.match(imageDecision({ ...base, trigger: "nightly", current: { sha: SHA } }).skip, /already built/);
   assert.deepEqual(imageDecision({ ...base, trigger: "manual", current: { sha: SHA } }), { build: true });

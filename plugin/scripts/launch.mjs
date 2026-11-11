@@ -665,7 +665,7 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   if (ctx.skip) return out({ exit: "skipped", reason: ctx.skip });
   const trusted = ev.kind === "comment" && !isSelf(ev.author) && pushAuthor(ev.author);
   const fromSelf = ev.kind === "stage" && isSelf({ user: ev.sender });
-  const decide = (c, e = ev) => launchDecision({ ev: e, state: c.state, question: c.labels.includes("factory:question"), record: c.record, trusted, closed: c.closed, fromSelf, runningSince: c.runningSince, review: c.review, headSha: c.headSha, checksDone: c.checksDone, staleMs: inputs.timeoutMinutes * 60_000 });
+  const decide = (c, e = ev) => launchDecision({ ev: e, state: c.state, record: c.record, trusted, closed: c.closed, fromSelf, runningSince: c.runningSince, review: c.review, headSha: c.headSha, checksDone: c.checksDone, staleMs: inputs.timeoutMinutes * 60_000 });
   const decision = decide(ctx);
   seen.stage = decision.stage ?? null;
   if (gate) {

@@ -2,8 +2,8 @@
 // Factory's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs, and
 // stops one left running with no stage holding it.
 //   node scripts/sweep.mjs --repo OWNER/NAME [--dry-run]
-// Runs when an Objective closes (its issue closed, its PR merged) or is Blocked, by hand, on its own wakes (sweepWaits:
-// what a run left for minutes later), with GitHub's hourly cron as the backstop, and inside a
+// Runs when an Objective closes (its issue closed, its PR merged), is Blocked or asks a Question, by hand, on its own
+// wakes (sweepWaits: what a run left for minutes later), with GitHub's hourly cron as the backstop, and inside a
 // launch the vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
 // Lists Factory's Objective sandboxes for this repository in the vendor's project (tags `factory=objective` and
 // `factory-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one

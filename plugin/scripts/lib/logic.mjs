@@ -497,10 +497,15 @@ export const STATE_LABELS = {
   "factory:in-review": "In review",
 };
 
-/** The issue's state from its Project card, else from its fallback label, else Queued. */
+/**
+ * The issue's state from its Project card, else from its fallback label, else Queued. The board has no Question
+ * column: a Question's card sits in In review (applyExit), and its `factory:question` label says which it is, so a
+ * card In review with that label is a Question, as the label alone says without a board.
+ */
 export function stateOf(issue, cardStatus) {
-  if (cardStatus && cardStatus !== "Queued") return cardStatus;
   const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+  if (cardStatus === "In review" && names.includes("factory:question")) return "Question";
+  if (cardStatus && cardStatus !== "Queued") return cardStatus;
   for (const n of names) if (STATE_LABELS[n]) return STATE_LABELS[n];
   return cardStatus || "Queued";
 }
@@ -2332,7 +2337,6 @@ export function dueStage({ state, record, runningSince = null, review = null }) 
  * Which stage, if any, an event starts for an Objective (pure; the caller supplies what GitHub said):
  *   ev           launchEvent()'s result
  *   state        the Objective's state (stateOf: card first, then the label)
- *   question     whether it carries factory:question (on a board a Question's card sits in In review)
  *   record       its sandbox record (sandboxRecord), or null
  *   trusted      whether a comment's author is a maintainer (pushAuthor), and not Factory itself
  *   runningSince when the Objective last became Running (its label event)
@@ -2343,7 +2347,7 @@ export function dueStage({ state, record, runningSince = null, review = null }) 
  * Returns {stage}, {requeue: reason} or {skip: reason}. Nothing here takes a slot: an answered Question goes back to
  * Queued and the dispatcher, the one place max_concurrent and daily_usd are decided, starts it.
  */
-export function launchDecision({ ev, state, question = false, record = null, trusted = false, fromSelf = false, closed = false, runningSince = null, review = null, headSha = null, checksDone = false, now = Date.now(), staleMs = 4 * 3600_000 }) {
+export function launchDecision({ ev, state, record = null, trusted = false, fromSelf = false, closed = false, runningSince = null, review = null, headSha = null, checksDone = false, now = Date.now(), staleMs = 4 * 3600_000 }) {
   if (ev.skip) return { skip: ev.skip };
   if (ev.kind === "stage") {
     // The running stage's own requests: only Factory's, and only for the claim the record still carries.
@@ -2375,7 +2379,7 @@ export function launchDecision({ ev, state, question = false, record = null, tru
     if (!ev.human) return { skip: "a comment by a bot" };
     if (!trusted) return { skip: "a comment by someone who is not a maintainer" };
     // A maintainer's comment on a Question is the answer: back to Queued, as re-applying the label does today.
-    return state === "Question" || (question && state === "In review") ? { requeue: "a maintainer answered the Question" } : { skip: `${state}: a comment starts nothing` };
+    return state === "Question" ? { requeue: "a maintainer answered the Question" } : { skip: `${state}: a comment starts nothing` };
   }
   if (ev.kind === "checks") {
     // Only a stage that stopped to wait for CI on this very head resumes, and only while it is still the branch's head.

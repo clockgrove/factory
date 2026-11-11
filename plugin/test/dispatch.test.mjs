@@ -40,6 +40,11 @@ test("Running, Blocked, Question and In review are excluded, from the card first
   assert.deepEqual(skipped.map((s) => s.reason), ["Running", "Blocked", "Question", "Running", "In review"]);
   assert.equal(stateOf(issue(9, ["factory:blocked"]), "Queued"), "Blocked", "a Queued card with a blocked label: the label wins");
   assert.equal(stateOf(issue(9, ["factory:blocked"]), "Running"), "Running", "a non-Queued card wins over the label");
+  // The board has no Question column: a Question's card sits in In review, and its label says Question (#57).
+  assert.equal(stateOf(issue(9, ["factory:question"]), "In review"), "Question");
+  assert.equal(stateOf(issue(9, ["factory:in-review"]), "In review"), "In review");
+  assert.equal(stateOf(issue(9, ["factory:question"]), "Running"), "Running", "a stale question label on a Running card is no Question");
+  assert.deepEqual(selectReady({ issues: [issue(4, ["factory:question"])], statuses: { 4: "In review" }, maxConcurrent: 10, dailyUsd: 100 }).skipped, [{ number: 4, reason: "Question" }]);
 });
 
 test("a held Queued issue (a requeue's backoff) is skipped with its reason and takes no slot", () => {

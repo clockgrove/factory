@@ -545,14 +545,14 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   }
   const on = doc?.on ?? doc?.true ?? {};
   const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
-  const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run factory\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")));
+  const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run factory\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")) && /exit == 'deferred'/.test(String(s?.if || "")));
   const missing = [
     ...((on?.issues?.types || []).map(String).includes("closed") && /action == 'closed' \|\|/.test(String(jobs.dispatch?.if || "")) ? [] : ["a dispatcher tick on a closed issue"]),
     ...(jobs.wake && on?.workflow_dispatch?.inputs?.wake ? [] : ["the wake job"]),
-    ...(jobs["launch-gate"] && !(ticks("launch") && ticks("launch-event")) ? ["the launch jobs' tick on a failed launch"] : []),
+    ...(jobs["launch-gate"] && !(ticks("launch") && ticks("launch-event")) ? ["the launch jobs' tick on a failed or deferred launch"] : []),
   ];
   if (!missing.length) return PASS("dispatcher ticks", "a closed issue, a failed launch and the waits only time ends tick the dispatcher on time");
-  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: those waits last until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
 
 /**

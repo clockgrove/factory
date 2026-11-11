@@ -2183,27 +2183,60 @@ export function watchdogMs({ minutes, sessionEnd, now = Date.now() }) {
   return Math.max(0, Number.isFinite(bySession) ? Math.min(byClock, bySession) : byClock);
 }
 
-/**
- * Failed starts at or after `since`, in the record: every failure but a quota refusal, which has its own streak and
- * limit (quotaBackoff). A launcher that threw before its claim records one too (launch.mjs failedStartRecord).
- */
-const failuresSince = (record, since) => (record?.launches || []).filter((l) => l?.ok === false && l.code !== "quota" && Number.isFinite(Date.parse(since)) && Date.parse(l.at) >= Date.parse(since));
-export const failedSince = (record, since) => failuresSince(record, since).length;
 /** Failed starts in one Running stint (or one review request) before the Objective is Blocked instead of tried again. */
 export const MAX_FAILED_STARTS = 3;
-/** The pause after a failed start, per failure so far: the next try after one failure waits 2 minutes, after two 4. */
-export const START_RETRY_MS = 2 * 60_000;
 /**
- * When the stage whose starts failed since `since` (the Running stint, or the review request) is tried again: the last
- * failure plus START_RETRY_MS per failure, or at once when MAX_FAILED_STARTS is reached (the launcher then Blocks).
- * Null when nothing failed since. The Objective stays Running meanwhile, so `since` never moves and the count holds.
+ * Start failures that say nothing about the Objective: the vendor (or the launch job's clock) failed it. They are
+ * retried with a growing pause and never Block; a vendor's outage holds new picks instead (transientHold).
  */
-export function startRetryAt(record, since) {
-  const fails = failuresSince(record, since);
-  if (!fails.length) return null;
-  const last = Math.max(...fails.map((l) => Date.parse(l.at)));
-  return fails.length >= MAX_FAILED_STARTS ? last : last + START_RETRY_MS * fails.length;
+export const TRANSIENT_START = Object.freeze(["rate_limited", "unavailable", "timeout"]);
+/** A launch job's limit (5 minutes) plus its wait for a runner: a starting marker this old with no outcome was lost. */
+export const START_LOST_MS = 10 * 60_000;
+/** The first pause after a failed start; each later one doubles it, up to START_RETRY_MAX_MS: 2, 4, 8, 16, then 30 minutes. */
+export const START_RETRY_MS = 2 * 60_000;
+export const START_RETRY_MAX_MS = 30 * 60_000;
+/** The pause before the next try after `n` failed starts. */
+export const startBackoffMs = (n) => (n >= 5 ? START_RETRY_MAX_MS : Math.min(START_RETRY_MAX_MS, START_RETRY_MS * 2 ** Math.max(0, n - 1)));
+
+/**
+ * The failed starts at or after `since` (the Running stint, or the review request), each `{at, code}`, oldest first:
+ * - a recorded failure with its code, but a quota refusal (its own streak and limit, quotaBackoff); an entry with no
+ *   code, written before codes were recorded, says nothing and is not counted;
+ * - a starting marker (`ok: null`, written by the dispatcher as it names the stage) older than START_LOST_MS with
+ *   nothing written after it: the launch never ran its course (code `lost`, a real failure);
+ * - a launcher's claim whose lease ran out with no start after it: the launcher was cut off in its vendor calls
+ *   (code `timeout`, a transient one).
+ */
+export function startFailures(record, since, now = Date.now()) {
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return [];
+  const list = (record?.launches || []).filter((l) => Date.parse(l?.at) >= t);
+  const out = list.filter((l) => l.ok === false && typeof l.code === "string" && l.code !== "quota").map((l) => ({ at: Date.parse(l.at), code: l.code }));
+  for (const l of list) {
+    const at = Date.parse(l.at);
+    const after = list.some((x) => x !== l && Date.parse(x.at) >= at) || Date.parse(record.at) > at;
+    if (l.ok === null && !after && now - at > START_LOST_MS) out.push({ at: at + START_LOST_MS, code: "lost" });
+  }
+  const claimedAt = Date.parse(record?.at);
+  if (record?.state === "running" && record.claim && Number.isFinite(Date.parse(record.leaseUntil)) && now >= Date.parse(record.leaseUntil) && claimedAt >= t && !list.some((l) => l.ok === true && Date.parse(l.at) >= claimedAt)) out.push({ at: Date.parse(record.leaseUntil), code: "timeout" });
+  return out.sort((a, b) => a.at - b.at);
 }
+/** The real failed starts since `since` (startFailures less TRANSIENT_START): three Block. */
+export const failedSince = (record, since, now = Date.now()) => startFailures(record, since, now).filter((f) => !TRANSIENT_START.includes(f.code)).length;
+/**
+ * When the stage whose starts failed since `since` is tried again: the last failure plus startBackoffMs of how many
+ * failed so far, or at once when MAX_FAILED_STARTS real failures are reached (the launcher then Blocks). Null when
+ * nothing failed since. The Objective stays Running meanwhile (a review stays labelled), so `since` never moves.
+ */
+export function startRetryAt(record, since, now = Date.now()) {
+  const fails = startFailures(record, since, now);
+  if (!fails.length) return null;
+  const last = fails.at(-1).at;
+  if (fails.filter((f) => !TRANSIENT_START.includes(f.code)).length >= MAX_FAILED_STARTS) return last;
+  return last + startBackoffMs(fails.length);
+}
+/** Whether the stage's latest failed start since `since` was the vendor's (transient): the route's picks wait meanwhile. */
+export const transientHold = (record, since, now = Date.now()) => TRANSIENT_START.includes(startFailures(record, since, now).at(-1)?.code);
 
 /**
  * The stage an Objective is due for, from its state alone: work for a Running Objective with no work start since it
@@ -2251,10 +2284,10 @@ export function launchDecision({ ev, state, question = false, record = null, tru
     if (record?.waiting === "checks" && record.head && record.head === headSha && checksDone) return { stage: record.stage };
     // The dispatcher's pick, or its sweep re-launching an event that was lost: each stage once per cue.
     if (state === "Running" && !runningSince) return { skip: "Running since an unknown time: nothing starts on a guess" };
-    if (state === "Running" && failedSince(record, runningSince) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox starts failed since it became Running` };
     if (state === "Running" && launchedSince(record, "work", runningSince)) return { skip: "work already started for this Running stint" };
-    // A review whose starts keep failing Blocks too: one request, three strikes.
-    if (state === "In review" && review?.since && !launchedSince(record, "review", review.since) && failedSince(record, review.since) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox review starts failed since the review was asked for` };
+    if (state === "Running" && failedSince(record, runningSince, now) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox starts failed since it became Running` };
+    // A review whose starts keep failing Blocks too: one request, three strikes. A vendor's transient failures never do.
+    if (state === "In review" && review?.since && !launchedSince(record, "review", review.since) && failedSince(record, review.since, now) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox review starts failed since the review was asked for` };
     return dueStage({ state, record, runningSince, review }) || { skip: `${state}: nothing to start` };
   }
   if (ev.kind === "comment") {

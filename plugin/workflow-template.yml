@@ -18,6 +18,9 @@ on:
       harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
       wake: { description: "Set by the wake job only (the deadline it slept to); leave empty", required: false }
       # {{#sandbox}}
+      failed_launch: { description: "Set by a launch job that failed only (its Objective); leave empty", required: false }
+      # {{/sandbox}}
+      # {{#sandbox}}
       image: { description: "true builds the sandbox image from the default branch now", required: false }
       sweep: { description: "true runs the sandbox sweep now", required: false }
       # {{/sandbox}}
@@ -254,8 +257,9 @@ jobs:
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
       - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, or deferred its stage to a retry time)
         if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
-        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml || true
+        # A failed launch names its Objective: the dispatcher then wakes at the end of its launch grace, not the cron.
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && matrix.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
+        run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
   launch-gate:
     # An event on one Objective: a maintainer's comment, finished CI on its branch, its PR labelled for review or marked
     # ready, its stage asking for tokens or saying it ended. The gate decides in no concurrency group, so an event that starts nothing (a stranger's comment, a fork's
@@ -308,8 +312,8 @@ jobs:
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
       - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off or deferred its stage to a retry time)
         if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
-        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml || true
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && needs.launch-gate.outputs.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
+        run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
   launch-tick:
     # CI finished on an In-review Objective's PR head with no stage waiting on it (the gate's answer): the dispatcher's
     # merge pass runs now, not on GitHub's cron. In no Objective group: it starts nothing there, so it replaces no launch.

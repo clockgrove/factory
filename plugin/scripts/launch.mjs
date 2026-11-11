@@ -31,7 +31,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, TRANSIENT_START, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -64,7 +64,6 @@ export async function createSession(adapter, spec) {
 /** A session that leaves the stage less than this much wall clock starts no stage. */
 const MIN_STAGE_MINUTES = 10;
 /** Vendor errors worth another try later: the Objective goes back to Queued rather than Blocked. */
-const TRANSIENT = new Set(["rate_limited", "unavailable"]);
 /** Inputs that are secrets in the environment under any of their names, beside SECRET_INPUTS. */
 const MORE_SECRETS = ["vercel_token", "vercel_team_id", "vercel_project_id"];
 const BARE_SECRETS = new Set(["GITHUB_TOKEN", "GH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"]);
@@ -651,34 +650,53 @@ export async function launchOne({ inputs, eventName, payload = {}, gate = false,
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
 
   // A start that throws before its own failure is recorded (the SDK's install, the vendor's or GitHub's reads before the
-  // claim) records one here, so the dispatcher's next try waits START_RETRY_MS and the third failure Blocks.
+  // claim) records one here, so the dispatcher's next try waits its pause and the third real failure Blocks.
   try {
     return await afterDecision(run, ctx, decision, { adapterReady, repoId });
   } catch (e) {
-    if (decision.stage && !run.started) await recordFailedStart(run, { stage: decision.stage, error: e }).catch((x) => log(`#${n}: the failed start was not recorded (${x.status ?? "error"})`));
+    if (decision.stage && !run.started) {
+      const w = await recordFailedStart(run, { stage: decision.stage, error: e }).catch((x) => ({ error: x }));
+      if (!w?.ok) log(`#${n}: the failed start was not recorded (${w?.error ? (w.error.status ?? "error") : w?.refused ? "another launcher's claim holds the record" : "the record lock stayed held"}); the dispatcher's starting marker counts it`);
+    }
     throw e;
   }
 }
 
+/** The launches with the dispatcher's starting markers (`ok: null`) dropped: an outcome, or a claim, settles them. */
+export const settledLaunches = (launches) => (launches || []).filter((l) => l?.ok !== null);
+
 /**
- * A failed start's entry appended to the Objective's record as it is now, everything else kept (a launcher that threw
- * before its claim holds no claim to write over). With no record yet, a new one that says only this.
+ * A failed start's entry appended to the Objective's record as it is now (`now`, read under the record lock),
+ * everything else kept: a launcher that threw before its claim holds no claim to write over. Its starting markers go,
+ * since this outcome settles them. With no record yet, a new one that says only this.
  */
 export function failedStartRecord(now, { vendor, stage, event, run, at, code }) {
   const entry = { stage, event, ok: false, run, at, code };
   const rec = now ? strip(now) : { vendor, stage, state: "failed", error: { code, status: null }, at, launches: [] };
-  return { ...rec, launches: [...(rec.launches || []), entry].slice(-KEEP_LAUNCHES) };
+  return { ...rec, launches: [...settledLaunches(rec.launches), entry].slice(-KEEP_LAUNCHES) };
 }
 
-async function recordFailedStart({ inputs, eventName, runId, repo, n, opts, claim }, { stage, error }) {
+/**
+ * The failed start of a launcher that threw, written as every claim-comment write is: under the record lock
+ * (writeSandboxRecord), over the record read there, so a sweep's or another launcher's write in between is kept. Another
+ * launcher's live claim is left alone (its own outcome counts); this launcher's own claim is released with the failure.
+ * `base` is the lock's base, read here when the throw came before the launcher had one.
+ */
+export async function recordFailedStart({ inputs, eventName, runId, repo, n, opts, claim, base }, { stage, error, at = new Date().toISOString(), api, lockOpts = {} }) {
   const code = typeof error?.code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(error.code) ? error.code : "error";
-  const now = sandboxRecord(await listComments(repo, n, opts), n);
-  // Another launcher's live claim is left alone: its own outcome is what counts. This launcher's own claim (it threw
-  // after writing it) is released with the failure, so the next try need not wait for its lease.
-  const mine = !!claim && now?.claim === claim;
-  if (!mine && now?.state === "running" && now.leaseUntil && Date.now() < Date.parse(now.leaseUntil)) return;
-  const rec = failedStartRecord(now, { vendor: inputs.sandbox, stage, event: eventName, run: runId, at: new Date().toISOString(), code });
-  await upsertComment(repo, n, marker(n, "sandbox"), recordBody(mine ? { ...rec, state: "failed", leaseUntil: null, error: { code, status: null } } : rec), opts);
+  const lockAt = base ?? (await (api ? lockBase(repo, opts, api) : lockBase(repo, opts)));
+  return writeSandboxRecord(
+    repo,
+    n,
+    opts,
+    (cur) => {
+      const mine = !!claim && cur?.claim === claim;
+      if (!mine && cur?.state === "running" && cur.leaseUntil && Date.now() < Date.parse(cur.leaseUntil)) return null;
+      const rec = failedStartRecord(cur, { vendor: inputs.sandbox, stage, event: eventName, run: runId, at, code });
+      return mine ? { ...rec, state: "failed", leaseUntil: null, error: { code, status: null } } : rec;
+    },
+    { base: lockAt, ...(api ? { api } : {}), ...lockOpts },
+  );
 }
 
 async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
@@ -698,13 +716,14 @@ async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
 }
 
 /**
- * What a failed start leads to: `quota` (quotaWait's own streak), `retry` (a transient vendor error with fewer than
- * MAX_FAILED_STARTS failures in the stint: the stage keeps its state and the dispatcher tries again at startRetryAt; it
- * never goes back to Queued, whose re-pick would start a new stint and reset the count), or `block`.
+ * What a failed start leads to: `quota` (quotaWait's own streak), `retry` (a transient vendor error, however many: the
+ * stage keeps its state and the dispatcher tries again at startRetryAt, 2, 4, 8, 16, then every 30 minutes, while its
+ * route picks nothing new; it never goes back to Queued and never Blocks), or `block` (any other error: at once from
+ * the launcher, or on the third such failure in the stint when it was recorded another way).
  */
-export function startFailure({ code, failures }) {
+export function startFailure({ code }) {
   if (code === "quota") return "quota";
-  return TRANSIENT.has(code) && failures < MAX_FAILED_STARTS ? "retry" : "block";
+  return TRANSIENT_START.includes(code) ? "retry" : "block";
 }
 
 /** The Objective Blocked with Factory's own reason (codes and times). */
@@ -902,7 +921,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   run.claim = claim;
   const leaseUntil = () => new Date(Date.now() + CLAIM_LEASE_MS).toISOString();
   // A quota streak (the vendor refusing starts for its quota) carries over the claim, so the next refusal counts on.
-  const claimed = await write((cur) => (sameRecord(cur, prior) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: prior?.launches || [], ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
+  const claimed = await write((cur) => (sameRecord(cur, prior) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: settledLaunches(prior?.launches), ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
   if (!claimed.ok) return out({ exit: "skipped", reason: `#${n}: ${claimed.refused ? "the sandbox record changed since it was read (another launcher's claim, a stage or the sweep)" : "another writer held the sandbox record's lock"}; nothing started` });
   watch.mark("claim");
 
@@ -933,7 +952,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     // Failures count from the Running stint for work and from the review's request for a review: neither moves while the
     // stage is retried, since a retried stage keeps its state (startFailure).
     const failures = failedSince({ launches: launches(entry) }, stage === "review" ? (ctx.review?.since ?? ctx.runningSince) : ctx.runningSince);
-    const retried = startFailure({ code: error.code, failures }) === "retry";
+    const retried = startFailure({ code: error.code }) === "retry";
     // Another failure tried again keeps the streak as it was, so a refusal after it counts on from the first one.
     const streak = quota ? (quota.giveUp ? {} : { quota: { since: quota.since, tries: quota.tries, retryAt: quota.retryAt } }) : retried && prior?.quota ? { quota: prior.quota } : {};
     await write((cur) => (cur?.claim === claim ? { ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry, cur.launches), ...streak } : null)).then(
@@ -942,9 +961,9 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     );
     if (quota) return out({ ...(await quotaWait(run, ctx, { stage, error, quota })), stage });
     if (retried) {
-      // Worth another try, by the dispatcher (startRetryAt): a work stage stays Running and a review stays labelled, so
-      // the stint (or the request) the failures count from never moves, and the third failure Blocks. Going back to
-      // Queued would start a new stint at each re-pick and never reach the third.
+      // Worth another try, by the dispatcher (startRetryAt, a growing pause): a work stage stays Running and a review
+      // stays labelled, and nothing new starts on this route meanwhile (logic.mjs transientHold). Going back to Queued
+      // would let each re-pick start a new stint and drain the queue into the outage.
       const why = `the ${inputs.sandbox} sandbox was unavailable (${error.code}); it is tried again after a pause`;
       return out({ exit: "deferred", stage, reason: `#${n}: ${why}` });
     }

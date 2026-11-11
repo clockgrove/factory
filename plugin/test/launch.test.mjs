@@ -237,8 +237,9 @@ test("stage lifecycle: the lease, a stage's own requests, the next stage when on
 
   const swept = { kind: "swept", issue: 9 };
   assert.match(launchDecision({ ev: swept, state: "Running", runningSince: null }).skip, /unknown time/, "fails closed");
-  const failed = { state: "failed", launches: [1, 2, 3].map((i) => ({ stage: "work", ok: false, at: `2026-11-08T10:0${i}:00Z` })) };
+  const failed = { state: "failed", launches: [1, 2, 3].map((i) => ({ stage: "work", ok: false, at: `2026-11-08T10:0${i}:00Z`, code: "error" })) };
   assert.equal(failedSince(failed, "2026-11-08T10:00:00Z"), 3);
+  assert.equal(failedSince({ launches: failed.launches.map(({ code, ...l }) => l) }, "2026-11-08T10:00:00Z"), 0, "entries from before codes were recorded (a quota refusal among them) are no strikes");
   assert.match(launchDecision({ ev: swept, state: "Running", runningSince: "2026-11-08T10:00:00Z", record: failed }).block, /3 sandbox starts failed/);
   assert.deepEqual(launchDecision({ ev: swept, state: "Running", runningSince: "2026-11-08T10:02:30Z", record: failed }), { stage: "work" }, "failures before this stint do not count");
   const review = { kind: "review", issue: 9, pr: 40, human: false, ready: false, draft: false, at: "2026-11-08T10:00:00Z" };

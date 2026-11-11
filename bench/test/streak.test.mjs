@@ -379,3 +379,17 @@ test("sandbox stages: the vendor comment's dollars sit beside the progress comme
   const late = { ...collected, issueComments: [{ ...collected.issueComments[1], created_at: "2031-03-02T09:00:00Z" }] };
   assert.deepEqual(factoryActivity(late), []);
 });
+
+test("sandbox stages: the record's launches are read merged as the plugin reads them, a stage's own entry included", async () => {
+  const { factoryLogin, launchesOf } = await import("../lib/phases.mjs");
+  const { marker, sandboxMarkerLine } = await import("../../plugin/scripts/lib/logic.mjs");
+  const app = { login: "factory-app[bot]", type: "Bot" };
+  const self = factoryLogin(null, app.login);
+  const claim = "0123456789ab";
+  const comments = [
+    { id: 1, user: app, body: `${marker(48, "sandbox")}\n${sandboxMarkerLine({ state: "running", claim, stage: "work", launches: [] })}` },
+    // The launcher's post-start write never came; the stage's part carries the start.
+    { id: 2, user: app, body: `${marker(48, "stage", claim)}\n${sandboxMarkerLine({ state: "running", at: "2031-03-02T03:01:00Z", launch: { stage: "work", ok: true, run: "9", cue: "stint-1", event: "pull_request", eventAt: "2031-03-02T03:00:00Z" } })}` },
+  ];
+  assert.deepEqual(launchesOf(comments, 48, self), [{ stage: "work", run: "9", event: "pull_request", at: Date.parse("2031-03-02T03:00:00Z") }]);
+});

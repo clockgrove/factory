@@ -6,9 +6,9 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
-import { marker, sandboxRecord, setSelf, stageDeadline, withLaunch } from "../scripts/lib/logic.mjs";
+import { marker, sandboxMarkerLine, sandboxRecord, setSelf, stageDeadline, withLaunch } from "../scripts/lib/logic.mjs";
 import { recordBody, stageProgressKey, startEntry, startInSandbox, startedRecord, writeSandboxRecord } from "../scripts/launch.mjs";
-import { startedFields, startedLaunch, writeRecord } from "../scripts/stage.mjs";
+import { stageWriter, startedFields, startedLaunch } from "../scripts/stage.mjs";
 import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
 
 const RUN = "42593022322";
@@ -72,16 +72,17 @@ async function race(store, o, s, order, { stageFields = s.fields, stageLaunch = 
     const entry = { ...s.launch, latencyMs: Date.parse(s.result.commandAt) - Date.parse(EVENT_AT), found: s.result.found, at, ms: MS };
     return writeSandboxRecord(REPO, o.n, {}, (cur) => (cur?.claim === o.claim ? startedRecord(cur, { base: { vendor: "vercel", stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, budgetUsd: 20, home: null }, result: s.result, claim: o.claim, progress: stageProgressKey(RUN, o.claim), latencyMs: entry.latencyMs, at, leaseUntil: "2026-11-09T09:34:00.900Z", entry }) : null), { api: store.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0 });
   };
-  const beat = () =>
-    writeRecord({
-      issue: o.n,
-      claim: o.claim,
-      launch: stageLaunch,
-      change: { ...stageFields, state: "running", leaseUntil: "2026-11-09T09:34:01.000Z" },
-      list: () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`),
-      put: (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } })),
-    });
-  const [l, b, b2] = order === "together" ? await Promise.all([launcher(), beat(), beat()]) : order === "launcher, then beat" ? [await launcher(), await beat(), await beat()] : (([x, y, z]) => [z, x, y])([await beat(), await beat(), await launcher()]);
+  const write = stageWriter({
+    issue: o.n,
+    claim: o.claim,
+    launch: stageLaunch,
+    list: () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`),
+    put: (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } })),
+  });
+  const beat = () => write({ ...stageFields, state: "running", leaseUntil: "2026-11-09T09:34:01.000Z" });
+  // The stage's beats run one at a time (stage.mjs heartbeat), beside the launcher's write.
+  const beats = async () => [await beat(), await beat()];
+  const [l, [b, b2]] = order === "together" ? await Promise.all([launcher(), beats()]) : order === "launcher, then beat" ? [await launcher(), await beats()] : (([x, y]) => [y, x])([await beats(), await launcher()]);
   assert.equal(l.ok, true, `#${o.n} (${order}): the launcher's write went in`);
   assert.deepEqual([b, b2], [{ ok: true }, { ok: true }], `#${o.n} (${order}): the beats went in`);
   return sandboxRecord(await store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`), o.n);
@@ -135,7 +136,8 @@ test("the stage's part: written by that stage alone, in two calls, and read only
   store.put(o.n, `${marker(o.n, "sandbox")}\n${recordBody(claimRecord(o))}`);
   const list = () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`);
   const put = (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } }));
-  const beat = (claim, state) => writeRecord({ issue: o.n, claim, change: { state, leaseUntil: "2026-11-09T09:40:00.000Z" }, list, put });
+  const writers = { [o.claim]: stageWriter({ issue: o.n, claim: o.claim, list, put }), ffffffffffff: stageWriter({ issue: o.n, claim: "ffffffffffff", list, put }) };
+  const beat = (claim, state) => writers[claim]({ state, leaseUntil: "2026-11-09T09:40:00.000Z" });
   assert.deepEqual(await beat(o.claim, "running"), { ok: true });
   const before = store.calls.length;
   assert.deepEqual(await beat(o.claim, "running"), { ok: true });
@@ -148,6 +150,32 @@ test("the stage's part: written by that stage alone, in two calls, and read only
   [...store.comments.values()].find((c) => c.body.startsWith(`${marker(o.n, "sandbox")}\n`)).body = `${marker(o.n, "sandbox")}\n${recordBody({ ...claimRecord(o), state: "stopped" })}`;
   rec = sandboxRecord(await list(), o.n);
   assert.deepEqual([rec.state, rec.leaseUntil], ["stopped", claimRecord(o).leaseUntil]);
+});
+
+test("the stage's part: a fresh part missing from the list is written again by its id, not posted twice; the latest part is read", async () => {
+  const [o] = OBJECTIVES;
+  const store = githubStore({ hideNew: 2 });
+  store.put(o.n, `${marker(o.n, "sandbox")}\n${recordBody(claimRecord(o))}`);
+  const write = stageWriter({
+    issue: o.n,
+    claim: o.claim,
+    list: () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`),
+    put: (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } })),
+  });
+  assert.deepEqual((await write({ state: "running", leaseUntil: "2026-11-09T09:40:00.000Z" })).ok, true);
+  // A stage that fails fast: its end comes while its first write is still missing from the list.
+  assert.deepEqual((await write({ state: "ended", exitCode: 1, leaseUntil: null })).ok, true);
+  const parts = [...store.comments.values()].filter((c) => c.body.startsWith(`${marker(o.n, "stage", o.claim)}\n`));
+  assert.equal(parts.length, 1, "one part, written again by its id");
+  const rec = sandboxRecord([...store.comments.values()], o.n);
+  assert.deepEqual([rec.state, rec.exitCode, rec.leaseUntil], ["ended", 1, null], "the end is read: the Objective is not held until its lease lapses");
+  // Two parts of one claim (one made before this fix): the one written last is read, whatever its id.
+  const two = [
+    { id: 1, user: BOT, body: `${marker(o.n, "sandbox")}\n${recordBody(claimRecord(o))}` },
+    { id: 2, user: BOT, body: `${marker(o.n, "stage", o.claim)}\n${sandboxMarkerLine({ state: "ended", exitCode: 1, at: "2026-11-09T09:31:00.000Z" })}` },
+    { id: 3, user: BOT, body: `${marker(o.n, "stage", o.claim)}\n${sandboxMarkerLine({ state: "running", at: "2026-11-09T09:30:00.000Z" })}` },
+  ];
+  assert.equal(sandboxRecord(two, o.n).state, "ended");
 });
 
 test("stageDeadline: the wall clock from the start, never past the session's end less the reserve", () => {

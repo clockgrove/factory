@@ -70,15 +70,13 @@ async function run() {
 
   // The stage's part of the record: its own comment, written by this process alone (docs/ADAPTERS.md, Records), and
   // only while the claim comment still carries this stage's claim: {ok}, or {lost} (another launcher holds it now).
-  const write = (change) =>
-    writeRecord({
-      issue,
-      claim,
-      launch,
-      change,
-      list: () => listComments(repo, issue, opts),
-      put: (id, body) => (id ? rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body } }) : rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } })),
-    });
+  const write = stageWriter({
+    issue,
+    claim,
+    launch,
+    list: () => listComments(repo, issue, opts),
+    put: (id, body) => (id ? rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body } }) : rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } })),
+  });
   // `ask` names one token request (its time, in seconds), so the launcher answers each request once (lib/lock.mjs).
   const dispatch = (want, ask = null) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: { event_type: "factory-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}) } } });
 
@@ -333,19 +331,25 @@ export function startedLaunch(text, started = {}) {
 }
 
 /**
- * One write of the stage's part of the record (its own comment, `<!-- factory:<n>:stage:<claim> -->`): `change` and
+ * The stage's writes of its part of the record (its own comment, `<!-- factory:<n>:stage:<claim> -->`): `change` and
  * `launch` (startedLaunch), which readers merge into the record (logic.mjs sandboxRecord). `list()` reads the issue's
- * comments once; `put(id, body)` writes this stage's comment (id null: a new one). Written only while the claim comment
- * carries `claim`; returns {ok} or {lost}. The stage writes its part whole from what it holds: no other process writes
- * it, so nothing is read back into it.
+ * comments; `put(id, body)` writes this stage's comment (id null: a new one) and answers with it. The comment's id is
+ * kept from the first write on, so a fresh comment still missing from the list is written again by its id, never
+ * posted twice. Each write goes in only while the claim comment carries `claim`, and answers {ok} or {lost}. The stage
+ * writes its part whole from what it holds: no other process writes it, so nothing is read back into it.
  */
-export async function writeRecord({ issue, claim, change, launch = null, list, put }) {
-  const comments = await list();
-  if (sandboxRecord(comments, issue)?.claim !== claim) return { lost: true };
-  const part = { ...change, ...(launch ? { launch } : {}), at: new Date().toISOString() };
-  const human = `Factory's ${part.state === "ended" ? "ended" : "running"} stage for this Objective's sandbox record (claim ${claim}).`;
-  await put(stagePartComment(comments, issue, claim)?.id ?? null, `${stageMarker(issue, claim)}\n${sandboxMarkerLine(part)}\n${human}`);
-  return { ok: true };
+export function stageWriter({ issue, claim, launch = null, list, put }) {
+  let id = null;
+  return async (change) => {
+    const comments = await list();
+    if (sandboxRecord(comments, issue)?.claim !== claim) return { lost: true };
+    const part = { ...change, ...(launch ? { launch } : {}), at: new Date().toISOString() };
+    const human = `Factory's ${part.state === "ended" ? "ended" : "running"} stage for this Objective's sandbox record (claim ${claim}).`;
+    id ??= stagePartComment(comments, issue, claim)?.id ?? null;
+    const wrote = await put(id, `${stageMarker(issue, claim)}\n${sandboxMarkerLine(part)}\n${human}`);
+    id ??= Number.isSafeInteger(wrote?.id) ? wrote.id : null;
+    return { ok: true };
+  };
 }
 
 /**

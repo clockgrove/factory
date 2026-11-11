@@ -10,7 +10,7 @@
 // Objective's concurrency group, one of:
 // Every start, hand-over and end first takes a create-only lock for its cue (lib/lock.mjs), so two launchers (two
 // Action runs, the sweep) never both act on one; the holder decides again on fresh reads.
-//   start   claim the record (written `running` with a short lease, read back), find the recorded sandbox or create
+//   start   claim the record (written `running` with a short lease under the record lock), find the recorded sandbox or create
 //           one, bring Factory's plugin and the harness CLI up to date in it, and start the stage (stage.mjs) detached
 //           with the App's write token, a read-only token and the harness's credential in its start environment
 //   token   hand a running stage fresh tokens before the hour is out (it asked: repository_dispatch)
@@ -839,13 +839,13 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
 
   // The claim: the record says `running` with a short lease before any sandbox call, written under the record lock and
   // only over the record this decision read. A record that changed since (another launcher's claim, a stage's beat, the
-  // sweep's claim) is left alone and nothing starts; a stage that never starts frees the Objective when the lease runs out. The cue's lock
-  // already keeps a second launcher of this cue out; the claim keeps out one of another cue.
+  // sweep's claim) is left alone and nothing starts; a stage that never starts frees the Objective when the lease runs
+  // out. The cue's lock already keeps a second launcher of this cue out; the claim keeps out one of another cue.
   const { tokens } = run;
   // Reads only, beside the claim's write: the CI token check doctor makes before every job (here, with this
   // job's token: the stage has none), the adopter's image (Factory's own record of it, confirmed by the vendor's; none
   // yet, or unreadable, starts from the base) and which account and plan the vendor credentials act for (names only:
-  // the plan sets the session's ceiling). No sandbox is created, resumed or run before the claim is read back and the
+  // the plan sets the session's ceiling). No sandbox is created, resumed or run before the claim is written and the
   // check has passed.
   const quiet = (p) => (p.catch(() => {}), p);
   const ciToken = quiet(workflowTokenChecks({ repo, token: inputs.githubToken || tokens.write }));

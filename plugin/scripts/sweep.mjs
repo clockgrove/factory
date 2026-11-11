@@ -145,7 +145,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       // starting now wins. Later writes go in only while the record still carries this claim.
       const recorded = issue && record?.id === s.id;
       let claim = null;
-      const mine = (next) => (cur) => (cur?.claim === claim ? next(cur) : null);
+      const underClaim = (next) => (cur) => (cur?.claim === claim ? next(cur) : null);
       if (recorded) {
         claim = `sweep-${randomBytes(6).toString("hex")}`;
         base ??= await lockBase(repo, opts);
@@ -180,12 +180,12 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         // The job log gets the message; the record keeps codes only. The sandbox stays for the next run.
         log(`sweep: ${s.id} (#${n}): ${e.code ?? "error"}: ${String(e.message).slice(0, 300)}`);
         out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
-        if (claim) await writeSandboxRecord(repo, n, opts, mine(() => written), { base }).catch(() => {});
+        if (claim) await writeSandboxRecord(repo, n, opts, underClaim(() => written), { base }).catch(() => {});
         continue;
       }
       if (claim) {
         const at = new Date().toISOString();
-        await writeSandboxRecord(repo, n, opts, mine(() => ({ ...written, id: null, state: "stopped", destroyedAt: at, collected: usage ? true : written.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null })), { base }).then(
+        await writeSandboxRecord(repo, n, opts, underClaim(() => ({ ...written, id: null, state: "stopped", destroyedAt: at, collected: usage ? true : written.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null })), { base }).then(
           (w) => w.ok || log(`sweep: #${n} record: not written (${w.refused ? "another claim holds it" : "the record lock stayed held"})`),
           (e) => log(`sweep: #${n} record: ${String(e.message).slice(0, 120)}`),
         );

@@ -1897,9 +1897,9 @@ export function spendParts(body) {
 const money = (n) => (Number.isFinite(n) ? `$${n.toFixed(n < 1 ? 4 : 2)}` : "?");
 const word = (s) => (typeof s === "string" && /^[A-Za-z0-9._:/-]{1,40}$/.test(s) ? s : "?");
 /**
- * The progress line a sandbox stage's end adds (codes, numbers and the vendor's dated rates only): the sandbox's state,
- * its active CPU and wall seconds, its size, the list rates and the stage's vendor dollars with the stopped stretch's
- * storage. `cost` is adapters/sandbox.mjs stageVendorCost's; `error` a code when the usage could not be read.
+ * The vendor comment's line for a sandbox stage's end (vendorBody; codes, numbers and the vendor's dated rates only):
+ * the sandbox's state, its active CPU and wall seconds, its size, the list rates and the stage's vendor dollars with the
+ * stopped stretch's storage. `cost` is adapters/sandbox.mjs stageVendorCost's; `error` a code when the usage could not be read.
  */
 export function vendorLine({ id, state, cost, rates, at = new Date().toISOString(), error = null }) {
   const clock = `${new Date(Date.parse(at) || Date.now()).toISOString().slice(11, 16)}Z`;
@@ -2011,8 +2011,15 @@ export function sandboxRecordOf(body) {
 /** The stage's own part of the sandbox record: one comment per stage claim, written by that stage alone (stage.mjs). */
 export const stageMarker = (issue, claim) => marker(issue, "stage", claim);
 const ownOldest = (comments, head, self) => (comments || []).filter((x) => self(x) && (x.body || "").startsWith(`${head}\n`)).sort((a, b) => a.id - b.id)[0];
-/** The stage's own comment for `claim` among `comments`, or undefined. */
-export const stagePartComment = (comments, issue, claim, { self = isSelf } = {}) => ownOldest(comments, stageMarker(issue, claim), self);
+/**
+ * The stage's own comment for `claim` among `comments`, or undefined: the one written last (its record's `at`, then
+ * its id), should a list that lagged the stage's first write ever have left two.
+ */
+export function stagePartComment(comments, issue, claim, { self = isSelf } = {}) {
+  const head = `${stageMarker(issue, claim)}\n`;
+  const at = (c) => Date.parse(sandboxRecordOf(c.body)?.at) || 0;
+  return (comments || []).filter((x) => self(x) && (x.body || "").startsWith(head)).sort((a, b) => at(b) - at(a) || b.id - a.id)[0];
+}
 
 /**
  * The Objective's sandbox record, merged from its single-writer parts (docs/ADAPTERS.md, Records): the claim comment

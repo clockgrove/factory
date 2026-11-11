@@ -17,7 +17,8 @@
  *                            unit and database tests, suffixed so repeated runs never collide; every one changes
  *                            the scratch adopter alone
  *   --count N                Objectives to file (default 2 for small, 5 for medium)
- *   --dispatch               fire `gh workflow run factory.yml` after filing (when the opened tick is not trusted)
+ *   --dispatch               dispatch factory.yml after filing (when the opened tick is not trusted); the run's id
+ *                            is recorded on each filed Objective, so the scorer reads it as the drill's, not input
  *   --local                  also label each Objective factory:local, so a local loop (plugin/scripts/local.mjs serve)
  *                            takes it and the Actions path leaves it alone
  *   --local-dir CLONE        with --local: the developer clone the local loop runs from; its .factory/ usage
@@ -41,6 +42,7 @@ import { promisify } from "node:util";
 import { awaitUsage } from "./lib/collect.mjs";
 import { ghApi } from "./lib/gh.mjs";
 import { mediumObjectives } from "./lib/medium.mjs";
+import { drillRecord } from "./lib/objective.mjs";
 
 const run = promisify(execFile);
 const here = resolve(new URL(".", import.meta.url).pathname);
@@ -141,9 +143,24 @@ for (const o of objectives) {
   filed.push({ number, title: o.title, url, filedAt: new Date().toISOString() });
   process.stderr.write(`filed #${number} ${o.title}\n`);
 }
+// The drill's own tick: dispatched through the API, which returns the run's id, recorded on each Objective it filed
+// (objective.mjs drillRecord) so the scorer reads that run as the drill's and not as operator input. A dispatch whose
+// id GitHub did not return has no record: it counts as input, as a person's would.
+let dispatched = null;
 if (values.dispatch) {
-  await gh("workflow", "run", "factory.yml", "-R", repo);
-  process.stderr.write("dispatched\n");
+  const ref = await gh("api", `repos/${repo}`, "--jq", ".default_branch");
+  const answer = await gh("api", "-X", "POST", `repos/${repo}/actions/workflows/factory.yml/dispatches`, "-f", `ref=${ref}`, "-F", "return_run_details=true");
+  let runId = null;
+  try {
+    runId = JSON.parse(answer || "{}").workflow_run_id ?? null;
+  } catch {
+    runId = null;
+  }
+  dispatched = { run: Number.isSafeInteger(runId) ? runId : null, at: new Date().toISOString() };
+  if (dispatched.run) {
+    for (const f of filed) await gh("issue", "comment", String(f.number), "-R", repo, "--body", drillRecord(f.number, dispatched.run));
+    process.stderr.write(`dispatched run ${dispatched.run}\n`);
+  } else process.stderr.write("dispatched, but GitHub returned no run id: the dispatch scores as operator input\n");
 }
 
 /** Wait until each issue is closed (merged) or Blocked (label) or the deadline passes. */
@@ -201,6 +218,7 @@ try {
 const report = {
   repo,
   filed,
+  dispatched,
   outcome: filed.map((f) => ({ number: f.number, state: state.get(f.number), row: rows.find((r) => r.issue === f.number) ?? null })),
   merged: filed.filter((f) => state.get(f.number) === "closed").length,
   walkAway: rows.filter((r) => r.walkAway?.value).length,

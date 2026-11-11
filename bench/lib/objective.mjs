@@ -199,18 +199,50 @@ function mergeConsequence(event, at, mergedTimes) {
 }
 
 /**
+ * The adopter drill's record of its own dispatch (bench/drill.mjs --dispatch), posted on each Objective it filed:
+ * `<!-- factory:N:drill {"dispatch": RUN_ID} -->`, the run id GitHub returned for the dispatch.
+ */
+export const drillRecord = (issue, runId) => `<!-- factory:${issue}:drill ${JSON.stringify({ dispatch: runId })} -->\nThe adopter drill (bench/drill.mjs) started Factory's workflow for this Objective as run ${runId}; the scorecard reads that run as the drill's, not as operator input.`;
+
+/**
+ * The workflow runs the drill that filed this Objective dispatched itself: the run ids of drill records (drillRecord)
+ * posted by the issue's own author, who filed it. Only their first attempt is the drill's (humanRuns).
+ */
+export function drillDispatches(collected) {
+  const n = collected.issue?.number;
+  const author = collected.issue?.user?.login;
+  const out = new Map();
+  if (!author) return out;
+  for (const c of collected.issueComments || []) {
+    if (c.user?.login !== author) continue;
+    const m = new RegExp(`^<!-- factory:${n}:drill (\\{[^\\n]*\\}) -->`).exec(c.body || "");
+    if (!m) continue;
+    try {
+      const id = JSON.parse(m[1])?.dispatch;
+      if (Number.isSafeInteger(id)) out.set(id, author);
+    } catch {
+      // a malformed record names no run
+    }
+  }
+  return out;
+}
+
+/**
  * The Factory workflow runs a person started or re-ran between the clock and the Objective's end (collect.mjs
  * `workflowRuns`): each is operator input. A run tied to Objectives by its jobs (`work (N)`, `launch (N)`, `review
  * (factory/N)`) counts for those; one tied to none (a hand-started dispatcher tick) counts for every Objective in
  * flight then. Bots never count. Factory never dispatches its own workflow under a person's login, but in local mode
  * its red-check triage re-runs failed jobs with the operator's token (plugin triage.mjs): a re-run by that login of a
  * run on a head Factory's own triage record names (`<!-- factory:triage {"reruns": [sha]} -->` in its progress
- * comments) is Factory's. A person's re-run on that same head reads as Factory's too; the record names no run.
+ * comments) is Factory's. A person's re-run on that same head reads as Factory's too; the record names no run. The
+ * dispatch the adopter drill made for the Objectives it filed (drillDispatches: the run id it recorded on the issue, by
+ * the issue's author, who must also be the run's triggering actor) is the drill's, not input; a re-run of it is.
  */
 export function humanRuns(collected, since, end, { bots = new Set() } = {}) {
   const n = collected.issue.number;
   const local = localLogin(collected);
   const triaged = local ? triageReruns(collected, local) : new Set();
+  const drill = drillDispatches(collected);
   const out = [];
   for (const r of collected.workflowRuns || []) {
     const rerun = (r.attempt ?? 1) > 1;
@@ -219,6 +251,7 @@ export function humanRuns(collected, since, end, { bots = new Set() } = {}) {
     if (!(ms(at) > ms(since)) || (end && ms(at) > ms(end))) continue;
     if (!isHuman(r.by, bots)) continue;
     if (rerun && r.by?.login === local && r.head_sha && triaged.has(r.head_sha)) continue;
+    if (!rerun && drill.has(r.id) && drill.get(r.id) === r.by?.login) continue;
     const tied = r.issues || [];
     if (tied.length && !tied.includes(n)) continue;
     out.push({ at, where: `run ${r.id}`, kind: rerun ? `re-run (attempt ${r.attempt})` : "workflow_dispatch", by: r.by.login ?? "unknown", detail: tied.length ? `tied to #${tied.join(", #")}` : "tied to no Objective: counts for every Objective in flight" });

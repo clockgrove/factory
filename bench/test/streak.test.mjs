@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { humanWorkflowRuns } from "../lib/collect.mjs";
 import { loadPrices } from "../lib/cost.mjs";
-import { humanActions, p1Escapes, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
+import { drillRecord, humanActions, p1Escapes, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
 import { streaks, streakTable, tagTime, verdict } from "../lib/streak.mjs";
 import { appendScorecard } from "../score.mjs";
 import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
@@ -23,6 +23,26 @@ const NOW = "2031-03-05T00:00:00Z";
 const score = (c) => scoreObjective(c, { prices, now: NOW });
 const OWNER = { login: "maintainer", type: "User" };
 const run = (id, over = {}) => ({ id, event: "workflow_dispatch", attempt: 1, created_at: "2031-03-02T03:00:00Z", run_started_at: "2031-03-02T03:00:00Z", by: OWNER, issues: [], ...over });
+
+test("the adopter drill's own dispatch, recorded on the Objective it filed, is not input; a person's dispatch or re-run still is", () => {
+  // As drill.mjs --dispatch leaves it on clockgrove/factory-scratch#498: the issue's author files it, dispatches run
+  // 42936119353 two seconds after the label, and records that run on the issue.
+  const WRITER = cleanMerge(42).issue.user;
+  const drilled = (runs, by = WRITER) => {
+    const c = cleanMerge(42);
+    c.issueComments = [...(c.issueComments || []), { user: by, created_at: "2031-03-02T01:00:05Z", body: drillRecord(42, 42936119353) }];
+    c.workflowRuns = runs;
+    return c;
+  };
+  const own = score(drilled([run(42936119353, { by: WRITER, created_at: "2031-03-02T01:00:02Z" })]));
+  assert.equal(own.walkAway.value, true, "the drill's own tick");
+  assert.equal(own.walkAway.humanActions, 0, "its marker comment is not input either");
+  // A person's later hand-started tick, another login's run under that id, a record by someone else, a re-run: input.
+  assert.equal(score(drilled([run(42936119353, { by: WRITER }), run(77, { by: WRITER })])).walkAway.firstHumanAction.where, "run 77");
+  assert.equal(score(drilled([run(42936119353, { by: OWNER })])).walkAway.value, false);
+  assert.equal(score(drilled([run(42936119353, { by: OWNER })], OWNER)).walkAway.value, false);
+  assert.equal(score(drilled([run(42936119353, { by: WRITER, attempt: 2 })])).walkAway.firstHumanAction.kind, "re-run (attempt 2)");
+});
 
 test("a person's dispatch of the Factory workflow while the Objective is live is input: untied counts for every Objective, tied only for its own", () => {
   // cleanMerge: label 01:00, merged 03:30.

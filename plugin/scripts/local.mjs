@@ -27,7 +27,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { log, resolveInputs } from "./lib/inputs.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -505,8 +505,12 @@ export class Local {
     let env;
     try {
       env = this.stageEnv(issue, usageDir, clone, stageTmp);
-      // Fresh: what an earlier stage or run left untracked in this reused clone goes (lib/local.mjs prepareClone).
-      await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true });
+      // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
+      // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
+      const locks = staleGitLocks(clone);
+      for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true, locks: locks.stale });
+      for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropOwned(stageTmp);
       if (e.code !== "outer-sandbox") throw e;

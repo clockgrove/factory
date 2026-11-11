@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,7 +14,6 @@ import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
 const AGENT = { user: "factory-agent", home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
 const denied = (settings) => settings.sandbox.credentials.envVars.filter((v) => v.mode === "deny").map((v) => v.name);
-const sh = (cmd, args, env = {}) => execFileSync(cmd, args, { encoding: "utf8", env: { PATH: process.env.PATH, ...env } });
 
 /** A throwaway agent home, temp directory and Factory-owned Claude home, for the runner's start-up path. */
 function fakeRunner() {
@@ -93,17 +92,18 @@ test("a ~/.bashrc a validation command planted in the agent's home never runs at
   const marker = join(root, "ran");
   for (const rc of [".bashrc", ".profile", ".bash_profile", ".bash_login"]) writeFileSync(join(agent.home, rc), `echo ${rc} >> ${marker}\n`);
   // The control: Claude Code's shell snapshot (`bash -c -l`) with the agent's home sources them.
-  sh("bash", ["-lc", "true"], { HOME: agent.home });
+  execFileSync("bash", ["-lc", "true"], { env: { PATH: process.env.PATH, HOME: agent.home } });
   assert.ok(existsSync(marker), "the planted files run when HOME is the agent's");
   writeFileSync(marker, "");
   await prepareClaudeHome(layout, { sudo: false });
   // Claude Code's start on a runner: the unit gives the agent's HOME; Factory's launch replaces it before Claude starts.
   const [cmd, args] = runnerLaunch(layout, "bash", ["-lc", 'printf "%s" "$HOME"']);
-  assert.equal(sh(cmd, args, { HOME: agent.home }), layout.home);
+  assert.equal(cmd, "/usr/bin/env");
+  assert.equal(execFileSync("/usr/bin/env", args, { encoding: "utf8", env: { PATH: process.env.PATH, HOME: agent.home } }), layout.home);
   assert.equal(readFileSync(marker, "utf8"), "", "no start-up file of the agent's ran");
   // Its commands get the agent's home back, inside the sandbox (CLAUDE_ENV_FILE).
   assert.equal(readFileSync(layout.envFile, "utf8"), envFileText(layout));
-  assert.equal(sh("bash", ["-c", `. ${layout.envFile}; printf "%s %s" "$HOME" "$TMPDIR"`]), `${agent.home} ${agent.tmp}`);
+  assert.equal(execFileSync("bash", ["-c", '. "$1"; printf "%s %s" "$HOME" "$TMPDIR"', "sh", layout.envFile], { encoding: "utf8" }), `${agent.home} ${agent.tmp}`);
 });
 
 test("Claude's state is made afresh before every start: what was planted is gone, the sessions Factory holds are back", async () => {
@@ -134,7 +134,7 @@ test("the checkout's git state is put back before every Claude start; a replaced
   dropGitPins();
   const { root } = fakeRunner();
   const clone = join(root, "repo");
-  sh("git", ["init", "-q", clone]);
+  execFileSync("git", ["init", "-q", clone]);
   writeFileSync(join(clone, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const config = readFileSync(join(clone, ".git", "config"), "utf8");
   await assert.rejects(restoreRunnerGit(clone), (e) => e instanceof GitRefusal && e.code === "git-state", "no pin, no start");
@@ -147,8 +147,8 @@ test("the checkout's git state is put back before every Claude start; a replaced
   assert.equal(readFileSync(join(clone, ".git", "config"), "utf8"), config);
   assert.ok(!existsSync(join(clone, ".git", "hooks", "post-index-change")) && existsSync(join(clone, ".git", "hooks", "pre-commit")));
   assert.ok(!existsSync(join(clone, ".git", "commondir")));
-  sh("mv", [join(clone, ".git"), join(clone, ".git-old")]);
-  sh("git", ["init", "-q", clone]);
+  renameSync(join(clone, ".git"), join(clone, ".git-old"));
+  execFileSync("git", ["init", "-q", clone]);
   await assert.rejects(restoreRunnerGit(clone), (e) => e instanceof GitRefusal && e.code === "git-identity");
   dropGitPins();
 });

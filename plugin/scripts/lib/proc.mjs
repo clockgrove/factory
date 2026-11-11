@@ -63,10 +63,7 @@ export function asAgent(cmd, args, env = {}, extra = [], cwd = null, { nested = 
     "PrivateIPC=yes",
     "NoNewPrivileges=yes",
     "RestrictSUIDSGID=yes",
-    // Not for a harness that runs its commands in a sandbox of its own (`nested`: Claude Code's bubblewrap): its
-    // read-only mounts over parts of /proc keep a user namespace from mounting a fresh /proc ("Can't mount proc on
-    // /newroot/proc"). The agent is unprivileged with no new privileges, so /proc/sys and /sys stay root's to write.
-    ...(nested ? [] : ["ProtectKernelTunables=yes"]),
+    ...(nested ? [] : ["ProtectKernelTunables=yes"]), // not under Claude Code's bwrap (docs/PLAN.md: it mounts a fresh /proc)
     "ProtectKernelModules=yes",
     "ProtectControlGroups=yes",
     "KillMode=control-group",

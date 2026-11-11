@@ -614,7 +614,7 @@ export function stageLock(n, ev, record) {
  * when its payload names none. With `gate` only the decision is made. After an Objective goes back to Queued, or on a
  * tick, the launch job's own step ticks the dispatcher. `adapterReady` is the vendor SDK's install still running
  * (installAdapter), awaited only before the first vendor call. Returns {exit, reason, issue, start, stage, sandboxId,
- * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | tick | started | token | stopped | blocked;
+ * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | quota | tick | started | token | stopped | blocked;
  * `usage` ({dir, name}) is a stage's usage directory to upload; `ms` the milliseconds per sub-step (stopwatch).
  */
 export async function launchOne({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null }) {
@@ -970,8 +970,10 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const note = `Factory: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Factory frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;
   await upsertComment(repo, n, marker(n, "quota"), note, opts).catch((e) => log(`#${n}: the quota note was not written (${e.status ?? "error"})`));
   const why = `the ${inputs.sandbox} sandbox's plan quota is used up (${code}); try ${quota.tries}, the next after ${clock(quota.retryAt)}`;
+  // The launcher hands the wait to the dispatcher: its job ticks it on `queued` (a work stage, back to Queued) or `quota`
+  // (a review, which stays labelled), and the dispatcher's next run sees the record's retryAt and arms its wake for it.
   if (stage === "work") return requeue(run, ctx.project, why);
-  return { exit: "skipped", reason: `#${n}: ${why}` };
+  return { exit: "quota", reason: `#${n}: ${why}` };
 }
 
 async function main() {

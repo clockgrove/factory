@@ -7,7 +7,7 @@
 name: factory
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *" # the dispatcher's backstop: GitHub fires a schedule late or not at all under load
     # {{#sandbox}}
     - cron: "41 10 * * *" # the nightly sandbox image build (the image job)
     - cron: "17 * * * *" # the hourly sandbox sweep (the sweep job)
@@ -20,12 +20,12 @@ on:
       image: { description: "true builds the sandbox image from the default branch now", required: false }
       sweep: { description: "true runs the sandbox sweep now", required: false }
       # {{/sandbox}}
-  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); the cron is only the sweep
+  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); closed: an Objective blocked by that issue is ready now
     # {{^sandbox}}
-    types: [opened, labeled]
+    types: [opened, labeled, closed]
     # {{/sandbox}}
     # {{#sandbox}}
-    types: [opened, labeled, closed] # closed: the sandbox sweep destroys the Objective's sandbox
+    types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox
     # {{/sandbox}}
   pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
@@ -78,13 +78,15 @@ permissions: # the job token reads code and Actions; every write goes through th
   # id-token: write         # Claude workload identity federation only
 jobs:
   dispatch:
-    # Ticks: the cron, a manual run, a new Objective's label, the review job's last step (a worker slot freed), a merged
-    # Factory PR, the merge queue dropping one (only GitHub and people with write access dequeue), the queue watch, and,
-    # without a sandbox, CI finishing on a factory/ branch (the merge pass merges a PR whose checks just went green; with
-    # a sandbox the gate job takes those events and ticks this job itself).
+    # Ticks: the */10 cron only (a backstop: GitHub fires schedules late or not at all; other schedules are other
+    # jobs'), a manual run, a new Objective's label, any issue closing (it may block an Objective), Factory's own jobs'
+    # last steps (a slot freed, a failed or requeued start), a merged Factory PR, the merge queue dropping one
+    # (only GitHub and people with write access dequeue), the queue watch, and, without a sandbox, CI finishing on a
+    # factory/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those
+    # events and ticks this job itself).
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && (github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
+      (github.event_name == 'schedule' && github.event.schedule == '*/10 * * * *') || github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/')) ||
       (github.event_name == 'pull_request' && github.event.action == 'dequeued' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
       # {{^sandbox}}
@@ -199,7 +201,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
-    permissions: { contents: read, actions: read } # the job token reads usage artifacts and this run; every write is the App's
+    permissions: { contents: read, actions: write } # the job token reads usage artifacts and this run, and ticks the dispatcher; every other write is the App's
     concurrency: { group: "factory-launch-factory/${{ matrix.issue }}", cancel-in-progress: false } # one launcher per Objective at a time, with launch-event's
     steps:
       - uses: {{action}}
@@ -221,6 +223,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
+      - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, or met the sandbox vendor's quota)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'quota' || steps.f.outputs.exit == 'blocked')
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
+        run: gh workflow run factory.yml || true
   launch-gate:
     # An event on one Objective: a maintainer's comment, finished CI on its branch, its PR labelled for review or marked
     # ready, its stage asking for tokens or saying it ended. The gate decides in no concurrency group, so an event that starts nothing (a stranger's comment, a fork's
@@ -249,7 +255,7 @@ jobs:
     if: needs.launch-gate.outputs.start == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick after a requeue or a stop
+    permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick after a requeue, a stop, a quota refusal or a failed launch
     # The group is the Objective's only when the gate said start; a skipped job's group is its own run's, whatever GitHub
     # does with the group of a job it skips.
     concurrency: { group: "${{ needs.launch-gate.outputs.start == 'true' && format('factory-launch-factory/{0}', needs.launch-gate.outputs.issue) || format('factory-launch-none-{0}', github.run_id) }}", cancel-in-progress: false }
@@ -271,8 +277,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
-      - name: Dispatch tick (an answered Question is Queued, or a stage ended and its sandbox stopped)
-        if: steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick'
+      - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off or met the vendor's quota)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'quota' || steps.f.outputs.exit == 'blocked')
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml || true
   launch-tick:

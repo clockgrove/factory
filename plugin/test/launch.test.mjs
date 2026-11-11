@@ -204,7 +204,16 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "check_suite", "workflow_run"]);
   assert.deepEqual(doc.on.workflow_run.workflows, ["Quality"]);
   assert.equal(doc.env.FACTORY_SANDBOX, "vercel");
-  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "read" }, "the job token reads; every write is the App's");
+  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" }, "the job token reads and ticks the dispatcher; every other write is the App's");
+  // A launch that fails, is cut off, requeues, Blocks or meets the vendor's quota ticks the dispatcher itself: no wait on the cron.
+  for (const job of ["launch", "launch-event"]) {
+    const tick = doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || ""));
+    assert.match(tick.if, /^always\(\) && \(steps\.f\.outcome != 'success' \|\|/, `${job}: ticks on its own failure`);
+    for (const exit of ["queued", "quota", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
+    assert.match(tick.env.GH_REPO, /github\.repository/);
+  }
+  // Only the */10 schedule runs the dispatcher: the hourly sweep and the nightly image are other jobs' schedules.
+  assert.match(doc.jobs.dispatch.if, /^\(github\.event_name == 'schedule' && github\.event\.schedule == '\*\/10 \* \* \* \*'\)/);
 });
 
 test("stage lifecycle: the lease, a stage's own requests, the next stage when one ends, and the leftovers' rules", async () => {

@@ -168,7 +168,7 @@ outputs:
     description: (dispatch) The JSON list of PRs the merge pass left in the merge queue, for the queue-watch job (`pr` in mode watch); empty when there are none.
     value: ${{ steps.run.outputs.queue_watch }}
   exit:
-    description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `tick`, `stopped`, `token`, `skipped` or `blocked`.
+    description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `quota` (a review the vendor's quota refused; it stays labelled), `tick`, `stopped`, `token`, `skipped` or `blocked`.
     value: ${{ steps.run.outputs.exit }}
   reason:
     description: (work, review) The one-line reason for a blocked or question exit.

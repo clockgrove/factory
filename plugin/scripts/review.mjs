@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -357,7 +357,17 @@ async function main() {
   const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
   if (install) {
     await progress("install");
-    await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
+    // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
+    if (!i.ok) {
+      log(i.reason);
+      await dropLabel();
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: i.reason, notify: inputs.notify, stage: "install" }, token);
+      await finish("blocked", i.reason);
+      return;
+    }
   }
 
   // The maintainers' word since the issue was filed: a Question's answer, a decision recorded in a comment. Read whole

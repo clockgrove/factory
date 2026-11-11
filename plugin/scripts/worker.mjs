@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -283,9 +283,10 @@ async function main() {
   if (install) {
     log(`install: ${install}`);
     await progress(first ? "install (first time on this machine)" : "install");
-    const i = await sh(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     if (!i.ok) {
-      const reason = `offline install failed: ${install}`;
+      const reason = i.reason;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, notify: inputs.notify, stage: "install" }, token);
       await finish("blocked", reason);
       return;

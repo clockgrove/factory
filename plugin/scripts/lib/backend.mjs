@@ -41,9 +41,13 @@ const SCRATCH_NOTE = "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this s
 // rather than working around it.
 const DENIED_NOTE = "\n\nThe sandbox reaches only the hosts the operator allows. If it denies a host your work cannot do without (a 403 from its proxy, or a `<sandbox_violations>` line naming the host), do not work around it: stop blocked, with each such host name in exit.json's `deniedHosts`, so the operator can allow it.";
 
-// On Linux a sandboxed command's localhost is its own (its own network namespace): no setting reaches a service the
-// setup started on the runner, so the commands that need one are proved where Factory runs them, outside the sandbox.
-const SERVICES_NOTE = "\n\nServices this machine's setup started (a database or server on `localhost`) are outside your sandbox: a command that connects to one fails here (connection refused), and that is no denied host. Do not stop on it: run what needs no service, and say in the PR which acceptance entries the validation commands prove. Factory runs the validation outside the sandbox after you exit, and a failure comes back to you with its output.";
+// On Linux a sandboxed command's localhost is its own (its own network namespace): the ports of the services the
+// repository's setup started are relayed to it through the sandbox's proxy (claude-runner.mjs envFileText); any other
+// service on the machine stays out of reach. The card names the ports offered, and says nothing when none are.
+const servicesNote = (ports = []) =>
+  ports.length
+    ? `\n\nThe services the repository's setup started on this machine are reachable from your commands at ${ports.map((p) => `\`localhost:${p}\``).join(", ")}. Any other service on this machine is outside your sandbox: a refused connection there is no denied host. Factory runs the validation commands after you exit, and a failure comes back to you with its output.`
+    : "";
 
 const ACTIONS = {
   name: "actions",
@@ -88,8 +92,11 @@ const ACTIONS = {
     outer: () => null,
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
-    /** Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's. */
-    cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_NOTE : ""),
+    /**
+     * Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's,
+     * and the ports of setup's services it reaches (`services`, claude-runner.mjs agentServicePorts).
+     */
+    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : ""),
     /**
      * Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input.
      * Codex and Copilot skip their sandboxes here, so their Block keeps its own fix.

@@ -10,7 +10,7 @@
 // back to the same harness); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
-import { pinRunnerGit } from "./lib/claude-runner.mjs";
+import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
@@ -262,6 +262,8 @@ async function main() {
   const firstMs = Number(process.env.FACTORY_LOCAL_FIRST_SETUP_MS);
   const first = Number.isFinite(firstMs) && firstMs >= 0;
   if (first) await progress(`first-time setup: cloned in ${Math.round(firstMs / 1000)} s`);
+  // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
+  if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
     log(`setup: ${inputs.setup}`);
     await progress("setup");
@@ -317,6 +319,7 @@ async function main() {
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     harness: inputs.harness,
+    services: inputs.harness === "claude" && access.agent ? agentServicePorts(access.agent) : [],
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,

@@ -12,7 +12,7 @@
 // auto_merge, record the head as mergeable and merge exactly it once its required
 // checks are green (now, or at the dispatcher's next tick). Unaddressed findings or
 // red validation after the pass is the blocked exit.
-import { pinRunnerGit } from "./lib/claude-runner.mjs";
+import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -338,6 +338,8 @@ async function main() {
     return;
   }
   await installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel }, env: childBase });
+  // What already listens on loopback is no service of the setup's: Claude Code's commands reach only what it starts.
+  if (inputs.harness === "claude" && access.agent) noteSetupStart();
   if (inputs.setup) {
     await progress("setup");
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
@@ -421,6 +423,7 @@ async function main() {
   const taskCard = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     harness: inputs.harness,
+    services: inputs.harness === "claude" && access.agent ? agentServicePorts(access.agent) : [],
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,

@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal } from "./local.mjs";
+import { log } from "./inputs.mjs";
 
 /** Claude Code's HOME on a runner: Factory's own, outside every home the agent can write. */
 export const CLAUDE_HOME = "/var/lib/factory-claude";
@@ -61,8 +62,114 @@ export function runnerLayout(agent, claudeHome = CLAUDE_HOME) {
 
 const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
-/** The file Claude Code sources inside its sandbox before each command: the agent's own HOME and TMPDIR back. */
-export const envFileText = (layout) => `export HOME=${q(layout.agentHome)}\nexport TMPDIR=${q(layout.agentTmp)}\n`;
+// ------------------------------------------------------------- services
+
+/**
+ * The IPv4 loopback and every-address forms in /proc/net/tcp and tcp6 (each 32-bit word in host byte order): 127.0.0.1,
+ * 0.0.0.0, `::`, and the IPv4-mapped ::ffff:127.0.0.1 and ::ffff:0.0.0.0 a dual-stack listener (a JVM's) shows. Never
+ * `::1`: the sandbox's proxy connects to `127.0.0.1:<port>`, so a service on `::1` alone would be offered and unreachable.
+ */
+const LOOPBACK = new Set(["0100007F", "00000000", "00000000000000000000000000000000", "0000000000000000FFFF00000100007F", "0000000000000000FFFF000000000000"]);
+
+/**
+ * The TCP ports listening on this machine's IPv4 loopback (or on every address), from /proc/net/tcp and tcp6: what a
+ * service the repository's setup started answers on. A socket owned by `skipUid` (the agent's) never counts, so nothing
+ * the agent started is offered, whatever the reap left. `read` is a seam for the tests.
+ */
+export function loopbackListeners(read = (p) => readFileSync(p, "utf8"), { skipUid = null } = {}) {
+  const ports = new Set();
+  for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text = "";
+    try {
+      text = read(file);
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n").slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 8 || f[3] !== "0A") continue;
+      if (skipUid !== null && skipUid !== undefined && Number(f[7]) === Number(skipUid)) continue;
+      const [addr, port] = f[1].split(":");
+      if (LOOPBACK.has(addr.toUpperCase())) ports.add(Number.parseInt(port, 16));
+    }
+  }
+  return [...ports].filter((p) => p > 0 && p < 65536).sort((a, b) => a - b);
+}
+
+/** The listeners before the repository's setup ran (noteSetupStart); null until then, and then no service is offered. */
+let BEFORE_SETUP = null;
+/** Right before the repository's setup runs: what already listened is no service of its. */
+export const noteSetupStart = (read) => {
+  BEFORE_SETUP = new Set(loopbackListeners(read));
+};
+/** Tests: forget the baseline. */
+export const dropSetupStart = () => {
+  BEFORE_SETUP = null;
+};
+/** At most this many services are offered to Claude Code's commands. */
+export const SERVICES_MAX = 20;
+const DROPPED_SAID = new Set();
+/**
+ * The ports of the services the repository's setup started: listening on loopback now, not before the setup ran, and
+ * not the agent's (`skipUid`). Claude Code's commands reach exactly these through its sandbox's proxy (envFileText,
+ * harness.mjs claudeRunner). Past SERVICES_MAX the rest are dropped, and the log names them once.
+ */
+export function servicePorts(read, { skipUid = null } = {}) {
+  if (!BEFORE_SETUP) return [];
+  const fresh = loopbackListeners(read, { skipUid }).filter((p) => !BEFORE_SETUP.has(p));
+  const dropped = fresh.slice(SERVICES_MAX);
+  if (dropped.length && !DROPPED_SAID.has(dropped.join(","))) {
+    DROPPED_SAID.add(dropped.join(","));
+    log(`setup's services: only the first ${SERVICES_MAX} ports are offered to Claude Code's commands; dropped ${dropped.join(", ")}`);
+  }
+  return fresh.slice(0, SERVICES_MAX);
+}
+
+/** The services offered to this agent's Claude Code commands (servicePorts without the agent's own sockets). */
+export const agentServicePorts = (agent, read) => servicePorts(read, { skipUid: agent.uid ?? uidOf(agent.user) });
+
+/**
+ * The file Claude Code sources inside its sandbox before each command: the agent's own HOME and TMPDIR back, and for
+ * each service port a relay on the sandbox's own loopback (its network namespace) to the same port on this machine,
+ * through the sandbox's proxy (HTTP CONNECT, with the proxy's per-session login from HTTPS_PROXY), which allows only
+ * `127.0.0.1:<port>` for these ports. So `localhost:5432` in a command reaches the database setup started, and nothing
+ * outside the sandbox runs anything for it: the relay runs inside, and the proxy only connects. It starts only where
+ * the sandbox's proxy is set (its login is `srt` or starts with `srt.`), so never in Claude Code's own shell outside
+ * the sandbox.
+ */
+export function envFileText(layout, ports = []) {
+  const head = `export HOME=${q(layout.agentHome)}\nexport TMPDIR=${q(layout.agentTmp)}\n`;
+  const list = ports.filter((p) => Number.isInteger(p) && p > 0 && p < 65536);
+  if (!list.length) return head;
+  return `${head}${RELAY.replaceAll("@PORTS@", list.join(" "))}\n`;
+}
+
+const RELAY = [
+  "# Services the repository's setup started, through the sandbox's proxy (Factory: lib/claude-runner.mjs).",
+  "__f_x=\"${HTTPS_PROXY:-}\"; __f_x=\"${__f_x#*://}\"; __f_a=\"${__f_x%@*}\"; __f_h=\"${__f_x#*@}\"; __f_h=\"${__f_h%%/*}\"",
+  "case \"$__f_a\" in",
+  "  srt:*|srt.*:*)",
+  "    if command -v socat >/dev/null 2>&1; then",
+  "      __f_a=\"$(printf '%b' \"$(printf '%s' \"$__f_a\" | sed 's/%\\([0-9A-Fa-f][0-9A-Fa-f]\\)/\\\\x\\1/g')\")\"",
+  "      for __f_p in @PORTS@; do",
+  "        (socat \"TCP4-LISTEN:$__f_p,bind=127.0.0.1,fork,reuseaddr\" \"PROXY:${__f_h%:*}:127.0.0.1:$__f_p,proxyport=${__f_h##*:},proxyauth=$__f_a\" </dev/null >/dev/null 2>&1 &)",
+  "        (socat \"TCP6-LISTEN:$__f_p,bind=[::1],fork,reuseaddr,ipv6only=1\" \"PROXY:${__f_h%:*}:127.0.0.1:$__f_p,proxyport=${__f_h##*:},proxyauth=$__f_a\" </dev/null >/dev/null 2>&1 &)",
+  "      done",
+  "      for __f_p in @PORTS@; do",
+  "        __f_i=0",
+  "        while [ \"$__f_i\" -lt 40 ]; do __f_l=\"$(ss -Hltn \"sport = :$__f_p\" 2>/dev/null)\" || break; [ -n \"$__f_l\" ] && break; sleep 0.05; __f_i=$((__f_i + 1)); done",
+  "      done",
+  "    fi",
+  "    ;;",
+  "esac",
+  "unset __f_x __f_a __f_h __f_p __f_i __f_l",
+].join("\n");
+
+/** Factory's env file for Claude Code, written (or rewritten before a start) with the current service ports. */
+export function writeEnvFile(layout, ports = []) {
+  writeFileSync(layout.envFile, envFileText(layout, ports));
+  chmodSync(layout.envFile, 0o644);
+}
 
 /**
  * Factory's directory made afresh, owned by Factory's own user and 755 (the agent reads it, never writes it), with the
@@ -75,8 +182,7 @@ export async function prepareClaudeHome(layout, { sudo = true } = {}) {
   } else {
     await exec("/bin/sh", ["-c", 'rm -rf -- "$1" && mkdir -m 755 -- "$1"', "sh", layout.home]);
   }
-  writeFileSync(layout.envFile, envFileText(layout));
-  chmodSync(layout.envFile, 0o644);
+  writeEnvFile(layout);
 }
 
 // ------------------------------------------------------------- sessions

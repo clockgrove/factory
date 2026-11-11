@@ -7,7 +7,7 @@ import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
-import { asClaudeAgent, captureSession, resetClaudeState, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
+import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -166,12 +166,14 @@ export function promptCacheTtl(harness, env = {}) {
  * (lib/claude-runner.mjs: Factory's HOME for Claude Code, its per-start state, the caches) and the hosts its commands
  * may reach (`allowed_domains`). Null for any other harness, in local mode and before the agent uid exists.
  */
-export function claudeRunner({ harness, agent, clone, env = process.env, claudeHome }) {
+export function claudeRunner({ harness, agent, clone, env = process.env, claudeHome, services = null }) {
   if (harness !== "claude" || !agent || !clone || backend(env).name === "local") return null;
   const layout = runnerLayout(agent, claudeHome);
   // Its edit-diff directory is named by the agent's uid; without it the sandbox could not keep commands out of it.
   if (!layout.editDiffs) throw new Error(`no uid for ${agent.user}: refusing to start Claude Code without its sandbox's full write list`);
-  return { clone, ...layout, domains: runnerDomains(input("allowed_domains", { env })) };
+  // The services the repository's setup started: their loopback ports through the sandbox's proxy (claude-runner.mjs).
+  const offered = services ?? agentServicePorts(agent);
+  return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env })), ...offered.map((p) => `127.0.0.1:${p}`)] };
 }
 
 /**
@@ -331,8 +333,15 @@ async function runnerClear(runner, env) {
     throw new GitRefusal("git-clear", e.message);
   });
   await resetClaudeState(runner, env);
+  // Its commands' env file, with a relay for each service the setup started (claude-runner.mjs envFileText).
+  writeEnvFile(runner, runner.services);
+  if (runner.services.length && !SERVICES_SAID.has(runner.services.join(","))) {
+    SERVICES_SAID.add(runner.services.join(","));
+    log(`Claude Code's commands reach the services setup started on localhost:${runner.services.join(", ")} through its sandbox's proxy`);
+  }
   return cleared;
 }
+const SERVICES_SAID = new Set();
 
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.

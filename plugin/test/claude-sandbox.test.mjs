@@ -199,6 +199,11 @@ test("uidOf reads a user's uid from /etc/passwd", () => {
   assert.equal(runnerLayout({ user: "x", uid: 7, home: "/h", tmp: "/h/tmp" }).editDiffs, "/h/.factory-claude/cmd/claude-7/bash-edit-diff");
 });
 
+test("the default hosts carry GitHub's Git LFS download hosts, never an upload host", () => {
+  for (const host of ["github-cloud.githubusercontent.com", "media.githubusercontent.com"]) assert.ok(LOCAL_DOMAINS.includes(host), host);
+  assert.ok(!LOCAL_DOMAINS.some((h) => /amazonaws\.com$/.test(h)), "no S3 upload host");
+});
+
 test("#61: Claude Code's own TMPDIR on a runner is the /tmp its unit makes private, never a directory in the agent's home", () => {
   // With blockReadsOutsideWorkingDirectories, the sandbox could not read a TMPDIR in the agent's home (outside the
   // working directories), and every sandboxed command lost its network, the proxy's bridge included.

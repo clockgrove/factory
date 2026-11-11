@@ -432,7 +432,8 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   c.feed('{"type":"turn.started"}');
   c.feed('{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}');
   c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
-  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 150, output: 25 }]);
+  // input_tokens already includes the cached part, output_tokens the reasoning part.
+  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20 }]);
 });
 
 test("exec: onLine sees each stdout line; a child silent for idleMs is killed and reported idle", async () => {

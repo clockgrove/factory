@@ -475,6 +475,7 @@ const less = (a, b) => (a === null || a === undefined ? null : Math.max(0, a - (
  * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
  * reported (in this process, or in its restored transcript or Factory's record of it). Turns are per process and stay.
+ * Codex's first-turn cache split is that running total too, so it is counted the same way.
  */
 export function sinceSession(rec, prior) {
   if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;
@@ -492,7 +493,9 @@ export function sinceSession(rec, prior) {
   const t = rec.tokens ?? {};
   const pt = prior.tokens ?? {};
   const counts = Object.fromEntries(["premiumRequests", "aiu"].filter((k) => typeof rec[k] === "number").map((k) => [k, Math.round(less(rec[k], prior[k]) * 1000) / 1000]));
-  return { ...rec, ...counts, usd: less(rec.usd, prior.usd), tokens: { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) }, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
+  const first = rec.cache?.first;
+  const cache = rec.harness === "codex" && first ? { cache: { ...rec.cache, first: { ...first, input: less(first.input, pt.input), cached: less(first.cached, pt.cached) } } } : {};
+  return { ...rec, ...counts, ...cache, usd: less(rec.usd, prior.usd), tokens: { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) }, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
 }
 
 export function mergeUsage(records) {

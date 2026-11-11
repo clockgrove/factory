@@ -86,6 +86,16 @@ test("question answered: merged, but the owner's answer and ready-for-review are
   assert.equal(row.wallMinutes, 33 * 60); // Mar 2 01:00 to Mar 3 10:00
 });
 
+test("cost: a raw Codex stream counts a resumed pass's own share", () => {
+  // Real Codex 0.167.0 streams as the worker tees them: `codex exec`, then `codex exec resume` on the same thread, whose
+  // turn.completed is the thread's running total. Together they cost what the thread reported last.
+  const fixtures = join(BENCH, "..", "plugin", "test", "fixtures");
+  const pass = (label, f) => `{"type":"factory.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
+  const raw = parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl"), { model: "gpt-6.1-sol" });
+  assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: null });
+  assert.equal(raw.turns, 2);
+});
+
 test("cost: Codex tokens are priced from prices.json, with its date in the basis", () => {
   const row = scoreObjective(cleanMerge(46, usage("codex")), { prices, now: NOW });
   assert.equal(row.harness, "codex");

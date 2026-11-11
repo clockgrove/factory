@@ -586,6 +586,7 @@ async function main() {
       fed = answerFed({ fresh: !resume, decisions, listed, afterPush: afterPush.length > 0 });
       return {
         onLine: answerLive.onLine,
+        onResume: answerLive.onResume,
         ...workerRun(inputs),
         resume,
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })), decisions: listed, afterPush: afterPush.length > 0 }),

@@ -677,10 +677,15 @@ export function costByPhase(records) {
  * What a running harness is doing, from its own event stream (Claude stream-json, Codex JSONL,
  * Copilot JSON): turns, tool calls, sub-agents started and finished, tokens, the last event's
  * time. Pure: feed(line) per stdout line, snapshot() at any time. The one line this renders is
- * the progress comment's status while the harness runs, so a reader needs no log.
+ * the progress comment's status while the harness runs, so a reader needs no log. Codex reports a
+ * resumed thread's running total: since(thread, prior) names the total the thread had already
+ * reported, so the counter shows the pass's own share (as runHarness counts it).
  */
 export function harnessActivity(now = () => Date.now()) {
   const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0 }, usd: null, ended: false, lastText: "" };
+  // Codex: each resumed thread's prior total, and the one the current pass's first turn.completed is counted from.
+  const priors = new Map();
+  let base = null;
   const brief = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
   const feed = (line) => {
     const t = String(line || "").trim();
@@ -720,11 +725,13 @@ export function harnessActivity(now = () => Date.now()) {
       s.ended = true;
       if (typeof e.total_cost_usd === "number") s.usd = e.total_cost_usd;
     }
-    // Codex
+    // Codex: input_tokens already includes the cached part and output_tokens the reasoning part.
+    else if (e.type === "thread.started") base = priors.get(e.thread_id) ?? null;
     else if (e.type === "turn.started") s.turns += 1;
     else if (e.type === "turn.completed" && e.usage) {
-      s.tokens.input += (e.usage.input_tokens || 0) + (e.usage.cached_input_tokens || 0);
-      s.tokens.output += (e.usage.output_tokens || 0) + (e.usage.reasoning_output_tokens || 0);
+      s.tokens.input += Math.max(0, (e.usage.input_tokens || 0) - (base?.input ?? 0));
+      s.tokens.output += Math.max(0, (e.usage.output_tokens || 0) - (base?.output ?? 0));
+      base = null;
     } else if (e.type === "item.started" && e.item) {
       s.toolCalls += 1;
       s.lastTool = e.item.type === "command_execution" && e.item.command ? `command: ${brief(e.item.command)}` : e.item.type || "item";
@@ -738,7 +745,10 @@ export function harnessActivity(now = () => Date.now()) {
     const commands = all.filter((a) => !a.done && a.kind === "command").length;
     return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended };
   };
-  return { feed, snapshot };
+  const since = (thread, prior) => {
+    if (thread && prior?.tokens) priors.set(thread, { input: prior.tokens.input ?? 0, output: prior.tokens.output ?? 0 });
+  };
+  return { feed, snapshot, since };
 }
 
 /** The status line for a running or finished harness, from a snapshot. */

@@ -599,7 +599,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     const resume = session?.canResume ? session.id : null;
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
     const exitBefore = io?.files?.()?.["exit.json"];
-    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine });
+    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
     live.finish();
     if (io) await io.collect();
     usage.push(rec);
@@ -725,7 +725,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
 
 /**
  * The onLine hook for a harness run: feeds the activity tracker and keeps the progress
- * comment's status line current. Returns {onLine, tracker, finish(label)}.
+ * comment's status line current. Returns {onLine, onResume, tracker, finish(label)}: runHarness calls onResume with a
+ * resumed session's prior running total, so the line shows the pass's own share.
  */
 export function liveActivity(progress, { harness, model, tick = null, drift = null }) {
   const tracker = harnessActivity();
@@ -740,6 +741,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
   progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
   return {
     onLine,
+    onResume: tracker.since,
     tracker,
     finish: () => {
       drift?.stop();
@@ -893,7 +895,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage: `${label}-fix-${passes}`, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
-    const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine });
+    const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine, onResume: live.onResume });
     live.finish();
     if (io) await io.collect();
     usage.push(rec);

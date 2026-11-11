@@ -23,6 +23,7 @@ export const PRICES_FILE = join(import.meta.dirname, "..", "prices.json");
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
+const less = (a, b) => (a === null ? null : Math.max(0, a - (b ?? 0)));
 const round4 = (n) => (n === null ? null : Math.round(n * 10000) / 10000);
 
 export function loadPrices(file = PRICES_FILE) {
@@ -145,17 +146,37 @@ export function vendorOf(records) {
   return { usd, parts: withVendor.length, upperBound: upper > 0, basis, storedUsd: round4(withVendor.reduce((s, r) => s + (num(r.vendor.storedUsd) ?? 0), 0)) };
 }
 
-/** Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already includes the reasoning tokens. */
+/**
+ * Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already
+ * includes the reasoning tokens. Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
+ * the stream reports the thread's running total, so it counts only its own share (as the worker's runHarness does).
+ */
 export function fromCodexEvents(text, model = null) {
   const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
+  const totals = new Map();
+  let thread = null;
+  let pass = null;
+  const close = () => {
+    if (!pass) return;
+    const prior = thread ? totals.get(thread) : null;
+    if (thread) totals.set(thread, pass);
+    for (const k of ["input", "output", "cached"]) rec.tokens[k] = add(rec.tokens[k], prior ? less(pass[k], prior[k]) : pass[k]);
+    pass = null;
+  };
   for (const e of jsonLines(text)) {
+    if (e.type === "thread.started") {
+      close();
+      thread = typeof e.thread_id === "string" ? e.thread_id : null;
+    }
     if (e.type !== "turn.completed") continue;
     rec.turns += 1;
     const u = e.usage || {};
-    rec.tokens.input = add(rec.tokens.input, num(u.input_tokens));
-    rec.tokens.output = add(rec.tokens.output, num(u.output_tokens));
-    rec.tokens.cached = add(rec.tokens.cached, num(u.cached_input_tokens));
+    pass ??= { input: null, output: null, cached: null };
+    pass.input = add(pass.input, num(u.input_tokens));
+    pass.output = add(pass.output, num(u.output_tokens));
+    pass.cached = add(pass.cached, num(u.cached_input_tokens));
   }
+  close();
   return rec;
 }
 

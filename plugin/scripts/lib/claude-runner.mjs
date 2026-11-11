@@ -6,7 +6,8 @@
 // outside that sandbox, so the agent's home and the checkout's .git are the agent's to plant things in. So:
 // - Claude Code's HOME is a directory Factory owns (CLAUDE_HOME): no shell start-up file, no git config, only its env
 //   file and Factory's skills. The unit (or NAMESPACE_WRAP) sees it read-only.
-// - Its config directory (CLAUDE_CONFIG_DIR) and its own TMPDIR live in the agent's home but are made afresh before
+// - Its own TMPDIR is /tmp, which its unit (PrivateTmp) or NAMESPACE_WRAP makes private and fresh for every start.
+// - Its config directory (CLAUDE_CONFIG_DIR) lives in the agent's home but is made afresh before
 //   every start (resetClaudeState), with only the sessions Factory itself captured put back, so nothing planted between
 //   two starts survives into the next. Its sandboxed commands cannot write them.
 // - The checkout's .git config, commondir, info/attributes and hooks, which Claude Code's own git reads, are put back
@@ -53,7 +54,6 @@ export function runnerLayout(agent, claudeHome = CLAUDE_HOME) {
     agentTmp: agent.tmp,
     state,
     config: join(state, "config"),
-    ownTmp: join(state, "tmp"),
     cmdTmp: join(state, "cmd"),
     caches: RUNNER_CACHES.map((c) => join(agent.home, c)),
   };
@@ -102,13 +102,13 @@ export const dropSessions = () => {
 export const RUNNER_SESSION_ROOT = ".factory-claude/config/projects";
 
 /**
- * Claude Code's state made afresh before a start, as the agent: its config directory, own TMPDIR and its commands'
- * temp directory removed (a link is removed, never followed) and made empty, the package caches made where absent,
+ * Claude Code's state made afresh before a start, as the agent: its config directory and its commands' temp directory
+ * removed (a link is removed, never followed) and made empty, the package caches made where absent,
  * then every session archive Factory holds unpacked into projects/.
  */
 export async function resetClaudeState(layout, env = process.env) {
   // The edit-diff directory is made too, so the sandbox's write denial holds a real directory.
-  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/tmp" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"; shift 2; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.editDiffs || "", ...layout.caches], { cwd: layout.agentHome, env });
+  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"; shift 2; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.editDiffs || "", ...layout.caches], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Claude Code's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS.values()) {
     const put = await exec("tar", ["-xf", "-", "-C", join(layout.config, "projects")], { cwd: layout.agentHome, env, input: tar });
@@ -201,8 +201,16 @@ export const dropGitPins = () => GIT_PINS.clear();
  */
 export function runnerLaunch(layout, cmd, args, path = process.env.PATH || "") {
   const safe = path.split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
-  return ["/usr/bin/env", [`HOME=${layout.home}`, `TMPDIR=${layout.ownTmp}`, `PATH=${safe.join(":")}`, cmd, ...args]];
+  return ["/usr/bin/env", [`HOME=${layout.home}`, `TMPDIR=${CLAUDE_TMPDIR}`, `PATH=${safe.join(":")}`, cmd, ...args]];
 }
+
+/**
+ * Claude Code's own TMPDIR on a runner: the /tmp its unit (PrivateTmp) or NAMESPACE_WRAP mounts afresh for every
+ * start, so nothing the agent wrote before survives into it. Not a directory in the agent's home: with
+ * blockReadsOutsideWorkingDirectories, Claude Code's sandbox cannot read its own TMPDIR there, and its commands then
+ * get no network at all, the proxy's bridge included (#61); /tmp stays readable.
+ */
+export const CLAUDE_TMPDIR = "/tmp";
 
 /** The env Claude Code gets on a runner beside its credential. */
 export const runnerEnv = (layout) => ({ CLAUDE_CONFIG_DIR: layout.config, CLAUDE_CODE_TMPDIR: layout.cmdTmp, CLAUDE_ENV_FILE: layout.envFile, NODE_USE_ENV_PROXY: "1" });

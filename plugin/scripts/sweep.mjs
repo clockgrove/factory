@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// Factory's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs.
+// Factory's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs, and
+// stops one left running with no stage holding it.
 //   node scripts/sweep.mjs --repo OWNER/NAME [--dry-run]
-// Runs hourly, by hand, when an Objective closes (its issue closed, its PR merged), and inside a launch the vendor
-// refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
+// Runs hourly, by hand, when an Objective closes (its issue closed, its PR merged) or is Blocked, and inside a launch the
+// vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
 // Lists Factory's Objective sandboxes for this repository in the vendor's project (tags `factory=objective` and
 // `factory-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one
 // (logic.mjs sweepDecision) when its Objective is closed, when the Objective's record names another sandbox or none,
 // or when it has been stopped longer than `sandbox_idle_days` with the Objective neither Running nor In review. At most
-// `sweep_max_destroys` a run. A stage's usage tarball the launcher never collected comes out to the runner first, for
-// the job's upload steps (one per slot, COLLECT_SLOTS). The record's own sandbox is claimed in the record before it is
-// destroyed, under the record lock as a launcher claims it, so a launch starting meanwhile wins and the sweep leaves it. Then this
+// `sweep_max_destroys` a run. The record's own sandbox, running with no stage holding it on an Objective neither Running
+// nor In review (a Block for a vanished stage), is stopped instead and its vendor cost booked: an end never answered.
+// A stage's usage tarball the launcher never collected comes out to the runner first, for the job's upload steps (one
+// per slot, COLLECT_SLOTS). The record's own sandbox is claimed in the record before it is stopped or destroyed, under
+// the record lock as a launcher claims it, so a launch starting meanwhile wins and the sweep leaves it. Then this
 // repository's images: the current one stays, and an older one until no stage can still be starting from it
 // (lib/image.mjs prunableImages); the rest go.
 import { execFileSync } from "node:child_process";
@@ -87,7 +90,7 @@ export const storageLine = (r) =>
   }`;
 
 /**
- * One sweep. Returns what it did per sandbox: `{id, issue, action: "destroyed" | "kept" | "skipped", reason, usage}`, and
+ * One sweep. Returns what it did per sandbox: `{id, issue, action: "destroyed" | "stopped" | "kept" | "skipped", reason, usage}`, and
  * per image (`images`). `collectRoot` is where collected usage goes, one directory per slot; `collectSlots` slots are
  * filled in order (0 in a launcher, which has no upload steps to spare: a sandbox whose usage or vendor cost is still
  * to come out waits for the sweep job).
@@ -124,7 +127,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         out.push({ id: s.id, issue: n, action: "kept", reason: d.keep });
         continue;
       }
-      if (destroyed >= maxDestroys) {
+      if (d.destroy && destroyed >= maxDestroys) {
         out.push({ id: s.id, issue: n, action: "skipped", reason: `sweep_max_destroys (${maxDestroys}) reached; next run` });
         continue;
       }
@@ -138,18 +141,21 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         continue;
       }
       if (dryRun) {
-        out.push({ id: s.id, issue: n, action: "would destroy", reason: d.destroy });
+        out.push({ id: s.id, issue: n, action: d.stop ? "would stop" : "would destroy", reason: d.stop ?? d.destroy });
         continue;
       }
       // The record's own sandbox: claim it as a launcher does (under the record lock, over the record read), so a launch
-      // starting now wins. Later writes go in only while the record still carries this claim.
+      // starting now wins. Later writes go in only while the record still carries this claim, each over the record as it
+      // is then (`cur`, settled by writeSandboxRecord), so an attempt stored meanwhile is kept; `from` is the record the
+      // claim replaced, whose stage and claim the later writes put back.
       const recorded = issue && record?.id === s.id;
       let claim = null;
-      const underClaim = (next) => (cur) => (cur?.claim === claim ? next(cur) : null);
+      let from = null;
+      const underClaim = (next) => (cur) => (cur?.claim === claim ? { ...next(cur), stage: from.stage, claim: from.claim } : null);
       if (recorded) {
         claim = `sweep-${randomBytes(6).toString("hex")}`;
         base ??= await lockBase(repo, opts);
-        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? { ...written, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() } : null), { base });
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? ((from = cur), { ...cur, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() }) : null), { base });
         if (!w.ok) {
           out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock" });
           continue;
@@ -157,6 +163,8 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       }
       let usage = null;
       let vendor = null;
+      // What the record says once the sandbox is stopped or destroyed (with a claim only).
+      let end = null;
       try {
         if (d.collect) {
           const dir = join(collectRoot, `slot-${slots.length + 1}`);
@@ -165,27 +173,37 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
             slots.push(usage);
           }
         }
+        // Stopped before its cost is read, so the totals are its session's whole (an end the stage never announced).
+        let stoppedAt = null;
+        if (d.stop) {
+          await adapter.stop(s.id);
+          stoppedAt = new Date().toISOString();
+        }
+        const settled = !!stoppedAt || s.state === "stopped";
         // A stage whose end was never answered: its vendor cost from the totals now, before they go with the sandbox.
         if (recorded && record.meter && !record.vendorBooked && (usage || slots.length < collectSlots)) {
           const after = await adapter.usage(s.id).catch(() => null);
-          const booked = await bookVendor({ adapter, repo, n, opts, base, record: { ...written, id: s.id }, after, settled: s.state === "stopped", state: s.state === "stopped" ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
+          const booked = await bookVendor({ adapter, repo, n, opts, base, record: { ...written, id: s.id }, after, settled, state: settled ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
           if (!usage && booked.usage) slots.push(booked.usage);
           usage = booked.usage ?? usage;
           vendor = booked.vendor;
         }
-        await adapter.destroy(s.id);
-        destroyed += 1;
-        out.push({ id: s.id, issue: n, action: "destroyed", reason: d.destroy, usage: usage?.name ?? null });
+        if (d.destroy) {
+          await adapter.destroy(s.id);
+          destroyed += 1;
+        }
+        out.push({ id: s.id, issue: n, action: d.stop ? "stopped" : "destroyed", reason: d.stop ?? d.destroy, usage: usage?.name ?? null });
+        if (claim) end = d.stop ? { state: "stopped", stoppedAt } : { id: null, state: "stopped", destroyedAt: new Date().toISOString() };
       } catch (e) {
         // The job log gets the message; the record keeps codes only. The sandbox stays for the next run.
         log(`sweep: ${s.id} (#${n}): ${e.code ?? "error"}: ${String(e.message).slice(0, 300)}`);
         out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
-        if (claim) await writeSandboxRecord(repo, n, opts, underClaim(() => written), { base }).catch(() => {});
+        if (claim) await writeSandboxRecord(repo, n, opts, underClaim((cur) => ({ ...cur, state: from.state, at: from.at })), { base }).catch(() => {});
         continue;
       }
       if (claim) {
         const at = new Date().toISOString();
-        await writeSandboxRecord(repo, n, opts, underClaim(() => ({ ...written, id: null, state: "stopped", destroyedAt: at, collected: usage ? true : written.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null })), { base }).then(
+        await writeSandboxRecord(repo, n, opts, underClaim((cur) => ({ ...cur, ...end, collected: usage ? true : from.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null })), { base }).then(
           (w) => w.ok || log(`sweep: #${n} record: not written (${w.refused ? "another claim holds it" : "the record lock stayed held"})`),
           (e) => log(`sweep: #${n} record: ${String(e.message).slice(0, 120)}`),
         );
@@ -234,7 +252,7 @@ async function main() {
   const count = (a) => results.filter((r) => r.action === a).length;
   setOutput("destroyed", String(count("destroyed")));
   setOutput("images_destroyed", String(images.filter((i) => i.action === "destroyed").length));
-  log(`sweep: ${results.length} Objective sandbox(es); ${count("destroyed")} destroyed, ${count("kept")} kept, ${count("skipped")} left for the next run; ${images.filter((i) => i.action === "destroyed").length} image(s) destroyed`);
+  log(`sweep: ${results.length} Objective sandbox(es); ${count("destroyed")} destroyed, ${count("stopped")} stopped, ${count("kept")} kept, ${count("skipped")} left for the next run; ${images.filter((i) => i.action === "destroyed").length} image(s) destroyed`);
   if (process.env.GITHUB_STEP_SUMMARY) {
     const rows = [...results.map((r) => `| #${r.issue} | \`${r.id}\` | ${r.action} | ${r.reason} |`), ...images.map((i) => `| image | \`${i.source}\` | ${i.action} | ${i.reason} |`)];
     const lines = [before && `Storage before: ${storageLine(before)}.`, after && `Storage after: ${storageLine(after)}.`].filter(Boolean).join("\n\n");

@@ -172,6 +172,17 @@ test("cost: the reviewer's artifact is summed with the worker's; a raw Claude re
   assert.match(markdownTable([row]), /\$8\.23 \(\d+k in \/ \d+k cached \/ \d+k written \/ \d+k out\)/);
 });
 
+test("cost: the row's model is the work stage's whatever order the artifacts are listed in (#49)", () => {
+  const work = { harness: "claude", model: "claude-opus-5-5", artifact: "factory-usage-49/result.json", usd: 2, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 } };
+  const review = { ...work, model: "claude-fable-5-2", artifact: "factory-usage-49-review/result.json", usd: 1 };
+  for (const records of [[work, review], [review, work]]) {
+    const row = scoreObjective(cleanMerge(49, records), { prices, now: NOW });
+    assert.equal(row.model, "claude-opus-5-5");
+    assert.equal(row.cost.model, "claude-opus-5-5");
+    assert.deepEqual([row.activity.workRuns, row.activity.reviewRuns], [1, 1]);
+  }
+});
+
 test("cost: the prompt cache after each CI wait is summed across artifacts and noted under the table", () => {
   const first = (written, input) => ({ unit: "request", input, cached: input - written, written, written1h: written, written5m: 0 });
   const work = { harness: "claude", artifact: "factory-usage-49/result.json", usd: 2, runs: 3, tokens: { input: 1e6, output: 1e4, cached: 9e5, written: 1e5 }, cache: { ttl: "1h", writeShare: 0.1, afterWait: [{ label: "validation-fix-1", waitMin: 14, resumed: true, first: first(2000, 90000), writeShare: 0.05 }] } };

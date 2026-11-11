@@ -125,6 +125,21 @@ test("blocked: each reason in the worker contract, in priority order", () => {
   assert.equal(decideExit({ harness: { ok: false, error: "harness error" }, pr: pr(), commits: 2, validation: green }).reason, "harness error");
 });
 
+test("no commits: the worker's own exit record decides the Block or Question and its reason, not the generic line", () => {
+  const blocked = parseExitRecord('{"exit":"blocked","questions":[],"reason":"The last part needs a receipt the run does not have."}');
+  for (const recordBasis of ["exit file", "asked", undefined]) {
+    assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: blocked, recordBasis }), { exit: "blocked", reason: "worker blocked: The last part needs a receipt the run does not have." }, String(recordBasis));
+  }
+  const question = parseExitRecord(JSON.stringify({ exit: "question", reason: "", questions: [{ question: "Drop the old route?", test: "contract", existing: "GET /v1/items" }] }));
+  assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: question, recordBasis: "exit file" }), { exit: "question", reason: "question: Drop the old route?" });
+  // Factory's own stand-in when the ask could not run is no worker reason: the generic line leads and says why.
+  const none = { exit: "blocked", reason: "no exit record and no time left to ask", questions: [] };
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: none, recordBasis: "none" }).reason, "worker ended without commits or a PR; no exit record and no time left to ask");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a Block with no reason keeps the generic line");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "delivered", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a delivery with nothing delivered Blocks");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 2, record: blocked }).reason, "no PR could be opened for the branch", "with commits, the missing PR is Factory's");
+});
+
 test("clip: a long reason ends on a word boundary and shows it was cut", () => {
   const long = `The provider serves every generated mod from a download host ${"that the sandbox never reached ".repeat(8)}end.`;
   const c = clip(long);
@@ -154,7 +169,7 @@ test("deniedHosts: a blocked exit record's host names, checked for DNS shape, be
   assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: rec }), { exit: "blocked", reason: "worker blocked: the proof needs the download host", deniedHosts: rec.deniedHosts });
   assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).deniedHosts, rec.deniedHosts, "a Block before any commit keeps the worker's reason and hosts");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).reason, "worker blocked: the proof needs the download host");
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).reason, "worker ended without commits or a PR", "without hosts nothing changes");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).deniedHosts, undefined, "without hosts no host fix");
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, protectedHits: [".github/x"], record: rec }).deniedHosts, undefined, "a Block of Factory's own carries no host fix");
   assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, add it to `FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `factory:objective`.");
   assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, add them to `FACTORY_LOCAL_DOMAINS`/);

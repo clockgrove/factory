@@ -68,6 +68,11 @@ async function run() {
   mkdirSync(join(dir, "out"), { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
 
+  // The record's start fields and the start's launch entry, as the launcher handed them over: written with every beat
+  // and the end. The start's time is the one the launcher reads too (launch.mjs START). Declared before the writer,
+  // which takes the launch entry when it is made.
+  const started = startedFields(env.FACTORY_STAGE_RECORD, env.FACTORY_STAGE_COMMAND_MS, env.FACTORY_TIMEOUT_MINUTES);
+  const launch = startedLaunch(env.FACTORY_STAGE_RECORD, started);
   // The stage's part of the record: its own comment, written by this process alone (docs/ADAPTERS.md, Records), and
   // only while the claim comment still carries this stage's claim: {ok}, or {lost} (another launcher holds it now).
   const write = stageWriter({
@@ -87,10 +92,6 @@ async function run() {
   let minutes = Number(env.FACTORY_TIMEOUT_MINUTES) || 0;
   let deadlineAt = null;
   const sessionEnd = env.FACTORY_STAGE_SESSION_END || null;
-  // The record's start fields and the start's launch entry, as the launcher handed them over: written with every beat
-  // and the end. The start's time is the one the launcher reads too (launch.mjs START).
-  const started = startedFields(env.FACTORY_STAGE_RECORD, env.FACTORY_STAGE_COMMAND_MS, env.FACTORY_TIMEOUT_MINUTES);
-  const launch = startedLaunch(env.FACTORY_STAGE_RECORD, started);
   let beat = null;
   let server = null;
   let child = null;

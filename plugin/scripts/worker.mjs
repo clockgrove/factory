@@ -543,6 +543,7 @@ async function main() {
     validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, scope: validation.scope } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     record: asked.record,
+    recordBasis: asked.basis,
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,

@@ -441,7 +441,9 @@ jobs:
     # starting from it. Sleeps and ticks as sweep-wake does.
     name: wake (${{ needs.image.outputs.wake_kind }} ${{ needs.image.outputs.wake_at }})
     needs: image
-    if: needs.image.outputs.wake_at != ''
+    # The image job runs past a skipped dispatcher (push, cron, a manual build); without a status function GitHub's implicit
+    # success() would be false for any job downstream of that skip, so this one states its own condition.
+    if: needs.image.result == 'success' && needs.image.outputs.wake_at != '' && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions: { actions: write } # the tick only

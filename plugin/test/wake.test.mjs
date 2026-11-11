@@ -203,8 +203,13 @@ test("ownedTickCheck: an installed workflow without the dispatcher's own ticks i
   const beforeOwn = renderWorkflow(template, sandbox).replace(/\n {2}sweep-wake:[\s\S]*$/, "\n").replace(/ \|\|\n\s*\(needs\.dispatch\.outputs\.image_owed[^\n]*\)\)/, ")");
   const own = ownedTickCheck(beforeOwn, {});
   assert.equal(own.status, "FAIL");
-  assert.match(own.detail, /the sweep's own wake \(sweep-wake\), the sweep's wake after an image build \(image-wake\), the dispatcher's owed image build \(image_owed\)/);
+  assert.match(own.detail, /the sweep's own wake \(sweep-wake\), the sweep's wake after an image build \(image-wake\) that runs past a skipped dispatcher, the dispatcher's owed image build \(image_owed\)/);
   assert.equal(ownedTickCheck(beforeOwn, {}, { job: true }).status, "WARN");
+  // #53: an image-wake with no status function is skipped whenever the dispatcher is (push, cron, a manual build).
+  const skippedWake = ownedTickCheck(renderWorkflow(template, sandbox).replace("if: needs.image.result == 'success' && needs.image.outputs.wake_at != '' && !cancelled()", "if: needs.image.outputs.wake_at != ''"), {});
+  assert.equal(skippedWake.status, "FAIL");
+  assert.match(skippedWake.detail, /image-wake\) that runs past a skipped dispatcher/);
+  assert.equal(ownedTickCheck(renderWorkflow(template, sandbox), {}).status, "PASS");
   const noTick = ownedTickCheck(renderWorkflow(template, sandbox).replace(" || startsWith(inputs.wake, 'sweep ')", ""), {});
   assert.match(noTick.detail, /the sweep's own wake/, "a wake whose tick the sweep does not run on");
 });

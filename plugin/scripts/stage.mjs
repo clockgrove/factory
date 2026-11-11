@@ -19,13 +19,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_USER } from "./lib/agent.mjs";
 import { findPr, listComments, repoOf, rest } from "./lib/github.mjs";
-import { holdSecrets, log } from "./lib/inputs.mjs";
+import { holdSecrets, input, log } from "./lib/inputs.mjs";
 import { STAGE_GRACE_MS, dispatchLatency, sandboxMarkerLine, sandboxRecord, sessionCapNote, setSelf, stageDeadline, stageMarker, stageMinutes, stagePartComment, watchdogMs } from "./lib/logic.mjs";
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
 import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
 import { parseUsage } from "./lib/usage.mjs";
-import { parseSecretValues } from "./lib/worker-secrets.mjs";
+import { optedValues } from "./lib/worker-secrets.mjs";
 
 /** How long a lease lasts, and how often the stage renews it: a stage that dies frees the Objective within the lease. */
 export const LEASE_MS = 10 * 60_000;
@@ -57,10 +57,11 @@ async function run() {
   for (const k of SECRETS) delete env[k];
   const tokens = { write: secrets.FACTORY_APP_TOKEN, read: secrets.FACTORY_READ_TOKEN, at: Date.now() };
   // Every secret the child is given, fresh tokens included: masked in its harness stream when the stage has to end it.
-  // The worker secrets' values one by one (lib/worker-secrets.mjs), since they arrive as one block of lines.
-  const given = new Set([...Object.values(secrets), ...parseSecretValues(secrets.FACTORY_INPUT_WORKER_SECRET_VALUES).values()].filter(Boolean));
-  // What this process posts (the stage's record, an ended stage's exit): none of the worker secrets' values.
-  holdSecrets([...parseSecretValues(secrets.FACTORY_INPUT_WORKER_SECRET_VALUES).values()]);
+  // The opted-in worker secrets' values one by one (lib/worker-secrets.mjs), since they arrive as one block of lines.
+  const opted = optedValues(input("worker_secrets", { env }), secrets.FACTORY_INPUT_WORKER_SECRET_VALUES);
+  const given = new Set([...Object.values(secrets).filter((v, i) => Object.keys(secrets)[i] !== "FACTORY_INPUT_WORKER_SECRET_VALUES"), ...opted].filter(Boolean));
+  // What this process posts (the stage's record, an ended stage's exit): none of those values.
+  holdSecrets(opted);
   const repo = repoOf(env.GITHUB_REPOSITORY);
   const issue = Number(env.FACTORY_STAGE_ISSUE);
   const stage = env.FACTORY_STAGE;

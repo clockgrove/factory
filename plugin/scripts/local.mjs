@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, resolveInputs } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, redactSecrets, resolveInputs } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
@@ -179,6 +179,31 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/**
+ * A stage's output, relayed line by line to its log file and this terminal, with every held secret (inputs.mjs
+ * holdSecrets: the worker secrets' values) redacted. Whole lines only: a value split across two chunks is redacted
+ * once its line is complete. `end()` relays a last line with no newline.
+ */
+export function stageRelay({ logFile, prefix, write = (s) => process.stdout.write(s) }) {
+  let rest = "";
+  const emit = (raw) => {
+    const line = redactSecrets(raw);
+    appendOwn(logFile, `${line}\n`);
+    if (line.trim()) write(`${prefix} ${line}\n`);
+  };
+  return {
+    push: (chunk) => {
+      const parts = `${rest}${chunk}`.split("\n");
+      rest = parts.pop();
+      for (const p of parts) emit(p);
+    },
+    end: () => {
+      if (rest) emit(rest);
+      rest = "";
+    },
+  };
+}
+
 /** Local settings for this process only, never copied into a stage's env: the token, and where the App's key is. */
 const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
 function localToken(repoFull) {
@@ -535,13 +560,14 @@ export class Local {
       child.stdio[3].end(this.token);
       if (this.notice) serveNotices(child, this.notice);
       this.children.add(child);
-      const relay = (chunk) => {
-        appendOwn(logFile, chunk);
-        for (const line of String(chunk).split("\n")) if (line.trim()) process.stdout.write(`[#${issue} ${name}] ${line}\n`);
-      };
-      child.stdout.on("data", relay);
-      child.stderr.on("data", relay);
+      // One relay per stream, whole lines only, so no value split across two chunks escapes the redaction.
+      const relays = [child.stdout, child.stderr].map((stream) => {
+        const r = stageRelay({ logFile, prefix: `[#${issue} ${name}]` });
+        stream.on("data", r.push);
+        return r;
+      });
       child.on("close", (code) => {
+        for (const r of relays) r.end();
         this.children.delete(child);
         let result = null;
         try {

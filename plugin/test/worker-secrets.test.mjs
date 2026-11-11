@@ -297,3 +297,105 @@ test("maskFile: a value is masked as itself, JSON-escaped, URL-encoded and base6
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------------------ re-review fixes (#68)
+
+test("the push scan reads a merge's own change and fails closed on a log it could not read whole", async () => {
+  const { dropHeldSecrets, holdSecrets } = await import("../scripts/lib/inputs.mjs");
+  const { SECRET_PUSH_REASON, SECRET_SCAN_MAX_BYTES, openOutbox, secretScan } = await import("../scripts/lib/outbox.mjs");
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  assert.ok(SECRET_SCAN_MAX_BYTES < 536_870_888, "below V8's longest string");
+  // Truncated or failed: refused, whatever the text read so far says.
+  const read = (r) => async () => r;
+  assert.match(await secretScan(read({ code: 0, truncated: true, stdout: "" }), "a..b", [KEY]), /could not be read whole/);
+  assert.match(await secretScan(read({ code: 128, stdout: "" }), "a..b", [KEY]), /could not be read whole/);
+  assert.equal(await secretScan(read({ code: 0, stdout: "+clean" }), "a..b", [KEY]), null);
+  assert.equal(await secretScan(read({ code: 0, truncated: true, stdout: "" }), "a..b", []), null, "nothing held, nothing to scan");
+  // A value only a merge's resolution adds.
+  const dir = mkdtempSync(join(tmpdir(), "ws-merge-"));
+  holdSecrets([KEY]);
+  try {
+    const quiet = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    const origin = join(dir, "origin.git");
+    const work = join(dir, "work");
+    const git = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { env: quiet, encoding: "utf8" });
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    execFileSync("git", ["clone", "-q", origin, work], { env: quiet });
+    writeFileSync(join(work, "a.txt"), "a\n");
+    git("add", "a.txt");
+    git("commit", "-q", "-m", "base");
+    git("push", "-q", "origin", "HEAD:main");
+    git("checkout", "-q", "-b", "side");
+    writeFileSync(join(work, "b.txt"), "b\n");
+    git("add", "b.txt");
+    git("commit", "-q", "-m", "side");
+    git("checkout", "-q", "-b", "factory/1", "main");
+    writeFileSync(join(work, "c.txt"), "c\n");
+    git("add", "c.txt");
+    git("commit", "-q", "-m", "work");
+    git("merge", "-q", "--no-ff", "--no-commit", "side");
+    writeFileSync(join(work, "b.txt"), `b ${KEY}\n`);
+    git("add", "b.txt");
+    git("commit", "-q", "-m", "merge side");
+    const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, agentEnv: quiet, protectedList: [], base: dir });
+    assert.equal(await box.push(), false);
+    assert.equal(box.error, SECRET_PUSH_REASON);
+  } finally {
+    dropHeldSecrets();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("only the opted-in values are held and masked: another line of the secret is no worker secret", async () => {
+  const { dropHeldSecrets, heldSecrets, redactSecrets } = await import("../scripts/lib/inputs.mjs");
+  const { optedValues } = await import("../scripts/lib/worker-secrets.mjs");
+  const text = `W=${KEY}\nREGION=us-east-1-long\nF=${FACTORY_KEY}`;
+  assert.deepEqual(optedValues("AI_GATEWAY_API_KEY=W FAL_KEY=F", text), [KEY, FACTORY_KEY], "withheld values too");
+  dropHeldSecrets();
+  try {
+    const write = process.stdout.write;
+    process.stdout.write = () => true;
+    try {
+      openWorkerSecrets({ workerSecrets: "AI_GATEWAY_API_KEY=W", workerSecretValues: text }, { factoryKey: () => "" });
+    } finally {
+      process.stdout.write = write;
+    }
+    assert.deepEqual(heldSecrets(), [KEY]);
+    assert.equal(redactSecrets("deploy to us-east-1-long"), "deploy to us-east-1-long");
+  } finally {
+    dropHeldSecrets();
+  }
+});
+
+test("local serve relays a stage's output with every held value redacted, even one split across chunks", async () => {
+  const { dropHeldSecrets, holdSecrets } = await import("../scripts/lib/inputs.mjs");
+  const { stageRelay } = await import("../scripts/local.mjs");
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "ws-relay-"));
+  holdSecrets([KEY]);
+  try {
+    let shown = "";
+    const r = stageRelay({ logFile: join(dir, "stage.log"), prefix: "[#1 work]", write: (s) => (shown += s) });
+    r.push(`one ${KEY.slice(0, 10)}`);
+    r.push(`${KEY.slice(10)} two\nthree ${KEY}`);
+    r.end();
+    const logged = readFileSync(join(dir, "stage.log"), "utf8");
+    for (const t of [shown, logged]) assert.ok(!t.includes(KEY) && t.includes("one *** two") && t.includes("three ***"), t);
+  } finally {
+    dropHeldSecrets();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a value under 8 characters is named by doctor; the lower-case percent-encoding is a masked form", async () => {
+  const { secretForms } = await import("../scripts/lib/inputs.mjs");
+  const checks = workerSecretChecks({ inputs: { workerSecrets: "SHORT_KEY=S", workerSecretValues: "S=abc" }, env: { GITHUB_ACTIONS: "true" }, factoryKey: () => "" });
+  assert.deepEqual(checks.map((c) => c.status), ["WARN"]);
+  assert.match(checks[0].detail, /SHORT_KEY: a value under 8 characters/);
+  assert.ok(secretForms("vck_a/b+c=d0123").includes("vck_a%2fb%2bc%3dd0123"));
+});

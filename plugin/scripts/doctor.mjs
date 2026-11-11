@@ -104,6 +104,10 @@ export function workerSecretChecks({ inputs, env = process.env, factoryKey = () 
   // localBaseEnv leaves such names out; the warning says why the stage does not get it).
   const shared = localEnvWorkerNames(inputs.workerSecrets, env.FACTORY_LOCAL_ENV);
   if (shared.length) out.push(WARN("worker secrets", `FACTORY_LOCAL_ENV names ${shared.map(nameLabel).join(", ")}, a worker secret: local mode leaves it out of every stage's environment, so only the worker's shell gets it`, "remove it from FACTORY_LOCAL_ENV; worker_secrets alone opts it in"));
+  // Factory redacts and masks only values of eight characters or more (inputs.mjs secretForms): a shorter one would mask
+  // ordinary text, so it goes unprotected.
+  const short = given.filter((e) => ws.env[e.name].length < 8);
+  if (short.length) out.push(WARN("worker secrets", `${short.map((e) => nameLabel(e.name)).join(", ")}: a value under 8 characters, which Factory cannot redact or mask in what it posts, stores or pushes`, "use a real key: a gateway key is far longer"));
   if (given.length && !out.length) out.push(PASS("worker secrets", `${given.map(secretLabel).join(", ")} reach the worker's shell; any code it runs can spend them, so each must be a dedicated key with a budget`));
   return out;
 }

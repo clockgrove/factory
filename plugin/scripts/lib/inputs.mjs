@@ -243,14 +243,16 @@ export const log = (...parts) => process.stdout.write(`[factory] ${redactSecrets
 
 /**
  * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its
- * encodeURIComponent form, and its base64 at each of the three byte offsets a surrounding text can put it at (the
+ * encodeURIComponent form (upper- and lower-case hex), and its base64 at each of the three byte offsets a surrounding text can put it at (the
  * characters that also carry a neighbour's bits left out). Only forms of eight characters or more: a shorter one would
  * mask ordinary text.
  */
 export function secretForms(value) {
   const v = String(value ?? "");
   if (v.length < 8) return [];
-  const forms = new Set([v, JSON.stringify(v).slice(1, -1), encodeURIComponent(v)]);
+  const url = encodeURIComponent(v);
+  // Percent-encoding with lower-case hex (%2f) as well as upper-case (%2F): both decode to the value.
+  const forms = new Set([v, JSON.stringify(v).slice(1, -1), url, url.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase())]);
   const bytes = Buffer.from(v, "utf8");
   for (let k = 0; k < 3; k += 1) {
     const b64 = Buffer.concat([Buffer.alloc(k), bytes]).toString("base64").replace(/=+$/, "");

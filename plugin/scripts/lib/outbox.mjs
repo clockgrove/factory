@@ -25,6 +25,21 @@ export function carriesSecret(text, values = heldSecrets()) {
   return values.flatMap(secretForms).some((f) => t.includes(f));
 }
 
+/** The most of `git log -p` the scan reads: a little below V8's longest string (536,870,888 bytes). */
+export const SECRET_SCAN_MAX_BYTES = 536_000_000;
+
+/**
+ * Why the commits in `range` may not be pushed for the held secrets, or null: every commit's change and message, a merge
+ * commit's against its first parent (where a value its resolution adds would show). It fails closed: an unreadable or
+ * truncated log refuses too. `git(args, opts)` runs git in Factory's mirror.
+ */
+export async function secretScan(git, range, held = heldSecrets(), maxBytes = SECRET_SCAN_MAX_BYTES) {
+  if (!held.length) return null;
+  const patches = await git(["log", "-p", "--diff-merges=first-parent", "-U0", "--no-color", "--no-ext-diff", "--text", "--format=%B", range], { maxBytes });
+  if (patches.code !== 0 || patches.truncated) return "the branch's commits could not be read whole for worker secrets, so nothing was pushed";
+  return carriesSecret(patches.stdout, held) ? SECRET_PUSH_REASON : null;
+}
+
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /**
@@ -674,12 +689,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const hits = protectedTouched(files, protectedList);
     if (hits.length) return refuse(`touched protected path ${hits.join(", ")}`, { kind: "protected" });
     // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
-    const held = heldSecrets();
-    if (held.length) {
-      const patches = await git(["log", "-p", "-U0", "--no-color", "--no-ext-diff", "--text", "--format=%B", `${base}..${head}`], { maxBytes: 512 * 1024 * 1024 });
-      if (patches.code !== 0) return refuse("the branch's commits could not be read for worker secrets, so nothing was pushed");
-      if (carriesSecret(patches.stdout, held)) return refuse(SECRET_PUSH_REASON);
-    }
+    const leak = await secretScan(git, `${base}..${head}`);
+    if (leak) return refuse(leak);
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
     if (outside.length) return refuse(fixScopeReason(outside), { kind: "fix-scope" });

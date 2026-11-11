@@ -154,6 +154,16 @@ export function localSecretValues(spec, env = process.env) {
   return lines.join("\n");
 }
 
+/**
+ * The values of the opted-in SOURCEs (`spec`, worker_secrets) in `valuesText` (worker_secret_values): what a process holds
+ * and masks (inputs.mjs holdSecrets), withheld ones included. A line no entry names is no worker secret, so it is
+ * neither held nor masked (a REGION=us-east-1 line would redact every us-east-1).
+ */
+export function optedValues(spec, valuesText) {
+  const values = parseSecretValues(valuesText);
+  return [...new Set(parseWorkerSecrets(spec).entries.map((e) => values.get(e.source)).filter((v) => typeof v === "string" && v))];
+}
+
 /** The carrier for runHarness: {SHELL_SECRETS_ENV: JSON} when there is anything to carry, else {}. */
 export const packShellSecrets = (secrets = {}) => (Object.keys(secrets).length ? { [SHELL_SECRETS_ENV]: JSON.stringify(secrets) } : {});
 

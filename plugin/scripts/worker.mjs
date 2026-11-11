@@ -30,7 +30,7 @@ import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
-import { REFUSAL_TEXT, nameLabel, refusedEntry, secretLabel, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
+import { REFUSAL_TEXT, nameLabel, optedValues, refusedEntry, secretLabel, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -653,10 +653,12 @@ async function main() {
 export function openWorkerSecrets(inputs, { factoryKey = () => triageKey({ inputs }) } = {}) {
   if (!String(inputs.workerSecrets || "").trim()) return {};
   const values = parseSecretValues(inputs.workerSecretValues);
-  // Every value this process holds: never posted to GitHub, stored in the usage record, sent to the gateway or pushed.
-  holdSecrets([...values.values()]);
+  // The opted-in values this process holds (withheld ones too): never posted to GitHub, stored in the usage record, sent
+  // to the gateway or pushed. A line no entry names is no secret of the worker's.
+  const opted = optedValues(inputs.workerSecrets, inputs.workerSecretValues);
+  holdSecrets(opted);
   const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
-  for (const v of values.values()) mask(v);
+  for (const v of opted) mask(v);
   for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
   for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
   for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);

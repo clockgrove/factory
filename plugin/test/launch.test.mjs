@@ -214,6 +214,11 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   }
   // Only the */10 schedule runs the dispatcher: the hourly sweep and the nightly image are other jobs' schedules.
   assert.match(doc.jobs.dispatch.if, /^\(github\.event_name == 'schedule' && github\.event\.schedule == '\*\/10 \* \* \* \*'\)/);
+  // The App marking its own PR ready starts no job (#47); a person marking it ready still starts the review or the gate.
+  for (const [route, job] of [["runner", runner.jobs.review], ["sandbox", doc.jobs["launch-gate"]]]) {
+    const cues = job.if.match(/github\.event\.action == 'ready_for_review'[^)]*/g);
+    assert.deepEqual(cues, ["github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'"], `${route}: only a person's ready_for_review is a cue`);
+  }
 });
 
 test("stage lifecycle: the lease, a stage's own requests, the next stage when one ends, and the leftovers' rules", async () => {

@@ -21,6 +21,8 @@ import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage } from "./lib/usage.mjs";
+import { triageKey } from "./lib/triage.mjs";
+import { REFUSAL_TEXT, refusedEntry, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
 const PASS = (n, d) => check(n, "PASS", d);
@@ -74,6 +76,25 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     else out.push(await copilotWriteProbe({ repo: inputs.repo, token: tok }));
   }
   if (probe) out.push(await probeHarness({ inputs, env }));
+  return out;
+}
+
+/**
+ * The worker secrets (lib/worker-secrets.mjs), when `worker_secrets` names any: each refused entry, each SOURCE with no
+ * value here and each value equal to Factory's own AI Gateway key (compared by hash, in this process; the worker
+ * withholds it) is a WARN; else one PASS naming what reaches the worker's shell. Values: `worker_secret_values` (a job,
+ * a stage), else, off Actions, this shell's variables (a developer's doctor run for local mode). Names only, never a value.
+ */
+export function workerSecretChecks({ inputs, env = process.env, factoryKey = () => triageKey({ inputs, env }) }) {
+  if (!String(inputs.workerSecrets || "").trim()) return [];
+  const values = parseSecretValues(inputs.workerSecretValues);
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s) ?? (env.GITHUB_ACTIONS ? undefined : env[s]), factoryKey: factoryKey() });
+  const out = [];
+  for (const r of ws.refused) out.push(WARN("worker secrets", `refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`, "remove it from worker_secrets (FACTORY_WORKER_SECRETS); pass a key of its own as NAME=SOURCE"));
+  if (ws.missing.length) out.push(WARN("worker secrets", `no value here for ${ws.missing.join(", ")}`, "on Actions and in a cloud sandbox add a SOURCE=value line for each to the repository secret FACTORY_WORKER_SECRET_VALUES (the workflow passes it as worker_secret_values); in local mode export each in the shell that runs factory serve"));
+  if (ws.factoryKey.length) out.push(WARN("worker secrets", `${ws.factoryKey.join(", ")}: the same value as Factory's own AI Gateway key, so the worker does not get it`, "give the worker a dedicated key with a budget of its own (docs/PLAN.md, Worker secrets); Factory's AI_GATEWAY_API_KEY stays Factory's"));
+  const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
+  if (given.length && !out.length) out.push(PASS("worker secrets", `${given.map((e) => (e.name === e.source ? e.name : `${e.name} (from ${e.source})`)).join(", ")} reach the worker's shell; any code it runs can spend them, so each must be a dedicated key with a budget`));
   return out;
 }
 
@@ -931,6 +952,7 @@ export function noticeAppCheck(minted) {
 export async function jobChecks({ inputs, repo, token, app, checkout, notice = false }) {
   const out = [];
   out.push(...(await credentialChecks({ inputs })));
+  out.push(...workerSecretChecks({ inputs }));
   out.push(...(await githubChecks({ inputs, repo, token, app, notice, job: true })));
   out.push(...(await repositoryChecks({ inputs, checkout })));
   out.push(...(await runnerChecks({ inputs })));
@@ -958,6 +980,7 @@ async function main() {
   const results = [];
   const local = args.local === "true" || backend().name === "local";
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
+  results.push(...workerSecretChecks({ inputs }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

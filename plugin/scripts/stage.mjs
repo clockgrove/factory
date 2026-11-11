@@ -25,6 +25,7 @@ import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
 import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
 import { parseUsage } from "./lib/usage.mjs";
+import { parseSecretValues } from "./lib/worker-secrets.mjs";
 
 /** How long a lease lasts, and how often the stage renews it: a stage that dies frees the Objective within the lease. */
 export const LEASE_MS = 10 * 60_000;
@@ -33,7 +34,7 @@ const BEAT_MS = 2 * 60_000;
 const TOKEN_ASK_MS = 40 * 60_000;
 const TOKEN_RETRY_MS = 5 * 60_000;
 /** The secrets this process may be started with: moved into memory, gone from the environment. */
-const SECRETS = ["FACTORY_APP_TOKEN", "FACTORY_READ_TOKEN", "FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_INPUT_CODEX_API_KEY", "FACTORY_INPUT_COPILOT_GITHUB_TOKEN", "FACTORY_INPUT_AI_GATEWAY_API_KEY"];
+const SECRETS = ["FACTORY_APP_TOKEN", "FACTORY_READ_TOKEN", "FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_INPUT_CODEX_API_KEY", "FACTORY_INPUT_COPILOT_GITHUB_TOKEN", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "FACTORY_INPUT_WORKER_SECRET_VALUES"];
 
 const dirOf = (env = process.env) => join(env.HOME || "/tmp", "factory");
 const socketOf = (env = process.env) => join(dirOf(env), "stage.sock");
@@ -56,7 +57,8 @@ async function run() {
   for (const k of SECRETS) delete env[k];
   const tokens = { write: secrets.FACTORY_APP_TOKEN, read: secrets.FACTORY_READ_TOKEN, at: Date.now() };
   // Every secret the child is given, fresh tokens included: masked in its harness stream when the stage has to end it.
-  const given = new Set(Object.values(secrets).filter(Boolean));
+  // The worker secrets' values one by one (lib/worker-secrets.mjs), since they arrive as one block of lines.
+  const given = new Set([...Object.values(secrets), ...parseSecretValues(secrets.FACTORY_INPUT_WORKER_SECRET_VALUES).values()].filter(Boolean));
   const repo = repoOf(env.GITHUB_REPOSITORY);
   const issue = Number(env.FACTORY_STAGE_ISSUE);
   const stage = env.FACTORY_STAGE;

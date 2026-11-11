@@ -67,6 +67,8 @@ export const DEFAULTS = {
   codex_api_key: "",
   copilot_github_token: "",
   ai_gateway_api_key: "", // red-check triage (triage.mjs) and the drift advisory (drift.mjs); empty turns both off
+  worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
+  worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
   triage_model: "", // empty: triage.mjs TRIAGE_MODEL
   drift_model: "", // empty: drift.mjs DRIFT_MODEL (the drift advisory, on with ai_gateway_api_key)
   github_token: "",
@@ -82,9 +84,15 @@ export const DEFAULTS = {
   sweep_max_destroys: "5",
 };
 
-export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "ai_gateway_api_key", "github_token", "app_token", "vercel_token"]);
+export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];
+/** Keys that must never reach a child that is not the harness (validation commands, git hooks). */
+export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
+/** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
+export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN"];
+/** GitHub tokens a child must never get from the job: the job's own, gh's, and Factory's write token. */
+export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FACTORY_GIT_TOKEN", "FACTORY_LOCAL_TOKEN", "FACTORY_SECOND_TOKEN", "GH_CONFIG_DIR"];
 /** A name that carries one of Factory's own service keys: the bare name, or the input under FACTORY_ or FACTORY_INPUT_. */
 export const isFactorySecret = (k) => FACTORY_SECRET_KEYS.some((n) => k === n || k === `FACTORY_${n}` || k === `FACTORY_INPUT_${n}`);
 
@@ -183,6 +191,9 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     codexApiKey: get("codex_api_key"),
     copilotGithubToken: get("copilot_github_token"),
     aiGatewayApiKey: get("ai_gateway_api_key"),
+    // The secrets the worker's shell gets (lib/worker-secrets.mjs): the opt-in, and their values where a runner has them.
+    workerSecrets: get("worker_secrets"),
+    workerSecretValues: get("worker_secret_values"),
     triageModel: get("triage_model").trim(),
     driftModel: get("drift_model").trim(),
     githubToken: get("github_token") || env.GITHUB_TOKEN || "",

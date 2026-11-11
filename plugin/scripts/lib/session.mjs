@@ -549,12 +549,12 @@ export async function questionRaisedAt(repo, pr, opts) {
   return drafted.at(-1) || pr.created_at;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [] }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
-  return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
+  return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
 }
 
 /**
@@ -588,6 +588,15 @@ const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
  * provider's refusal (usage.mjs providerRefusal) is no death: the harness answered, and the same request is refused again.
  */
 export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
+
+/**
+ * The card's line on the worker secrets in the worker's shell (lib/worker-secrets.mjs), by name; "" when there are none.
+ */
+export function shellSecretsNote(names = []) {
+  if (!names.length) return "";
+  const them = names.length === 1 ? "it" : "them";
+  return `\n\nThe repository gave your shell ${names.map((n) => `\`${n}\``).join(", ")}, for what the Objective needs: every command you run can read and spend ${them}. Use ${them} only for the Objective's own steps, never print ${them}, and never write ${them} into a file or a commit.`;
+}
 
 /**
  * Hold a fix pass to its scope (outbox.mjs fence, logic.mjs fixScopeRefused). Toolchain files the pass changed outside

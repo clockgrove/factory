@@ -884,6 +884,50 @@ test("a stage's start clears what an earlier stage or run left untracked in the 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("a stage's start removes the git locks an interrupted run left, and leaves one a live process holds", { skip: !existsSync("/proc/self/fd") && "needs /proc" }, async () => {
+  const { mkdtempSync, writeFileSync, rmSync, utimesSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync, spawn } = await import("node:child_process");
+  const { exec } = await import("../scripts/lib/proc.mjs");
+  const { prepareClone, staleGitLocks } = await import("../scripts/lib/local.mjs");
+  const root = mkdtempSync(join(tmpdir(), "locks-"));
+  const clone = join(root, "repo");
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (...a) => execFileSync("git", ["-C", clone, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("git", ["init", "-q", "-b", "main", clone]);
+  writeFileSync(join(clone, "app.txt"), "v1\n");
+  git("add", ".");
+  git("commit", "-q", "-m", "i");
+  const run = (inner) => exec(inner[0], inner.slice(1));
+  const plant = () => {
+    for (const l of ["config.lock", "refs/heads/main.lock"]) writeFileSync(join(clone, ".git", l), "");
+  };
+  const start = async () => (await prepareClone(clone, [], run, { fresh: true, locks: staleGitLocks(clone).stale })).locks.sort();
+  plant();
+  assert.throws(() => git("config", "factory.x", "1"), "the planted lock stops git");
+  // A live holder: a process with the lock open. Both locks stay (the holder may be mid-way through a ref update too).
+  const holder = spawn(process.execPath, ["-e", "require('fs').openSync(process.argv[1], 'r'); process.stdout.write('ok'); setInterval(() => {}, 1e3)", join(clone, ".git", "config.lock")], { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await new Promise((ok) => holder.stdout.once("data", ok));
+    assert.deepEqual(await start(), []);
+    assert.deepEqual(staleGitLocks(clone).live.sort(), [".git/config.lock", ".git/refs/heads/main.lock"]);
+  } finally {
+    holder.kill();
+    await new Promise((ok) => holder.once("exit", ok));
+  }
+  // The holder is gone: the next start removes both, and git works again.
+  assert.deepEqual(await start(), [".git/config.lock", ".git/refs/heads/main.lock"]);
+  git("config", "factory.x", "1");
+  git("commit", "-q", "--allow-empty", "-m", "after");
+  // A lock older than the box's last boot has no holder, whatever /proc says.
+  plant();
+  for (const l of ["config.lock", "refs/heads/main.lock"]) utimesSync(join(clone, ".git", l), new Date(0), new Date(0));
+  assert.deepEqual(staleGitLocks(clone, { proc: join(root, "no-proc") }).stale.sort(), [".git/config.lock", ".git/refs/heads/main.lock"]);
+  assert.deepEqual(staleGitLocks(join(root, "absent")), { stale: [], live: [] });
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("host sockets: the ssh, gpg and tmux directories under /tmp, socket or not, but the stage's own", async () => {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

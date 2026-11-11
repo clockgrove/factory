@@ -5,7 +5,7 @@
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { homedir, platform as osPlatform } from "node:os";
+import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
@@ -346,7 +346,8 @@ export function prepareProtectedPaths(clone) {
 
 // The same, run inside the clone's own sandbox (backend.mjs sandbox.git), so Factory's process writes nothing in the
 // clone between stages, where the agent may have planted a symlink. CommonJS for `node -e`: argv is the clone, "1" to
-// clear first ("fresh" at a stage's start: see below), then more directories to make (the package caches that live in the clone). Always: .git/commondir is
+// clear first ("fresh" at a stage's start: see below), the stale git locks to remove as JSON (prepareClone), then more
+// directories to make (the package caches that live in the clone). Always: .git/commondir is
 // `.`, the clone's own .git, and .git/info/attributes exists (made empty where absent). Clearing, before a harness
 // starts: the git directory back to the clone's own (GIT_REPOINT removed, gitlinks HEAD lacks dropped, no submodule
 // checked out: each gitlink's .git and .git/modules removed, then checked: exit 3 when git would still read another
@@ -357,13 +358,20 @@ export function prepareProtectedPaths(clone) {
 // the checkout's to discard (outbox.mjs putOn).
 const PREPARE_CLONE = String.raw`
 const fs = require("fs"), path = require("path"), cp = require("child_process");
-const [clone, clear, ...dirs] = process.argv.slice(1);
+const [clone, clear, lockArg, ...dirs] = process.argv.slice(1);
 const P = ${JSON.stringify(SRT_PROTECTED)}, H = ${JSON.stringify(HARNESS_CONFIG)}, X = ${JSON.stringify(HARNESS_EXEC_CONFIG)}, R = ${JSON.stringify(GIT_REPOINT)};
 const refuse = (why) => { process.stderr.write("refusing to start the harness: " + why + "\n"); process.exit(3); };
 const dotgit = path.join(clone, ".git");
 const gst = fs.lstatSync(dotgit, { throwIfNoEntry: false });
 if (gst && gst.isDirectory()) { fs.rmSync(path.join(dotgit, "commondir"), { recursive: true, force: true }); fs.writeFileSync(path.join(dotgit, "commondir"), ".\n", { flag: "wx" }); try { fs.mkdirSync(path.join(dotgit, "info"), { recursive: true }); fs.writeFileSync(path.join(dotgit, "info", "attributes"), "", { flag: "wx" }); } catch {} }
 const realParents = (x) => { for (let p = path.dirname(x); p !== "."; p = path.dirname(p)) { const st = fs.lstatSync(path.join(clone, p), { throwIfNoEntry: false }); if (st && !st.isDirectory()) return false; } return true; };
+const removed = [];
+for (const rel of JSON.parse(lockArg || "[]")) {
+  const parts = rel.split("/");
+  if (parts[0] !== ".git" || !rel.endsWith(".lock") || parts.some((x) => x === ".." || x === "." || x === "") || !realParents(rel)) continue;
+  const st = fs.lstatSync(path.join(clone, rel), { throwIfNoEntry: false });
+  if (st && st.isFile()) { fs.rmSync(path.join(clone, rel), { force: true }); removed.push(rel); }
+}
 let names = [];
 if (clear === "1") {
   if (!gst || !gst.isDirectory()) refuse(".git is not the clone's own directory");
@@ -412,18 +420,90 @@ if (made.length) {
   const add = made.map((f) => "/" + f).filter((l) => !have.includes(l));
   if (add.length) fs.appendFileSync(ex, (have.length && have.at(-1) !== "" ? "\n" : "") + "# Factory: srt's protected paths, made empty so the sandbox protects a real path\n" + add.join("\n") + "\n");
 }
-process.stdout.write(JSON.stringify({ submodules: names }));
+process.stdout.write(JSON.stringify({ submodules: names, locks: removed }));
 `;
 
-/** prepareProtectedPaths and the clone's package-cache directories, in the clone's own sandbox (`run` gives the command). */
-export async function prepareClone(clone, dirs, run, { clear = false, fresh = false } = {}) {
-  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? "fresh" : "0", ...dirs]);
+/**
+ * prepareProtectedPaths and the clone's package-cache directories, in the clone's own sandbox (`run` gives the command).
+ * `locks`: the stale git locks to remove first (staleGitLocks), each re-checked there as a regular `.lock` file under
+ * `.git` with no symlink on its path. Returns {submodules, locks}: the names .gitmodules gives and the locks removed.
+ */
+export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, locks = [] } = {}) {
+  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? "fresh" : "0", JSON.stringify(locks), ...dirs]);
   if (r.code !== 0) throw new Error(`the clone could not be prepared in its sandbox: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
   try {
-    return JSON.parse(String(r.stdout).trim().split("\n").at(-1));
+    return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };
   } catch {
-    return { submodules: [] };
+    return { submodules: [], locks: [] };
   }
+}
+
+/**
+ * True when a process on the box has its working directory or an open file in `clone`, false when none has, null
+ * when `proc` cannot be read (no /proc: macOS). Processes of other users are not visible and do not count.
+ */
+export function cloneInUse(clone, proc = "/proc") {
+  let pids;
+  try {
+    pids = readdirSync(proc).filter((p) => /^\d+$/.test(p));
+  } catch {
+    return null;
+  }
+  const roots = new Set([resolve(clone)]);
+  try {
+    roots.add(realpathSync(clone));
+  } catch {
+    // gone: the path as given
+  }
+  const inside = (p) => !!p && [...roots].some((r) => p === r || p.startsWith(`${r}/`));
+  const link = (p) => {
+    try {
+      return readlinkSync(p);
+    } catch {
+      return "";
+    }
+  };
+  for (const pid of pids) {
+    if (inside(link(join(proc, pid, "cwd")))) return true;
+    let fds = [];
+    try {
+      fds = readdirSync(join(proc, pid, "fd"));
+    } catch {
+      // gone, or another user's
+    }
+    for (const fd of fds) if (inside(link(join(proc, pid, "fd", fd)))) return true;
+  }
+  return false;
+}
+
+/**
+ * The git lock files in the clone a stage may remove before it starts, and those it must leave: an interrupted stage (a
+ * reboot, a killed serve) leaves locks behind, and git then refuses the config, index or ref each guards. Candidates are
+ * `.git/*.lock` and `.git/refs/**\/*.lock`, read without following a symlink (the clone has no worktree gitdirs: the
+ * clear before each harness start removes `.git/worktrees`). Returns {stale, live}, paths relative to the clone.
+ *
+ * The liveness check: a lock older than the box's last boot has no holder (no process survives a restart). A newer one
+ * is stale only where /proc shows no process with its working directory or an open file in the clone. Not the lock file
+ * alone: git closes a ref lock between writing it and renaming it into place, but stays in the repository (git chdirs
+ * into the repository it works on; Factory runs every git with `-C <clone>`). Without /proc (macOS) only the boot rule holds.
+ */
+export function staleGitLocks(clone, { proc = "/proc", bootMs = Date.now() - uptime() * 1000 } = {}) {
+  const found = [];
+  const walk = (rel, deep) => {
+    if (!lstatSync(join(clone, rel), { throwIfNoEntry: false })?.isDirectory()) return;
+    for (const n of readdirSync(join(clone, rel))) {
+      const r = join(rel, n);
+      const st = lstatSync(join(clone, r), { throwIfNoEntry: false });
+      if (st?.isFile() && n.endsWith(".lock")) found.push({ rel: r, mtimeMs: st.mtimeMs });
+      else if (deep && st?.isDirectory()) walk(r, true);
+    }
+  };
+  walk(".git", false);
+  walk(join(".git", "refs"), true);
+  const newer = found.filter((l) => l.mtimeMs >= bootMs);
+  const held = newer.length ? cloneInUse(clone, proc) !== false : false;
+  const stale = found.filter((l) => l.mtimeMs < bootMs || !held).map((l) => l.rel);
+  return { stale, live: found.map((l) => l.rel).filter((r) => !stale.includes(r)) };
 }
 
 /**

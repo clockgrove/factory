@@ -236,7 +236,7 @@ export const gitRefusalReason = (code, issue) =>
     ? gitIdentityReason(issue)
     : code === "git-state"
       ? "local mode: the clone's .git config, hooks, commondir or info/attributes changed during the stage (git-state); the harness was not started"
-      : "local mode: Factory's pre-start check of the clone's git directory failed (git-clear); the harness was not started";
+      : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
@@ -525,14 +525,19 @@ export const credentialPaths = (home = homedir()) => CREDENTIAL_PATHS.map((p) =>
  */
 export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, ".git", "config"), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
 
+/** The model credentials Claude Code's sandbox unsets before every command it runs, on every route (harness.mjs passes all of SHELL_SECRET_KEYS). */
+export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+
 /**
- * Claude Code's settings for a local run: shell commands in its sandbox with no unsandboxed
+ * Claude Code's settings for a sandboxed run: shell commands in its sandbox with no unsandboxed
  * escape and the run refused when the sandbox cannot start; network limited to `domains`;
- * credential stores unreadable by shell and file tools alike; the clone's git hooks and config
- * unwritable; file edits auto-approved only inside the working directory and `addDirs` (acceptEdits).
+ * credential stores (`secrets`) unreadable by shell and file tools alike; the credentials in
+ * `secretEnv` unset in every command's environment (the sandbox's `credentials.envVars`); the
+ * clone's git hooks and config unwritable; file edits auto-approved only inside the working
+ * directory and `addDirs` (acceptEdits). Local mode, the Actions runner and the cloud sandbox VM
+ * use it alike (claudeRunnerSettings).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [] } = {}) {
-  const secrets = credentialPaths(home);
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV } = {}) {
   // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
@@ -547,6 +552,8 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       // /proc: no sandboxed command reads another process's environment or command line.
       // writable: the package caches, for shell commands only (no file tool, and no CLAUDE.md read from them).
       filesystem: { denyRead: [...secrets, "/proc"], ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
+      // The model's credential (and any other the harness holds) is not in a command's environment.
+      credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
     },
     // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
     // false), which is what confines it; without the rule, gh writes and commands with variables would need a
@@ -558,6 +565,32 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       blockWritesOutsideWorkingDirectories: true,
     },
   };
+}
+
+/** Where a runner's Claude Code loads Factory's skills and agent definitions from: in the agent's home, out of every sandbox's write reach. */
+export const runnerClaudeDir = (home) => join(home, ".factory", "claude");
+
+/**
+ * Claude Code's settings on the Actions runner and in a cloud sandbox VM, where it runs as the agent uid (agent.mjs):
+ * local mode's bar (claudeLocalSettings), fitted to the agent's home. Commands may write the agent's home (the
+ * checkout, the temp directory, the package caches), never Claude Code's own state, the agent's git config, Factory's
+ * files there (`.factory`: the read-only token and the skills Claude Code loads) or the checkout's git hooks, config and
+ * harness configuration, any of which code Claude Code or Factory's git runs outside the sandbox would read. No
+ * credential store is hidden: the agent's home holds only its read-only GitHub token, which is for its commands.
+ */
+export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, home, secretEnv = CLAUDE_SECRET_ENV }) {
+  const own = [join(home, ".claude"), join(home, ".claude.json"), join(home, ".gitconfig"), join(home, ".config", "git"), join(home, ".factory")];
+  return claudeLocalSettings({ domains, clone, home, readOnly: own, writable: [home], secrets: [], secretEnv });
+}
+
+/**
+ * The hosts a runner's sandboxed commands may reach: LOCAL_DOMAINS plus the `allowed_domains` input (the Actions and
+ * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space. An entry is a host name or
+ * `*.` and one; anything else is dropped.
+ */
+export function runnerDomains(value = "") {
+  const extra = String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter((d) => /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(d));
+  return [...new Set([...LOCAL_DOMAINS, ...extra])];
 }
 
 const isDir = (p) => {

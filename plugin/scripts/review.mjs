@@ -405,6 +405,7 @@ async function main() {
   });
   const taskCard = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
+    harness: inputs.harness,
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,

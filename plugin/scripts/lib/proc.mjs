@@ -48,7 +48,7 @@ const UNIT_PREFIX = "factory-agent-";
  * in its cgroup. The variables' values travel in the environment (`-E NAME` takes them from there), never on the
  * command line, where every uid could read them. Returns [cmd, args, env] for spawn.
  */
-export function asAgent(cmd, args, env = {}, extra = [], cwd = null) {
+export function asAgent(cmd, args, env = {}, extra = [], cwd = null, { nested = false } = {}) {
   const keys = Object.keys(env).filter((k) => env[k] !== undefined && env[k] !== null && (AGENT_ENV.test(k) || AGENT.allow.has(k) || extra.includes(k)));
   const out = Object.fromEntries(keys.map((k) => [k, String(env[k])]));
   if (AGENT.launcher === "namespace") return [...asAgentInNamespace(cmd, args, env, keys, cwd), out];
@@ -63,7 +63,10 @@ export function asAgent(cmd, args, env = {}, extra = [], cwd = null) {
     "PrivateIPC=yes",
     "NoNewPrivileges=yes",
     "RestrictSUIDSGID=yes",
-    "ProtectKernelTunables=yes",
+    // Not for a harness that runs its commands in a sandbox of its own (`nested`: Claude Code's bubblewrap): its
+    // read-only mounts over parts of /proc keep a user namespace from mounting a fresh /proc ("Can't mount proc on
+    // /newroot/proc"). The agent is unprivileged with no new privileges, so /proc/sys and /sys stay root's to write.
+    ...(nested ? [] : ["ProtectKernelTunables=yes"]),
     "ProtectKernelModules=yes",
     "ProtectControlGroups=yes",
     "KillMode=control-group",
@@ -285,10 +288,10 @@ function fileStdio(limit) {
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, onLine = null, idleMs = 0, agentExtra = [], group = false, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, onLine = null, idleMs = 0, agentExtra = [], agentNested = false, group = false, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
-    if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
+    if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd, { nested: agentNested });
     else {
       // Already the agent's (backend.mjs sandbox.command): the unit (or the namespace wrapper) starts in this directory.
       args = args.map((a) => (String(a).startsWith("--working-directory=") ? `--working-directory=${cwd}` : a));

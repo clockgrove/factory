@@ -644,15 +644,19 @@ export const deniedHostsOf = (v) => [...new Set((Array.isArray(v) ? v : []).filt
 const allowedBy = (host, domains) => domains.some((d) => d === host || (typeof d === "string" && d.startsWith("*.") && host.endsWith(d.slice(1))));
 
 /**
- * The fix line of a local Block whose worker named the hosts its sandbox denied: allow them in FACTORY_LOCAL_DOMAINS,
- * then re-apply the label. Hosts the sandboxes already allow (`domains`) are left out, since allowing them again fixes
+ * The fix line of a Block whose worker named the hosts its sandbox denied: allow them in FACTORY_LOCAL_DOMAINS (local
+ * mode) or the `allowed_domains` input (`route` "runner": Claude Code on Actions or in a cloud sandbox), then re-apply
+ * the label. Hosts the sandboxes already allow (`domains`) are left out, since allowing them again fixes
  * nothing; null when none is left, so the Block keeps the generic fix.
  */
-export function deniedHostsFix(hosts, domains = []) {
+export function deniedHostsFix(hosts, domains = [], route = "local") {
   const left = deniedHostsOf(hosts).filter((h) => !allowedBy(h, domains));
   if (!left.length) return null;
   const them = left.length === 1 ? "it" : "them";
-  return `The local sandbox denied ${left.map((h) => `\`${h}\``).join(", ")}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
+  const named = left.map((h) => `\`${h}\``).join(", ");
+  // On Actions and in a cloud sandbox, Claude Code's sandbox: the workflow's `allowed_domains` input (harness.mjs claudeRunner).
+  if (route === "runner") return `Claude Code's sandbox denied ${named}. If the Objective needs ${them}, add ${them} to the Factory workflow's \`allowed_domains\` input (or \`FACTORY_ALLOWED_DOMAINS\` in its env block), then re-apply \`factory:objective\`.`;
+  return `The local sandbox denied ${named}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
 }
 
 /**

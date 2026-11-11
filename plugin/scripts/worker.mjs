@@ -311,6 +311,7 @@ async function main() {
   const needsOf = (plan, seen = answered) => (rebaseMode ? {} : planNeedsOf(plan, { source: repo, label: inputs.objectiveLabel, answered: seen }));
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
+    harness: inputs.harness,
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,

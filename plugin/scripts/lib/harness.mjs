@@ -10,7 +10,7 @@ import { readAgentFiles } from "./handoff.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
-import { HARNESS_GIT_ENV, claudeLocalSettings, codexLocalConfig, codexShellExclude, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, sandboxedVersion, stageTemp } from "./local.mjs";
+import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerClaudeDir, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -161,14 +161,32 @@ export function promptCacheTtl(harness, env = {}) {
 }
 
 /**
+ * A runner's Claude Code run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), home and temp directory, the
+ * directory it loads Factory's skills from, and the hosts its commands may reach (`allowed_domains`). Null for any
+ * other harness, in local mode and before the agent uid exists.
+ */
+export function claudeRunner({ harness, agent, clone, env = process.env }) {
+  if (harness !== "claude" || !agent || !clone || backend(env).name === "local") return null;
+  return { clone, home: agent.home, tmp: agent.tmp, claudeDir: runnerClaudeDir(agent.home), domains: runnerDomains(input("allowed_domains", { env })) };
+}
+
+/**
+ * A runner's Claude Code env: its commands' TMPDIR in the agent's own temp directory (not the shared /tmp/claude), and
+ * Node's fetch through the sandbox's proxy, which it ignores unless told.
+ */
+const runnerClaudeEnv = (runner) => ({ CLAUDE_CODE_TMPDIR: runner.tmp, NODE_USE_ENV_PROXY: "1" });
+
+/**
  * The command line for one run. `resume` is the session id of the run to continue
  * (Claude --resume, Codex exec resume, Copilot --resume); `agent` names a pinned
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, runner = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD }) {
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
-  // lib/local.mjs to one bar; on a runner the VM is disposable, so permissions are skipped.
+  // lib/local.mjs to one bar. On a runner and in a cloud sandbox VM (`runner`: the agent uid's checkout, home and temp
+  // directory), Claude Code runs its commands in its own sandbox to the same bar (claudeRunnerSettings), so they never
+  // see its credential; Codex and Copilot skip their permissions there and withhold the credential by their own flags.
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
@@ -180,17 +198,22 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // would run on the host outside every sandbox. The repository's CLAUDE.md still loads (as an added directory); Factory's
       // skills and agent definitions, and the repository's own, come from a copy in the stage's usage directory, which no
       // sandbox may write (checkout.mjs claudePlugin).
-      const plugin = local?.claudeDir ? ["--plugin-dir", join(local.claudeDir, "plugin"), "--agents", join(local.claudeDir, "agents.json")] : [];
+      // On a runner the same flags, Factory's skills from the agent's home and its own settings (claudeRunnerSettings):
+      // the checkout and the temp directory ($FACTORY_IN, $FACTORY_OUT) are its working directories.
+      const own = local || runner;
+      const plugin = own?.claudeDir ? ["--plugin-dir", join(own.claudeDir, "plugin"), "--agents", join(own.claudeDir, "agents.json")] : [];
       // The package caches are writable to shell commands only, never added directories, whose CLAUDE.md would load.
       const caches = local?.cacheDirs || [];
-      const perms = local ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches })), ...plugin, ...[...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])].flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
+      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: SHELL_SECRET_KEYS }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, home: runner.home, secretEnv: SHELL_SECRET_KEYS }) : null;
+      const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.tmp] : [];
+      const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
-      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(local ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}) } };
+      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerClaudeEnv(runner) : {}) } };
     }
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
@@ -298,6 +321,12 @@ export function seedSessionTotal(sessionId, total) {
   if (sessionId && total && !SESSION_TOTALS.has(sessionId)) SESSION_TOTALS.set(sessionId, total);
 }
 
+/** A runner's pre-start clear of the checkout (local.mjs clearHarnessConfig), as the agent; a failure refuses the start. */
+const runnerClear = (clone, env) =>
+  clearHarnessConfig(clone, (inner) => exec(...backend(env).sandbox.git(inner, env), { env })).catch((e) => {
+    throw new GitRefusal("git-clear", e.message);
+  });
+
 export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.
   const agentUid = agentUser();
@@ -312,7 +341,10 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     if (sandboxed) copilotTmpdir(sandboxed, env);
   }
   // Locally: whatever hook, settings or MCP server a sandboxed command left in the clone is gone before the harness starts.
-  const cleared = await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
+  // A runner's Claude Code gets the same pre-start clear, as the agent: its own git and the checkout's protected paths
+  // (local.mjs prepareClone) are what its sandbox guards.
+  const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env });
+  const cleared = runner ? await runnerClear(cwd, scrubbedEnv(env)) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
   const cacheTtl = promptCacheTtl(harness, env);
   const creditUsd = copilotCreditUsd();
   // Copilot takes no cap under 30 AI credits: with less than that left, no Copilot run starts (the caller Blocks on the
@@ -322,7 +354,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     log(`${label}: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap; not starting the run`);
     return { ...parseUsage(harness, "", model || null, 0, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
-  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env) });
+  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
@@ -350,7 +382,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
-  const r = await exec(runCmd, runArgs, { cwd, env: childEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra: [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], group: backend(env).name === "local", fileStdio: true });
+  const r = await exec(runCmd, runArgs, { cwd, env: childEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra: [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], group: backend(env).name === "local", fileStdio: true, agentNested: !!runner });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // Only a regular file the harness wrote is read (in the outer sandbox's folder, a link could point anywhere).

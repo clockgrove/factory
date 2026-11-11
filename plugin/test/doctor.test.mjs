@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { credentialChecks, workflowText } from "../scripts/doctor.mjs";
+import { claudeSandboxChecks, credentialChecks, workflowText } from "../scripts/doctor.mjs";
 
 const repo = { full: "o/r", owner: "o", name: "r" };
 const wf = (pin) => `on: issues\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${pin}\n`;
@@ -116,15 +116,16 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   for (const doc of ["README.md", "plugin/skills/setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
 });
 
-test("doctor: Claude off local mode WARNs that its Bash commands can read its credential; local mode and Codex do not", async () => {
-  const env = { GITHUB_ACTIONS: "true" };
-  const shell = (rows) => rows.filter((r) => r.name === "claude shell credential");
-  for (const credential of ["api", "plan"]) {
-    const rows = shell(await credentialChecks({ inputs: { harness: "claude", credential, anthropicApiKey: credential === "api" ? "k" : "", claudeCodeOauthToken: credential === "plan" ? "t" : "" }, env, local: false }));
-    assert.deepEqual(rows.map((r) => r.status), ["WARN"], `claude ${credential} on Actions or in a sandbox`);
-    assert.match(rows[0].detail, /bubblewrap/);
-  }
-  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "login" }, env: {}, local: false })).map((r) => r.status), ["WARN"], "a person's doctor run for an Actions repository, on the CLI login");
-  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env, local: true })), [], "local mode runs Claude's commands in its sandbox");
-  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "codex", credential: "api", codexApiKey: "k", model: "m" }, env, local: false })), [], "Codex withholds its key on every route");
+test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap or socat; no shell-credential WARN anywhere", async () => {
+  const names = (rows) => rows.map((r) => `${r.name}:${r.status}`);
+  const none = async () => false;
+  const all = async () => true;
+  const claude = { harness: "claude" };
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["claude sandbox: bwrap:FAIL", "claude sandbox: socat:FAIL"]);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS"]);
+  assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: {}, local: false, has: none }), [], "a person's machine checking an Actions repository");
+  assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: true, has: none }), [], "local mode checks its own sandboxes");
+  assert.deepEqual(await claudeSandboxChecks({ inputs: { harness: "codex" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none }), []);
+  const rows = await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
+  assert.deepEqual(rows.filter((r) => /shell credential/.test(r.name)), [], "Claude's commands no longer see its credential on any route");
 });

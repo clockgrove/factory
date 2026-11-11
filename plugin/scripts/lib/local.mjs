@@ -604,9 +604,15 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
     // A trusted project's .codex/config.toml merges into this profile, and the model writes the clone: never trust it.
     ...(clone ? [`projects={${tq(clone)}={trust_level="untrusted"}}`] : []),
     `approvals_reviewer="user"`,
-    `shell_environment_policy.exclude=[${secretEnv.map(tq).join(",")}]`,
+    codexShellExclude(secretEnv),
   ].flatMap((c) => ["-c", c]);
 }
+
+/**
+ * Codex's `-c` value that drops `names` from the environment of every command its model runs, on every route. Codex's
+ * default keeps names containing KEY, SECRET or TOKEN (`shell_environment_policy.ignore_default_excludes` is true).
+ */
+export const codexShellExclude = (names) => `shell_environment_policy.exclude=[${names.map(tq).join(",")}]`;
 
 /**
  * The settings.json for the COPILOT_HOME Factory gives a local Copilot run (`copilot --sandbox`): commands in

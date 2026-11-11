@@ -10,7 +10,7 @@ import { readAgentFiles } from "./handoff.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
-import { HARNESS_GIT_ENV, claudeLocalSettings, codexLocalConfig, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, sandboxedVersion, stageTemp } from "./local.mjs";
+import { HARNESS_GIT_ENV, claudeLocalSettings, codexLocalConfig, codexShellExclude, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -25,6 +25,14 @@ export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID
 
 /** Factory's own service keys (inputs.mjs, where local.mjs reads them too): for Factory's process only, never any child's. */
 export { FACTORY_SECRET_KEYS };
+
+/**
+ * The credentials the harness must keep out of the commands its model runs, on every route: its own model credential
+ * (which it needs, but its shell does not) and any other Factory could hand it. Codex drops them by its shell
+ * environment policy, Copilot by --secret-env-vars. Not GitHub's names: the agent's read-only `gh` login is meant for its
+ * commands.
+ */
+export const SHELL_SECRET_KEYS = [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...FACTORY_SECRET_KEYS];
 
 /**
  * Env for a non-harness child (and the harness itself, before its own credential is added): the
@@ -188,7 +196,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
       const args = resume ? ["exec", "resume", resume] : ["exec"];
       // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code.
-      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...FACTORY_SECRET_KEYS] })] : ["--dangerously-bypass-approvals-and-sandbox"];
+      // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included.
+      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: SHELL_SECRET_KEYS })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(SHELL_SECRET_KEYS)];
       args.push("--json", ...perms, "--skip-git-repo-check");
       if (model && !resume) args.push("-m", model);
       if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
@@ -207,7 +216,9 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // Copilot's built-in GitHub MCP server would act with whatever token Copilot holds: always off.
       // The prompt goes on stdin, never `-p <prompt>`: one argv string over 128 KB fails to start on Linux (E2BIG), and
       // without -p a piped stdin is a non-interactive prompt (1.0.107, checked live with 200 KB, fresh and --resume).
-      const args = [...perms, "--disable-builtin-mcps", "--output-format", "json"];
+      // Every route: the credentials (SHELL_SECRET_KEYS, its own COPILOT_GITHUB_TOKEN included) are removed from its shell
+      // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
+      const args = [...perms, `--secret-env-vars=${SHELL_SECRET_KEYS.join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
       // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.

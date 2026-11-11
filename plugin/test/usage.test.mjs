@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { credentialEnv, finalText, harnessCommand, promptCacheTtl, scrubbedEnv } from "../scripts/lib/harness.mjs";
+import { SHELL_SECRET_KEYS, credentialEnv, finalText, harnessCommand, promptCacheTtl, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { localSandbox } from "../scripts/lib/local.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
@@ -204,6 +204,22 @@ test("harness command lines are the documented headless flags; the prompt goes o
   const lp = harnessCommand({ harness: "copilot", prompt: "P", local });
   assert.ok(lp.args.includes("--sandbox") && !lp.args.includes("--allow-all") && !lp.args.includes("--allow-all-paths"), "copilot keeps path checks on locally");
   assert.deepEqual(lp.args.slice(lp.args.indexOf("--add-dir"), lp.args.indexOf("--add-dir") + 2), ["--add-dir", "/u"]);
+});
+
+test("on every route the model's commands never see a credential: Codex excludes them from its shell, Copilot names them secret", () => {
+  const local = { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: ["/u/bin"] };
+  for (const route of [null, local]) {
+    const x = harnessCommand({ harness: "codex", prompt: "P", local: route });
+    const exclude = x.args.filter((a) => a.startsWith("shell_environment_policy.exclude="));
+    assert.equal(exclude.length, 1, `codex ${route ? "local" : "runner"}: one exclude list`);
+    assert.equal(x.args[x.args.indexOf(exclude[0]) - 1], "-c");
+    for (const k of ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN", "FACTORY_APP_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_TOKEN"]) assert.ok(exclude[0].includes(JSON.stringify(k)), `codex: ${k} excluded`);
+    const p = harnessCommand({ harness: "copilot", prompt: "P", local: route });
+    const secret = p.args.filter((a) => a.startsWith("--secret-env-vars="));
+    assert.equal(secret.length, 1, `copilot ${route ? "local" : "runner"}: one secret list`);
+    assert.deepEqual(secret[0].slice("--secret-env-vars=".length).split(","), SHELL_SECRET_KEYS);
+  }
+  assert.ok(SHELL_SECRET_KEYS.includes("COPILOT_GITHUB_TOKEN") && !SHELL_SECRET_KEYS.includes("GH_CONFIG_DIR"), "the agent's read-only gh login stays");
 });
 
 test("a prompt over 128 KB starts every harness: it goes on stdin, no argument nears Linux's per-argument cap", async () => {

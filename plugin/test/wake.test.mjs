@@ -489,3 +489,27 @@ test("dispatch: the run that names a launch owns it: a wake for its marker's exp
   const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality", sandbox: "vercel", default_branch: "main" }));
   for (const job of ["launch", "launch-event"]) assert.match(doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || "")).if, /exit == 'skipped'/, `${job}: a launch that started nothing ticks`);
 });
+
+test("an orphan starting marker: none over a live claim, and a skipping launcher drops its own (#42)", async () => {
+  const { startingRecord } = await import("../scripts/dispatch.mjs");
+  const { withoutOwnMarker } = await import("../scripts/launch.mjs");
+  setSelf(BOT.login);
+  const s = githubStore({ seed: 11 });
+  // An event launcher claims work; the dispatcher, which read the record before that claim, then tries to mark its own
+  // launch of the same stage (that launch will skip: the stage holds). Then the event's start fails transiently.
+  await storeWrite(s, () => ({ vendor: "vercel", stage: "work", state: "running", at: at(3), claimedAt: at(3), leaseUntil: at(13), claim: "eeeeeeeeeeee", launches: [] }), Date.parse(at(3)));
+  const marked = await storeWrite(s, (cur) => startingRecord(cur, { vendor: "vercel", stage: "work", at: at(3.1), run: "900" }), Date.parse(at(3.1)));
+  assert.equal(marked.ok, undefined, "no marker over a live claim");
+  await storeWrite(s, (cur) => (cur?.claim === "eeeeeeeeeeee" ? { ...cur, state: "failed", error: { code: "unavailable", status: 503 }, at: at(4), leaseUntil: null, launches: [...cur.launches, { stage: "work", ok: false, code: "unavailable", at: at(4) }] } : null), Date.parse(at(4)));
+  await storeWrite(s, (cur) => ({ ...cur }), Date.parse(at(14)));
+  const rec = sandboxRecordOf(s.bodyOf(N7, HEAD7));
+  assert.deepEqual(startFailures(rec, SINCE, Date.parse(at(14))).map((f) => f.code), ["unavailable"]);
+  assert.equal(failedSince(rec, SINCE, Date.parse(at(14))), 0, "a transient failure stays transient: no orphan strike");
+  // A launch that skips drops its own run's pending marker only.
+  const two = { launches: [{ stage: "work", ok: false, code: "error", at: at(1) }, { stage: "work", event: "dispatch", ok: null, run: "800", at: at(2) }, { stage: "work", event: "dispatch", ok: null, run: "900", at: at(3) }] };
+  assert.deepEqual(withoutOwnMarker(two, { run: "900", stage: "work" }).launches.map((l) => l.run ?? l.code), ["error", "800"]);
+  assert.equal(withoutOwnMarker(two, { run: "900", stage: "review" }), null, "another stage's marker is not its own");
+  assert.equal(withoutOwnMarker(two, { run: "901" }), null);
+  assert.equal(withoutOwnMarker(null, { run: "900" }), null);
+  setSelf(null);
+});

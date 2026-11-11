@@ -48,7 +48,7 @@ import {
   transientError,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, exec, git } from "./proc.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -569,8 +569,11 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
 const REVIEW_AT_START = /^<!-- factory:\d+:review -->/;
 const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
 
-/** A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. */
-export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
+/**
+ * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. A
+ * provider's refusal (usage.mjs providerRefusal) is no death: the harness answered, and the same request is refused again.
+ */
+export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
 
 /**
  * Hold a fix pass to its scope (outbox.mjs fence, logic.mjs fixScopeRefused). Toolchain files the pass changed outside
@@ -620,7 +623,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
  */
 export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
   if (out instanceof Error) return { refused: `the fix pass's changes could not be read: ${out.message.slice(0, 160)}` };
-  if (rec.timedOut || rec.budgetExceeded || crashed(rec)) return { harness: crashed(rec) ? { ...rec, died: 1 } : rec, ...(out.length ? { refused: fixScopeReason(out) } : {}) };
+  if (rec.timedOut || rec.budgetExceeded || rec.refusal || crashed(rec)) return { harness: crashed(rec) ? { ...rec, died: 1 } : rec, ...(out.length ? { refused: fixScopeReason(out) } : {}) };
   if (out.length) return { refused: fixScopeReason(out) };
   const asks = typeof exitNow === "string" && exitNow !== exitBefore && parseExitRecord(exitNow)?.exit === "question";
   return asks ? { refused: fixScopeReason(first), question: true } : {};
@@ -902,7 +905,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (rec.sessionId) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex has no in-run cap; Copilot's is checked again here
     if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
-    if (rec.timedOut || rec.budgetExceeded) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: rec };
+    if (rec.timedOut || rec.budgetExceeded || rec.refusal) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: rec };
     if (crashed(rec)) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { ...rec, died: 1 }, died: true };
     const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage), label: `${label}-scope-${passes}`, progress, io });
     usage.push(...held.usage);
@@ -1093,7 +1096,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
     const resume = session?.canResume ? session.id : null;
     const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd, env, timeoutMs: Math.min(10 * 60_000, remainingMs(deadlineAt)), eventsFile, label });
     usage.push(rec);
-    return { text: rec.finalText };
+    return rec.refusal ? { refused: "provider", refusal: rec.refusal } : { text: rec.finalText };
   };
   let record = null;
   let basis = "exit file";
@@ -1103,7 +1106,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   } else log("no $FACTORY_OUT/exit.json; asking the harness");
   if (!record) {
     const asked = await ask(EXIT_PROMPT, "exit");
-    const refused = { time: "no exit record and no time left to ask", unmetered: "unmetered: max_usd cannot be enforced", budget: "no exit record and no budget left to ask" }[asked.refused];
+    const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", unmetered: "unmetered: max_usd cannot be enforced", budget: "no exit record and no budget left to ask" }[asked.refused];
     if (refused) return { record: { exit: "blocked", reason: refused, questions: [] }, usage, basis: "none" };
     record = parseExitRecord(asked.text);
     if (!record) return { record: { exit: "blocked", reason: "the harness gave no exit record (neither the exit file nor a JSON answer)", questions: [] }, usage, basis: "none" };

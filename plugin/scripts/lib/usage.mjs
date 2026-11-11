@@ -82,6 +82,57 @@ export function jsonLines(text) {
 }
 
 /**
+ * Error types and codes that no retry can pass, whatever the status: an exhausted quota or billing (OpenAI's
+ * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit).
+ */
+const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authorization"]);
+/** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
+const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
+const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+/**
+ * A provider's refusal the harness reported as structure, when no retry can pass it: {harness, status, type, code,
+ * message}, else null. Decided on the fields alone (an HTTP status in 4xx other than RETRYABLE_4XX, or a REFUSED_KINDS
+ * type or code), never on the message's words; a 429 rate limit, a 5xx or a transport error (no status) is null, so
+ * the run stays a death or a harness error as before. The parsers ask only for a run that failed. Each harness's structure:
+ *   claude  : the result line with is_error and `api_error_status`; the type is the API error message's `error`
+ *   codex   : the last `turn.failed` (else `error`) event, whose `error.message` is the provider's JSON error body
+ *             ({status, error: {type, code, message}}); a message that is not a JSON object is prose: null
+ *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
+ */
+export function providerRefusal(harness, events) {
+  let r = null;
+  if (harness === "claude") {
+    const res = [...events].reverse().find((e) => e?.type === "result");
+    const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
+    const status = num(res?.api_error_status) ?? num(api?.api_error_status);
+    if (res?.is_error !== true || status === null) return null;
+    r = { status, type: str(api?.error), code: null, message: str(res.result) };
+  } else if (harness === "codex") {
+    const last = [...events].reverse().find((e) => e?.type === "turn.failed" || e?.type === "error" || e?.type === "turn.completed");
+    if (!last || last.type === "turn.completed") return null;
+    const raw = last.type === "turn.failed" ? last.error?.message : last.message;
+    let body = null;
+    if (typeof raw === "string" && raw.trim().startsWith("{")) {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+    }
+    if (!body || typeof body !== "object") return null;
+    r = { status: num(body.status), type: str(body.error?.type), code: str(body.error?.code), message: str(body.error?.message) };
+  } else if (harness === "copilot") {
+    const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
+    if (!d || typeof d !== "object") return null;
+    r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode), message: str(d.message) };
+  } else return null;
+  const kind = REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
+  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
+  return refused ? { harness, ...r } : null;
+}
+
+/**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by
  * component on the bench's scorecard.
@@ -132,13 +183,16 @@ export function parseClaude(stdout, model) {
   }
   let init = null;
   let first = null;
+  let lines = result ? [result] : [];
   if (!result) {
-    const lines = jsonLines(stdout);
+    lines = jsonLines(stdout);
     result = [...lines].reverse().find((l) => l && l.type === "result") ?? lines.at(-1) ?? null;
     init = lines.find((l) => l && l.type === "system" && l.session_id) ?? null;
     first = claudeFirstRequest(lines);
   }
   rec.cache = { first };
+  const refusal = providerRefusal("claude", lines);
+  if (refusal) rec.refusal = refusal;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -274,6 +328,8 @@ export function parseCodex(stdout, model) {
   rec.cache = { first };
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
+  const refusal = rec.ok ? null : providerRefusal("codex", events);
+  if (refusal) rec.refusal = refusal;
   rec.usd = priceCodex(rec.model, rec.tokens);
   rec.basis = rec.usd === null ? (rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
   return rec;
@@ -389,7 +445,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   let streamNano = null;
   let streamRequests = null;
   let ttlSeconds = null;
-  for (const e of jsonLines(stdout)) {
+  const events = jsonLines(stdout);
+  for (const e of events) {
     if (e.type === "assistant.turn_end") turns += 1;
     if (e.type === "assistant.message" && e.data?.model && !rec.model) rec.model = cleanModel(e.data.model);
     if (e.type === "session.usage_checkpoint") {
@@ -424,6 +481,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   if (requests >= 0) rec.premiumRequests = requests;
   if (!rec.model) rec.model = a.model;
   const p = priceCredits(a, creditUsd);
+  const refusal = rec.ok ? null : providerRefusal("copilot", events);
+  if (refusal) rec.refusal = refusal;
   if (p.aiu !== null) rec.aiu = p.aiu;
   if (p.lowerBound) rec.usdLowerBound = true;
   rec.sessionStartTime = a.sessionStartTime;
@@ -443,19 +502,17 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   return rec;
 }
 
-/** One entry point: harness name to parser. */
+/** One entry point: harness name to parser. A provider's refusal is the run's error, in its structured fields. */
 export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
-  switch (harness) {
-    case "claude":
-      return parseClaude(stdout, model);
-    case "codex":
-      return parseCodex(stdout, model);
-    case "copilot":
-      return parseCopilot(stdout, model, exitCode, extra);
-    default:
-      throw new Error(`unknown harness ${harness}`);
-  }
+  const parse = { claude: () => parseClaude(stdout, model), codex: () => parseCodex(stdout, model), copilot: () => parseCopilot(stdout, model, exitCode, extra) }[harness];
+  if (!parse) throw new Error(`unknown harness ${harness}`);
+  const rec = parse();
+  if (rec.refusal) rec.error = `refused by the provider: ${refusalFields(rec.refusal)}`;
+  return rec;
 }
+
+/** A refusal's structured fields in one line: "HTTP 400 invalid_request_error <code>". */
+export const refusalFields = (r) => [r.status !== null ? `HTTP ${r.status}` : null, r.type, r.code].filter(Boolean).join(" ");
 
 /** Sum several records of one run (first prompt, validation retry, review pass). */
 /** Per-model totals summed across runs; undefined when no run reported a split. */

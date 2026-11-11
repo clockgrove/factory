@@ -13,7 +13,7 @@ import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
-import { commandText, parseMaintainer, protectedPaths, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
+import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
@@ -123,6 +123,7 @@ export async function probeHarness({ inputs, env = process.env }) {
   const { cmd, args, stdin } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5 });
   const r = await exec(cmd, args, { env: { ...env, ...cred.env }, input: stdin, timeoutMs: 180_000 });
   const rec = parseUsage(h, r.stdout, inputs.model || null, r.code ?? 1);
+  if (rec.refusal) return FAIL(`${h} probe`, refusalReason(rec.refusal), "an Objective would Block on the same refusal: fix the credential's account or the model setting first");
   if (r.code !== 0 && !rec.ok) return FAIL(`${h} probe`, `exit ${r.code}: ${String(r.stderr).slice(-200).trim()}`, "check the credential and the CLI version");
   const usage = rec.usd !== null ? `$${rec.usd}` : rec.tokens.input !== null ? `${rec.tokens.input} input tokens, ${rec.basis}` : "no usage output";
   return (rec.usd !== null || rec.tokens.input !== null || h === "copilot" ? PASS : WARN)(`${h} probe`, `model ${rec.model ?? "default"}, ${usage}`, "usage output missing: update the CLI");

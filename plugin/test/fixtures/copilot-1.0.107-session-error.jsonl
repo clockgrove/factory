@@ -1,0 +1,3 @@
+{"type":"user.message","data":{"content":"Reply with the single word ok."},"id":"00000000-0000-0000-0000-000000000011","timestamp":"2026-11-11T01:40:00.000Z","parentId":null}
+{"type":"session.error","data":{"errorType":"quota","errorCode":"quota_exceeded","statusCode":402,"message":"You have no AI credits left for this billing period."},"id":"00000000-0000-0000-0000-000000000012","timestamp":"2026-11-11T01:40:01.000Z","parentId":"00000000-0000-0000-0000-000000000011"}
+{"type":"result","timestamp":"2026-11-11T01:40:01.100Z","sessionId":"00000000-0000-0000-0000-000000000013","exitCode":1,"usage":{"premiumRequests":0,"totalApiDurationMs":0,"sessionDurationMs":1100,"codeChanges":{"linesAdded":0,"linesRemoved":0,"filesModified":[]}}}

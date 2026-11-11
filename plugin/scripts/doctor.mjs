@@ -81,7 +81,7 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
 
 /**
  * The worker secrets (lib/worker-secrets.mjs), when `worker_secrets` names any: each refused entry, each SOURCE with no
- * value here and each value equal to Factory's own AI Gateway key (compared by hash, in this process; the worker
+ * value here and each value equal to Factory's own AI Gateway key (compared in constant time, in this process; the worker
  * withholds it) is a WARN; else one PASS naming what reaches the worker's shell. Values: `worker_secret_values` (a job,
  * a stage), else, off Actions, this shell's variables (a developer's doctor run for local mode). Names only, never a value.
  */

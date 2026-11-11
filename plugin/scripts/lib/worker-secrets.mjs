@@ -12,12 +12,12 @@
 //
 // Never the model's credential, Factory's or the runner's tokens, a name the harness or the runner reads, or a name
 // that changes how commands run: such an entry is refused. Factory's own AI_GATEWAY_API_KEY is refused as a SOURCE, and
-// a value that equals Factory's key is withheld (compared by hash, in this process, never printed).
+// a value that equals Factory's key is withheld (compared in constant time, in this process, never printed).
 //
 // Only the worker's harness gets them, through one variable (SHELL_SECRETS_ENV) that runHarness unpacks for the harness
 // child alone and scrubbedEnv removes everywhere else: the repository's setup, install and validation, Factory's own
 // git, and the reviewer never see them.
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets } from "./inputs.mjs";
 
 /** The one variable that carries the worker's shell secrets (JSON {NAME: value}) from worker.mjs to runHarness. */
@@ -110,16 +110,15 @@ export function parseSecretValues(text) {
   return out;
 }
 
-/** This process's own key for sameSecret: random, never stored or printed. */
-const COMPARE_KEY = randomBytes(32);
 /**
- * Whether two secrets are equal, by their HMAC-SHA256 under a key of this process's own, compared in constant time:
- * neither is ever printed, stored or compared as text.
+ * Whether two secrets are equal: their bytes compared in constant time in this process (no hash or other value is
+ * derived from either), and neither is ever printed or stored. Only the lengths are compared first.
  */
 export function sameSecret(a, b) {
   if (!a || !b) return false;
-  const h = (s) => createHmac("sha256", COMPARE_KEY).update(String(s)).digest();
-  return timingSafeEqual(h(a), h(b));
+  const x = Buffer.from(String(a), "utf8");
+  const y = Buffer.from(String(b), "utf8");
+  return x.length === y.length && timingSafeEqual(x, y);
 }
 
 /**

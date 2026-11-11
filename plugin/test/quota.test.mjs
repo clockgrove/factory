@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { OPERATIONS } from "../scripts/lib/adapters/sandbox.mjs";
-import { PREVIOUS_IMAGE_MS, prunableImages } from "../scripts/lib/image.mjs";
+import { PREVIOUS_IMAGE_MS, imagePrune, prunableImages } from "../scripts/lib/image.mjs";
 import { QUOTA_BACKOFF_MS, QUOTA_MAX_TRIES, QUOTA_WAIT_MS, quotaBackoff, quotaWaiting, selectReady, sweepDecision } from "../scripts/lib/logic.mjs";
 import { storageLine } from "../scripts/sweep.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -75,6 +75,9 @@ test("images: the current one stays, an older recorded one until no stage can st
   assert.deepEqual(prunableImages(images, { ...current, source: "gone" }, verified, NOW), [], "a current the listing does not show: nothing goes");
   assert.deepEqual(pruned(NOW, images.slice(1, 2)), [], "only the current: it stays");
   assert.ok(!pruned(NOW).includes("new"), "a newer image (being recorded, or off the default branch) stays");
+  // When the first image kept for a starting stage becomes prunable: the sweep's own next run.
+  assert.equal(imagePrune(images, current, verified, T + MIN).until, T - 3 * MIN + PREVIOUS_IMAGE_MS, "the one two back, superseded 3 minutes before the current");
+  assert.equal(imagePrune(images, current, verified, T + PREVIOUS_IMAGE_MS).until, null, "none kept: no wait");
 });
 
 test("storage: one line of numbers; the adapter contract has storage", () => {

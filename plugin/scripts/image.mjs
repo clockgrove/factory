@@ -8,7 +8,8 @@
 // id, the head and the snapshot (the vendor's proof). The GitHub record is a marker comment the Factory App writes on
 // its image issue, with a token minted for that alone (issues: write on this repository); images beyond the newest
 // two are destroyed, found from the vendor's listing only. Runs on a push to the default branch (until today's builds
-// pass image_daily_minutes), on the nightly schedule, or by hand on the default branch's head. The build sandbox gets
+// pass image_daily_minutes), on the first dispatcher tick of a UTC day that finds a build owed (lib/image.mjs
+// imageOwed), on the nightly schedule (the backstop), or by hand on the default branch's head. The build sandbox gets
 // no secret: the vendor's credentials and the App key stay in this process, whose environment keeps none.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -21,9 +22,10 @@ import { installCommand, runnerFileEnv } from "./lib/checkout.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { getRepo, onDefaultBranch, repoOf, rest } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
-import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
+import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
 import { SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { setSelf } from "./lib/logic.mjs";
+import { armSweepWake } from "./dispatch.mjs";
 
 /** The build sandbox's limits: setup that takes longer than this is not an image build. */
 const BUILD_MS = 40 * 60_000;
@@ -181,11 +183,14 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
   }
 }
 
-/** Which kind of build this event asks for, or null: a push to the default branch, the nightly cron, a manual run. */
+/**
+ * Which kind of build this event asks for, or null: a push to the default branch, the nightly cron, a manual run
+ * (`image: true`). The dispatcher's owed build (`image_owed`) is the caller's to add: it rides on any event.
+ */
 export function imageTrigger(eventName, payload, defaultBranch) {
   if (eventName === "push") return payload?.ref === `refs/heads/${defaultBranch}` ? "merge" : null;
   if (eventName === "schedule") return payload?.schedule === NIGHTLY_CRON ? "nightly" : null;
-  if (eventName === "workflow_dispatch") return "manual";
+  if (eventName === "workflow_dispatch" && payload?.inputs?.image === "true") return "manual";
   return null;
 }
 
@@ -210,24 +215,35 @@ async function main() {
   const payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
   const repoData = await getRepo(repo, { token });
   const branch = repoData.default_branch;
-  const trigger = args.manual === "true" ? "manual" : imageTrigger(eventName, payload, branch);
+  // A build the dispatcher saw owed (lib/image.mjs imageOwed) rides on whatever event ticked it.
+  const trigger = args.manual === "true" ? "manual" : (imageTrigger(eventName, payload, branch) ?? (inputs.imageOwed ? "owed" : null));
   if (!trigger) return done("skipped", `no image build on ${eventName || "this event"}`);
   const head = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (trigger === "merge" && process.env.GITHUB_SHA && head !== process.env.GITHUB_SHA) throw new Error(`the checkout is at ${head}, not the pushed head ${process.env.GITHUB_SHA}`);
-  // Only merged code becomes the image: by hand, exactly the default branch's head now; otherwise a commit on it.
+  // Only merged code becomes the image: by hand or owed, exactly the default branch's head now; otherwise a commit on it.
   const tip = (await rest(`repos/${repo.full}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, { token }))?.object?.sha;
-  if (trigger === "manual" ? head !== tip : head !== tip && !(await onDefaultBranch(repo, head, { token }))) {
-    done("refused", `${head.slice(0, 7)} is not ${trigger === "manual" ? "the head" : "on the history"} of ${branch} (${String(tip).slice(0, 7)}); only merged code becomes the image`);
-    process.exitCode = 1;
-    return;
-  }
-
   // The App's token for the record alone: issues write on this repository. The key is gone from memory once minted.
   const minted = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, permissions: { issues: "write" } });
   inputs.appPrivateKey = "";
   mask(minted.token);
   setSelf(`${minted.appSlug}[bot]`);
   const app = { token: minted.token };
+  // An owed build checks the record as it is now (a queued tick's job may start after another build of the head) and
+  // records its attempt before anything that can fail, so a crash, a timeout, a refusal or a vendor failure ends the
+  // owing: the next merge or the nightly cron tries again, never the next tick.
+  let attempt = null;
+  if (trigger === "owed") {
+    const tipAt = (await rest(`repos/${repo.full}/commits/${tip}`, { token }))?.commit?.committer?.date;
+    attempt = owedAttempt({ builds: (await listImages(repo, app)).builds, tip, tipAt, refresh: inputs.imageRefresh, dailyMinutes: inputs.imageDailyMinutes, vendor: inputs.sandbox });
+    if (!attempt) return done("skipped", `${String(tip).slice(0, 7)} is owed no build now (a build of it is recorded, built, failed or started, or today's turn is used)`);
+    await recordImage(repo, attempt, app);
+  }
+  const exact = trigger === "manual" || trigger === "owed";
+  if (exact ? head !== tip : head !== tip && !(await onDefaultBranch(repo, head, { token }))) {
+    done("refused", `${head.slice(0, 7)} is not ${exact ? "the head" : "on the history"} of ${branch} (${String(tip).slice(0, 7)}); only merged code becomes the image`);
+    process.exitCode = 1;
+    return;
+  }
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });
   inputs.vercelToken = "";
   const repoId = String(process.env.GITHUB_REPOSITORY_ID || repoData.id);
@@ -243,6 +259,12 @@ async function main() {
     return done("skipped", decision.skip);
   }
   if (decision.note) log(`image: ${decision.note}`);
+  // The attempt, recorded before the build's first vendor change: a crash or a timeout past here leaves it, so the
+  // dispatcher owes this head no build (lib/image.mjs imageOwed). The build's own entry replaces it (withBuild).
+  if (!attempt) {
+    attempt = { vendor: inputs.sandbox, snapshot: null, sha: head, builtAt: new Date().toISOString(), buildMs: 0, attempt: true };
+    await recordImage(repo, attempt, app).catch((e) => log(`image: the attempt was not recorded (${e.status ?? String(e.message).slice(0, 120)})`));
+  }
 
   // One build at a time (the job's concurrency group), so a sandbox with the repository's tag that is not a finished
   // image is a crashed or cancelled build's.
@@ -265,7 +287,7 @@ async function main() {
   }
   const base = adapter.baseImage(inputs.nodeVersion);
   log(`image: building ${repo.full}@${head.slice(0, 7)} (${trigger}) from ${base}; bundle ${(bundle.length / 1e6).toFixed(1)} MB`);
-  const builtAt = new Date().toISOString();
+  const builtAt = attempt.builtAt;
   // The build's output is the repository's: no workflow command in it is honoured while it streams.
   const stopToken = randomBytes(16).toString("hex");
   process.stdout.write(`::stop-commands::${stopToken}\n`);
@@ -301,9 +323,13 @@ async function main() {
   }
   // Older images beyond the newest two, from the vendor's listing in this project (never from GitHub's records): each
   // goes with its snapshot. A stage that read the previous one a moment ago still finds it.
-  for (const i of staleImages((await vendorImages(adapter, repoId)).images, built.source)) {
+  const listed = (await vendorImages(adapter, repoId)).images;
+  const stale = staleImages(listed, built.source);
+  for (const i of stale) {
     await adapter.destroy(i.source).then(() => log(`image: destroyed superseded image ${i.source} (${i.snapshot})`), (e) => log(`image: destroying ${i.source} failed (${e.code ?? e.message})`));
   }
+  // The image before this one stays while a stage may still be starting from it; the sweep's wake takes it then.
+  await armSweepWake("image", imageWaits({ built: true, olderImage: listed.some((i) => i.source !== built.source && !stale.includes(i)) }), { repo, payload, eventName, token });
   const today = todayMs + built.buildMs;
   const gb = built.sizeBytes === null ? "?" : (built.sizeBytes / 1e9).toFixed(2);
   log(`image: ${built.snapshot} from ${head.slice(0, 7)} in ${(built.buildMs / 1000).toFixed(1)} s; ${gb} GB (${built.usdPerMonth === null ? "?" : `$${built.usdPerMonth}`}/month stored); build sandbox $${built.usd ?? "?"}; today's builds ${(today / 60_000).toFixed(1)} min`);

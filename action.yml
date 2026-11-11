@@ -132,10 +132,13 @@ inputs:
     description: 'VERCEL_PROJECT_ID for `sandbox: vercel`: the Vercel project the sandboxes belong to.'
     required: false
   image_refresh:
-    description: '(image) `merge` (default) builds the sandbox image on every push to the default branch until today''s builds reach `image_daily_minutes`, then leaves the day''s last refresh to the nightly build; `nightly` builds on the nightly schedule only.'
+    description: '(image) `merge` (default) builds the sandbox image on every push to the default branch until today''s builds reach `image_daily_minutes`, then leaves the head to the next UTC day''s first dispatcher tick (`image_owed`; the nightly schedule is the backstop); `nightly` builds a head once a day, on that tick or the nightly schedule.'
     required: false
   image_daily_minutes:
     description: '(image) Build minutes a day the image may take on merges before refreshes move to the nightly build. Default 5.'
+    required: false
+  image_owed:
+    description: '(image) `true` builds the default branch''s head on an event other than a push, the nightly cron or `image: true`: the dispatcher''s `image_owed` output, when an earlier day left the head unbuilt and today''s turn allows a build.'
     required: false
   sandbox_idle_days:
     description: '(sweep) Days an Objective''s sandbox may stay stopped, the Objective neither Running nor In review, before the sweep destroys it. Default 7.'
@@ -167,15 +170,21 @@ outputs:
   queue_watch:
     description: (dispatch) The JSON list of PRs the merge pass left in the merge queue, for the queue-watch job (`pr` in mode watch); empty when there are none.
     value: ${{ steps.run.outputs.queue_watch }}
+  image_owed:
+    description: (dispatch, cloud sandbox) `true` when the default branch's head is owed an image build now (an earlier day left it unbuilt and today's turn allows one), for the image job's `if:`.
+    value: ${{ steps.run.outputs.image_owed }}
   wake_at:
-    description: (dispatch) When the wake job ticks the dispatcher next (an ISO time), for a wait only time ends; empty when no wake is due or one already armed covers it.
+    description: (dispatch) When the wake job ticks the dispatcher next (an ISO time), for a wait only time ends; (sweep, image) when that job's wake ticks the sweep next; empty when no wake is due or one already armed covers it.
     value: ${{ steps.run.outputs.wake_at }}
   wake_kind:
-    description: (dispatch) What `wake_at` waits for, one of `lease`, `quota`, `start-retry`, `daily-cap` or `retry`.
+    description: (dispatch) What `wake_at` waits for, one of `lease`, `quota`, `start-retry`, `daily-cap` or `retry`; (sweep, image) `sweep`, a sweep wait of minutes.
     value: ${{ steps.run.outputs.wake_kind }}
   exit:
     description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `deferred` (the stage did not start and waits for its retry time, after a transient vendor error or for a review the vendor's quota refused), `tick`, `stopped`, `token`, `skipped` or `blocked`.
     value: ${{ steps.run.outputs.exit }}
+  sweep:
+    description: (launch) `true` when the quota sweep a refused start ran left a sandbox for the sweep job (its usage needs that job's upload slots); the launch job's tick then runs the sweep job too.
+    value: ${{ steps.run.outputs.sweep }}
   reason:
     description: (work, review) The one-line reason for a blocked or question exit.
     value: ${{ steps.run.outputs.reason }}
@@ -323,6 +332,7 @@ runs:
         FACTORY_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
         FACTORY_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
         FACTORY_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
+        FACTORY_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
         FACTORY_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
         FACTORY_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
         FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage

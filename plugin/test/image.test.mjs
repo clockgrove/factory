@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, findImageIssue, currentImage, imageDecision, imageOwed, imageWaits, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
+import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, findImageIssue, currentImage, imageDecision, imageOwed, imageWaits, owedAttempt, withBuild, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
 import { marker, setSelf } from "../scripts/lib/logic.mjs";
 import { changePath, imageTrigger, privilegedChanges, unexplainedChanges } from "../scripts/image.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -129,6 +129,31 @@ test("an owed build: a head an earlier day left unbuilt, on the UTC day's first 
   assert.equal(imageOwed({ ...base, refresh: "nightly", builds: [{ sha: OTHER, builtAt: "2026-11-09T00:30:00Z", buildMs: 1000 }] }), false, "already one today");
   assert.equal(imageOwed({ ...base, head: undefined }), false, "an unread head");
   assert.equal(imageOwed({ ...base, builds: [] }), true, "no build yet");
+  // Any recorded build of the head ends the owing, not only the newest entry.
+  const other = { sha: OTHER, builtAt: "2026-11-09T01:00:00Z", buildMs: 1000 };
+  assert.equal(imageOwed({ ...base, builds: [other, { sha: SHA, builtAt: yesterday, buildMs: 1000, attempt: true }] }), false, "an attempt a crash or a timeout left");
+  assert.equal(imageOwed({ ...base, builds: [other, { sha: SHA, snapshot: "snap_1", builtAt: yesterday, buildMs: 90_000 }] }), false, "the current image is the head, with a newer failed build of another head on top");
+});
+
+test("an owed build's job re-checks the record when it starts, records its attempt first, and the build's own entry replaces it", () => {
+  const now = new Date("2026-11-09T03:00:00Z");
+  const base = { tip: SHA, tipAt: "2026-11-08T22:00:00Z", refresh: "merge", dailyMinutes: 5, vendor: "vercel", now };
+  const attempt = owedAttempt({ ...base, builds: [] });
+  assert.deepEqual(attempt, { vendor: "vercel", snapshot: null, source: null, sha: SHA, builtAt: now.toISOString(), buildMs: 0, sizeBytes: null, usd: null, attempt: true });
+  // A tick during that build queued another owed job: it starts after the attempt is on the record, and builds nothing.
+  let builds = withBuild([], attempt);
+  assert.equal(owedAttempt({ ...base, builds }), null, "a queued job after an attempt (crashed, timed out or running)");
+  // The dispatcher owes the head nothing either, whatever the build's end.
+  assert.equal(imageOwed({ refresh: "merge", head: SHA, headAt: base.tipAt, builds, todayMs: 0, dailyMinutes: 5, now }), false);
+  // A failed build's entry replaces its attempt: one entry, its minutes counted.
+  builds = withBuild(builds, { vendor: "vercel", snapshot: null, sha: SHA, builtAt: attempt.builtAt, buildMs: 120_000 });
+  assert.equal(builds.length, 1);
+  assert.equal(builds[0].attempt, undefined);
+  assert.equal(builds[0].buildMs, 120_000);
+  assert.equal(owedAttempt({ ...base, builds, now: new Date("2026-11-09T05:00:00Z") }), null, "a failed head waits for the next merge or the nightly cron");
+  // An attempt of another start stays: it is another build that was tried.
+  assert.equal(withBuild([attempt], { vendor: "vercel", snapshot: null, sha: SHA, builtAt: "2026-11-09T04:00:00.000Z", buildMs: 1000 }).length, 2);
+  assert.equal(owedAttempt({ ...base, builds: [], tipAt: "2026-11-09T01:00:00Z" }), null, "a head merged today builds on its own push");
 });
 
 test("the image job's own wake: the sweep's, minutes after a build that left an older image", () => {
@@ -182,7 +207,10 @@ test("workflow template: the image job runs on the default branch's pushes, the 
   assert.match(job.if, /inputs\.image == 'true' && github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/, "by hand only on the default branch");
   // An owed build rides on the dispatcher's tick, never a pull request's run, and checks out the default branch.
   assert.equal(job.needs, "dispatch");
-  assert.match(job.if, /^!cancelled\(\) && \(/, "a push or the cron, where the dispatcher is skipped, still runs it");
+  assert.match(job.if, /\) && !cancelled\(\)$/, "a push, the cron or a manual run, where the dispatcher is skipped, still runs it");
+  assert.doesNotMatch(job.if, /^!/, "an if: starting with ! is YAML's tag notation");
+  // A manual build's run skips the dispatcher by its own if:, so no pending dispatcher a newer tick cancels can drop it.
+  assert.match(doc.jobs.dispatch.if, /\(github\.event_name == 'workflow_dispatch' && github\.event\.inputs\.image != 'true'\)/);
   assert.match(job.if, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event_name != 'pull_request'/);
   assert.match(job.steps[0].with.ref, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event\.repository\.default_branch/);
   assert.match(job.steps.find((s) => s.with?.mode === "image").with.image_owed, /needs\.dispatch\.outputs\.image_owed/);

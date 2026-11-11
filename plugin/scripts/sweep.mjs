@@ -255,17 +255,20 @@ export const SWEEP_RETRY_MS = 10 * 60_000;
  * left, each a wait of minutes:
  * - a minute after a wait ends: a stage that ended moments ago (the launcher's end answers it first), a sandbox created
  *   moments ago, a superseded image a stage may still be starting from, or any such wait that ended during this run;
- * - SWEEP_RETRY_MS on: what a cap left (sweep_max_destroys, the collection slots), and once, never from a run a `sweep`
- *   wake started, what a failure left (an unreadable issue, a vendor error, a held lock).
+ * - SWEEP_RETRY_MS on: what a cap left (sweep_max_destroys, the collection slots) after a run that destroyed or stopped
+ *   one (a cap of 0 leaves the rest to events and the cron), and once, never from a run a `sweep` wake started, what a
+ *   failure left (an unreadable issue, a vendor error, a held lock).
  * A stopped sandbox's idle days (days, not minutes) get no wake: the next sweep an event runs (an Objective closing,
  * merging or Blocking), or the hourly cron's, destroys it.
  */
 export function sweepWaits({ results = [], imagesUntil = null, imagesFailed = false, now = Date.now(), firedBy = null }) {
   const out = [];
   const soon = (ms) => new Date(Math.max(ms, now) + WAKE_SLACK_MS).toISOString();
+  // A cap's rest comes back only after a run that got somewhere (a cap of 0 would re-arm for ever).
+  const progress = results.some((r) => r.action === "destroyed" || r.action === "stopped");
   for (const r of results) {
     if (r.action === "kept" && Number.isFinite(r.until) && (!r.idle || r.until <= now)) out.push({ issue: r.issue, kind: "sweep", at: soon(r.until) });
-    if (r.retry === "cap" || (r.retry === "error" && firedBy?.kind !== "sweep")) out.push({ issue: r.issue, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
+    if ((r.retry === "cap" && progress) || (r.retry === "error" && firedBy?.kind !== "sweep")) out.push({ issue: r.issue, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
   }
   if (Number.isFinite(imagesUntil)) out.push({ issue: null, kind: "sweep", at: soon(imagesUntil) });
   if (imagesFailed && firedBy?.kind !== "sweep") out.push({ issue: null, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });

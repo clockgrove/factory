@@ -22,7 +22,7 @@ import { installCommand, runnerFileEnv } from "./lib/checkout.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { getRepo, onDefaultBranch, repoOf, rest } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
-import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageWaits, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
+import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
 import { SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { setSelf } from "./lib/logic.mjs";
 import { armSweepWake } from "./dispatch.mjs";
@@ -222,19 +222,28 @@ async function main() {
   if (trigger === "merge" && process.env.GITHUB_SHA && head !== process.env.GITHUB_SHA) throw new Error(`the checkout is at ${head}, not the pushed head ${process.env.GITHUB_SHA}`);
   // Only merged code becomes the image: by hand or owed, exactly the default branch's head now; otherwise a commit on it.
   const tip = (await rest(`repos/${repo.full}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, { token }))?.object?.sha;
-  const exact = trigger === "manual" || trigger === "owed";
-  if (exact ? head !== tip : head !== tip && !(await onDefaultBranch(repo, head, { token }))) {
-    done("refused", `${head.slice(0, 7)} is not ${exact ? "the head" : "on the history"} of ${branch} (${String(tip).slice(0, 7)}); only merged code becomes the image`);
-    process.exitCode = 1;
-    return;
-  }
-
   // The App's token for the record alone: issues write on this repository. The key is gone from memory once minted.
   const minted = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, permissions: { issues: "write" } });
   inputs.appPrivateKey = "";
   mask(minted.token);
   setSelf(`${minted.appSlug}[bot]`);
   const app = { token: minted.token };
+  // An owed build checks the record as it is now (a queued tick's job may start after another build of the head) and
+  // records its attempt before anything that can fail, so a crash, a timeout, a refusal or a vendor failure ends the
+  // owing: the next merge or the nightly cron tries again, never the next tick.
+  let attempt = null;
+  if (trigger === "owed") {
+    const tipAt = (await rest(`repos/${repo.full}/commits/${tip}`, { token }))?.commit?.committer?.date;
+    attempt = owedAttempt({ builds: (await listImages(repo, app)).builds, tip, tipAt, refresh: inputs.imageRefresh, dailyMinutes: inputs.imageDailyMinutes, vendor: inputs.sandbox });
+    if (!attempt) return done("skipped", `${String(tip).slice(0, 7)} is owed no build now (a build of it is recorded, built, failed or started, or today's turn is used)`);
+    await recordImage(repo, attempt, app);
+  }
+  const exact = trigger === "manual" || trigger === "owed";
+  if (exact ? head !== tip : head !== tip && !(await onDefaultBranch(repo, head, { token }))) {
+    done("refused", `${head.slice(0, 7)} is not ${exact ? "the head" : "on the history"} of ${branch} (${String(tip).slice(0, 7)}); only merged code becomes the image`);
+    process.exitCode = 1;
+    return;
+  }
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });
   inputs.vercelToken = "";
   const repoId = String(process.env.GITHUB_REPOSITORY_ID || repoData.id);
@@ -250,6 +259,12 @@ async function main() {
     return done("skipped", decision.skip);
   }
   if (decision.note) log(`image: ${decision.note}`);
+  // The attempt, recorded before the build's first vendor change: a crash or a timeout past here leaves it, so the
+  // dispatcher owes this head no build (lib/image.mjs imageOwed). The build's own entry replaces it (withBuild).
+  if (!attempt) {
+    attempt = { vendor: inputs.sandbox, snapshot: null, sha: head, builtAt: new Date().toISOString(), buildMs: 0, attempt: true };
+    await recordImage(repo, attempt, app).catch((e) => log(`image: the attempt was not recorded (${e.status ?? String(e.message).slice(0, 120)})`));
+  }
 
   // One build at a time (the job's concurrency group), so a sandbox with the repository's tag that is not a finished
   // image is a crashed or cancelled build's.
@@ -272,7 +287,7 @@ async function main() {
   }
   const base = adapter.baseImage(inputs.nodeVersion);
   log(`image: building ${repo.full}@${head.slice(0, 7)} (${trigger}) from ${base}; bundle ${(bundle.length / 1e6).toFixed(1)} MB`);
-  const builtAt = new Date().toISOString();
+  const builtAt = attempt.builtAt;
   // The build's output is the repository's: no workflow command in it is honoured while it streams.
   const stopToken = randomBytes(16).toString("hex");
   process.stdout.write(`::stop-commands::${stopToken}\n`);

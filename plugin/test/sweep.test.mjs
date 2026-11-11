@@ -45,7 +45,9 @@ test("sweep: what it keeps for time alone says when, and its own next runs follo
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 8 * 60_000, idle: false }], now: NOW }), [{ issue: 4, kind: "sweep", at: at(NOW + 8 * 60_000 + slack) }]);
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 3600_000, idle: true }], now: NOW }), [], "idle days: no sleeper; the next event's sweep or the hourly cron");
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", reason: "the Objective is Running" }], now: NOW }), []);
-  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "cap" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [{ issue: 4, kind: "sweep", at: at(NOW + SWEEP_RETRY_MS) }], "a cap's rest, every time");
+  const destroyed = { issue: 3, action: "destroyed" };
+  assert.deepEqual(sweepWaits({ results: [destroyed, { issue: 4, action: "skipped", retry: "cap" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [{ issue: 4, kind: "sweep", at: at(NOW + SWEEP_RETRY_MS) }], "a cap's rest after a run that got somewhere, every time");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "cap" }], now: NOW }), [], "sweep_max_destroys 0: nothing destroyed, no endless re-arm");
   assert.equal(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "error" }], now: NOW }).length, 1, "a failure: once");
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "error" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [], "never again from a sweep wake's run");
   assert.deepEqual(sweepWaits({ imagesUntil: NOW + 5 * 60_000, now: NOW }), [{ issue: null, kind: "sweep", at: at(NOW + 6 * 60_000) }], "a superseded image");

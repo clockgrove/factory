@@ -48,7 +48,19 @@ export function imageEntry(e) {
   if (!e || typeof e !== "object" || typeof e.vendor !== "string" || !ID.test(e.vendor) || !SHA.test(e.sha ?? "") || !Number.isFinite(Date.parse(e.builtAt))) return null;
   const id = (v) => (typeof v === "string" && ID.test(v) ? v : null);
   const num = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
-  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd) };
+  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd), ...(e.attempt === true ? { attempt: true } : {}) };
+}
+
+/**
+ * The record after one more entry, newest first: `entry` replaces the attempt it ends (`attempt: true`, the same head
+ * and start, written before the build began), so a build that ran to its end is one entry; an attempt nothing ended (a
+ * crash, a timeout) stays, as a build of that head that was tried.
+ */
+export function withBuild(builds, entry) {
+  const e = imageEntry(entry);
+  if (!e) return builds;
+  const ends = (b) => !e.attempt && b.attempt === true && b.sha === e.sha && b.builtAt === e.builtAt;
+  return [e, ...builds.filter((b) => !ends(b))].slice(0, RECORDED);
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */
@@ -105,9 +117,11 @@ export async function recordImage(repo, entry, opts) {
     // Locked is part of what makes it Factory's record on Actions (findImageIssue): a failed lock fails the record.
     await rest(`repos/${repo.full}/issues/${issue}/lock`, { ...opts, method: "PUT", body: { lock_reason: "resolved" } });
   }
-  const next = [imageEntry(entry), ...builds].filter(Boolean).slice(0, RECORDED);
+  const next = withBuild(builds, entry);
   const e = next[0];
-  const human = e.snapshot
+  const human = e.attempt
+    ? `Factory's sandbox image: a build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) started at ${e.builtAt.slice(0, 16)}Z.`
+    : e.snapshot
     ? `Factory's sandbox image: \`${e.snapshot}\` (${e.vendor}) from \`${e.sha.slice(0, 7)}\`, built in ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`
     : `Factory's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`;
   await upsertComment(repo, issue, marker(issue, "image"), `${imageMarkerLine(next)}\n${human}`, opts);
@@ -193,18 +207,31 @@ export function imageDecision({ trigger, refresh, head, current, lastAttemptAt =
 
 /**
  * Whether the image is owed a build now (the dispatcher's tick runs the image job when it is): the default branch's
- * head (`head`, committed at `headAt`) is not the newest build Factory tried (`builds`, newest first, failed ones
- * included), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
+ * head (`head`, committed at `headAt`) is in no build Factory recorded (`builds`, newest first: built, failed, or only
+ * started), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
  * left to the nightly build; a merge today builds on its own push), and today's turn allows one: `merge`, today's
  * builds under `dailyMinutes`; `nightly`, none tried yet today. So an owed build runs on the first dispatcher tick of
  * the UTC day, an event's or a wake's, never on GitHub's nightly cron alone, which stays the backstop.
  */
 export function imageOwed({ refresh, head, headAt, builds = [], todayMs, dailyMinutes, now = new Date() }) {
-  if (!head || builds[0]?.sha === head) return false;
+  // Any build of the head Factory recorded ends the owing: built, failed, or only started (an attempt a crash, a timeout
+  // or a vendor error left). The next merge or the nightly cron tries again, never another tick.
+  if (!head || builds.some((b) => b.sha === head)) return false;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   if (!(Date.parse(headAt) < today)) return false;
   if (refresh === "nightly") return !builds.some((b) => Date.parse(b.builtAt) >= today);
   return todayMs < dailyMinutes * 60_000;
+}
+
+/**
+ * The owed build's own check when its job starts (a tick's queued job may start after another build of the head):
+ * imageOwed against the record read now, for the default branch's head now (`tip`, committed at `tipAt`). Returns the
+ * attempt entry to record before anything else (so a crash, a timeout, a refusal or a vendor failure ends the owing),
+ * or null when the head is owed no build any more.
+ */
+export function owedAttempt({ builds, tip, tipAt, refresh, dailyMinutes, vendor, now = new Date() }) {
+  if (!imageOwed({ refresh, head: tip, headAt: tipAt, builds, todayMs: todaysBuildMs(builds, now), dailyMinutes, now })) return null;
+  return imageEntry({ vendor, snapshot: null, sha: tip, builtAt: now.toISOString(), buildMs: 0, attempt: true });
 }
 
 /**

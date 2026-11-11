@@ -237,7 +237,7 @@ test("workflow template: the sweep and the image job each have a wake job that s
     assert.match(wake.if, new RegExp(`needs\\.${job}\\.outputs\\.wake_at != ''`));
     assert.equal(wake.concurrency, undefined);
     assert.deepEqual(wake.permissions, { actions: "write" });
-    assert.ok(Number(wake["timeout-minutes"]) >= 20, "it outlives a sweep wait (20 minutes at most)");
+    assert.ok(Number(wake["timeout-minutes"]) >= 20, "it outlives a sweep wait (about 16 minutes at most)");
     assert.ok(Number(wake["timeout-minutes"]) <= 30, "no long sleeper");
     assert.match(wake.steps[0].run, /gh workflow run factory\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/, "the tick carries its deadline");
     for (const k of ["wake_at", "wake_kind"]) assert.match(doc.jobs[job].outputs[k], new RegExp(`steps\\.f\\.outputs\\.${k}`));

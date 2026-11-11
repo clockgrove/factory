@@ -76,7 +76,8 @@ test("workflow template: the sweep job, hourly or by hand, with three usage uplo
 });
 
 // The sweep against an in-memory GitHub (fixtures/github-records.mjs, behind fetch) and a fake vendor: one Objective, #7.
-async function sweepOne({ issue, record, sandbox }) {
+// `hooks(store)` returns adapter calls to replace: store.record() reads the claim comment now, store.write(rec) replaces it.
+async function sweepOne({ issue, record, sandbox, hooks = () => ({}) }) {
   const { githubStore, BOT, REPO } = await import("./fixtures/github-records.mjs");
   const { recordBody } = await import("../scripts/launch.mjs");
   const { sweep } = await import("../scripts/sweep.mjs");
@@ -95,6 +96,9 @@ async function sweepOne({ issue, record, sandbox }) {
     readFile: async () => null,
     destroy: async (id) => calls.push(`destroy ${id}`),
   };
+  const head = marker(N, "sandbox");
+  const id = [...s.comments.values()].find((c) => c.body.startsWith(`${head}\n`)).id;
+  Object.assign(adapter, hooks({ calls, record: () => sandboxRecordOf(s.bodyOf(N, head)), write: (rec) => s.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body: `${head}\n${recordBody(rec)}` } }) }));
   const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const realFetch = globalThis.fetch;
   const saved = { api: process.env.GITHUB_API_URL, gql: process.env.GITHUB_GRAPHQL_URL };
@@ -154,4 +158,58 @@ test("sweep: a Block for a vanished stage stops its running sandbox, books its c
   assert.deepEqual(closed.calls, ["destroy factory-aaa"]);
   assert.deepEqual(closed.rec.launches.map((l) => [l.ok, l.code]), [[false, "timeout"]], "every launch attempt ends as a stored entry");
   assert.deepEqual([closed.rec.state, closed.rec.id, closed.rec.stage, closed.rec.claim], ["stopped", null, "work", "aaaaaaaaaaaa"]);
+});
+
+test("sweep review fixes: its claim holds against a launcher, a lost claim stops nothing, a stop error clears, an interrupted sweep's stage is never restored as the stage's", async () => {
+  const { launchDecision, stageHolds } = await import("../scripts/lib/logic.mjs");
+  const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
+  const blocked = { state: "open", labels: [{ name: "factory:objective" }, { name: "factory:blocked" }] };
+  const started = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "factory-aaa", state: "running", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(60) }] };
+
+  // The sweep's claim, as a launcher reads it while the sweep stops the sandbox: held, so nothing starts in it.
+  let seen = null;
+  await sweepOne({
+    issue: blocked,
+    record: started,
+    hooks: (st) => ({
+      stop: async (id) => {
+        const r = st.record();
+        seen = { holds: stageHolds(r, Date.now(), 60 * 60_000), decision: launchDecision({ ev: { kind: "swept" }, state: "Running", record: r, runningSince: ago(1), staleMs: 3600_000 }) };
+        st.calls.push(`stop ${id}`);
+      },
+    }),
+  });
+  assert.equal(seen?.holds, true, "the sweep's claim carries a live lease of its own");
+  assert.ok(seen.decision.skip, "a launcher starts nothing over it");
+
+  // A launcher's claim that lands after the sweep's (between its claim and its stop): the sweep stops nothing.
+  const lost = await sweepOne({
+    issue: blocked,
+    record: started,
+    hooks: (st) => ({ readFile: async () => (await st.write({ ...st.record(), stage: "work", claim: "bbbbbbbbbbbb", state: "running", at: ago(0), leaseUntil: ago(-10) }), null) }),
+  });
+  assert.deepEqual(lost.calls, [], "the new stage's sandbox is not stopped");
+  assert.equal(lost.r.results[0].action, "skipped");
+  assert.equal(lost.rec.claim, "bbbbbbbbbbbb");
+
+  // An earlier stop that failed: this one clears its error, so the next start books the stopped stretch.
+  const failedStop = await sweepOne({ issue: blocked, record: { ...started, state: "stopped", stopError: "error", leaseUntil: null, collected: true, vendorBooked: true } });
+  assert.deepEqual(failedStop.calls, ["stop factory-aaa"]);
+  assert.equal(failedStop.rec.stopError, undefined);
+  assert.ok(Date.parse(failedStop.rec.stoppedAt));
+
+  // A claim an interrupted sweep left: the stage and claim it kept go back, else the last start's stage; never "sweep".
+  const left = { ...started, stage: "sweep", claim: "sweep-0123456789ab", at: ago(30), leaseUntil: ago(20) };
+  const kept = await sweepOne({ issue: blocked, record: { ...left, prior: { stage: "work", claim: "cd737cfa9cec" } } });
+  assert.deepEqual([kept.rec.state, kept.rec.stage, kept.rec.claim, kept.rec.prior], ["stopped", "work", "cd737cfa9cec", undefined]);
+  const bare = await sweepOne({ issue: blocked, record: left });
+  assert.deepEqual([bare.rec.state, bare.rec.stage], ["stopped", "work"]);
+  assert.ok(!String(bare.rec.claim).startsWith("sweep-"), "no sweep's claim is taken for the stage's");
+});
+
+test("sweep: a stage that said it ended moments ago is left to the launcher's end (one usage upload)", () => {
+  const ended = rec({ state: "ended", at: new Date(NOW - 2 * 60_000).toISOString(), collected: undefined });
+  const d = { ...base, state: "Blocked", sandbox: box({ state: "running" }), record: ended };
+  assert.equal(sweepDecision(d).keep, "its stage ended moments ago; the launcher's end answers it");
+  assert.equal(sweepDecision({ ...d, record: { ...ended, at: new Date(NOW - 20 * 60_000).toISOString() } }).stop, "running with no stage holding it, the Objective Blocked", "an end whose event was lost is the sweep's after the grace");
 });

@@ -359,7 +359,9 @@ jobs:
     # nor In review) are destroyed, at most FACTORY_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A
     # stage's usage the launcher never collected is uploaded as the launcher would. Hourly, by hand, and when an
     # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage. A
-    # Block runs it too: a sandbox still running with no stage holding it is stopped and its cost booked at once.
+    # Block runs it too: a sandbox still running with no stage holding it is stopped and its cost booked at once. A stage
+    # that Blocks itself also says it ended, and the launcher's end answers that; this sweep leaves a stage that ended
+    # moments ago to it (logic.mjs sweepDecision), and its claim under the record lock keeps the two apart.
     if: >-
       github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.sweep == 'true') ||
       (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||

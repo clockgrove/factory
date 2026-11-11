@@ -24,7 +24,7 @@ import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
 import { appToken } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
-import { bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
+import { CLAIM_LEASE_MS, bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
 import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
 import { lockBase } from "./lib/lock.mjs";
 import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
@@ -90,6 +90,18 @@ export const storageLine = (r) =>
   }`;
 
 /**
+ * The stage and claim a record holds for its stage: its own, or, over a claim a sweep left (`stage: "sweep"`), the ones
+ * that sweep kept as `prior`, else the stage of its last start (claim unknown). Never the sweep's.
+ */
+export function ownStage(record) {
+  if (record?.stage !== "sweep") return { stage: record?.stage ?? null, claim: record?.claim ?? null };
+  const p = record.prior;
+  if (p && typeof p === "object" && p.stage !== "sweep") return { stage: p.stage ?? null, claim: typeof p.claim === "string" && !p.claim.startsWith("sweep-") ? p.claim : null };
+  const last = (record.launches || []).filter((l) => l?.ok === true && (l.stage === "work" || l.stage === "review")).at(-1);
+  return { stage: last?.stage ?? null, claim: null };
+}
+
+/**
  * One sweep. Returns what it did per sandbox: `{id, issue, action: "destroyed" | "stopped" | "kept" | "skipped", reason, usage}`, and
  * per image (`images`). `collectRoot` is where collected usage goes, one directory per slot; `collectSlots` slots are
  * filled in order (0 in a launcher, which has no upload steps to spare: a sandbox whose usage or vendor cost is still
@@ -144,23 +156,32 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         out.push({ id: s.id, issue: n, action: d.stop ? "would stop" : "would destroy", reason: d.stop ?? d.destroy });
         continue;
       }
-      // The record's own sandbox: claim it as a launcher does (under the record lock, over the record read), so a launch
-      // starting now wins. Later writes go in only while the record still carries this claim, each over the record as it
-      // is then (`cur`, settled by writeSandboxRecord), so an attempt stored meanwhile is kept; `from` is the record the
-      // claim replaced, whose stage and claim the later writes put back.
+      // The record's own sandbox: claim it as a launcher does (under the record lock, over the record read, with a lease
+      // of its own, so a launcher reads it as held and starts nothing), so a launch starting now wins. Later writes go in
+      // only while the record still carries this claim, each over the record as it is then (`cur`, settled by
+      // writeSandboxRecord), so an attempt stored meanwhile is kept. `own` is the stage and claim the record holds for
+      // its stage, which the claim keeps as `prior` and the later writes put back: never the sweep's, even over a claim
+      // an earlier sweep left behind.
       const recorded = issue && record?.id === s.id;
+      const own = ownStage(written);
       let claim = null;
       let from = null;
-      const underClaim = (next) => (cur) => (cur?.claim === claim ? { ...next(cur), stage: from.stage, claim: from.claim } : null);
+      const underClaim = (next) => (cur) => (cur?.claim === claim ? { ...next(cur), stage: own.stage, claim: own.claim, prior: undefined } : null);
       if (recorded) {
         claim = `sweep-${randomBytes(6).toString("hex")}`;
         base ??= await lockBase(repo, opts);
-        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? ((from = cur), { ...cur, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() }) : null), { base });
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? ((from = cur), { ...cur, state: "running", stage: "sweep", claim, prior: own, at: new Date(now).toISOString(), leaseUntil: new Date(Date.now() + CLAIM_LEASE_MS).toISOString() }) : null), { base });
         if (!w.ok) {
           out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock" });
           continue;
         }
       }
+      // Under the record lock, right before the sandbox is stopped or destroyed: the record still carries this claim.
+      const stillClaimed = async () => {
+        let held = false;
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => ((held = cur?.claim === claim), null), { base });
+        return held && !w.contended;
+      };
       let usage = null;
       let vendor = null;
       // What the record says once the sandbox is stopped or destroyed (with a claim only).
@@ -168,10 +189,15 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       try {
         if (d.collect) {
           const dir = join(collectRoot, `slot-${slots.length + 1}`);
-          if (await collect(adapter, s.id, record, dir)) {
-            usage = { dir, name: record.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
+          if (await collect(adapter, s.id, { ...record, ...own }, dir)) {
+            usage = { dir, name: own.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
             slots.push(usage);
           }
+        }
+        if (claim && !(await stillClaimed())) {
+          // A launcher's claim (or the lock held throughout) since this sweep claimed it: the sandbox is the launcher's now.
+          out.push({ id: s.id, issue: n, action: "skipped", reason: "the sandbox record no longer carries the sweep's claim (a launcher claimed it)", usage: usage?.name ?? null });
+          continue;
         }
         // Stopped before its cost is read, so the totals are its session's whole (an end the stage never announced).
         let stoppedAt = null;
@@ -183,7 +209,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         // A stage whose end was never answered: its vendor cost from the totals now, before they go with the sandbox.
         if (recorded && record.meter && !record.vendorBooked && (usage || slots.length < collectSlots)) {
           const after = await adapter.usage(s.id).catch(() => null);
-          const booked = await bookVendor({ adapter, repo, n, opts, base, record: { ...written, id: s.id }, after, settled, state: settled ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
+          const booked = await bookVendor({ adapter, repo, n, opts, base, record: { ...written, ...own, id: s.id }, after, settled, state: settled ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
           if (!usage && booked.usage) slots.push(booked.usage);
           usage = booked.usage ?? usage;
           vendor = booked.vendor;
@@ -193,12 +219,13 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
           destroyed += 1;
         }
         out.push({ id: s.id, issue: n, action: d.stop ? "stopped" : "destroyed", reason: d.stop ?? d.destroy, usage: usage?.name ?? null });
-        if (claim) end = d.stop ? { state: "stopped", stoppedAt } : { id: null, state: "stopped", destroyedAt: new Date().toISOString() };
+        // A stop that went through clears an earlier one's error, so the next start books the stopped stretch's storage.
+        if (claim) end = d.stop ? { state: "stopped", stoppedAt, stopError: undefined } : { id: null, state: "stopped", destroyedAt: new Date().toISOString() };
       } catch (e) {
         // The job log gets the message; the record keeps codes only. The sandbox stays for the next run.
         log(`sweep: ${s.id} (#${n}): ${e.code ?? "error"}: ${String(e.message).slice(0, 300)}`);
         out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
-        if (claim) await writeSandboxRecord(repo, n, opts, underClaim((cur) => ({ ...cur, state: from.state, at: from.at })), { base }).catch(() => {});
+        if (claim) await writeSandboxRecord(repo, n, opts, underClaim((cur) => ({ ...cur, state: from.state, at: from.at, leaseUntil: from.leaseUntil })), { base }).catch(() => {});
         continue;
       }
       if (claim) {

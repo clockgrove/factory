@@ -2424,9 +2424,13 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * or `{keep: reason}`.
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
-export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs }) {
+export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = START_LOST_MS }) {
   if (holds) return { keep: "a stage holds it" };
   const mine = record?.id === sandbox.id;
+  // A stage that said it ended moments ago: the launcher's end answers it (collects its usage, stops the sandbox, books
+  // its cost) within a launch job's time. The sweep a stage's own Block runs leaves it to that end, so the usage comes
+  // out once; an end whose event was lost is the sweep's after the grace.
+  if (mine && record.state === "ended" && now - Date.parse(record.at) < endGraceMs) return { keep: "its stage ended moments ago; the launcher's end answers it" };
   // The grace is for a sandbox no record names yet; the record's own sandbox is judged by the record at once, so a
   // short Objective's sandbox goes when it closes, not an hour later.
   if (!mine && now - Date.parse(sandbox.createdAt) < graceMs) return { keep: "created moments ago" };

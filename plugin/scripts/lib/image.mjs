@@ -199,10 +199,10 @@ export function imageDecision({ trigger, refresh, head, current, lastAttemptAt =
   if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
   if (trigger === "nightly" || trigger === "owed") return { build: true };
   if (trigger !== "merge") return { skip: `no image build on ${trigger}` };
-  if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it" };
+  if (refresh === "nightly") return { skip: "image_refresh is nightly; the next UTC day's first dispatcher tick builds it" };
   if (todayMs < dailyMinutes * 60_000) return { build: true };
   if (!lastAttemptAt || Date.parse(lastAttemptAt) < lastNightly(now).getTime()) return { build: true, note: "today's minutes are used up, but no build was tried since the last nightly time" };
-  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it` };
+  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the next UTC day's first dispatcher tick builds it` };
 }
 
 /**

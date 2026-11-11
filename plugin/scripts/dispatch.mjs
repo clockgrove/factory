@@ -161,9 +161,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (inputs.sandbox) {
     for (const issue of wanted) {
       if (reset.includes(issue.number)) continue;
-      const labels = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-      const state = stateOf(issue, statuses[issue.number] ?? null);
-      if (!(state === "Question" || (labels.includes("factory:question") && state === "In review"))) continue;
+      if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
       const asked = await objectiveLabeledAt(repo, issue.number, "factory:question", opts).catch(() => null);
       if (!asked) continue;
       const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);

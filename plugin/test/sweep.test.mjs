@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checksResume, launchDecision, missedAnswer, sweepDecision } from "../scripts/lib/logic.mjs";
+import { checksResume, launchDecision, missedAnswer, pickSandbox, sandboxTags, stateOf, sweepDecision } from "../scripts/lib/logic.mjs";
 import { SWEEP_RETRY_MS, objectiveSandboxes, sweepWaits, usageTarball } from "../scripts/sweep.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
@@ -88,7 +88,7 @@ test("workflow template: the sweep job, on events, its own wakes, by hand and th
   const job = doc.jobs.sweep;
   assert.ok(doc.on.schedule.some((s) => s.cron === "17 * * * *"));
   assert.ok(job.if.includes("github.event.schedule == '17 * * * *'"));
-  assert.ok(job.if.includes("github.event.action == 'labeled' && github.event.label.name == 'factory:blocked'"), "a Block runs the sweep at once");
+  assert.ok(job.if.includes("github.event.action == 'labeled' && (github.event.label.name == 'factory:blocked' || github.event.label.name == 'factory:question')"), "a Block or a Question (#57) runs the sweep at once");
   assert.ok(job.if.includes("inputs.sweep == 'true' || startsWith(inputs.wake, 'sweep ')"), "its own wakes' ticks run it");
   assert.deepEqual(job.permissions, { contents: "read", actions: "read" }, "actions: read for the armed wakes only");
   assert.equal(job.steps.filter((s) => String(s.uses).startsWith("actions/upload-artifact")).length, 3);
@@ -99,7 +99,8 @@ test("workflow template: the sweep job, on events, its own wakes, by hand and th
 
 // The sweep against an in-memory GitHub (fixtures/github-records.mjs, behind fetch) and a fake vendor: one Objective, #7.
 // `hooks(store)` returns adapter calls to replace: store.record() reads the claim comment now, store.write(rec) replaces it.
-async function sweepOne({ issue, record, sandbox, hooks = () => ({}) }) {
+// `card`: the Objective's card on a Factory board (its Status), or none (no board).
+async function sweepOne({ issue, record, sandbox, card = null, hooks = () => ({}) }) {
   const { githubStore, BOT, REPO } = await import("./fixtures/github-records.mjs");
   const { recordBody } = await import("../scripts/launch.mjs");
   const { sweep } = await import("../scripts/sweep.mjs");
@@ -131,7 +132,9 @@ async function sweepOne({ issue, record, sandbox, hooks = () => ({}) }) {
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (u.pathname === "/graphql") {
-      if (/projectsV2/.test(body.query)) return json({ data: { repository: { id: "R_1", projectsV2: { nodes: [] } }, repositoryOwner: null } });
+      const board = { id: "P_1", title: "Factory", number: 1, field: { id: "F_1", options: ["Queued", "Running", "In review", "Blocked", "Done"].map((name) => ({ id: name, name })) } };
+      if (/projectsV2/.test(body.query)) return json({ data: { repository: { id: "R_1", projectsV2: { nodes: card ? [board] : [] } }, repositoryOwner: null } });
+      if (/projectItems/.test(body.query)) return json({ data: { repository: { i0: { number: N, projectItems: { nodes: card ? [{ project: { id: board.id }, fieldValueByName: { name: card } }] : [] } } } } });
       return s.api.graphql(body.query, body.variables).then((data) => json({ data }), (e) => json({ errors: [{ message: e.message }] }));
     }
     if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues/${N}`) return json({ number: N, ...issue });
@@ -180,6 +183,34 @@ test("sweep: a Block for a vanished stage stops its running sandbox, books its c
   assert.deepEqual(closed.calls, ["destroy factory-aaa"]);
   assert.deepEqual(closed.rec.launches.map((l) => [l.ok, l.code]), [[false, "timeout"]], "every launch attempt ends as a stored entry");
   assert.deepEqual([closed.rec.state, closed.rec.id, closed.rec.stage, closed.rec.claim], ["stopped", null, "work", "aaaaaaaaaaaa"]);
+});
+
+test("sweep: a Question whose card sits in In review is stopped and booked like a Block, then destroyed after its idle days (#57)", async () => {
+  const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
+  // factory-scratch #372/#397: factory:question, no factory:in-review, the card still In review (applyExit puts a Question there).
+  const question = { state: "open", labels: [{ name: "factory:objective" }, { name: "factory:question" }] };
+  const ended = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "factory-aaa", state: "ended", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(90) }], meter: { base: null, created: true, ceilingUsd: 0.603515, stored: { ms: 0, bytes: null }, vcpus: 2 }, sessionEnd: ago(-45) };
+
+  const q = await sweepOne({ issue: question, record: ended, card: "In review" });
+  assert.deepEqual(q.r.results.map((x) => [x.action, x.reason]), [["stopped", "running with no stage holding it, the Objective Question"]]);
+  assert.deepEqual(q.calls, ["stop factory-aaa", "usage factory-aaa"], "stopped, then its totals read; never destroyed");
+  assert.deepEqual([q.rec.state, q.rec.id, q.rec.stage, q.rec.claim, q.rec.leaseUntil], ["stopped", "factory-aaa", "work", "cd737cfa9cec", null], "the stage's own record, stopped and unleased");
+  assert.equal(q.rec.vendorBooked, true);
+  assert.ok(q.vendor, "the vendor comment daily_usd reads is written");
+  // The answer resumes the stage from the stopped sandbox: the answer requeues it, and the next start picks that sandbox.
+  assert.ok(launchDecision({ ev: { kind: "comment", issue: 7, human: true }, state: stateOf(question, "In review"), trusted: true }).requeue);
+  assert.equal(pickSandbox([{ id: "factory-aaa", state: "stopped", tags: sandboxTags("1", 7) }], { repoId: "1", issue: 7, recordedId: q.rec.id }), "factory-aaa");
+
+  const idle = await sweepOne({ issue: question, record: { ...ended, state: "stopped", at: ago(8 * 1440), leaseUntil: null, vendorBooked: true }, sandbox: { state: "stopped" }, card: "In review" });
+  assert.deepEqual(idle.r.results.map((x) => [x.action, x.reason]), [["destroyed", "stopped 8 days, the Objective Question"]]);
+  assert.deepEqual(idle.calls, ["destroy factory-aaa"]);
+
+  const live = await sweepOne({ issue: question, record: { ...ended, state: "running", leaseUntil: ago(-5) }, card: "In review" });
+  assert.deepEqual(live.r.results.map((x) => [x.action, x.reason]), [["kept", "a stage holds it"]], "a live lease is never stopped");
+  assert.deepEqual(live.calls, []);
+
+  const review = await sweepOne({ issue: { state: "open", labels: [{ name: "factory:objective" }, { name: "factory:in-review" }] }, record: ended, card: "In review" });
+  assert.deepEqual(review.r.results.map((x) => [x.action, x.reason]), [["kept", "the Objective is In review"]], "a delivered Objective In review keeps its sandbox");
 });
 
 test("sweep review fixes: its claim holds against a launcher, a lost claim stops nothing, a stop error clears, an interrupted sweep's stage is never restored as the stage's", async () => {

@@ -39,7 +39,7 @@ test("a runner's Claude settings: writes only in the checkout, the temp director
   assert.deepEqual(s.sandbox.network.allowedDomains, ["github.com"]);
   assert.deepEqual(fs.allowWrite, writable);
   assert.ok(!fs.allowWrite.includes("/home/factory-agent"), "not the agent's home: its shell start-up files and git config stay unwritable");
-  assert.ok(!fs.allowWrite.some((p) => p.startsWith(layout.config) || p.startsWith(layout.ownTmp)), "nor Claude Code's own state");
+  assert.ok(!fs.allowWrite.some((p) => p.startsWith(layout.config)), "nor Claude Code's own state");
   assert.deepEqual(fs.denyRead, ["/proc"], "the agent's read-only GitHub token is for its commands");
   for (const p of ["repo/.git/hooks", "repo/.git/config", "repo/.claude", "repo/.mcp.json"]) {
     assert.ok(fs.denyWrite.includes(`/home/factory-agent/${p}`), `${p}: no command writes it`);
@@ -85,7 +85,7 @@ test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it; C
   assert.equal(env.GIT_CONFIG_KEY_0, "core.fsmonitor", "Claude Code's own git runs no fsmonitor from the checkout");
   const [cmd, launch] = runnerLaunch(runner, "claude", ["-p"], "/opt/tool/bin:/home/factory-agent/.local/bin:/usr/bin");
   assert.equal(cmd, "/usr/bin/env");
-  assert.deepEqual(launch, [`HOME=${CLAUDE_HOME}`, "TMPDIR=/home/factory-agent/.factory-claude/tmp", "PATH=/opt/tool/bin:/usr/bin", "claude", "-p"], "nothing of the agent's home on its PATH");
+  assert.deepEqual(launch, [`HOME=${CLAUDE_HOME}`, "TMPDIR=/tmp", "PATH=/opt/tool/bin:/usr/bin", "claude", "-p"], "nothing of the agent's home on its PATH");
   assert.equal(claudeRunner({ harness: "codex", agent: AGENT, clone: "/c" }), null);
   assert.equal(claudeRunner({ harness: "claude", agent: null, clone: "/c" }), null, "no agent uid, no runner sandbox");
   assert.equal(claudeRunner({ harness: "claude", agent: AGENT, clone: "/c", env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
@@ -123,9 +123,8 @@ test("Claude's state is made afresh before every start: what was planted is gone
   writeFileSync(join(layout.config, "settings.json"), '{"hooks":{}}');
   writeFileSync(join(layout.config, ".claude.json"), '{"mcpServers":{"x":{"command":"evil"}}}');
   writeFileSync(join(projects, "-repo", "s1.jsonl"), '{"planted":true}\n');
-  writeFileSync(join(layout.ownTmp, "planted"), "x");
   await resetClaudeState(layout);
-  assert.ok(!existsSync(join(layout.config, "settings.json")) && !existsSync(join(layout.config, ".claude.json")) && !existsSync(join(layout.ownTmp, "planted")));
+  assert.ok(!existsSync(join(layout.config, "settings.json")) && !existsSync(join(layout.config, ".claude.json")));
   assert.equal(readFileSync(join(projects, "-repo", "s1.jsonl"), "utf8"), '{"turn":1}\n', "Factory's captured copy, not the planted one");
   for (const c of layout.caches) assert.ok(existsSync(c), `${c} made for the sandbox to write`);
   assert.ok(existsSync(layout.editDiffs), "the edit-diff directory is a real one, for the write denial to hold");
@@ -203,4 +202,16 @@ test("uidOf reads a user's uid from /etc/passwd", () => {
 test("the default hosts carry GitHub's Git LFS download hosts, never an upload host", () => {
   for (const host of ["github-cloud.githubusercontent.com", "media.githubusercontent.com"]) assert.ok(LOCAL_DOMAINS.includes(host), host);
   assert.ok(!LOCAL_DOMAINS.some((h) => /amazonaws\.com$/.test(h)), "no S3 upload host");
+});
+
+test("#61: Claude Code's own TMPDIR on a runner is the /tmp its unit makes private, never a directory in the agent's home", () => {
+  // With blockReadsOutsideWorkingDirectories, the sandbox could not read a TMPDIR in the agent's home (outside the
+  // working directories), and every sandboxed command lost its network, the proxy's bridge included.
+  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: {}, services: [] });
+  const [, launch] = runnerLaunch(runner, "claude", []);
+  assert.equal(launch.find((a) => a.startsWith("TMPDIR=")), "TMPDIR=/tmp");
+  const { args } = harnessCommand({ harness: "claude", prompt: "p", runner });
+  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  assert.equal(settings.permissions.blockReadsOutsideWorkingDirectories, true, "the bar it is fitted to");
+  for (const v of Object.values(runner)) if (typeof v === "string") assert.ok(!/\.factory-claude\/tmp$/.test(v), "no own TMPDIR left in the agent's home");
 });

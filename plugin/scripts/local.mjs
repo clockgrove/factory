@@ -25,7 +25,8 @@ import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
-import { log, resolveInputs } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, redactSecrets, resolveInputs } from "./lib/inputs.mjs";
+import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
@@ -178,6 +179,31 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/**
+ * A stage's output, relayed line by line to its log file and this terminal, with every held secret (inputs.mjs
+ * holdSecrets: the worker secrets' values) redacted. Whole lines only: a value split across two chunks is redacted
+ * once its line is complete. `end()` relays a last line with no newline.
+ */
+export function stageRelay({ logFile, prefix, write = (s) => process.stdout.write(s) }) {
+  let rest = "";
+  const emit = (raw) => {
+    const line = redactSecrets(raw);
+    appendOwn(logFile, `${line}\n`);
+    if (line.trim()) write(`${prefix} ${line}\n`);
+  };
+  return {
+    push: (chunk) => {
+      const parts = `${rest}${chunk}`.split("\n");
+      rest = parts.pop();
+      for (const p of parts) emit(p);
+    },
+    end: () => {
+      if (rest) emit(rest);
+      rest = "";
+    },
+  };
+}
+
 /** Local settings for this process only, never copied into a stage's env: the token, and where the App's key is. */
 const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
 function localToken(repoFull) {
@@ -321,8 +347,9 @@ export class Local {
     // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
     if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) delete wf[k];
     // The developer's own harness, model and session settings win over the workflow's.
-    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT", "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL"]) if (process.env[k]) wf[k] = process.env[k];
-    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV)), ...wf };
+    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT", "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_WORKER_SECRETS"]) if (process.env[k]) wf[k] = process.env[k];
+    // A worker secret's NAME or SOURCE never joins every stage's env through FACTORY_LOCAL_ENV (lib/local.mjs localBaseEnv).
+    const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV), { workerSecrets: wf.FACTORY_WORKER_SECRETS || "" }), ...wf };
     // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
     for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && !HOST_ONLY.includes(k)) env[k] = v;
     return { ...env, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
@@ -523,18 +550,24 @@ export class Local {
       // it starts would inherit it, nor in a file. With an App, the stage asks this process for each notice token over
       // Node's IPC channel (fd 4), which Node keeps from everything the stage starts (app-token.mjs serveNotices).
       const notice = this.notice ? ["--notice", "ipc"] : [];
-      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
+      // The work stage alone: the worker secrets' values from this shell (lib/worker-secrets.mjs), which its worker carries
+      // to the harness only, as the workflow's `worker_secret_values` reaches a runner's; nothing before the stage gets them.
+      const values = script === "worker.mjs" ? localSecretValues(input("worker_secrets", { env }), process.env) : "";
+      // This process posts what the stage leaves too: none of those values.
+      holdSecrets([...parseSecretValues(values).values()]);
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, FACTORY_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
       child.stdio[3].on("error", () => {});
       child.stdio[3].end(this.token);
       if (this.notice) serveNotices(child, this.notice);
       this.children.add(child);
-      const relay = (chunk) => {
-        appendOwn(logFile, chunk);
-        for (const line of String(chunk).split("\n")) if (line.trim()) process.stdout.write(`[#${issue} ${name}] ${line}\n`);
-      };
-      child.stdout.on("data", relay);
-      child.stderr.on("data", relay);
+      // One relay per stream, whole lines only, so no value split across two chunks escapes the redaction.
+      const relays = [child.stdout, child.stderr].map((stream) => {
+        const r = stageRelay({ logFile, prefix: `[#${issue} ${name}]` });
+        stream.on("data", r.push);
+        return r;
+      });
       child.on("close", (code) => {
+        for (const r of relays) r.end();
         this.children.delete(child);
         let result = null;
         try {

@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
-import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -29,7 +29,8 @@ import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
-import { openTriage } from "./lib/triage.mjs";
+import { openTriage, triageKey } from "./lib/triage.mjs";
+import { REFUSAL_TEXT, nameLabel, optedValues, refusedEntry, secretLabel, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -63,6 +64,8 @@ async function main() {
   let pr = null;
   let credentialBasis = "none";
   let cred = { env: {} };
+  // The worker secrets' values (lib/worker-secrets.mjs), masked in the uploaded stream like every other secret.
+  let shellSecretValues = [];
 
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
@@ -84,11 +87,11 @@ async function main() {
   const finish = async (exit, reason) => {
     keeper.stop();
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
-    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -103,7 +106,7 @@ async function main() {
     setOutput("usd", usage.usd === null ? "" : String(usage.usd));
     if (process.env.GITHUB_STEP_SUMMARY) {
       const { appendFileSync } = await import("node:fs");
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory #${issue}: ${exit}\n\n${reason || ""}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
     }
   };
 
@@ -300,7 +303,10 @@ async function main() {
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch });
   // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress });
-  const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
+  // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
+  const shellSecrets = openWorkerSecrets(inputs);
+  shellSecretValues = Object.values(shellSecrets);
+  const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
@@ -320,6 +326,7 @@ async function main() {
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     harness: inputs.harness,
     services: inputs.harness === "claude" && access.agent ? agentServicePorts(access.agent) : [],
+    shellSecrets: Object.keys(shellSecrets),
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,
@@ -628,11 +635,36 @@ async function main() {
   const askedAtPlan = decision.exit === "question" && !!planNeeds;
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).
   if (askedAtPlan) await progress.planAsked(needs.repos);
-  // Hosts the worker's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
-  const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;
+  // Hosts the worker's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS). Variables
+  // its shell lacked: the opt-in (worker_secrets) and where the value goes on this route.
+  const fixes = decision.exit === "blocked" ? [decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null, decision.missingSecrets ? missingSecretsFix(decision.missingSecrets, inputs.workerSecrets, backend().name === "local" ? "local" : "runner") : null].filter(Boolean) : [];
+  const fix = fixes.length ? fixes.join(" ") : null;
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix }, token);
   await finish(decision.exit, decision.reason);
   }
+}
+
+/**
+ * The worker secrets of this run (lib/worker-secrets.mjs): {NAME: value} for the harness's shell, each value masked in
+ * the job log. The log names what reaches the shell and what was refused, never a value. Values come from
+ * `worker_secret_values` (on Actions and in a cloud sandbox the workflow's, in local mode the one `serve` packed from its
+ * shell); one equal to Factory's own AI Gateway key is withheld.
+ */
+export function openWorkerSecrets(inputs, { factoryKey = () => triageKey({ inputs }) } = {}) {
+  if (!String(inputs.workerSecrets || "").trim()) return {};
+  const values = parseSecretValues(inputs.workerSecretValues);
+  // The opted-in values this process holds (withheld ones too): never posted to GitHub, stored in the usage record, sent
+  // to the gateway or pushed. A line no entry names is no secret of the worker's.
+  const opted = optedValues(inputs.workerSecrets, inputs.workerSecretValues);
+  holdSecrets(opted);
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
+  for (const v of opted) mask(v);
+  for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
+  for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
+  for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
+  const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
+  if (given.length) log(`worker secrets: ${given.map(secretLabel).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
+  return ws.env;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -14,6 +14,31 @@ import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
+import { heldSecrets, secretForms } from "./inputs.mjs";
+
+/** Why a push that carries a held secret is refused: Factory's own words, never the value. */
+export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
+
+/** Whether `text` (a branch's patches and commit messages) carries any form of a held secret (inputs.mjs secretForms). */
+export function carriesSecret(text, values = heldSecrets()) {
+  const t = String(text || "");
+  return values.flatMap(secretForms).some((f) => t.includes(f));
+}
+
+/** The most of `git log -p` the scan reads: a little below V8's longest string (536,870,888 bytes). */
+export const SECRET_SCAN_MAX_BYTES = 536_000_000;
+
+/**
+ * Why the commits in `range` may not be pushed for the held secrets, or null: every commit's change and message, a merge
+ * commit's against its first parent (where a value its resolution adds would show). It fails closed: an unreadable or
+ * truncated log refuses too. `git(args, opts)` runs git in Factory's mirror.
+ */
+export async function secretScan(git, range, held = heldSecrets(), maxBytes = SECRET_SCAN_MAX_BYTES) {
+  if (!held.length) return null;
+  const patches = await git(["log", "-p", "--diff-merges=first-parent", "-U0", "--no-color", "--no-ext-diff", "--text", "--format=%B", range], { maxBytes });
+  if (patches.code !== 0 || patches.truncated) return "the branch's commits could not be read whole for worker secrets, so nothing was pushed";
+  return carriesSecret(patches.stdout, held) ? SECRET_PUSH_REASON : null;
+}
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
@@ -663,6 +688,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
     if (hits.length) return refuse(`touched protected path ${hits.join(", ")}`, { kind: "protected" });
+    // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
+    const leak = await secretScan(git, `${base}..${head}`);
+    if (leak) return refuse(leak);
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
     if (outside.length) return refuse(fixScopeReason(outside), { kind: "fix-scope" });

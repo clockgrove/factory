@@ -301,7 +301,8 @@ export const stageProgressKey = (runId, claim) => (/^\d{1,20}$/.test(String(runI
 
 /**
  * The environment the stage starts with in the sandbox: the workflow's settings as inputs (never a secret), the GitHub
- * context, the stage's own names, the two tokens and only the credential its harness needs.
+ * context, the stage's own names, the two tokens, only the credential its harness needs and, for a work stage, the
+ * worker secrets' values.
  */
 export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
   const out = {};
@@ -315,6 +316,8 @@ export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, 
   for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) if (!out[k]) delete out[k];
   for (const k of GITHUB_CONTEXT) if (env[k]) out[k] = env[k];
   for (const key of [...(HARNESS_SECRETS[inputs.harness] || []), "aiGatewayApiKey"]) if (inputs[key]) out[`FACTORY_INPUT_${INPUT_NAME[key]}`] = inputs[key];
+  // The worker secrets' values (lib/worker-secrets.mjs), for a work stage only: its worker hands them to its harness alone.
+  if (stage === "work" && inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
   Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });
   if (pr) out.FACTORY_STAGE_PR = String(pr);
   if (tokens.read) out.FACTORY_READ_TOKEN = tokens.read;

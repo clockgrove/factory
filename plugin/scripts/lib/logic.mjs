@@ -4,6 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { refusalFields } from "./usage.mjs";
+import { missingSecretsOf } from "./worker-secrets.mjs";
 
 // ---------------------------------------------------------------- validation commands
 
@@ -632,8 +633,11 @@ export function refusalReason(r) {
 /** A Question from the worker's exit record: its first question, else the generic line. */
 const openQuestion = (record) => ({ exit: "question", reason: record?.questions?.length ? `question: ${clip(record.questions[0])}` : "an assumption would change a public contract or a recorded decision" });
 
-/** A worker's own Block: its reason, shortened, and the hosts its sandbox denied when it named them. */
-const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}) });
+/**
+ * A worker's own Block: its reason, shortened, the hosts its sandbox denied and the variables its shell lacked when it
+ * named them.
+ */
+const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}), ...(record.missingSecrets?.length ? { missingSecrets: record.missingSecrets } : {}) });
 
 /**
  * A host name as DNS spells it, in lower case: two or more labels of letters, digits and inner hyphens, at most 63
@@ -674,7 +678,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
  *  protectedHits: string[]
- *  record:     the harness's exit record {exit, reason, questions, deniedHosts?} (parseExitRecord), or null
+ *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
  *              the harness left none and the ask could not run or got none, so it is not the worker's own reason
  *  question:   boolean, when the caller has already decided whether a question is open
@@ -690,7 +694,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
  * Returns {exit: 'delivered'|'question'|'blocked', reason}, plus `deniedHosts` when the worker Blocked on hosts its
- * sandbox denied (its exit record's): the stage's backend turns them into the notice's fix (backend.mjs deniedFix).
+ * sandbox denied (its exit record's): the stage's backend turns them into the notice's fix (backend.mjs deniedFix);
+ * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
 export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
@@ -709,8 +714,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   // The plan needs another repository: the owner decides, so no commit (the plan-time stop) is no Block.
   if (planNeeds) return { exit: "question", reason: planNeeds };
   if (!pr?.exists) {
-    // A worker that stopped because the sandbox denied a host it needs: its own reason and hosts, not the missing commits.
-    if (record?.exit === "blocked" && record.deniedHosts?.length) return workerBlocked(record);
+    // A worker that stopped because the sandbox denied a host it needs, or its shell lacked a secret: its own reason and
+    // the names, not the missing commits.
+    if (record?.exit === "blocked" && (record.deniedHosts?.length || record.missingSecrets?.length)) return workerBlocked(record);
     if (commits === 0) {
       // A worker that stopped on purpose before any commit: its own Block or Question, with the reason it gave. A record
       // Factory filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.
@@ -889,7 +895,8 @@ export function evaluateChecks(names, checkRuns) {
 /**
  * The harness's exit record: the first JSON object in `text` (a file the task card names, or
  * the harness's answer to EXIT_PROMPT) with `exit` in EXITS. `questions` and `reason` are
- * normalized to strings; a blocked record's `deniedHosts` keeps host names only (deniedHostsOf). Null when there is
+ * normalized to strings; a blocked record's `deniedHosts` keeps host names only (deniedHostsOf), its `missingSecrets`
+ * environment variable names only (worker-secrets.mjs missingSecretsOf). Null when there is
  * no such object: the caller then asks the harness.
  */
 export function parseExitRecord(text) {
@@ -926,7 +933,9 @@ export function parseExitRecord(text) {
             const unfounded = v.exit === "question" ? (items.length ? items.filter((q) => !questionFounded(q)).map(text) : [typeof v.reason === "string" && v.reason ? v.reason : "a question exit with no question"]) : [];
             // A Block's hosts the sandbox denied (deniedHostsOf: host names only), which the Blocked notice names.
             const deniedHosts = v.exit === "blocked" ? deniedHostsOf(v.deniedHosts) : [];
-            return { exit: v.exit, reason: typeof v.reason === "string" ? v.reason : "", questions, ...(part ? { part } : {}), ...(unfounded.length ? { unfounded } : {}), ...(deniedHosts.length ? { deniedHosts } : {}) };
+            // A Block's variables the worker's shell lacked (missingSecretsOf: names only), which the notice names.
+            const missingSecrets = v.exit === "blocked" ? missingSecretsOf(v.missingSecrets) : [];
+            return { exit: v.exit, reason: typeof v.reason === "string" ? v.reason : "", questions, ...(part ? { part } : {}), ...(unfounded.length ? { unfounded } : {}), ...(deniedHosts.length ? { deniedHosts } : {}), ...(missingSecrets.length ? { missingSecrets } : {}) };
           }
           break;
         }
@@ -951,7 +960,7 @@ export const questionFounded = (q) =>
 const QUESTION_SHAPE = '{"question": "the question a human must answer, verbatim", "test": "contract" | "decision" | "access", "existing": "the existing contract it changes or removes, the recorded decision it contradicts, or the access it grants"}';
 
 /** What Factory asks a harness that left no exit record (resumed in its own session where it can). */
-export const EXIT_PROMPT = `Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": [${QUESTION_SHAPE}], "reason": "why you are blocked, else empty", "deniedHosts": ["each host the sandbox denied that blocked you"], "part": {"remaining": ["each checklist item left for the next PR"]}}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered". Leave out "deniedHosts" unless the sandbox denying a host is why you are blocked, and "part" unless you split the Objective and items remain for a later PR.`;
+export const EXIT_PROMPT = `Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": [${QUESTION_SHAPE}], "reason": "why you are blocked, else empty", "deniedHosts": ["each host the sandbox denied that blocked you"], "missingSecrets": ["each environment variable your shell lacked that blocked you"], "part": {"remaining": ["each checklist item left for the next PR"]}}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered". Leave out "deniedHosts" unless the sandbox denying a host is why you are blocked, "missingSecrets" unless a secret or API key missing from your shell is, and "part" unless you split the Objective and items remain for a later PR.`;
 
 /** The questions of a question exit that already name a test of the Question rule: they stand whatever the check says. */
 export const standingQuestions = (record) => (record?.questions || []).filter((q) => !(record.unfounded || []).includes(q));

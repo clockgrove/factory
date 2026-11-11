@@ -11,6 +11,7 @@ import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer } from "./logic.mjs";
 import { isFactorySecret } from "./inputs.mjs";
+import { parseWorkerSecrets } from "./worker-secrets.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -1222,11 +1223,14 @@ export function localSandbox(env = {}) {
  * The env a local child starts from: an allow-list, not the developer's whole shell, so AWS_*, NPM_TOKEN
  * and the like never reach the harness. `extra` names more variables the adopter's commands need
  * (FACTORY_LOCAL_ENV, such as DATABASE_URL); Factory's own service keys (inputs.mjs FACTORY_SECRET_KEYS) are never
- * among them, since the workflow file that can name them is repository content.
+ * among them, since the workflow file that can name them is repository content. Nor is a worker secret's NAME or SOURCE
+ * (`workerSecrets`, the worker_secrets setting): that reaches the work stage's harness alone (lib/worker-secrets.mjs),
+ * never every stage's every command; doctor warns when FACTORY_LOCAL_ENV names one.
  */
-export function localBaseEnv(env = process.env, extra = []) {
+export function localBaseEnv(env = process.env, extra = [], { workerSecrets = "" } = {}) {
   const keep = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z]+|TERM|COLORTERM|TMPDIR|TZ|XDG_[A-Z_]+|HTTPS?_PROXY|NO_PROXY|https?_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|MISE_[A-Z_]+|NVM_DIR|VOLTA_HOME|PNPM_HOME|COREPACK_HOME|BUN_INSTALL|CARGO_HOME|RUSTUP_HOME|GOPATH|GOROOT|JAVA_HOME|CLAUDE_CONFIG_DIR|CODEX_HOME)$/;
-  const wanted = new Set(extra.filter((k) => !isFactorySecret(k)));
+  const worker = new Set(parseWorkerSecrets(workerSecrets).entries.flatMap((e) => [e.name, e.source]));
+  const wanted = new Set(extra.filter((k) => !isFactorySecret(k) && !worker.has(k)));
   const out = {};
   for (const [k, v] of Object.entries(env)) if (keep.test(k) || wanted.has(k)) out[k] = v;
   // Tool telemetry would only hit the sandbox's network allow-list (a Codex sandbox reports each refusal as an error).

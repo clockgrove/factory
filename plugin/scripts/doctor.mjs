@@ -21,6 +21,8 @@ import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage } from "./lib/usage.mjs";
+import { triageKey } from "./lib/triage.mjs";
+import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
 const PASS = (n, d) => check(n, "PASS", d);
@@ -74,6 +76,39 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     else out.push(await copilotWriteProbe({ repo: inputs.repo, token: tok }));
   }
   if (probe) out.push(await probeHarness({ inputs, env }));
+  return out;
+}
+
+/**
+ * The worker secrets (lib/worker-secrets.mjs), when `worker_secrets` names any: each refused entry, each SOURCE with no
+ * value here and each value equal to Factory's own AI Gateway key (compared in constant time, in this process; the worker
+ * withholds it) is a WARN; else one PASS naming what reaches the worker's shell. Values: `worker_secret_values` (a job,
+ * a stage), else, off Actions, this shell's variables (a developer's doctor run for local mode). Names only, never a value.
+ */
+/** The FACTORY_LOCAL_ENV names that are a worker secret's NAME or SOURCE (`spec`, worker_secrets). */
+export function localEnvWorkerNames(spec, localEnv) {
+  const named = new Set(parseWorkerSecrets(spec).entries.flatMap((e) => [e.name, e.source]));
+  return String(localEnv || "").split(/[\s,]+/).filter((n) => n && named.has(n));
+}
+
+export function workerSecretChecks({ inputs, env = process.env, factoryKey = () => triageKey({ inputs, env }) }) {
+  if (!String(inputs.workerSecrets || "").trim()) return [];
+  const values = parseSecretValues(inputs.workerSecretValues);
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s) ?? (env.GITHUB_ACTIONS ? undefined : env[s]), factoryKey: factoryKey() });
+  const out = [];
+  for (const r of ws.refused) out.push(WARN("worker secrets", `refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`, "remove it from worker_secrets (FACTORY_WORKER_SECRETS); pass a key of its own as NAME=SOURCE"));
+  if (ws.missing.length) out.push(WARN("worker secrets", `no value here for ${ws.missing.map(nameLabel).join(", ")}`, "on Actions and in a cloud sandbox add a SOURCE=value line for each to the repository secret FACTORY_WORKER_SECRET_VALUES (the workflow passes it as worker_secret_values); in local mode export each in the shell that runs factory serve"));
+  if (ws.factoryKey.length) out.push(WARN("worker secrets", `${ws.factoryKey.map(nameLabel).join(", ")}: the same value as Factory's own AI Gateway key, so the worker does not get it`, "give the worker a dedicated key with a budget of its own (docs/PLAN.md, Worker secrets); Factory's AI_GATEWAY_API_KEY stays Factory's"));
+  const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
+  // FACTORY_LOCAL_ENV naming a worker secret would hand it to every local stage's every command (lib/local.mjs
+  // localBaseEnv leaves such names out; the warning says why the stage does not get it).
+  const shared = localEnvWorkerNames(inputs.workerSecrets, env.FACTORY_LOCAL_ENV);
+  if (shared.length) out.push(WARN("worker secrets", `FACTORY_LOCAL_ENV names ${shared.map(nameLabel).join(", ")}, a worker secret: local mode leaves it out of every stage's environment, so only the worker's shell gets it`, "remove it from FACTORY_LOCAL_ENV; worker_secrets alone opts it in"));
+  // Factory redacts and masks only values of eight characters or more (inputs.mjs secretForms): a shorter one would mask
+  // ordinary text, so it goes unprotected.
+  const short = given.filter((e) => ws.env[e.name].length < 8);
+  if (short.length) out.push(WARN("worker secrets", `${short.map((e) => nameLabel(e.name)).join(", ")}: a value under 8 characters, which Factory cannot redact or mask in what it posts, stores or pushes`, "use a real key: a gateway key is far longer"));
+  if (given.length && !out.length) out.push(PASS("worker secrets", `${given.map(secretLabel).join(", ")} reach the worker's shell; any code it runs can spend them, so each must be a dedicated key with a budget`));
   return out;
 }
 
@@ -931,6 +966,7 @@ export function noticeAppCheck(minted) {
 export async function jobChecks({ inputs, repo, token, app, checkout, notice = false }) {
   const out = [];
   out.push(...(await credentialChecks({ inputs })));
+  out.push(...workerSecretChecks({ inputs }));
   out.push(...(await githubChecks({ inputs, repo, token, app, notice, job: true })));
   out.push(...(await repositoryChecks({ inputs, checkout })));
   out.push(...(await runnerChecks({ inputs })));
@@ -941,7 +977,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   // Outside Actions the workflow's env block is not in this process: read it from the checkout (this shell still wins).
-  const inputs = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...readWorkflowEnv(checkout), ...process.env } });
+  const env = process.env.GITHUB_ACTIONS ? process.env : { ...readWorkflowEnv(checkout), ...process.env };
+  const inputs = resolveInputs({ args, env });
   if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
   const repo = repoOf(inputs.repo);
   let token = inputs.appToken || null;
@@ -958,6 +995,7 @@ async function main() {
   const results = [];
   const local = args.local === "true" || backend().name === "local";
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
+  results.push(...workerSecretChecks({ inputs, env }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

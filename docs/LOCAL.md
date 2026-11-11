@@ -72,6 +72,7 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_RESUME_POLICY`, `FACTORY_COMPACTION_WINDOW`, `FACTORY_PROMPT_CACHE_TTL` | the session settings, as on the Action |
 | `FACTORY_LOCAL_DOMAINS` | more hosts the sandboxes may reach, space or comma separated |
 | `FACTORY_LOCAL_ENV` | names of more variables the stage may see (the stage env is an allow-list, not your shell) |
+| `FACTORY_WORKER_SECRETS` | the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (PLAN.md, Worker secrets); this shell's `SOURCE` variables hold the values. The workflow's env block sets it too |
 | `FACTORY_LOCAL_SETUP` | the setup command for your machine (the workflow's assumes a fresh runner) |
 | `FACTORY_LOCAL_VALIDATION` | the validation commands local mode runs, when some of the workflow's cannot run in a sandbox; the required checks on GitHub still run the full set before a merge |
 | `FACTORY_LOCAL_DB=1`, `FACTORY_LOCAL_DB_INIT`, `FACTORY_PG_BIN` | a throwaway Postgres per validation command (below) |
@@ -79,6 +80,10 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: 
 | `FACTORY_LOCAL_MAX_CONCURRENT` | how many Objectives (work or review) this machine runs at once; default a quarter of its CPU threads, at most one per 8 GB of memory. The workflow's `max_concurrent` still caps the repository as a whole |
 
 Local mode runs the validation commands itself, so their order is its wall time. Mark a command `parallel:` (for example `parallel: pnpm test`) when it may run at the same time as the marked commands beside it, and quote the whole value in the workflow's env block (`FACTORY_VALIDATION: 'pnpm check, parallel: pnpm test'`), since an unquoted `: ` makes it a YAML mapping and GitHub then runs none of the workflow: each run of consecutive marked commands starts together, and the next command waits for all of them. Unmarked commands run one at a time, in order. Each command gets its own sandbox and, with `FACTORY_LOCAL_DB=1`, its own Postgres. When a group fails, the fix run gets every failed command's tail and the path of its whole output.
+
+## Worker secrets
+
+A worker that must spend through a key of the repository's own (a paid image step, say) gets it only when the repository opts it in (PLAN.md, Worker secrets): `FACTORY_WORKER_SECRETS: AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY` in the workflow's env block (or this shell), and `export WORKER_AI_GATEWAY_API_KEY=...` in the shell that runs `factory serve` (one line; a running `serve` reads it when it restarts), with the gateway's host in `FACTORY_LOCAL_DOMAINS`. Only the work stage's harness gets it, as `AI_GATEWAY_API_KEY` there; setup, install, validation and the reviewer never do. A worker secret's NAME or SOURCE that `FACTORY_LOCAL_ENV` also names is left out of every stage's environment (doctor warns), since `FACTORY_LOCAL_ENV` would hand it to every command of every stage. Use a dedicated key with a budget the gateway enforces, never the one in `~/.config/factory/ai-gateway-key`: Factory's key is refused as a SOURCE by name, and a worker value equal to it is withheld (doctor warns).
 
 ## Databases
 

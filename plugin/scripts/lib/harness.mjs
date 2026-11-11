@@ -10,7 +10,8 @@ import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
-import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
+import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
+import { SHELL_SECRETS_ENV, takeShellSecrets } from "./worker-secrets.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -19,13 +20,12 @@ export const CLI = {
   copilot: { bin: "copilot", pkg: "@github/copilot" },
 };
 
-/** Keys that must never reach a child that is not the harness (validation commands, git hooks). */
-export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
-/** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
-export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN"];
-
-/** Factory's own service keys (inputs.mjs, where local.mjs reads them too): for Factory's process only, never any child's. */
-export { FACTORY_SECRET_KEYS };
+/**
+ * The credential lists (inputs.mjs, where local.mjs and worker-secrets.mjs read them too): the model's
+ * (MODEL_SECRET_KEYS), the runner's (RUNNER_SECRET_KEYS), GitHub's (GITHUB_TOKEN_KEYS) and Factory's own service keys
+ * (FACTORY_SECRET_KEYS), which are for Factory's process only, never any child's.
+ */
+export { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS };
 
 /**
  * The credentials the harness must keep out of the commands its model runs, on every route: its own model credential
@@ -36,11 +36,20 @@ export { FACTORY_SECRET_KEYS };
 export const SHELL_SECRET_KEYS = [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...FACTORY_SECRET_KEYS];
 
 /**
+ * SHELL_SECRET_KEYS less the worker secrets a repository opted in to its worker's shell (lib/worker-secrets.mjs): only a
+ * Factory service key's name (AI_GATEWAY_API_KEY, holding the adopter's own key) can be one; a model, runner or GitHub
+ * credential's name never leaves the list, whatever `shellSecrets` says.
+ */
+export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((k) => !(FACTORY_SECRET_KEYS.includes(k) && shellSecrets.includes(k)));
+
+/**
  * Env for a non-harness child (and the harness itself, before its own credential is added): the
  * job's env with every secret removed. An `extra` value of undefined or null removes that key.
  */
 export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
+  // The worker's shell secrets (lib/worker-secrets.mjs) are for its harness alone (runHarness unpacks them there).
+  delete e[SHELL_SECRETS_ENV];
   for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS]) delete e[k];
   for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
   for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
@@ -54,9 +63,6 @@ export function scrubbedEnv(base = process.env, extra = {}) {
   for (const k of Object.keys(e)) if (k === "FACTORY_LFS_PIN" || k === "GIT_NO_REPLACE_OBJECTS" || /^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$/.test(k)) delete e[k];
   return e;
 }
-
-/** GitHub tokens a child must never get from the job: the job's own, gh's, and Factory's write token. */
-export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FACTORY_GIT_TOKEN", "FACTORY_LOCAL_TOKEN", "FACTORY_SECOND_TOKEN", "GH_CONFIG_DIR"];
 
 /**
  * The credential each harness child gets, and nothing else. Returns {env, basis}
@@ -182,7 +188,9 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, runner = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, runner = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD, shellSecrets = [] }) {
+  // The credentials kept from the model's commands: every one, less the worker secrets opted in to its shell.
+  const hidden = hiddenFromShell(shellSecrets);
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
   // lib/local.mjs to one bar. On a runner and in a cloud sandbox VM (`runner`: the agent uid's checkout, home and temp
   // directory), Claude Code runs its commands in its own sandbox to the same bar (claudeRunnerSettings), so they never
@@ -205,7 +213,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const plugin = pluginDir ? ["--plugin-dir", join(pluginDir, "plugin"), "--agents", join(pluginDir, "agents.json")] : [];
       // The package caches are writable to shell commands only, never added directories, whose CLAUDE.md would load.
       const caches = local?.cacheDirs || [];
-      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: SHELL_SECRET_KEYS }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: SHELL_SECRET_KEYS }) : null;
+      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: hidden }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
@@ -221,7 +229,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const args = resume ? ["exec", "resume", resume] : ["exec"];
       // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code.
       // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included.
-      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: SHELL_SECRET_KEYS })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(SHELL_SECRET_KEYS)];
+      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
       args.push("--json", ...perms, "--skip-git-repo-check");
       if (model && !resume) args.push("-m", model);
       if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
@@ -242,7 +250,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // without -p a piped stdin is a non-interactive prompt (1.0.107, checked live with 200 KB, fresh and --resume).
       // Every route: the credentials (SHELL_SECRET_KEYS, its own COPILOT_GITHUB_TOKEN included) are removed from its shell
       // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
-      const args = [...perms, `--secret-env-vars=${SHELL_SECRET_KEYS.join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
       // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.
@@ -343,7 +351,10 @@ async function runnerClear(runner, env) {
 }
 const SERVICES_SAID = new Set();
 
-export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
+export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
+  // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own.
+  const { shell, env } = takeShellSecrets(given);
+  const shellSecrets = Object.keys(shell);
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.
   const agentUid = agentUser();
   const usageName = `copilot-usage-${label}-${Date.now()}.json`;
@@ -370,7 +381,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     log(`${label}: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap; not starting the run`);
     return { ...parseUsage(harness, "", model || null, 0, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
-  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner });
+  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
@@ -383,7 +394,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const started = new Date().toISOString();
   // On Actions the harness runs as the agent uid (its cwd is the agent's checkout), with its model credential and nothing
   // else from the job; locally it leads its own process group, killed when it exits. Then its leftovers are reaped.
-  const childEnv = { ...env, ...extraEnv };
+  const childEnv = { ...env, ...extraEnv, ...shell };
   // Locally the harness's git is Factory's guard (local.mjs gitGuardScript), checking the .git the pre-start clear checked.
   const sandboxed = backend(env).sandbox.harness(env);
   if (sandboxed?.gitBin && sandboxed.clone) {
@@ -399,7 +410,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
-  const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+  const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), ...shellSecrets, "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
   // A runner's Claude Code: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
   const [execCmd, execArgs, execEnv] = runner ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
   const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });

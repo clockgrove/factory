@@ -7,7 +7,7 @@
 // harness. Only the typed label and its confidence reach code; the activity is read from the harness's own event stream
 // (Claude stream-json, Codex JSONL, Copilot JSON) by structure.
 import { openDecider } from "./adapters/decider.mjs";
-import { log, mask } from "./inputs.mjs";
+import { log, mask, redactSecrets } from "./inputs.mjs";
 import { triageKey } from "./triage.mjs";
 
 /** The default model: no false flag on 367 on-task checkpoints and 7 of 9 drift checkpoints caught at 0.7 (#2564). */
@@ -185,10 +185,13 @@ export function filesTouched(entries, root, cap = 25) {
   return out.slice(-cap);
 }
 
-/** What one checkpoint asks about: the shape the replay measured. */
+/**
+ * What one checkpoint asks about: the shape the replay measured. The activity is the agent's: no held secret (a worker
+ * secret's value, inputs.mjs holdSecrets) goes to the gateway in it.
+ */
 export function driftInput({ stage, goal, items = [], entries = [], root = null, window = WINDOW }) {
   const files = filesTouched(entries, root);
-  return [
+  return redactSecrets([
     `Stage: ${stage} (goal: ${goal}). Checkpoint after ${entries.length} tool calls.`,
     "Plan items:",
     ...items.map((x, i) => `${i + 1}. ${x}`),
@@ -197,7 +200,7 @@ export function driftInput({ stage, goal, items = [], entries = [], root = null,
     ...entries.slice(-window).map((e) => `- ${entryLine(e, root)}`),
     "",
     `Files touched so far: ${files.length ? files.join(", ") : "none"}`,
-  ].join("\n");
+  ].join("\n"));
 }
 
 /** The advisory line: the typed label and its confidence only. */

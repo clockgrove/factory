@@ -67,6 +67,8 @@ export const DEFAULTS = {
   codex_api_key: "",
   copilot_github_token: "",
   ai_gateway_api_key: "", // red-check triage (triage.mjs) and the drift advisory (drift.mjs); empty turns both off
+  worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
+  worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
   triage_model: "", // empty: triage.mjs TRIAGE_MODEL
   drift_model: "", // empty: drift.mjs DRIFT_MODEL (the drift advisory, on with ai_gateway_api_key)
   github_token: "",
@@ -82,9 +84,15 @@ export const DEFAULTS = {
   sweep_max_destroys: "5",
 };
 
-export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "ai_gateway_api_key", "github_token", "app_token", "vercel_token"]);
+export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];
+/** Keys that must never reach a child that is not the harness (validation commands, git hooks). */
+export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
+/** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
+export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN"];
+/** GitHub tokens a child must never get from the job: the job's own, gh's, and Factory's write token. */
+export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "FACTORY_GIT_TOKEN", "FACTORY_LOCAL_TOKEN", "FACTORY_SECOND_TOKEN", "GH_CONFIG_DIR"];
 /** A name that carries one of Factory's own service keys: the bare name, or the input under FACTORY_ or FACTORY_INPUT_. */
 export const isFactorySecret = (k) => FACTORY_SECRET_KEYS.some((n) => k === n || k === `FACTORY_${n}` || k === `FACTORY_INPUT_${n}`);
 
@@ -183,6 +191,9 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     codexApiKey: get("codex_api_key"),
     copilotGithubToken: get("copilot_github_token"),
     aiGatewayApiKey: get("ai_gateway_api_key"),
+    // The secrets the worker's shell gets (lib/worker-secrets.mjs): the opt-in, and their values where a runner has them.
+    workerSecrets: get("worker_secrets"),
+    workerSecretValues: get("worker_secret_values"),
     triageModel: get("triage_model").trim(),
     driftModel: get("drift_model").trim(),
     githubToken: get("github_token") || env.GITHUB_TOKEN || "",
@@ -214,7 +225,7 @@ export function promptCacheSetting(value) {
 
 /** Write `name=value` to $GITHUB_OUTPUT when running in Actions; always echo it. */
 export function setOutput(name, value, env = process.env) {
-  const line = `${name}=${typeof value === "string" ? value : JSON.stringify(value)}`;
+  const line = `${name}=${redactSecrets(typeof value === "string" ? value : JSON.stringify(value))}`;
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `${line}\n`);
   process.stdout.write(`[output] ${line}\n`);
 }
@@ -227,8 +238,58 @@ export const maskable = (env = process.env) => !!env.GITHUB_ACTIONS && env.FACTO
 export function mask(value) {
   if (value && maskable()) process.stdout.write(`::add-mask::${value}\n`);
 }
-/** Log a line with a stable prefix. Never pass a secret. */
-export const log = (...parts) => process.stdout.write(`[factory] ${parts.join(" ")}\n`);
+/** Log a line with a stable prefix. Never pass a secret; a held one (holdSecrets) is redacted anyway. */
+export const log = (...parts) => process.stdout.write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
+
+/**
+ * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its
+ * encodeURIComponent form (upper- and lower-case hex), and its base64 at each of the three byte offsets a surrounding text can put it at (the
+ * characters that also carry a neighbour's bits left out). Only forms of eight characters or more: a shorter one would
+ * mask ordinary text.
+ */
+export function secretForms(value) {
+  const v = String(value ?? "");
+  if (v.length < 8) return [];
+  const url = encodeURIComponent(v);
+  // Percent-encoding with lower-case hex (%2f) as well as upper-case (%2F): both decode to the value.
+  const forms = new Set([v, JSON.stringify(v).slice(1, -1), url, url.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase())]);
+  const bytes = Buffer.from(v, "utf8");
+  for (let k = 0; k < 3; k += 1) {
+    const b64 = Buffer.concat([Buffer.alloc(k), bytes]).toString("base64").replace(/=+$/, "");
+    // Leading characters that hold a prefix byte's bits: none at offset 0, two at 1, three at 2. The last character
+    // holds the next byte's bits too, unless the encoded bytes end on a 3-byte boundary.
+    const start = [0, 2, 3][k];
+    const end = (k + bytes.length) % 3 === 0 ? b64.length : b64.length - 1;
+    forms.add(b64.slice(start, end));
+  }
+  return [...forms].filter((f) => f.length >= 8);
+}
+
+/**
+ * Secrets this process must never post or store as text (the worker secrets' values, lib/worker-secrets.mjs): every
+ * GitHub request body (github.mjs), the usage record, the drift advisory's input, the log and Factory's push check
+ * (outbox.mjs) redact or refuse them.
+ */
+const HELD = new Set();
+export function holdSecrets(values = []) {
+  for (const v of values) if (typeof v === "string" && v.length >= 8) HELD.add(v);
+}
+export const heldSecrets = () => [...HELD];
+/** Tests: forget every held secret. */
+export const dropHeldSecrets = () => HELD.clear();
+
+/** `x` with every form of every held secret (or of `values`) replaced by ***: strings, and arrays and objects deeply. */
+export function redactSecrets(x, values = heldSecrets()) {
+  if (!values.length) return x;
+  const forms = values.flatMap(secretForms).sort((a, b) => b.length - a.length);
+  const walk = (y) => {
+    if (typeof y === "string") return forms.reduce((t, f) => (t.includes(f) ? t.split(f).join("***") : t), y);
+    if (Array.isArray(y)) return y.map(walk);
+    if (y && typeof y === "object") return Object.fromEntries(Object.entries(y).map(([k, v]) => [k, walk(v)]));
+    return y;
+  };
+  return walk(x);
+}
 
 /** Who fired this job's event ({login, type}: type "Bot" for an App), from GITHUB_EVENT_PATH; null outside Actions. */
 export function eventSender(env = process.env) {

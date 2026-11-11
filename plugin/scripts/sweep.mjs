@@ -9,7 +9,7 @@
 // or when it has been stopped longer than `sandbox_idle_days` with the Objective neither Running nor In review. At most
 // `sweep_max_destroys` a run. A stage's usage tarball the launcher never collected comes out to the runner first, for
 // the job's upload steps (one per slot, COLLECT_SLOTS). The record's own sandbox is claimed in the record before it is
-// destroyed (the launcher's compare-and-set), so a launch starting meanwhile wins and the sweep leaves it. Then this
+// destroyed, under the record lock as a launcher claims it, so a launch starting meanwhile wins and the sweep leaves it. Then this
 // repository's images: the current one stays, and an older one until no stage can still be starting from it
 // (lib/image.mjs prunableImages); the rest go.
 import { execFileSync } from "node:child_process";
@@ -21,11 +21,12 @@ import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
 import { appToken } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
-import { bookVendor, recordBody } from "./launch.mjs";
-import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf, upsertComment } from "./lib/github.mjs";
+import { bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
+import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
+import { lockBase } from "./lib/lock.mjs";
 import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { factorySandboxId, marker, sandboxRecord, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
+import { factorySandboxId, sandboxRecord, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
 
 /** Usage tarballs collected per run: the workflow's sweep job has this many upload steps. */
 export const COLLECT_SLOTS = 3;
@@ -99,6 +100,8 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
   const out = [];
   const slots = [];
   let destroyed = 0;
+  // The record lock's base (lib/lock.mjs lockBase), read once, when a record is first claimed.
+  let base = null;
   for (const n of numbers) {
     let issue = null;
     try {
@@ -138,14 +141,17 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         out.push({ id: s.id, issue: n, action: "would destroy", reason: d.destroy });
         continue;
       }
-      // The record's own sandbox: claim it as a launcher does (written, read back), so a launch starting now wins.
+      // The record's own sandbox: claim it as a launcher does (under the record lock, over the record read), so a launch
+      // starting now wins. Later writes go in only while the record still carries this claim.
       const recorded = issue && record?.id === s.id;
       let claim = null;
+      const mine = (next) => (cur) => (cur?.claim === claim ? next(cur) : null);
       if (recorded) {
         claim = `sweep-${randomBytes(6).toString("hex")}`;
-        await upsertComment(repo, n, marker(n, "sandbox"), recordBody({ ...written, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() }), opts);
-        if (sandboxRecord(await listComments(repo, n, opts), n)?.claim !== claim) {
-          out.push({ id: s.id, issue: n, action: "skipped", reason: "a launcher claimed the sandbox record" });
+        base ??= await lockBase(repo, opts);
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, record) ? { ...written, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() } : null), { base });
+        if (!w.ok) {
+          out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock" });
           continue;
         }
       }
@@ -162,7 +168,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         // A stage whose end was never answered: its vendor cost from the totals now, before they go with the sandbox.
         if (recorded && record.meter && !record.vendorBooked && (usage || slots.length < collectSlots)) {
           const after = await adapter.usage(s.id).catch(() => null);
-          const booked = await bookVendor({ adapter, repo, n, opts, record: { ...written, id: s.id }, after, settled: s.state === "stopped", state: s.state === "stopped" ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
+          const booked = await bookVendor({ adapter, repo, n, opts, base, record: { ...written, id: s.id }, after, settled: s.state === "stopped", state: s.state === "stopped" ? "stopped" : "running", usage, harness, error: after ? null : "unread" });
           if (!usage && booked.usage) slots.push(booked.usage);
           usage = booked.usage ?? usage;
           vendor = booked.vendor;
@@ -174,12 +180,15 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         // The job log gets the message; the record keeps codes only. The sandbox stays for the next run.
         log(`sweep: ${s.id} (#${n}): ${e.code ?? "error"}: ${String(e.message).slice(0, 300)}`);
         out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
-        if (claim) await upsertComment(repo, n, marker(n, "sandbox"), recordBody(written), opts).catch(() => {});
+        if (claim) await writeSandboxRecord(repo, n, opts, mine(() => written), { base }).catch(() => {});
         continue;
       }
       if (claim) {
         const at = new Date().toISOString();
-        await upsertComment(repo, n, marker(n, "sandbox"), recordBody({ ...written, id: null, state: "stopped", destroyedAt: at, collected: usage ? true : written.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null }), opts).catch((e) => log(`sweep: #${n} record: ${String(e.message).slice(0, 120)}`));
+        await writeSandboxRecord(repo, n, opts, mine(() => ({ ...written, id: null, state: "stopped", destroyedAt: at, collected: usage ? true : written.collected, ...(vendor ? { vendorBooked: true, vendorUsd: vendor.usd } : {}), at, leaseUntil: null })), { base }).then(
+          (w) => w.ok || log(`sweep: #${n} record: not written (${w.refused ? "another claim holds it" : "the record lock stayed held"})`),
+          (e) => log(`sweep: #${n} record: ${String(e.message).slice(0, 120)}`),
+        );
       }
     }
   }

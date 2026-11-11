@@ -355,3 +355,23 @@ test("streakTable: a backslash or pipe in a cell cannot break the Markdown row",
   assert.ok(md.includes("| c\\\\\\|x |"), md);
   assert.ok(!md.includes("| c\\|x |"), md);
 });
+
+test("sandbox stages: the vendor comment's dollars sit beside the progress comment's model dollars; one without a progress comment is its own row", async () => {
+  const { spendRecords } = await import("../lib/objective.mjs");
+  const app = { login: "factory-app[bot]", type: "Bot" };
+  const at = "2031-03-02T03:00:00Z";
+  const c = (body) => ({ user: app, created_at: at, body });
+  const collected = {
+    issue: { number: 48, labels: [] },
+    issueTimeline: [{ event: "labeled", label: { name: "factory:running" }, actor: app }],
+    issueComments: [
+      c('<!-- factory:48:progress:work:9-0123456789ab -->\nFactory work run 9-0123456789ab.\n<!-- factory:spend {"usd":0.5} -->'),
+      c('<!-- factory:48:vendor:work:9-0123456789ab -->\nFactory\'s sandbox cost for this stage:\n- 03:10Z sandbox `factory-a` stopped\n<!-- factory:spend {"usd":0.02,"vendorUsd":0.02} -->'),
+      c('<!-- factory:48:vendor:review:10-ba9876543210 -->\nFactory\'s sandbox cost for this stage:\n- 03:30Z sandbox `factory-a` stopped\n<!-- factory:spend {"usd":0.33,"modelUsd":0.3,"vendorUsd":0.03} -->'),
+      // An older stage's progress spend line, model and vendor in one.
+      c('<!-- factory:48:progress:review:8-aaaaaaaaaaaa -->\nFactory review run 8.\n<!-- factory:spend {"usd":0.45,"modelUsd":0.4,"vendorUsd":0.05} -->'),
+    ],
+  };
+  const rows = spendRecords(collected);
+  assert.deepEqual(rows.map((r) => [r.usd, r.vendor?.usd ?? null]), [[0.5, 0.02], [0.4, 0.05], [0.3, 0.03]]);
+});

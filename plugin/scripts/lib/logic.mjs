@@ -1894,7 +1894,6 @@ export function spendParts(body) {
   }
 }
 
-const VENDOR_LINE = /^- \d\d:\d\dZ sandbox `/;
 const money = (n) => (Number.isFinite(n) ? `$${n.toFixed(n < 1 ? 4 : 2)}` : "?");
 const word = (s) => (typeof s === "string" && /^[A-Za-z0-9._:/-]{1,40}$/.test(s) ? s : "?");
 /**
@@ -1919,24 +1918,15 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
 }
 
 /**
- * A progress comment's body with the stage's vendor cost booked: `line` (vendorLine) after the run's last line, and the
- * spend line rewritten to model plus vendor, so the daily sum counts both. Booking again replaces the earlier booking.
- * `modelUsd` is the harness's dollars when the body's own spend line has none (the stage died before writing it).
+ * The vendor comment's body (`<!-- factory:<n>:vendor:<stage>:<key> -->`, one per stage, written by its one booker):
+ * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
+ * model dollars. `modelUsd`: the harness's dollars from the usage record, for a stage that left no progress comment.
  */
-export function withVendorCost(body, { line, vendorUsd, modelUsd = null }) {
-  const had = spendParts(body);
-  const model = had?.modelUsd ?? (had ? had.usd : null) ?? (Number.isFinite(modelUsd) ? modelUsd : 0);
-  const vendor = Number.isFinite(vendorUsd) ? vendorUsd : 0;
-  const lines = String(body || "").split("\n").filter((l) => !SPEND.test(l) && !VENDOR_LINE.test(l));
-  let last = -1;
-  lines.forEach((l, i) => {
-    if (/^- \d\d:\d\dZ /.test(l)) last = i;
-  });
-  const tail = lines.findIndex((l, i) => i > 0 && l.startsWith("<!-- factory:"));
-  const at = last >= 0 ? last + 1 : tail > 0 ? tail : lines.length;
-  lines.splice(at, 0, line);
+export function vendorBody({ line, vendorUsd, modelUsd = null }) {
   const round = (n) => Math.round(n * 1e6) / 1e6;
-  return `${lines.join("\n")}\n${spendMarker(round(model + vendor), { modelUsd: round(model), vendorUsd: round(vendor) })}`;
+  const vendor = round(Number.isFinite(vendorUsd) ? vendorUsd : 0);
+  const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
+  return `Factory's sandbox cost for this stage:\n${line}\n${spendMarker(round(vendor + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor })}`;
 }
 
 // ----------------------------------------------------------------- launch
@@ -2018,22 +2008,36 @@ export function sandboxRecordOf(body) {
     return null;
   }
 }
+/** The stage's own part of the sandbox record: one comment per stage claim, written by that stage alone (stage.mjs). */
+export const stageMarker = (issue, claim) => marker(issue, "stage", claim);
+const ownOldest = (comments, head, self) => (comments || []).filter((x) => self(x) && (x.body || "").startsWith(`${head}\n`)).sort((a, b) => a.id - b.id)[0];
+/** The stage's own comment for `claim` among `comments`, or undefined. */
+export const stagePartComment = (comments, issue, claim, { self = isSelf } = {}) => ownOldest(comments, stageMarker(issue, claim), self);
+
 /**
- * The Objective's sandbox record: Factory's own marker comment only (anyone can paste the marker into theirs), the
- * oldest one when a race left two. Carries the comment's id and updated_at for the launcher's compare-and-set.
+ * The Objective's sandbox record, merged from its single-writer parts (docs/ADAPTERS.md, Records): the claim comment
+ * `<!-- factory:<n>:sandbox -->` (launchers and the sweep, under the Objective's record lock) and, while it says
+ * `running`, the comment of the stage holding its claim (`<!-- factory:<n>:stage:<claim> -->`, that stage alone): its
+ * fields over the claim comment's, its launch entry added where the launcher's is missing, a quota streak over (a
+ * stage that writes has started). Factory's own comments only (anyone can paste a marker into theirs), the oldest when
+ * there are two. Carries the claim comment's id and updated_at.
  */
 export function sandboxRecord(comments, issue, { self = isSelf } = {}) {
-  const head = marker(issue, "sandbox");
-  const c = (comments || []).filter((x) => self(x) && (x.body || "").startsWith(head)).sort((a, b) => a.id - b.id)[0];
-  return c ? { ...sandboxRecordOf(c.body), commentId: c.id, updatedAt: c.updated_at ?? null } : null;
+  const c = ownOldest(comments, marker(issue, "sandbox"), self);
+  if (!c) return null;
+  const base = { ...sandboxRecordOf(c.body), commentId: c.id, updatedAt: c.updated_at ?? null };
+  const part = base.state === "running" && typeof base.claim === "string" ? sandboxRecordOf(stagePartComment(comments, issue, base.claim, { self })?.body) : null;
+  if (!part) return base;
+  const { launch, claim, quota, ...fields } = part;
+  const { quota: _, ...kept } = base;
+  return { ...kept, ...fields, launches: launch && typeof launch === "object" ? withLaunch(base.launches, launch) : base.launches };
 }
 
 /** How many launches a sandbox record keeps, the latest last. */
 export const KEEP_LAUNCHES = 10;
 /**
- * `launches` with a started stage's entry in it. A start is one entry per cue and launch run, which both writers of the
- * record carry: the launcher after the start, and the stage with every beat (its first can land over the launcher's
- * write, which GitHub cannot compare-and-set). `replace`: the launcher's own entry, with its timings, takes the place
+ * `launches` with a started stage's entry in it. A start is one entry per cue and launch run, which both parts of the
+ * record carry: the launcher's after the start, and the stage's from its first beat (which can come first). `replace`: the launcher's own entry, with its timings, takes the place
  * of the stage's; without it an entry already there is kept.
  */
 const sameStart = (entry) => (l) => l?.ok === true && l.cue === entry.cue && l.run === entry.run;
@@ -2043,9 +2047,6 @@ export function withLaunch(launches, entry, { replace = false } = {}) {
   if (!replace && list.some(same)) return list;
   return [...list.filter((l) => !same(l)), entry].slice(-KEEP_LAUNCHES);
 }
-
-/** Whether `launches` hold the launcher's own entry of this start: the one with its step timings (`ms`), not the stage's. */
-export const launcherWrote = (launches, entry) => Array.isArray(launches) && launches.some((l) => sameStart(entry)(l) && !!l.ms && typeof l.ms === "object");
 
 /** The tags an Objective's sandbox carries: the vendor-side half of finding it (docs/ADAPTERS.md). */
 export const sandboxTags = (repoId, issue) => ({ factory: "objective", "factory-repo": String(repoId), "factory-issue": String(issue) });

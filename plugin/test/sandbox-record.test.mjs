@@ -1,13 +1,15 @@
-// The sandbox record keeps every start: two writers share it (the launcher after a start, the stage with every beat)
-// and GitHub has no compare-and-set on a comment, so either can land over the other. Shapes from the wave-5 drill's
-// #293 and #294, both started from one dispatcher run (42593022322), where #294's work launch and image were lost.
+// The sandbox record keeps every start: it is read merged from single-writer parts (logic.mjs sandboxRecord), the
+// launcher's claim comment and the stage's own comment, so neither write can land over the other. Shapes from the
+// wave-5 drill's #293 and #294, both started from one dispatcher run (42593022322), where #294's work launch and image
+// were lost to a beat landing over the launcher's write when both wrote one comment.
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
-import { launcherWrote, marker, sandboxRecord, sandboxRecordOf, stageDeadline, withLaunch } from "../scripts/lib/logic.mjs";
-import { recordBody, stageProgressKey, startEntry, startInSandbox, startedRecord } from "../scripts/launch.mjs";
-import { awaitLauncher, startedFields, startedLaunch, writeRecord } from "../scripts/stage.mjs";
+import { marker, sandboxRecord, setSelf, stageDeadline, withLaunch } from "../scripts/lib/logic.mjs";
+import { recordBody, stageProgressKey, startEntry, startInSandbox, startedRecord, writeSandboxRecord } from "../scripts/launch.mjs";
+import { startedFields, startedLaunch, writeRecord } from "../scripts/stage.mjs";
+import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
 
 const RUN = "42593022322";
 const IMAGE = { snapshot: "snap_famw7CHNm6PKr7p8K7DiwB2RmaGJ", sha: "a6fcd9f08a0eff2a7b93df6d622d1e8f0204fd30" };
@@ -16,18 +18,7 @@ const OBJECTIVES = [
   { n: 293, claim: "a5e441c92cdf", sandbox: "factory-0d2c41aa7b10", cue: "stint-1794216209", commandMs: Date.parse("2026-11-09T09:23:58.230Z") },
   { n: 294, claim: "76991fcd4388", sandbox: "factory-cfecde49e990", cue: "stint-1794216211", commandMs: Date.parse("2026-11-09T09:23:59.441Z") },
 ];
-const bot = { login: "factory-app[bot]", type: "Bot" };
-const self = (c) => c.user?.login === bot.login;
-
-/** One repository's comments: the record comment per Objective, written whole (GitHub's PATCH). */
-function comments() {
-  const byId = new Map();
-  return {
-    list: (n) => [...byId.values()].filter((c) => c.issue === n),
-    put: (n, id, rec) => byId.set(id, { id, issue: n, user: bot, body: `${marker(n, "sandbox")}\n${recordBody(rec)}` }),
-    get: (id) => byId.get(id),
-  };
-}
+setSelf(BOT.login);
 
 /** A work stage started from one dispatcher run: the real start against a vendor that creates from the image. */
 async function started(o) {
@@ -70,54 +61,33 @@ const claimRecord = (o) => ({ vendor: "vercel", stage: "work", event: "pull_requ
 const MS = { "start.create": 2000, "start.command": 1200 };
 
 /**
- * One Objective's two writers. The launcher reads the record and writes startedRecord over it; the stage's first beat
- * is awaitLauncher (reads until the launcher's write is in, or `waits` reads pass), then writeRecord (read from the
- * list, read the comment, compare, patch). `order` says how they interleave. `waits: 0` is the beat without the wait.
+ * One Objective's two writers, as launch.mjs and stage.mjs make them: the launcher's post-start write (startedRecord
+ * over the record as it is, under the record lock) and the stage's beats (its own comment), on the in-memory GitHub.
+ * `order`: at once (the store's seed picks the interleaving), or one after the other. Returns the record as read.
  */
-async function race(store, o, s, order, { stageFields = s.fields, stageLaunch = s.stageLaunch, waits = 3 } = {}) {
-  const id = o.n * 1000;
-  store.put(o.n, id, claimRecord(o));
-  let now = null;
-  const launcherRead = () => (now = sandboxRecord(store.list(o.n), o.n, { self }));
-  const launcherWrite = () => {
+async function race(store, o, s, order, { stageFields = s.fields, stageLaunch = s.stageLaunch } = {}) {
+  store.put(o.n, `${marker(o.n, "sandbox")}\n${recordBody(claimRecord(o))}`);
+  const launcher = () => {
     const at = "2026-11-09T09:24:00.900Z";
     const entry = { ...s.launch, latencyMs: Date.parse(s.result.commandAt) - Date.parse(EVENT_AT), found: s.result.found, at, ms: MS };
-    if (now?.claim === o.claim) store.put(o.n, id, startedRecord(now, { base: { vendor: "vercel", stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, budgetUsd: 20, home: null }, result: s.result, claim: o.claim, progress: stageProgressKey(RUN, o.claim), latencyMs: entry.latencyMs, at, leaseUntil: "2026-11-09T09:34:00.900Z", entry }));
+    return writeSandboxRecord(REPO, o.n, {}, (cur) => (cur?.claim === o.claim ? startedRecord(cur, { base: { vendor: "vercel", stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, budgetUsd: 20, home: null }, result: s.result, claim: o.claim, progress: stageProgressKey(RUN, o.claim), latencyMs: entry.latencyMs, at, leaseUntil: "2026-11-09T09:34:00.900Z", entry }) : null), { api: store.api, base: BASE, tries: 400, pauseMs: 0, readBackPauseMs: 0 });
   };
-  // `afterRead` runs after the stage's first read of the record, `beforePatch` just before its write.
-  const beat = async ({ afterRead = () => {}, beforePatch = () => {} } = {}) => {
-    let reads = 0;
-    const record = async () => {
-      const r = sandboxRecord(store.list(o.n), o.n, { self });
-      const out = r && { ...r, body: store.get(r.commentId).body };
-      if ((reads += 1) === 1) afterRead();
-      return out;
-    };
-    if (waits) await awaitLauncher({ record, launch: stageLaunch, claim: o.claim, tries: waits, pauseMs: 1 });
-    return writeRecord({
+  const beat = () =>
+    writeRecord({
+      issue: o.n,
       claim: o.claim,
       launch: stageLaunch,
       change: { ...stageFields, state: "running", leaseUntil: "2026-11-09T09:34:01.000Z" },
-      pauseMs: 1,
-      record,
-      read: async (cid) => ({ body: store.get(cid).body }),
-      patch: async (cid, rec) => {
-        beforePatch();
-        store.put(o.n, cid, rec);
-      },
+      list: () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`),
+      put: (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } })),
     });
-  };
-  const launcher = () => (launcherRead(), launcherWrite());
-  // The drill's interleaving: the stage's first read comes before the launcher's write, its write after.
-  if (order === "beat over the launcher") await beat(waits ? { afterRead: launcher } : { beforePatch: launcher });
-  else if (order === "launcher, then beat") (launcher(), await beat());
-  // The launcher's write never came while the beat waited: the beat goes ahead, the launcher's write lands after it.
-  else if (order === "beat, then launcher") (await beat(), launcher());
-  else if (order === "launcher over the beat") (launcherRead(), await beat(), launcherWrite());
-  return sandboxRecordOf(store.get(id).body);
+  const [l, b, b2] = order === "together" ? await Promise.all([launcher(), beat(), beat()]) : order === "launcher, then beat" ? [await launcher(), await beat(), await beat()] : (([x, y, z]) => [z, x, y])([await beat(), await beat(), await launcher()]);
+  assert.equal(l.ok, true, `#${o.n} (${order}): the launcher's write went in`);
+  assert.deepEqual([b, b2], [{ ok: true }, { ok: true }], `#${o.n} (${order}): the beats went in`);
+  return sandboxRecord(await store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`), o.n);
 }
 
-const ORDERS = ["beat over the launcher", "launcher, then beat", "beat, then launcher", "launcher over the beat"];
+const ORDERS = ["together", "launcher, then beat", "beat, then launcher"];
 
 test("two Objectives started from one dispatcher run: each record keeps its work launch and its image, whichever write lands last", async () => {
   const starts = await Promise.all(OBJECTIVES.map(started));
@@ -131,8 +101,8 @@ test("two Objectives started from one dispatcher run: each record keeps its work
     assert.equal(fields.progress, `${RUN}-${o.claim}`);
     assert.deepEqual([stageLaunch.stage, stageLaunch.cue, stageLaunch.run, stageLaunch.found, stageLaunch.ok], ["work", o.cue, RUN, false, true]);
   }
-  for (const order of ORDERS) {
-    const store = comments();
+  for (const [order, seed] of [...ORDERS.map((x) => [x, 1]), ...Array.from({ length: 30 }, (_, i) => ["together", i + 2])]) {
+    const store = githubStore({ seed });
     // Both Objectives' writes run at once in one repository, as the two launch jobs and their two stages did.
     const records = await Promise.all(OBJECTIVES.map((o, i) => race(store, o, starts[i], order)));
     for (const [i, o] of OBJECTIVES.entries()) {
@@ -149,28 +119,35 @@ test("two Objectives started from one dispatcher run: each record keeps its work
   }
 });
 
-test("without the first beat's wait, a beat landing over the launcher still clears the quota streak and keeps the deadline", async () => {
-  const [o] = OBJECTIVES;
+test("the drill's loss cannot recur: a beat that carries only the sandbox, home and meter keeps the launcher's launch and image", async () => {
+  const [o] = OBJECTIVES.slice(1);
   const s = await started(o);
-  const rec = await race(comments(), o, s, "beat over the launcher", { waits: 0 });
-  assert.equal(rec.quota, undefined, "the stage's write drops the streak its stale read carried");
-  assert.equal(rec.deadlineAt, s.result.deadlineAt, "the stage writes the launcher's deadline");
-  assert.equal(rec.launches[0].ms, undefined, "negative control: the timings are the launcher's alone, which the wait keeps");
+  const old = startedFields(JSON.stringify({ id: s.result.id, home: s.result.home, meter: s.result.meter }));
+  for (let seed = 1; seed <= 20; seed += 1) {
+    const rec = await race(githubStore({ seed }), o, s, "together", { stageFields: old, stageLaunch: null });
+    assert.deepEqual([rec.launches.length, rec.image, rec.launches[0].ms], [1, IMAGE, MS], `seed ${seed}: what #294's record lost is kept`);
+  }
 });
 
-test("awaitLauncher: reads until the launcher's entry, with its timings, is in the record", async () => {
-  const launch = { stage: "work", ok: true, cue: "stint-1", run: "9", at: "a" };
-  const reads = (...recs) => {
-    let i = 0;
-    return async () => recs[Math.min(i++, recs.length - 1)];
-  };
-  const mine = { claim: "c", launches: [launch] };
-  const written = { claim: "c", launches: [{ ...launch, ms: { "start.command": 1 } }] };
-  assert.equal(await awaitLauncher({ record: reads(mine, mine, written), launch, claim: "c", tries: 5, pauseMs: 1 }), "written");
-  assert.equal(await awaitLauncher({ record: reads(mine), launch, claim: "c", tries: 3, pauseMs: 1 }), "timeout", "the stage's own entry is not the launcher's");
-  assert.equal(await awaitLauncher({ record: reads({ ...written, claim: "other" }), launch, claim: "c", tries: 3, pauseMs: 1 }), "lost");
-  assert.equal(await awaitLauncher({ record: reads(written), launch: null, claim: "c", tries: 3, pauseMs: 1 }), "none");
-  assert.equal(launcherWrote([{ ...launch, run: "10", ms: {} }], launch), false, "another run's start");
+test("the stage's part: written by that stage alone, in two calls, and read only while the claim comment carries its claim", async () => {
+  const [o] = OBJECTIVES;
+  const store = githubStore();
+  store.put(o.n, `${marker(o.n, "sandbox")}\n${recordBody(claimRecord(o))}`);
+  const list = () => store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments?per_page=100`);
+  const put = (id, body) => (id ? store.api.rest(`repos/${REPO.full}/issues/comments/${id}`, { method: "PATCH", body: { body } }) : store.api.rest(`repos/${REPO.full}/issues/${o.n}/comments`, { method: "POST", body: { body } }));
+  const beat = (claim, state) => writeRecord({ issue: o.n, claim, change: { state, leaseUntil: "2026-11-09T09:40:00.000Z" }, list, put });
+  assert.deepEqual(await beat(o.claim, "running"), { ok: true });
+  const before = store.calls.length;
+  assert.deepEqual(await beat(o.claim, "running"), { ok: true });
+  assert.deepEqual(store.calls.slice(before).map((c) => c.split(" ")[0]), ["GET", "PATCH"], "a beat: one list read and one write");
+  let rec = sandboxRecord(await list(), o.n);
+  assert.deepEqual([rec.leaseUntil, rec.quota], ["2026-11-09T09:40:00.000Z", undefined], "the stage's lease, the quota streak over");
+  assert.deepEqual(await beat("ffffffffffff", "running"), { lost: true }, "another claim: nothing written");
+  assert.equal([...store.comments.values()].filter((c) => c.body.includes("ffffffffffff")).length, 0);
+  // The launcher's stop folds the stage's part in; the part is read no more.
+  [...store.comments.values()].find((c) => c.body.startsWith(`${marker(o.n, "sandbox")}\n`)).body = `${marker(o.n, "sandbox")}\n${recordBody({ ...claimRecord(o), state: "stopped" })}`;
+  rec = sandboxRecord(await list(), o.n);
+  assert.deepEqual([rec.state, rec.leaseUntil], ["stopped", claimRecord(o).leaseUntil]);
 });
 
 test("stageDeadline: the wall clock from the start, never past the session's end less the reserve", () => {
@@ -180,14 +157,6 @@ test("stageDeadline: the wall clock from the start, never past the session's end
   assert.equal(stageDeadline(at, 40, null), "2026-11-09T10:04:00.000Z");
   assert.equal(stageDeadline(null, 40, null), null);
   assert.equal(stageDeadline(at, 0, null), null);
-});
-
-test("the drill's loss, reproduced: a beat that carries only the sandbox, home and meter lands over the launcher's write", async () => {
-  const [o] = OBJECTIVES.slice(1);
-  const s = await started(o);
-  const old = startedFields(JSON.stringify({ id: s.result.id, home: s.result.home, meter: s.result.meter }));
-  const rec = await race(comments(), o, s, "beat over the launcher", { stageFields: old, stageLaunch: null, waits: 0 });
-  assert.deepEqual([rec.launches.length, rec.image], [0, undefined], "what #294's record showed before its review: no work launch, no image");
 });
 
 test("withLaunch: one entry per cue and run; the launcher's replaces the stage's, the stage's never replaces the launcher's", () => {

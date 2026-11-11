@@ -479,6 +479,21 @@ export function questionAt(collected, since) {
   return null;
 }
 
+/** Factory's own vendor comments for the Objective's sandbox stages (plugin launch.mjs bookVendor), oldest first. */
+function vendorComments(collected, { app = null } = {}) {
+  const n = collected.issue.number;
+  const self = factoryLogin(collected.issueTimeline, app);
+  const mine = (c) => self && String(c.user?.login ?? "").toLowerCase() === self;
+  return (collected.issueComments || []).filter((c) => new RegExp(`^<!-- factory:${n}:vendor:(work|review)[:\\s-]`).test(c.body || "") && mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
+}
+const spendOf = (body) => {
+  try {
+    return JSON.parse(/^<!-- factory:spend (\{[^\n]*\}) -->$/m.exec(body || "")?.[1] ?? "null");
+  } catch {
+    return null;
+  }
+};
+
 /** Factory's own progress comments for the Objective's work and review stages, oldest first: its App's login, or in local mode the login its progress comments are posted as. */
 function factoryStages(collected, { app = null } = {}) {
   const n = collected.issue.number;
@@ -525,17 +540,23 @@ export function objectiveHarness(collected, { app = null } = {}) {
 /**
  * Usage records from Factory's spend lines (`<!-- factory:spend {...} -->`, plugin logic.mjs spendMarker), one per
  * progress comment of Factory's own: its App's login, or in local mode the login its progress comments are posted as.
- * A stage whose comment has no spend line is an unmetered part. The harness and model are the stage's own
- * (stageHarnessOf), carried to the review stages; dollars are the worker's own pricing.
+ * A sandbox stage's vendor dollars are in its vendor comment (`<!-- factory:<n>:vendor:<key> -->`, the progress
+ * comment's key; one of a stage that left no progress comment is a row of its own); an older stage's progress spend
+ * line carries them itself. A stage whose comment has no spend line is an unmetered part. The harness and model are
+ * the stage's own (stageHarnessOf), carried to the review stages; dollars are the worker's own pricing.
  */
 export function spendRecords(collected, { app = null } = {}) {
   const n = collected.issue.number;
   const stages = factoryStages(collected, { app });
+  const vendors = vendorComments(collected, { app });
+  const keyOf = (body, kind) => new RegExp(`^<!-- factory:${n}:${kind}:([A-Za-z0-9:-]{1,100}) -->`).exec(body || "")?.[1] ?? null;
   let harness = null;
   let model = null;
   const out = [];
-  for (const c of stages) {
-    const body = c.body || "";
+  for (const c of [...stages, ...vendors.filter((v) => !stages.some((p) => keyOf(p.body, "progress") === keyOf(v.body, "vendor")))]) {
+    const own = (c.body || "").startsWith(`<!-- factory:${n}:vendor:`);
+    const booked = own ? c : vendors.find((v) => keyOf(v.body, "vendor") === keyOf(c.body, "progress"));
+    const body = own ? (c.body || "").replace(`<!-- factory:${n}:vendor:`, `<!-- factory:${n}:progress:`) : c.body || "";
     const kind = new RegExp(`^<!-- factory:${n}:progress:(work|review)`).exec(body)[1];
     const id = /^<!-- factory:\d+:progress:(?:work|review):([^\s>-]+)/.exec(body)?.[1] ?? c.id ?? out.length;
     const ran = stageHarnessOf(body);
@@ -548,9 +569,11 @@ export function spendRecords(collected, { app = null } = {}) {
       spend = null;
     }
     const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+    const bookedSpend = booked && !own ? spendOf(booked.body) : null;
     const total = num(spend?.usd);
-    const vendor = num(spend?.vendorUsd);
-    const modelUsd = num(spend?.modelUsd) ?? (total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
+    const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
+    // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
+    const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
     out.push({ source: "spend", harness, model, usd: spend ? modelUsd : null, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.

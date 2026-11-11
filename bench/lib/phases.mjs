@@ -161,9 +161,9 @@ export function lastWrite(comment) {
 /**
  * When the stage itself last wrote its progress comment, in ms, from the comment's own header (`started HH:MMZ, N min
  * at the last line`, which every write of the stage's reporter, the exit line's included, sets), within a minute and a
- * half. Not its `updated_at`: Factory books a lost stage's sandbox cost into the comment (launch.mjs bookVendor, from
- * the sweep) hours later, and that edit leaves the header alone. Falls back to lastWrite when the header is absent
- * (a comment the booking wrote for a stage that left none), clamped to [created, lastWrite]. Null when unknown.
+ * half. Not its `updated_at`: an older stage's comment had a lost stage's sandbox cost booked into it (now its own
+ * vendor comment) hours later, an edit that left the header alone. Falls back to lastWrite when the header is absent
+ * (a comment such a booking wrote for a stage that left none), clamped to [created, lastWrite]. Null when unknown.
  */
 export function stageLastWrite(comment) {
   const created = Date.parse(comment?.created_at);

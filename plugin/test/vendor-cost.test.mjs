@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { checkRates, harnessBudgetUsd, sessionCeilingUsd, stageVendorCost, storedUsd } from "../scripts/lib/adapters/sandbox.mjs";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
-import { spendMarker, spendOf, spendParts, vendorLine, withVendorCost } from "../scripts/lib/logic.mjs";
+import { spendOf, spendParts, vendorBody, vendorLine } from "../scripts/lib/logic.mjs";
 import { progressRunId } from "../scripts/lib/session.mjs";
 import { startedFields } from "../scripts/stage.mjs";
 import { bookVendor, recordBody, stageEnvironment, stageProgressComment, stageProgressKey, startInSandbox } from "../scripts/launch.mjs";
@@ -60,22 +60,18 @@ test("ceiling: every vCPU busy for the whole session plus its memory, so compute
   assert.ok(worst.usd <= ceiling + 1e-9, "a fully busy session costs the ceiling at most");
 });
 
-test("progress comment: the vendor line carries state, seconds, size and dated rates; the spend line becomes model plus vendor, once", () => {
+test("vendor comment: the vendor line carries state, seconds, size and dated rates; its spend line the vendor's dollars", () => {
   const cost = stageVendorCost(R, { before: { wallMs: 0, activeCpuMs: 0 }, after: { wallMs: 212_000, activeCpuMs: 41_200, memoryMb: 4096, vcpus: 2 }, stored: { ms: 3 * H, bytes: 1.2e9 } });
   const line = vendorLine({ id: "factory-a0dd", state: "stopped", cost, rates: R, at: "2026-11-09T01:16:30Z" });
   assert.match(line, /^- 01:16Z sandbox `factory-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
-  const body = `Factory work run 7-abc: started 01:12Z, 3 min at the last line.\n- 01:12Z setup\n- 01:15Z exit: delivered; usd 0.25\n${spendMarker(0.25)}\n<!-- factory:decisions-read {} -->`;
-  const once = withVendorCost(body, { line, vendorUsd: cost.usd });
-  close(spendOf(once), 0.25 + cost.usd, "daily_usd counts model and vendor");
-  assert.deepEqual(Object.keys(spendParts(once)), ["usd", "modelUsd", "vendorUsd"]);
-  close(spendParts(once).modelUsd, 0.25, "model kept apart");
-  assert.ok(once.indexOf(line) > once.indexOf("exit: delivered") && once.indexOf(line) < once.indexOf("decisions-read"), "the line follows the run's last line");
-  // Booked again (a retried end, or the sweep): replaced, not added.
-  const twice = withVendorCost(once, { line, vendorUsd: cost.usd });
-  close(spendOf(twice), spendOf(once), "booking twice counts once");
-  assert.equal(twice.split(line).length - 1, 1);
-  // A stage that died before its spend line: the usage record's model dollars stand in.
-  close(spendOf(withVendorCost("Factory work run x.", { line, vendorUsd: 0.01, modelUsd: 2 })), 2.01, "model from the usage record");
+  const body = vendorBody({ line, vendorUsd: cost.usd });
+  assert.ok(body.includes(line));
+  close(spendOf(body), cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");
+  assert.deepEqual(spendParts(body), { usd: spendOf(body), modelUsd: null, vendorUsd: spendOf(body) });
+  // A stage that left no progress comment: the usage record's model dollars are here, so the daily sum counts them.
+  const alone = vendorBody({ line, vendorUsd: 0.01, modelUsd: 2 });
+  close(spendOf(alone), 2.01, "model from the usage record");
+  close(spendParts(alone).modelUsd, 2);
   // An upper bound says so; nothing but codes and numbers reaches the comment.
   const bound = vendorLine({ id: "factory-a0dd", state: "running", cost: stageVendorCost(R, { before: null, after: null, ceilingUsd: 0.2 }), rates: R, error: "unavailable" });
   assert.match(bound, /running: usage not settled \(unavailable\), counted at the session's ceiling, .* vendor at most \$0\.2000 this stage/);

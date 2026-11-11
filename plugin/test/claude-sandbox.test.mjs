@@ -49,7 +49,7 @@ test("Claude on a runner: its own sandbox, acceptEdits, no settings, hooks or MC
   assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), ["/home/factory-agent/repo", "/home/factory-agent/tmp"]);
   const settings = JSON.parse(flag("--settings"));
   assert.deepEqual(denied(settings), SHELL_SECRET_KEYS, "every credential the harness could hold");
-  assert.ok(settings.sandbox.network.allowedDomains.includes("pypi.org"));
+  assert.equal(settings.sandbox.network.allowedDomains.at(-1), "pypi.org", "the allowed_domains input, after LOCAL_DOMAINS");
   assert.equal(env.CLAUDE_CODE_TMPDIR, "/home/factory-agent/tmp");
   assert.equal(env.NODE_USE_ENV_PROXY, "1");
   assert.equal(env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD, "1");

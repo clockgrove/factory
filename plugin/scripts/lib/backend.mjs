@@ -41,6 +41,10 @@ const SCRATCH_NOTE = "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this s
 // rather than working around it.
 const DENIED_NOTE = "\n\nThe sandbox reaches only the hosts the operator allows. If it denies a host your work cannot do without (a 403 from its proxy, or a `<sandbox_violations>` line naming the host), do not work around it: stop blocked, with each such host name in exit.json's `deniedHosts`, so the operator can allow it.";
 
+// On Linux a sandboxed command's localhost is its own (its own network namespace): no setting reaches a service the
+// setup started on the runner, so the commands that need one are proved where Factory runs them, outside the sandbox.
+const SERVICES_NOTE = "\n\nServices this machine's setup started (a database or server on `localhost`) are outside your sandbox: a command that connects to one fails here (connection refused), and that is no denied host. Do not stop on it: run what needs no service, and say in the PR which acceptance entries the validation commands prove. Factory runs the validation outside the sandbox after you exit, and a failure comes back to you with its output.";
+
 const ACTIONS = {
   name: "actions",
   trigger: {
@@ -85,7 +89,7 @@ const ACTIONS = {
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
     /** Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's. */
-    cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE : ""),
+    cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_NOTE : ""),
     /** Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input. */
     deniedFix: (hosts, env = process.env) => deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner"),
   },

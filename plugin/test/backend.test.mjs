@@ -41,7 +41,7 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.throws(() => BACKENDS.local.sandbox.harness({ FACTORY_LOCAL: "1" }), /unsandboxed/);
   assert.equal(BACKENDS.actions.sandbox.cardNotes(), "");
   assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "codex"), "", "Codex and Copilot skip their sandboxes on a runner");
-  assert.match(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /\$TMPDIR[\s\S]*`deniedHosts`/, "Claude Code's sandbox on a runner: local mode's notes");
+  assert.match(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /\$TMPDIR[\s\S]*`deniedHosts`[\s\S]*`localhost`/, "Claude Code's sandbox on a runner: local mode's notes, and services out of reach");
   assert.match(BACKENDS.local.sandbox.cardNotes({}), /\$TMPDIR/);
   assert.doesNotMatch(BACKENDS.local.sandbox.cardNotes({}), /factory-db/);
   assert.match(BACKENDS.local.sandbox.cardNotes({ FACTORY_LOCAL_DB: "1" }), /factory-db npm run test:db/);

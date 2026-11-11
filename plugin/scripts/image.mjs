@@ -35,8 +35,11 @@ export const SECRET_ENV = new Set([...[...SECRET_INPUTS].map((n) => `FACTORY_INP
 
 /** Factory's directory in the image, owned by the default user. */
 const PREPARE = `sudo install -d -m 755 -o "$(id -u)" -g "$(id -g)" ${IMAGE_DIR}`;
-/** git-lfs and gh, from the base's apt (every vendor base Factory uses is Ubuntu); each must answer --version. */
-export const BASE_PACKAGES = "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y -qq git-lfs gh libcap2-bin >/dev/null; git lfs version; gh --version | head -1";
+/**
+ * git-lfs and gh, from the base's apt (every vendor base Factory uses is Ubuntu), and what Claude Code's sandbox needs
+ * (bubblewrap, socat, ripgrep: harness.mjs claudeRunner); each must answer --version.
+ */
+export const BASE_PACKAGES = "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y -qq git-lfs gh libcap2-bin bubblewrap socat ripgrep >/dev/null; git lfs version; gh --version | head -1; bwrap --version; command -v socat";
 /** Clone the bundle at `sha` on `branch`, origin the plain URL, no credential anywhere in the git config. */
 const CLONE = [
   'set -euo pipefail; git clone -q --no-checkout "$BUNDLE" "$CHECKOUT"; cd "$CHECKOUT"',

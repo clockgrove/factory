@@ -57,6 +57,7 @@ import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
 import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
+import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
 import { mergeTriage, notStartedJobs, notStartedReason, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
@@ -249,7 +250,8 @@ function savedEntries(root, names) {
 }
 
 /** Where each harness keeps its sessions, relative to the agent's home (the agent uid runs with its own HOME). */
-const AGENT_SESSION_ROOT = { claude: ".claude/projects", codex: ".codex/sessions", copilot: ".copilot/session-state" };
+// Claude Code's is its runner state's (lib/claude-runner.mjs), which Factory makes afresh before every start.
+const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: ".codex/sessions", copilot: ".copilot/session-state" };
 
 /**
  * saveTranscript for the agent uid (Actions): the session's files are listed and archived by the agent, the archive
@@ -260,10 +262,17 @@ export async function saveAgentTranscript({ harness, sessionId, usageDir, checko
   const root = AGENT_SESSION_ROOT[harness];
   if (!agent || !root || !/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
   // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
-  const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId], { cwd: agent.home });
-  const files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
-  if (!files.length) return null;
-  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
+  // Claude Code's session as Factory captured it right after its run (claude-runner.mjs captureSession), never what
+  // the agent's home holds by now; the other harnesses' are read from the agent's home.
+  const held = harness === "claude" ? capturedSession(sessionId) : null;
+  let files = held?.files || [];
+  let tar = held ? { code: 0, stdout: held.tar } : null;
+  if (!held) {
+    const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId], { cwd: agent.home });
+    files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
+    if (!files.length) return null;
+    tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
+  }
   if (tar.code !== 0) return null;
   const dest = join(usageDir, "transcript");
   rmSync(dest, { recursive: true, force: true });
@@ -334,6 +343,11 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
       // the agent's home by the agent, from a pipe; a file already there is kept.
       const tar = await exec("tar", ["-C", join(dir, "transcript"), "--null", "--no-recursion", "-T", "-", "-cf", "-"], { encoding: "buffer", input: `${savedEntries(join(dir, "transcript"), s.files).join("\0")}\0` });
+      // Claude Code's state is made afresh before every start, which puts Factory's held copy back (claude-runner.mjs).
+      if (harness === "claude" && tar.code === 0) {
+        holdSession(s.id, tar.stdout);
+        return { id: s.id, from: src.name, reason: "" };
+      }
       const put = await exec("sh", ["-c", 'mkdir -p "$1" && tar -xf - -C "$1" --skip-old-files', "sh", AGENT_SESSION_ROOT[harness]], { cwd: agent.home, input: tar.stdout });
       if (tar.code !== 0 || put.code !== 0) return { id: null, from: src.name, reason: "the saved session could not be put back in the agent's home" };
       return { id: s.id, from: src.name, reason: "" };
@@ -535,12 +549,12 @@ export async function questionRaisedAt(repo, pr, opts) {
   return drafted.at(-1) || pr.created_at;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [] }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
-  return `${card.trimEnd()}${backend().sandbox.cardNotes()}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
+  return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
 }
 
 /**

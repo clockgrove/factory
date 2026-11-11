@@ -12,12 +12,12 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
-import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
+import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { readWorkflowEnv } from "./lib/local.mjs";
+import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage } from "./lib/usage.mjs";
@@ -35,28 +35,15 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
-/**
- * Claude Code off local mode (Actions, a cloud sandbox): its Bash commands, and the repository's code and dependencies
- * they run, can read its model credential. Claude Code withholds it only from commands in its own bubblewrap sandbox,
- * which those routes do not run (PLAN.md, Credentials and billing). Codex and Copilot withhold it on every route, and
- * local mode runs Claude's commands in its sandbox.
- */
-export function claudeShellCheck({ harness, local }) {
-  if (harness !== "claude" || local) return null;
-  return WARN("claude shell credential", "on Actions and in a cloud sandbox, Claude Code's Bash commands (and the repository code and dependencies they run) can read ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN: Claude Code withholds it only inside its own bubblewrap sandbox, which these routes do not run", "accept it (docs/PLAN.md, Credentials and billing), run Claude Objectives in local mode, or use codex or copilot, which withhold their credential on every route");
-}
-
-export async function credentialChecks({ inputs, env = process.env, probe = false, local = backend(env).name === "local" }) {
+export async function credentialChecks({ inputs, env = process.env, probe = false }) {
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
-  const shell = claudeShellCheck({ harness: h, local });
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
   if (inputs.credential === "login" || localFallback) {
     out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
-    if (shell) out.push(shell);
     if (probe) out.push(await probeHarness({ inputs, env }));
     return out;
   }
@@ -72,7 +59,6 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     else if (fed) out.push(PASS("claude credential", "workload identity federation configured (id-token: write, exchange URL set)"));
     else out.push(FAIL("claude credential", "no ANTHROPIC_API_KEY and no federation", "gh secret set ANTHROPIC_API_KEY, or add id-token: write and anthropic_oidc_exchange_url"));
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
-    if (shell) out.push(shell);
   }
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
@@ -746,7 +732,45 @@ export async function runnerChecks({ inputs, env = process.env }) {
     out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Factory wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
   }
   out.push((await onPath("git")) ? PASS("git", "present") : FAIL("git", "git not on PATH", "install git"));
+  out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
+}
+
+/** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */
+export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-bwrap && sudo apparmor_parser -r /etc/apparmor.d/factory-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
+
+/**
+ * Claude Code on Actions and in a cloud sandbox runs its commands in its bubblewrap sandbox (harness.mjs claudeRunner).
+ * Wherever its settings are checked: each `allowed_domains` entry it would drop is a WARN. Where the job runs (a runner
+ * job, a sandbox stage): bwrap, socat and rg, which the Action and the stage's start install on Ubuntu; on a
+ * self-hosted runner, AppArmor letting bwrap make user namespaces, which the Action does not change there. Not in local
+ * mode, whose own checks name them (local.mjs). `has`, `read` and `profiles` are seams for the tests.
+ */
+export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles }) {
+  if (inputs.harness !== "claude" || local) return [];
+  const out = [];
+  const dropped = droppedDomains(input("allowed_domains", { env }));
+  if (dropped.length) out.push(WARN("allowed_domains", `not host names, so Claude Code's sandbox does not allow them: ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address"));
+  if (!(env.GITHUB_ACTIONS || env.FACTORY_STAGE_SANDBOX === "1")) return out;
+  for (const [bin, pkg] of [["bwrap", "bubblewrap"], ["socat", "socat"], ["rg", "ripgrep"]]) out.push((await has(bin)) ? PASS(`claude sandbox: ${bin}`, "present") : FAIL(`claude sandbox: ${bin}`, `${bin} not on PATH; Claude Code runs every command in its bubblewrap sandbox here and refuses to start without it`, `install ${pkg} on the runner (sudo apt-get install -y bubblewrap socat ripgrep; the Action does this on GitHub's hosted runners)`));
+  if (env.RUNNER_ENVIRONMENT === "self-hosted") {
+    let restricted = false;
+    try {
+      restricted = read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").trim() === "1";
+    } catch {
+      // no such restriction on this kernel
+    }
+    const loaded = restricted || (await has("apparmor_parser")) ? await profiles() : "";
+    const blocks = (restricted && !/^factory-bwrap /m.test(loaded)) || /^unpriv_bwrap /m.test(loaded);
+    out.push(blocks ? FAIL("claude sandbox: apparmor", "AppArmor keeps bwrap from making the user namespaces Claude Code's sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners", APPARMOR_ADMIN_STEP) : PASS("claude sandbox: apparmor", restricted ? "the factory-bwrap profile lets bwrap make user namespaces" : "no user-namespace restriction"));
+  }
+  return out;
+}
+
+/** The AppArmor profiles loaded (root's to read), or "" when they cannot be read. */
+async function apparmorProfiles() {
+  const r = await exec("/usr/bin/sudo", ["-n", "/bin/cat", "/sys/kernel/security/apparmor/profiles"], { env: { PATH: "/usr/bin:/bin" } }).catch(() => ({ code: 1 }));
+  return r.code === 0 ? String(r.stdout) : "";
 }
 
 /**
@@ -933,7 +957,7 @@ async function main() {
   }
   const results = [];
   const local = args.local === "true" || backend().name === "local";
-  results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
+  results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

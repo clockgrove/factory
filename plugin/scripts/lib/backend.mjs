@@ -7,6 +7,8 @@ import { getIssue } from "./github.mjs";
 import { CLAIM_PAUSE_MS, GitRefusal, checkGitState, clearHarnessConfig, gitDirChanged, pinGitState, hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
 import { agentUser, asAgent, exec, reapAgent } from "./proc.mjs";
 import { deniedHostsFix } from "./logic.mjs";
+import { input } from "./inputs.mjs";
+import { runnerDomains } from "./local.mjs";
 
 /** A local loop holds the Objective while its claim's heartbeat is fresh. */
 const claimedLocally = async (repo, issue, opts) => (await localClaim(repo, issue, opts).catch(() => null))?.fresh === true;
@@ -32,6 +34,16 @@ const sandboxDomains = (env) => {
     return [];
   }
 };
+
+// The sandboxes give /tmp no lasting space (Codex's is read-only, Copilot's is fresh for each command).
+const SCRATCH_NOTE = "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this sandbox /tmp may be read-only or emptied between commands.";
+// A denied host is the operator's to allow (FACTORY_LOCAL_DOMAINS, or allowed_domains on a runner): the worker names it
+// rather than working around it.
+const DENIED_NOTE = "\n\nThe sandbox reaches only the hosts the operator allows. If it denies a host your work cannot do without (a 403 from its proxy, or a `<sandbox_violations>` line naming the host), do not work around it: stop blocked, with each such host name in exit.json's `deniedHosts`, so the operator can allow it.";
+
+// On Linux a sandboxed command's localhost is its own (its own network namespace): no setting reaches a service the
+// setup started on the runner, so the commands that need one are proved where Factory runs them, outside the sandbox.
+const SERVICES_NOTE = "\n\nServices this machine's setup started (a database or server on `localhost`) are outside your sandbox: a command that connects to one fails here (connection refused), and that is no denied host. Do not stop on it: run what needs no service, and say in the PR which acceptance entries the validation commands prove. Factory runs the validation outside the sandbox after you exit, and a failure comes back to you with its output.";
 
 const ACTIONS = {
   name: "actions",
@@ -76,9 +88,13 @@ const ACTIONS = {
     outer: () => null,
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
-    cardNotes: () => "",
-    /** A runner keeps no host list, so a host the worker names as denied has no allow-list fix: the Block's own fix stands. */
-    deniedFix: () => null,
+    /** Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's. */
+    cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_NOTE : ""),
+    /**
+     * Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input.
+     * Codex and Copilot skip their sandboxes here, so their Block keeps its own fix.
+     */
+    deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },
@@ -158,11 +174,8 @@ const LOCAL = {
      */
     deniedFix: (hosts, env = process.env) => deniedHostsFix(hosts, sandboxDomains(env)),
     cardNotes: (env = process.env) =>
-      // The sandboxes give /tmp no lasting space (Codex's is read-only, Copilot's is fresh for each command).
-      "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this sandbox /tmp may be read-only or emptied between commands." +
-      // The sandbox cannot reach Git LFS's storage host; Factory's own push uploads the media (lib/session.mjs push).
-      // A denied host is the operator's to allow (FACTORY_LOCAL_DOMAINS): the worker names it rather than working around it.
-      "\n\nThe sandbox reaches only the hosts the operator allows. If it denies a host your work cannot do without (a 403 from its proxy, or a `<sandbox_violations>` line naming the host), do not work around it: stop blocked, with each such host name in exit.json's `deniedHosts`, so the operator can allow it." +
+      SCRATCH_NOTE +
+      DENIED_NOTE +
       "\n\nIf your work adds or changes files that `.gitattributes` routes through Git LFS, commit them and stop: this sandbox cannot reach Git LFS storage, so a push carrying new media fails here. Factory uploads the media and pushes the branch after you exit; do not retry the push, and never use `--no-verify`." +
       // The sandbox cannot reach the box's Postgres, so tests that need one run through factory-db.
       (env.FACTORY_LOCAL_DB === "1" ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards." : ""),

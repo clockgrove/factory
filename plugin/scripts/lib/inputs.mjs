@@ -51,6 +51,7 @@ export const DEFAULTS = {
   protected_paths: "",
   ci_checks: "",
   harness_version: "latest",
+  allowed_domains: "", // Claude Code's sandbox on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
   action: `clockgrove/factory@v${FACTORY_VERSION}`,
   objective_label: "factory:objective",

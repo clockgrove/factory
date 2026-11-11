@@ -13,9 +13,10 @@ test("backend: FACTORY_LOCAL=1 picks local, anything else the Action's runner", 
   assert.equal(backend({ FACTORY_LOCAL_SANDBOX: "{}" }).name, "local", "sandbox settings alone still mean local");
 });
 
-test("deniedFix: a local Block on denied hosts gets the FACTORY_LOCAL_DOMAINS fix; the Action's runner keeps its own", () => {
+test("deniedFix: a local Block on denied hosts gets the FACTORY_LOCAL_DOMAINS fix, a runner's (Claude's sandbox) the allowed_domains input", () => {
   const env = { FACTORY_LOCAL_SANDBOX: JSON.stringify({ domains: ["github.com", "extra.example.com"] }) };
-  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], env), null);
+  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "claude"), /^Claude Code's sandbox denied `cdn\.example\.org`\. .*`allowed_domains` input.*re-apply `factory:objective`\.$/);
+  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org", "registry.npmjs.org"], { FACTORY_INPUT_ALLOWED_DOMAINS: "*.example.org" }, "claude"), null, "allowed already, by the input or by default");
   assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org", "extra.example.com"], env), /^The local sandbox denied `cdn\.example\.org`\. .*FACTORY_LOCAL_DOMAINS.*re-apply `factory:objective`\.$/);
   assert.equal(BACKENDS.local.sandbox.deniedFix(["github.com"], env), null, "an allowed host is no allow-list fix");
   assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org"], { FACTORY_LOCAL_SANDBOX: "{not json" }), /cdn\.example\.org/, "unreadable settings never fail the notice");
@@ -39,6 +40,8 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.equal(BACKENDS.actions.sandbox.harness({ FACTORY_LOCAL_SANDBOX: "{}" }), null);
   assert.throws(() => BACKENDS.local.sandbox.harness({ FACTORY_LOCAL: "1" }), /unsandboxed/);
   assert.equal(BACKENDS.actions.sandbox.cardNotes(), "");
+  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "codex"), "", "Codex and Copilot skip their sandboxes on a runner");
+  assert.match(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /\$TMPDIR[\s\S]*`deniedHosts`[\s\S]*`localhost`/, "Claude Code's sandbox on a runner: local mode's notes, and services out of reach");
   assert.match(BACKENDS.local.sandbox.cardNotes({}), /\$TMPDIR/);
   assert.doesNotMatch(BACKENDS.local.sandbox.cardNotes({}), /factory-db/);
   assert.match(BACKENDS.local.sandbox.cardNotes({ FACTORY_LOCAL_DB: "1" }), /factory-db npm run test:db/);

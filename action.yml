@@ -95,6 +95,9 @@ inputs:
   harness_version:
     description: The npm version of the harness CLI to install on the runner; `latest` by default.
     required: false
+  allowed_domains:
+    description: Hosts Claude Code's sandboxed commands may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains). The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
+    required: false
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
     required: false
@@ -265,7 +268,21 @@ runs:
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in
-          claude)  npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${VERSION}" ;;
+          claude)  npm install -g --allow-scripts=@anthropic-ai/claude-code "@anthropic-ai/claude-code@${VERSION}"
+                   # Claude Code runs its commands in its bubblewrap sandbox here (docs/PLAN.md, Credentials and billing).
+                   # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap: a profile grants them to
+                   # /usr/bin/bwrap alone (not the sysctl, which lifts it for every program), and Ubuntu 26.04's
+                   # bwrap-userns-restrict profile, which takes the capabilities its sandbox needs, is unloaded when loaded.
+                   # Only on GitHub's hosted runners, which are thrown away after the job: on a self-hosted runner these
+                   # would outlast it and change the whole host, so doctor names the one-time admin step instead.
+                   if [ "$RUNNER_OS" = Linux ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && command -v apt-get >/dev/null && sudo -n true 2>/dev/null; then
+                     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap socat ripgrep >/dev/null || { sudo -n apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap socat ripgrep >/dev/null; } || echo "::warning::bubblewrap, socat and ripgrep did not install; doctor names what is missing"
+                     if [ -d /sys/kernel/security/apparmor ]; then
+                       if sudo -n grep -q '^unpriv_bwrap ' /sys/kernel/security/apparmor/profiles; then sudo -n apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict || echo "::warning::bwrap-userns-restrict could not be unloaded"; fi
+                       printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-bwrap >/dev/null
+                       sudo -n apparmor_parser -r /etc/apparmor.d/factory-bwrap || echo "::warning::the AppArmor profile for bwrap did not load; Claude Code refuses to start where its sandbox cannot"
+                     fi
+                   fi ;;
           codex)   npm install -g "@openai/codex@${VERSION}" ;;
           copilot) npm install -g "@github/copilot@${VERSION}" ;;
           *) echo "unknown harness $HARNESS" >&2; exit 1 ;;
@@ -299,6 +316,7 @@ runs:
         FACTORY_INPUT_EFFORT: ${{ inputs.effort }}
         FACTORY_INPUT_COMPACTION_WINDOW: ${{ inputs.compaction_window }}
         FACTORY_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
+        FACTORY_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
         FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
         FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
         FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}

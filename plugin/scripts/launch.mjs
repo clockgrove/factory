@@ -339,6 +339,8 @@ export const START = [
   'if [ -n "$2" ]; then rm -rf "$d/plugin.new"; mkdir -p "$d/plugin.new"; tar xzf "$2" -C "$d/plugin.new"; rm -f "$2"; echo "$3" > "$d/plugin.new/.factory-digest"; rm -rf "$d/plugin"; mv "$d/plugin.new" "$d/plugin"; fi',
   // Factory's own tools, which a vendor's base image may lack (the adopter's image keeps them once installed).
   'need=""; command -v git-lfs >/dev/null || need="$need git-lfs"; command -v gh >/dev/null || need="$need gh"',
+  // Claude Code runs its commands in its bubblewrap sandbox here (harness.mjs claudeRunner): bwrap and socat, and ripgrep.
+  'if [ "$4" = claude ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v socat >/dev/null || need="$need socat"; command -v rg >/dev/null || need="$need ripgrep"; fi',
   // System installs are for every uid (the agent runs the harness): umask 022 for them, whatever the stage's own is.
   'if [ -n "$need" ]; then bare sudo -n apt-get update -qq >&2 && bare sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need >&2; bare git lfs install --skip-repo >&2 || true; fi',
   'want="$6"; if [ "$want" = latest ]; then want="$(bare npm view "$5" version 2>/dev/null || true)"; fi',

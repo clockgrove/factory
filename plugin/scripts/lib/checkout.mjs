@@ -1,16 +1,17 @@
 // The worker's checkout: the branch, the plugin's skills and agent definitions
 // written in (git-excluded, never committed), the repository's validation and
 // setup commands, and the commit guard for protected paths.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { putFiles, readAgentTree } from "./handoff.mjs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exec } from "./proc.mjs";
+import { agentUser, exec } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
 import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
+import { prepareClaudeHome, runnerLayout } from "./claude-runner.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -67,35 +68,55 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
   await excludeFromGit(checkout, written, env);
   const local = backend(env).sandbox.harness(env);
   if (harness === "claude" && local?.claudeDir) await claudePlugin(checkout, local.claudeDir, env);
+  // On a runner and in a cloud sandbox VM the same copy, in Factory's own HOME for Claude Code, made afresh first
+  // (lib/claude-runner.mjs): the agent reads it and never writes it.
+  else if (harness === "claude" && agentUser() && backend(env).name !== "local") {
+    const layout = runnerLayout(agentUser());
+    await prepareClaudeHome(layout);
+    await claudePlugin(checkout, layout.pluginDir, env, { shared: true });
+  }
   return written;
 }
 
 /**
- * A local Claude Code run's skills and agent definitions: the clone's .claude/skills and .claude/agents as installPlugin
+ * A sandboxed Claude Code run's skills and agent definitions (local mode, and a runner's in Factory's HOME for it): the clone's .claude/skills and .claude/agents as installPlugin
  * left them (Factory's, the repository's own and its mirrored .agents/skills), copied out in the git sandbox into `dir`,
  * a directory of the stage's usage directory that no sandbox may write. Claude Code loads them from there (harness.mjs)
  * and never reads the clone's .claude, which sandboxed code can write. The skills become a plugin named factory (a skill
  * is then factory:<name>); the agents keep their names in an --agents file holding only their description, prompt, tools
  * and model, so no hook, MCP server or permission mode an agent file declares applies.
  */
-export async function claudePlugin(checkout, dir, env = process.env) {
-  const tree = await readAgentTree(checkout, [".claude/skills", ".claude/agents"], env);
+export async function claudePlugin(checkout, dir, env = process.env, { shared = false } = {}) {
+  const files = claudePluginFiles(await readAgentTree(checkout, [".claude/skills", ".claude/agents"], env));
   rmSync(dir, { recursive: true, force: true });
-  mkdirSync(join(dir, "plugin", ".claude-plugin"), { recursive: true });
-  writeFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), `${JSON.stringify({ name: "factory" })}\n`);
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  }
+  // `shared`: a runner's agent uid reads it, whatever this process's umask (a sandbox stage's is 077).
+  if (shared) {
+    const open = (p) => {
+      chmodSync(p, 0o755);
+      for (const e of readdirSync(p, { withFileTypes: true })) e.isDirectory() ? open(join(p, e.name)) : chmodSync(join(p, e.name), 0o644);
+    };
+    open(dir);
+  }
+}
+
+/** claudePlugin's files, by path under its directory: the plugin's manifest and skills, and agents.json. */
+export function claudePluginFiles(tree) {
+  const files = { "plugin/.claude-plugin/plugin.json": `${JSON.stringify({ name: "factory" })}\n` };
   const agents = {};
   for (const [rel, text] of Object.entries(tree)) {
     if (typeof text !== "string" || rel.split("/").some((p) => p === "" || p === "." || p === "..")) continue;
-    if (rel.startsWith(".claude/skills/")) {
-      const file = join(dir, "plugin", "skills", rel.slice(".claude/skills/".length));
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, text);
-    } else if (/^\.claude\/agents\/[^/]+\.md$/.test(rel)) {
+    if (rel.startsWith(".claude/skills/")) files[join("plugin", "skills", rel.slice(".claude/skills/".length))] = text;
+    else if (/^\.claude\/agents\/[^/]+\.md$/.test(rel)) {
       const a = agentDefinition(text, basename(rel, ".md"));
       if (a) agents[a.name] = a.definition;
     }
   }
-  writeFileSync(join(dir, "agents.json"), `${JSON.stringify(agents)}\n`);
+  files["agents.json"] = `${JSON.stringify(agents)}\n`;
+  return files;
 }
 
 /** A Claude Code agent file (front matter, then the prompt) as an --agents entry with only the safe fields; null when unreadable. */

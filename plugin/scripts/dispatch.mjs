@@ -551,7 +551,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     for (const [n, stage] of named) {
       const markedAt = new Date().toISOString();
       const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: markedAt, run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
-      if (!w?.ok) log(`  #${n}: its starting marker was not written; the wake below and the launch grace catch a lost launch`);
+      if (!w?.ok) log(`  #${n}: no starting marker (${w?.refused ? "a launcher's live claim holds the record" : "not written"}); the wake below and the launch grace catch a lost launch`);
       // This run owns the launch it named: a launcher that exits without a tick, or never runs, is looked at again when
       // its marker turns into an outcome, by a wake of this run's, not the cron.
       due(n, "start-retry", Date.parse(markedAt) + START_LOST_MS + 1000);
@@ -563,10 +563,13 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
 
 /**
  * The record with the dispatcher's starting marker for `stage` appended (`ok: null`, no code): the launch it names
- * settles it (its claim or its failure drops it, launch.mjs settledLaunches). With no record yet, one that says only
- * this; the record's own time is left as it was, so a later write shows the marker was followed.
+ * settles it (its claim or its failure drops it, launch.mjs settledLaunches; its skip drops it too, launch.mjs
+ * withoutOwnMarker). With no record yet, one that says only this; the record's own time is left as it was, so a later
+ * write shows the marker was followed. Null (no marker) over a live claim: a launcher already holds the record, so
+ * the launch this run names will skip, and a marker nothing settles would count as a `lost` start.
  */
 export function startingRecord(cur, { vendor, stage, at, run }) {
+  if (cur?.state === "running" && cur.claim && Date.parse(cur.leaseUntil) > Date.parse(at)) return null;
   const entry = { stage, event: "dispatch", ok: null, run, at };
   const rec = cur ? { ...cur } : { vendor, stage, state: "named", at, launches: [] };
   return { ...rec, launches: [...(rec.launches || []), entry].slice(-KEEP_LAUNCHES) };

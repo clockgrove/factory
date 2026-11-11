@@ -621,7 +621,29 @@ export function stageLock(n, ev, record) {
  * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | deferred | tick | started | token | stopped | blocked;
  * `usage` ({dir, name}) is a stage's usage directory to upload; `ms` the milliseconds per sub-step (stopwatch).
  */
-export async function launchOne({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null }) {
+export async function launchOne(args) {
+  const seen = {};
+  const r = await launchInner({ ...args, seen });
+  // A launch the dispatcher named (`swept`) that starts nothing is no attempt: it drops its own run's starting marker,
+  // so the marker never turns into a `lost` start (logic.mjs settleStale). Only when the record still shows one.
+  if (r.exit === "skipped" && seen.swept && seen.marker) {
+    await settleOwnMarker(seen).catch((e) => log(`#${seen.n}: its starting marker was not settled (${e.status ?? "error"}); it counts as one lost start`));
+  }
+  return r;
+}
+
+/** The record without this run's pending starting marker for `stage` (any stage when unknown), or null when it has none. */
+export function withoutOwnMarker(cur, { run, stage = null }) {
+  const mine = (l) => l?.ok === null && !!run && l.run === run && (!stage || l.stage === stage);
+  if (!(cur?.launches || []).some(mine)) return null;
+  return { ...cur, launches: cur.launches.filter((l) => !mine(l)) };
+}
+
+async function settleOwnMarker({ repo, n, opts, runId, stage, base }) {
+  await writeSandboxRecord(repo, n, opts, (cur) => withoutOwnMarker(cur, { run: runId, stage }), { base: base ?? (await lockBase(repo, opts)) });
+}
+
+async function launchInner({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null, seen = {} }) {
   const watch = stopwatch();
   const timed = (r) => ({ ...r, ms: watch.ms });
   const repo = repoOf(inputs.repo);
@@ -637,11 +659,13 @@ export async function launchOne({ inputs, eventName, payload = {}, gate = false,
   const opts = { token: tokens.write };
   const ctx = await readContext({ repo, n, ev, inputs, opts, readEventTime: !gate, runId, eventAt });
   watch.mark("read");
+  if (!gate && ev.kind === "swept") Object.assign(seen, { swept: true, repo, n, opts, runId, marker: !!withoutOwnMarker(ctx.record, { run: runId }) });
   if (ctx.skip) return out({ exit: "skipped", reason: ctx.skip });
   const trusted = ev.kind === "comment" && !isSelf(ev.author) && pushAuthor(ev.author);
   const fromSelf = ev.kind === "stage" && isSelf({ user: ev.sender });
   const decide = (c, e = ev) => launchDecision({ ev: e, state: c.state, question: c.labels.includes("factory:question"), record: c.record, trusted, closed: c.closed, fromSelf, runningSince: c.runningSince, review: c.review, headSha: c.headSha, checksDone: c.checksDone, staleMs: inputs.timeoutMinutes * 60_000 });
   const decision = decide(ctx);
+  seen.stage = decision.stage ?? null;
   if (gate) {
     // The gate's answer only; the start job reads it all again in the Objective's group, where the state is settled.
     // A merge tick starts nothing in the Objective's group: its own job ticks the dispatcher (workflow-template.yml launch-tick).
@@ -649,7 +673,7 @@ export async function launchOne({ inputs, eventName, payload = {}, gate = false,
     return out({ exit: decision.skip ? "skipped" : "start", start: !decision.skip, reason: decision.skip ? `#${n} (${ev.kind}): ${decision.skip}` : `#${n} (${ev.kind})` });
   }
   if (decision.skip) return out({ exit: "skipped", reason: `#${n} (${ev.kind}): ${decision.skip}` });
-  const run = { inputs, eventName, runId, repo, n, ev, tokens, opts, decide, out, watch };
+  const run = { inputs, eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
   if (decision.block) return out(await block(run, `launcher: ${decision.block}`));
   if (decision.requeue) return out(await requeue(run, ctx.project, decision.requeue));
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
@@ -714,6 +738,7 @@ async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
     lockBase(repo, opts),
   ]);
   Object.assign(run, { adapter, repoId: id, base });
+  run.seen && (run.seen.base = base);
   watch.mark("open");
   if (decision.token) return timed(await handOver(run, ctx));
   if (ev.kind === "stage") return timed(await endStage(run, ctx));

@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
-import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -30,7 +30,7 @@ import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
-import { REFUSAL_TEXT, refusedEntry, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
+import { REFUSAL_TEXT, nameLabel, refusedEntry, secretLabel, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -106,7 +106,7 @@ async function main() {
     setOutput("usd", usage.usd === null ? "" : String(usage.usd));
     if (process.env.GITHUB_STEP_SUMMARY) {
       const { appendFileSync } = await import("node:fs");
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory #${issue}: ${exit}\n\n${reason || ""}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usage.usd ?? "unmetered"} (${usage.basis}) · passes: ${passes}\n`);
     }
   };
 
@@ -653,13 +653,15 @@ async function main() {
 export function openWorkerSecrets(inputs, { factoryKey = () => triageKey({ inputs }) } = {}) {
   if (!String(inputs.workerSecrets || "").trim()) return {};
   const values = parseSecretValues(inputs.workerSecretValues);
+  // Every value this process holds: never posted to GitHub, stored in the usage record, sent to the gateway or pushed.
+  holdSecrets([...values.values()]);
   const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
-  for (const v of Object.values(ws.env)) mask(v);
+  for (const v of values.values()) mask(v);
   for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
-  for (const s of ws.missing) log(`worker secrets: no value for ${s}; the worker's shell runs without it`);
-  for (const n of ws.factoryKey) log(`worker secrets: ${n} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
+  for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
+  for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
   const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
-  if (given.length) log(`worker secrets: ${given.map((e) => (e.name === e.source ? e.name : `${e.name} (from ${e.source})`)).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
+  if (given.length) log(`worker secrets: ${given.map(secretLabel).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
   return ws.env;
 }
 

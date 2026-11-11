@@ -244,7 +244,9 @@ export async function runValidation(checkout, commands, opts = {}) {
   const results = [];
   // The HEAD under test, read in the agent's sandbox: Factory runs no git on the host in the agent's checkout.
   const env = opts.env || process.env;
-  const head = (await exec(...backend(env).sandbox.git(["git", "-C", checkout, "rev-parse", "HEAD"], env), { env }).catch(() => ({ stdout: "" }))).stdout.trim();
+  // Factory's git there gets no secret: neither the harness's credential nor the worker secrets' carrier (scrubbedEnv).
+  const gitEnv = scrubbedEnv(env);
+  const head = (await exec(...backend(gitEnv).sandbox.git(["git", "-C", checkout, "rev-parse", "HEAD"], gitEnv), { env: gitEnv }).catch(() => ({ stdout: "" }))).stdout.trim();
   // FACTORY_DB_WRAP: only validation commands get a throwaway database (sh), not setup or install.
   const extraEnv = { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}), FACTORY_DB_WRAP: "1" };
   const shOpts = opts;

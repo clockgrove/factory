@@ -153,3 +153,147 @@ test("doctor: a WARN for each refused entry, a SOURCE with no value and a value 
   assert.deepEqual(workerSecretChecks({ inputs: { workerSecrets: "FAL_KEY" }, env: { FAL_KEY: KEY }, factoryKey: () => "" }).map((c) => c.status), ["PASS"]);
   assert.deepEqual(workerSecretChecks({ inputs: { workerSecrets: "" }, env: {}, factoryKey: () => "" }), []);
 });
+
+// ------------------------------------------------------------------ review fixes (#68)
+
+test("validation's HEAD read: Factory's git gets neither the worker secrets' carrier nor the model credential", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { runValidation } = await import("../scripts/lib/checkout.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "ws-validation-"));
+  try {
+    // srt stands where local mode's sandbox would: it records the environment Factory's git starts with.
+    const out = join(dir, "env.txt");
+    writeFileSync(join(dir, "srt"), `#!/bin/sh\nenv > "${out}"\n`, { mode: 0o755 });
+    await runValidation(dir, [], { env: { PATH: `${dir}:${process.env.PATH}`, FACTORY_LOCAL: "1", FACTORY_LOCAL_SRT_GIT: join(dir, "none"), ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY }), ANTHROPIC_API_KEY: "sk-model-credential" } });
+    const seen = readFileSync(out, "utf8");
+    assert.ok(seen.includes("FACTORY_LOCAL_SRT_GIT="), "srt ran with the stage's sandbox settings");
+    assert.ok(!seen.includes(KEY) && !seen.includes(SHELL_SECRETS_ENV), "no worker secret");
+    assert.ok(!seen.includes("sk-model-credential"), "no model credential");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("local mode: FACTORY_LOCAL_ENV never hands a worker secret's NAME or SOURCE to every stage; doctor warns", async () => {
+  const { localBaseEnv } = await import("../scripts/lib/local.mjs");
+  const { localEnvWorkerNames } = await import("../scripts/doctor.mjs");
+  const shell = { PATH: "/bin", WORKER_AI_GATEWAY_API_KEY: KEY, AI_GATEWAY_API_KEY: KEY, DATABASE_URL: "postgres://x" };
+  const base = localBaseEnv(shell, ["WORKER_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY", "DATABASE_URL"], { workerSecrets: "AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY" });
+  assert.equal(base.DATABASE_URL, "postgres://x", "other names still pass");
+  assert.ok(!Object.values(base).includes(KEY), "neither the SOURCE nor the NAME");
+  assert.deepEqual(localEnvWorkerNames("AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY", "DATABASE_URL, WORKER_AI_GATEWAY_API_KEY"), ["WORKER_AI_GATEWAY_API_KEY"]);
+  const checks = workerSecretChecks({ inputs: { workerSecrets: "AI_GATEWAY_API_KEY=W" }, env: { W: KEY, FACTORY_LOCAL_ENV: "W" }, factoryKey: () => "" });
+  assert.deepEqual(checks.map((c) => c.status), ["WARN"]);
+  assert.match(checks[0].detail, /FACTORY_LOCAL_ENV names W/);
+});
+
+test("a key pasted into worker_secrets is never printed: names with a key's prefix are refused, long entries never quoted", async () => {
+  const pasted = ["vck_4f9a2bE7cD1x9QpLmN0rStUvWxYz", "github_pat_11ABCDEFG0123456789_abcdefghijk", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8", "sk-proj-abc", "xoxb-1234-5678", "AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789"];
+  const spec = `AI_GATEWAY_API_KEY=${pasted[0]} ${pasted[1]} OTHER=${pasted[2]} ${pasted[3]} ${pasted[4]} LONG=${pasted[5]} ${pasted[5]}`;
+  const write = process.stdout.write;
+  let logged = "";
+  process.stdout.write = (s) => {
+    logged += s;
+    return true;
+  };
+  try {
+    openWorkerSecrets({ workerSecrets: spec, workerSecretValues: "" }, { factoryKey: () => "" });
+  } finally {
+    process.stdout.write = write;
+  }
+  const doctor = workerSecretChecks({ inputs: { workerSecrets: spec, workerSecretValues: "" }, env: { GITHUB_ACTIONS: "true" }, factoryKey: () => "" });
+  const text = `${logged}\n${doctor.map((c) => `${c.detail} ${c.fix}`).join("\n")}`;
+  for (const k of pasted) assert.ok(!text.includes(k.slice(0, 12)), `never printed: ${k.slice(0, 6)}…`);
+  assert.match(text, /no value (here )?for LONG/, "a missing value is named by its NAME");
+  for (const k of pasted.slice(0, 5)) assert.ok(shellNameRefusal(k), `${k.slice(0, 6)}… refused`);
+});
+
+test("Factory never posts, stores or pushes a worker secret's value", async () => {
+  const { dropHeldSecrets, holdSecrets, setOutput } = await import("../scripts/lib/inputs.mjs");
+  const { requestBody } = await import("../scripts/lib/github.mjs");
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
+  const { driftInput, GOALS } = await import("../scripts/lib/drift.mjs");
+  const { missingSecretsOf } = await import("../scripts/lib/worker-secrets.mjs");
+  const { SECRET_PUSH_REASON, carriesSecret, openOutbox } = await import("../scripts/lib/outbox.mjs");
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const b64 = Buffer.from(KEY).toString("base64");
+  const dir = mkdtempSync(join(tmpdir(), "ws-redact-"));
+  holdSecrets([KEY]);
+  try {
+    // Every GitHub request body: a Blocked reason and its last output, a question, a PR body.
+    const sent = requestBody({ body: `worker blocked: 401 with ${KEY}\n\`\`\`\n${b64}\n${encodeURIComponent(KEY)}\n\`\`\``, title: "t", nested: [{ q: `use ${KEY}?` }] });
+    assert.ok(!sent.includes(KEY) && !sent.includes(b64.slice(0, 20)), "redacted in every form");
+    assert.match(sent, /\*\*\*/);
+    // The usage record's reason.
+    const usage = writeUsage(dir, { harness: "claude", model: "m", records: [], passes: 0, exit: "blocked", reason: `worker blocked: ${KEY}`, credentialBasis: "x" });
+    assert.ok(!readFileSync(join(dir, "result.json"), "utf8").includes(KEY) && !usage.reason.includes(KEY));
+    // The drift advisory's activity entries.
+    assert.ok(!driftInput({ stage: "work-1", goal: GOALS.work, entries: [{ kind: "cmd", text: `curl -H "Authorization: Bearer ${KEY}" x` }] }).includes(KEY));
+    // An exit record naming the value as a "missing" variable.
+    assert.deepEqual(missingSecretsOf([KEY, "FAL_KEY"]), ["FAL_KEY"]);
+    // The job's outputs.
+    const out = join(dir, "out");
+    writeFileSync(out, "");
+    const write = process.stdout.write;
+    process.stdout.write = () => true;
+    try {
+      setOutput("reason", `blocked on ${KEY}`, { GITHUB_OUTPUT: out });
+    } finally {
+      process.stdout.write = write;
+    }
+    assert.ok(!readFileSync(out, "utf8").includes(KEY));
+    // A push whose commits carry it, even one that removes it again, is refused before anything is sent.
+    assert.equal(carriesSecret(`+const k = "${KEY}";`), true);
+    assert.equal(carriesSecret("+nothing here"), false);
+    const quiet = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    const origin = join(dir, "origin.git");
+    const work = join(dir, "work");
+    const git = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { env: quiet, encoding: "utf8" });
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    execFileSync("git", ["clone", "-q", origin, work], { env: quiet });
+    writeFileSync(join(work, "app.txt"), "v1\n");
+    git("add", "app.txt");
+    git("commit", "-q", "-m", "base");
+    git("push", "-q", "origin", "HEAD:main");
+    git("checkout", "-q", "-b", "factory/1");
+    writeFileSync(join(work, "app.txt"), `key=${b64}\n`);
+    git("commit", "-q", "-am", "add");
+    writeFileSync(join(work, "app.txt"), "v2\n");
+    git("commit", "-q", "-am", "remove");
+    const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, agentEnv: quiet, protectedList: [], base: dir });
+    assert.equal(await box.push(), false);
+    assert.equal(box.error, SECRET_PUSH_REASON);
+    assert.ok(!box.error.includes(KEY));
+    assert.equal(execFileSync("git", ["-C", origin, "branch", "--list", "factory/1"], { encoding: "utf8" }).trim(), "", "nothing was pushed");
+  } finally {
+    dropHeldSecrets();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("maskFile: a value is masked as itself, JSON-escaped, URL-encoded and base64 at every byte offset", async () => {
+  const { maskFile } = await import("../scripts/lib/session.mjs");
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const v = 'vck_ab"c\\d/e+f=g&h 0123456789';
+  const blobs = ["", "x", "xy"].map((p) => Buffer.from(`${p}${v}!`).toString("base64"));
+  const forms = [v, JSON.stringify(v).slice(1, -1), encodeURIComponent(v)];
+  const dir = mkdtempSync(join(tmpdir(), "ws-mask-"));
+  try {
+    const file = join(dir, "events.jsonl");
+    // The forms as a harness stream carries them: raw in a line, inside a JSON string, in a URL, base64-encoded.
+    writeFileSync(file, [...forms, ...blobs].map((t) => `before ${t} after`).join("\n"));
+    assert.ok(maskFile(file, [v]) >= forms.length + blobs.length);
+    const masked = readFileSync(file, "utf8");
+    for (const f of forms) assert.ok(!masked.includes(f), "every text form");
+    for (const b of blobs) assert.ok(!masked.includes(b.slice(4, -4)), "every base64 offset");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

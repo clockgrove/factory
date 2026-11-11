@@ -47,7 +47,7 @@ import {
   upsertComment,
   transientError,
 } from "./github.mjs";
-import { log } from "./inputs.mjs";
+import { log, redactSecrets, secretForms } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, exec, git } from "./proc.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
@@ -153,7 +153,8 @@ export function deadline(startedAt, timeoutMinutes, reserveMinutes = 15) {
 /** Replace every secret the job held with *** in a file that will be uploaded (the raw harness stream). */
 export function maskFile(file, secrets) {
   if (!existsSync(file)) return 0;
-  const values = [...new Set((secrets || []).filter((s) => typeof s === "string" && s.length >= 8))];
+  // Each secret in every form text can carry it (inputs.mjs secretForms: JSON-escaped, URL-encoded, base64), longest first.
+  const values = [...new Set((secrets || []).filter((s) => typeof s === "string").flatMap(secretForms))].sort((a, b) => b.length - a.length);
   if (!values.length) return 0;
   let text = readFileSync(file, "utf8");
   let hits = 0;
@@ -998,8 +999,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // Counted by the dispatcher from the progress comment's spend line, not from this record (dispatch.mjs todaysSpend).
     ...(spendInProgress ? { spendInProgress: true } : {}),
   };
-  writeOwn(join(usageDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-  return result;
+  // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
+  const stored = redactSecrets(result);
+  writeOwn(join(usageDir, "result.json"), `${JSON.stringify(stored, null, 2)}\n`);
+  return stored;
 }
 
 /**

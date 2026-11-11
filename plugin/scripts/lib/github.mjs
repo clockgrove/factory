@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
-import { log } from "./inputs.mjs";
+import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
@@ -80,11 +80,15 @@ async function call(url, { method = "GET", body, token, accept = "application/vn
       ...(t ? { Authorization: `Bearer ${t}` } : {}),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    // Every request body: no held secret (a worker secret's value, inputs.mjs holdSecrets) is ever posted.
+    body: requestBody(body),
   });
   if (!maxBytes || !r.ok || !r.body) return { r, text: await r.text() };
   return { r, text: await tailOf(r.body, maxBytes) };
 }
+
+/** A request's JSON body with every held secret redacted (inputs.mjs redactSecrets); undefined without one. */
+export const requestBody = (body) => (body !== undefined ? JSON.stringify(redactSecrets(body)) : undefined);
 
 /** A response body's last `maxBytes` bytes, read as a stream so no more than about twice that is ever held. */
 async function tailOf(stream, maxBytes) {

@@ -14,6 +14,16 @@ import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
+import { heldSecrets, secretForms } from "./inputs.mjs";
+
+/** Why a push that carries a held secret is refused: Factory's own words, never the value. */
+export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
+
+/** Whether `text` (a branch's patches and commit messages) carries any form of a held secret (inputs.mjs secretForms). */
+export function carriesSecret(text, values = heldSecrets()) {
+  const t = String(text || "");
+  return values.flatMap(secretForms).some((f) => t.includes(f));
+}
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
@@ -663,6 +673,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
     if (hits.length) return refuse(`touched protected path ${hits.join(", ")}`, { kind: "protected" });
+    // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
+    const held = heldSecrets();
+    if (held.length) {
+      const patches = await git(["log", "-p", "-U0", "--no-color", "--no-ext-diff", "--text", "--format=%B", `${base}..${head}`], { maxBytes: 512 * 1024 * 1024 });
+      if (patches.code !== 0) return refuse("the branch's commits could not be read for worker secrets, so nothing was pushed");
+      if (carriesSecret(patches.stdout, held)) return refuse(SECRET_PUSH_REASON);
+    }
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
     if (outside.length) return refuse(fixScopeReason(outside), { kind: "fix-scope" });

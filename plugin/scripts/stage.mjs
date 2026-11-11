@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_USER } from "./lib/agent.mjs";
 import { findPr, listComments, repoOf, rest } from "./lib/github.mjs";
-import { log } from "./lib/inputs.mjs";
+import { holdSecrets, log } from "./lib/inputs.mjs";
 import { STAGE_GRACE_MS, dispatchLatency, sandboxMarkerLine, sandboxRecord, sessionCapNote, setSelf, stageDeadline, stageMarker, stageMinutes, stagePartComment, watchdogMs } from "./lib/logic.mjs";
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
@@ -59,6 +59,8 @@ async function run() {
   // Every secret the child is given, fresh tokens included: masked in its harness stream when the stage has to end it.
   // The worker secrets' values one by one (lib/worker-secrets.mjs), since they arrive as one block of lines.
   const given = new Set([...Object.values(secrets), ...parseSecretValues(secrets.FACTORY_INPUT_WORKER_SECRET_VALUES).values()].filter(Boolean));
+  // What this process posts (the stage's record, an ended stage's exit): none of the worker secrets' values.
+  holdSecrets([...parseSecretValues(secrets.FACTORY_INPUT_WORKER_SECRET_VALUES).values()]);
   const repo = repoOf(env.GITHUB_REPOSITORY);
   const issue = Number(env.FACTORY_STAGE_ISSUE);
   const stage = env.FACTORY_STAGE;

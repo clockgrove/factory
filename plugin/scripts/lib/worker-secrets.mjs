@@ -17,8 +17,8 @@
 // Only the worker's harness gets them, through one variable (SHELL_SECRETS_ENV) that runHarness unpacks for the harness
 // child alone and scrubbedEnv removes everywhere else: the repository's setup, install and validation, Factory's own
 // git, and the reviewer never see them.
-import { createHash, timingSafeEqual } from "node:crypto";
-import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS } from "./inputs.mjs";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets } from "./inputs.mjs";
 
 /** The one variable that carries the worker's shell secrets (JSON {NAME: value}) from worker.mjs to runHarness. */
 export const SHELL_SECRETS_ENV = "FACTORY_SHELL_SECRETS";
@@ -29,12 +29,18 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Prefixes Factory, the runner or a harness CLI reads its own settings or credentials from. */
 const OWNED_PREFIX = /^(FACTORY|GITHUB|GH|ACTIONS|RUNNER|ANTHROPIC|CLAUDE|CODEX|OPENAI|COPILOT)_/;
 /** Names that change how a process or a command runs, whatever their value. */
-const PROCESS_NAMES = new Set(["PATH", "HOME", "TMPDIR", "SHELL", "USER", "LOGNAME", "PWD", "CI", "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "PYTHONPATH", "PYTHONSTARTUP", "PERL5LIB", "PERL5OPT", "RUBYOPT", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]);
+export const PROCESS_NAMES = new Set(["PATH", "HOME", "TMPDIR", "SHELL", "USER", "LOGNAME", "PWD", "CI", "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "BUN_OPTIONS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PERL5LIB", "PERL5OPT", "RUBYOPT", "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]);
 const PROCESS_PREFIX = /^(LD_|DYLD_|GIT_|NPM_CONFIG_|SUDO_)/;
+
+/** The prefixes of well-known keys and tokens: a name that starts with one is a key pasted into the wrong place. */
+const KEY_PREFIX = /^(vck_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk-|sk_|xox[a-z]?-|AKIA|AIza|glpat-|npm_)/i;
+/** A name the log, doctor or a GitHub comment may show: at most 40 characters and no key's prefix. */
+export const showable = (name) => typeof name === "string" && name.length > 0 && name.length <= 40 && !KEY_PREFIX.test(name);
 
 /** Why `name` may not be a variable in the worker's shell, or null when it may. Case-insensitive. */
 export function shellNameRefusal(name) {
   if (!ENV_NAME.test(String(name || ""))) return "not-a-name";
+  if (KEY_PREFIX.test(name)) return "looks-like-key";
   const up = name.toUpperCase();
   if (MODEL_SECRET_KEYS.includes(up)) return "model-credential";
   if (RUNNER_SECRET_KEYS.includes(up) || GITHUB_TOKEN_KEYS.includes(up)) return "factory-token";
@@ -51,6 +57,7 @@ export function sourceRefusal(name) {
 /** What each refusal code means, for the log and doctor. */
 export const REFUSAL_TEXT = {
   "not-a-name": "not NAME or NAME=SOURCE with environment variable names",
+  "looks-like-key": "it looks like a key, not a name: put the key's value in the secret, and its name here",
   "model-credential": "a model credential, which never reaches a command",
   "factory-token": "one of Factory's or the runner's tokens",
   "reserved-name": "a name Factory, the runner or a harness reads its own settings from",
@@ -72,15 +79,20 @@ export function parseWorkerSecrets(spec) {
     const name = parts[0];
     const source = parts.length === 2 && parts[1] ? parts[1] : name;
     const code = parts.length > 2 || (parts.length === 2 && !parts[1]) ? "not-a-name" : shellNameRefusal(name) || sourceRefusal(source) || (entries.some((e) => e.name === name) ? "duplicate" : null) || (entries.length >= WORKER_SECRETS_MAX ? "too-many" : null);
-    // What the log and doctor may quote: a NAME, and a SOURCE only when it is refused as a well-known name. Never an entry
-    // that is no name at all, which could be a key pasted into the wrong setting.
-    const nameOk = ENV_NAME.test(name);
-    const shown = !nameOk || code === "not-a-name" ? "" : source !== name && !shellNameRefusal(name) && ![null, "not-a-name"].includes(sourceRefusal(source)) ? `${name}=${source}` : name;
-    if (code) refused.push({ entry: shown.slice(0, 80), code });
+    // What the log and doctor may quote: a showable NAME, and a SOURCE only when it is refused as a well-known name. Never
+    // an entry that is no name, is long or carries a key's prefix, which could be a key pasted into the wrong setting.
+    const wellKnown = (n) => !["not-a-name", "looks-like-key", null].includes(sourceRefusal(n));
+    const shown = code === "not-a-name" || !ENV_NAME.test(name) || !showable(name) ? "" : source !== name && !shellNameRefusal(name) && wellKnown(source) && showable(source) ? `${name}=${source}` : name;
+    if (code) refused.push({ entry: shown.length <= 40 ? shown : "", code });
     else entries.push({ name, source });
   }
   return { entries, refused };
 }
+
+/** How the log and doctor name an entry that reaches the shell: NAME, with its SOURCE when both are showable. */
+export const secretLabel = (e) => (!showable(e.name) ? "a secret" : e.name === e.source || !showable(e.source) ? e.name : `${e.name} (from ${e.source})`);
+/** How the log and doctor name a NAME: itself when showable, else "a secret". */
+export const nameLabel = (n) => (showable(n) ? n : "a secret");
 
 /** How the log and doctor name a refused entry (parseWorkerSecrets `entry`): quoted, or "an entry" when it may not be shown. */
 export const refusedEntry = (r) => (r.entry ? JSON.stringify(r.entry) : "an entry");
@@ -98,15 +110,20 @@ export function parseSecretValues(text) {
   return out;
 }
 
-/** Whether two secrets are equal, by their SHA-256 in this process: neither is ever printed or compared as text. */
+/** This process's own key for sameSecret: random, never stored or printed. */
+const COMPARE_KEY = randomBytes(32);
+/**
+ * Whether two secrets are equal, by their HMAC-SHA256 under a key of this process's own, compared in constant time:
+ * neither is ever printed, stored or compared as text.
+ */
 export function sameSecret(a, b) {
   if (!a || !b) return false;
-  const h = (s) => createHash("sha256").update(String(s)).digest();
+  const h = (s) => createHmac("sha256", COMPARE_KEY).update(String(s)).digest();
   return timingSafeEqual(h(a), h(b));
 }
 
 /**
- * The worker's shell secrets: {env: {NAME: value}, entries, refused, missing: [SOURCE without a value],
+ * The worker's shell secrets: {env: {NAME: value}, entries, refused, missing: [NAME whose SOURCE has no value],
  * factoryKey: [NAME whose value is Factory's own key, withheld]}. `lookup(source)` gives a value; `factoryKey` is
  * Factory's own AI Gateway key ("" when none).
  */
@@ -117,7 +134,8 @@ export function workerSecrets({ spec, lookup, factoryKey = "" }) {
   const same = [];
   for (const { name, source } of entries) {
     const v = lookup(source);
-    if (typeof v !== "string" || !v || v.includes("\n")) missing.push(source);
+    // Named by NAME: a SOURCE could be a key pasted into the wrong place, and is never printed.
+    if (typeof v !== "string" || !v || v.includes("\n")) missing.push(name);
     else if (sameSecret(v, factoryKey)) same.push(name);
     else env[name] = v;
   }
@@ -156,10 +174,14 @@ export function takeShellSecrets(env = {}) {
 }
 
 /**
- * An exit record's `missingSecrets`: its strings that are environment variable names, once each, at most ten. Values are
- * names, never secrets: a string that is not a name is dropped, so nothing else reaches a GitHub comment.
+ * An exit record's `missingSecrets`: its strings that are showable environment variable names, once each, at most ten.
+ * Values are names, never secrets: a string that is not a name, is long, carries a key's prefix or is a held secret's
+ * value (inputs.mjs holdSecrets) is dropped, so nothing else reaches a GitHub comment.
  */
-export const missingSecretsOf = (v) => [...new Set((Array.isArray(v) ? v : []).filter((n) => typeof n === "string").map((n) => n.trim()).filter((n) => ENV_NAME.test(n) && n.length <= 100))].slice(0, 10);
+export const missingSecretsOf = (v) => {
+  const held = new Set(heldSecrets());
+  return [...new Set((Array.isArray(v) ? v : []).filter((n) => typeof n === "string").map((n) => n.trim()).filter((n) => ENV_NAME.test(n) && showable(n) && !held.has(n)))].slice(0, 10);
+};
 
 /**
  * The fix line of a Block whose worker named variables its shell lacked (`missingSecrets`): opt them in, unless a name

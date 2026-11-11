@@ -225,7 +225,7 @@ export function promptCacheSetting(value) {
 
 /** Write `name=value` to $GITHUB_OUTPUT when running in Actions; always echo it. */
 export function setOutput(name, value, env = process.env) {
-  const line = `${name}=${typeof value === "string" ? value : JSON.stringify(value)}`;
+  const line = `${name}=${redactSecrets(typeof value === "string" ? value : JSON.stringify(value))}`;
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `${line}\n`);
   process.stdout.write(`[output] ${line}\n`);
 }
@@ -238,8 +238,56 @@ export const maskable = (env = process.env) => !!env.GITHUB_ACTIONS && env.FACTO
 export function mask(value) {
   if (value && maskable()) process.stdout.write(`::add-mask::${value}\n`);
 }
-/** Log a line with a stable prefix. Never pass a secret. */
-export const log = (...parts) => process.stdout.write(`[factory] ${parts.join(" ")}\n`);
+/** Log a line with a stable prefix. Never pass a secret; a held one (holdSecrets) is redacted anyway. */
+export const log = (...parts) => process.stdout.write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
+
+/**
+ * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its
+ * encodeURIComponent form, and its base64 at each of the three byte offsets a surrounding text can put it at (the
+ * characters that also carry a neighbour's bits left out). Only forms of eight characters or more: a shorter one would
+ * mask ordinary text.
+ */
+export function secretForms(value) {
+  const v = String(value ?? "");
+  if (v.length < 8) return [];
+  const forms = new Set([v, JSON.stringify(v).slice(1, -1), encodeURIComponent(v)]);
+  const bytes = Buffer.from(v, "utf8");
+  for (let k = 0; k < 3; k += 1) {
+    const b64 = Buffer.concat([Buffer.alloc(k), bytes]).toString("base64").replace(/=+$/, "");
+    // Leading characters that hold a prefix byte's bits: none at offset 0, two at 1, three at 2. The last character
+    // holds the next byte's bits too, unless the encoded bytes end on a 3-byte boundary.
+    const start = [0, 2, 3][k];
+    const end = (k + bytes.length) % 3 === 0 ? b64.length : b64.length - 1;
+    forms.add(b64.slice(start, end));
+  }
+  return [...forms].filter((f) => f.length >= 8);
+}
+
+/**
+ * Secrets this process must never post or store as text (the worker secrets' values, lib/worker-secrets.mjs): every
+ * GitHub request body (github.mjs), the usage record, the drift advisory's input, the log and Factory's push check
+ * (outbox.mjs) redact or refuse them.
+ */
+const HELD = new Set();
+export function holdSecrets(values = []) {
+  for (const v of values) if (typeof v === "string" && v.length >= 8) HELD.add(v);
+}
+export const heldSecrets = () => [...HELD];
+/** Tests: forget every held secret. */
+export const dropHeldSecrets = () => HELD.clear();
+
+/** `x` with every form of every held secret (or of `values`) replaced by ***: strings, and arrays and objects deeply. */
+export function redactSecrets(x, values = heldSecrets()) {
+  if (!values.length) return x;
+  const forms = values.flatMap(secretForms).sort((a, b) => b.length - a.length);
+  const walk = (y) => {
+    if (typeof y === "string") return forms.reduce((t, f) => (t.includes(f) ? t.split(f).join("***") : t), y);
+    if (Array.isArray(y)) return y.map(walk);
+    if (y && typeof y === "object") return Object.fromEntries(Object.entries(y).map(([k, v]) => [k, walk(v)]));
+    return y;
+  };
+  return walk(x);
+}
 
 /** Who fired this job's event ({login, type}: type "Bot" for an App), from GITHUB_EVENT_PATH; null outside Actions. */
 export function eventSender(env = process.env) {

@@ -7,7 +7,7 @@ import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
-import { captureSession, resetClaudeState, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
+import { asClaudeAgent, captureSession, resetClaudeState, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -387,7 +387,10 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
   const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
-  const r = await exec(runCmd, runArgs, { cwd, env: childEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra: [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"], group: backend(env).name === "local", fileStdio: true, agentNested: !!runner });
+  const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+  // A runner's Claude Code: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
+  const [execCmd, execArgs, execEnv] = runner ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code session, captured before anything else runs as the agent: the next start and the stage's

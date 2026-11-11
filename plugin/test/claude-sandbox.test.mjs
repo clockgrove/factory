@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand } from "../scripts/lib/harness.mjs";
-import { CLAUDE_HOME, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
+import { CLAUDE_HOME, asClaudeAgent, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
 import { CLAUDE_SECRET_ENV, GitRefusal, LOCAL_DOMAINS, claudeLocalSettings, claudeRunnerSettings, droppedDomains, runnerDomains } from "../scripts/lib/local.mjs";
 import { asAgent, setAgent } from "../scripts/lib/proc.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
@@ -175,13 +175,13 @@ test("doctor: in a job, bwrap, socat and rg; on a self-hosted runner, AppArmor w
   assert.deepEqual(names(hosted), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"], "the Action loads the profile on GitHub's hosted runners");
 });
 
-test("the agent's unit keeps ProtectKernelTunables, but for a harness with a sandbox of its own (bwrap mounts a fresh /proc)", () => {
+test("the agent's unit keeps ProtectKernelTunables, but Claude Code's (bwrap mounts a fresh /proc)", () => {
   setAgent(AGENT);
   try {
     assert.ok(asAgent("true", [], {}, [], AGENT.home)[1].includes("--property=ProtectKernelTunables=yes"));
-    const nested = asAgent("claude", [], {}, [], AGENT.home, { nested: true })[1];
-    assert.ok(!nested.includes("--property=ProtectKernelTunables=yes"));
-    for (const p of ["--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict", "--property=ProtectKernelModules=yes"]) assert.ok(nested.includes(p), p);
+    const claude = asClaudeAgent("/usr/bin/env", ["claude"], {}, [], AGENT.home)[1];
+    assert.ok(!claude.includes("--property=ProtectKernelTunables=yes"));
+    for (const p of ["--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict", "--property=ProtectKernelModules=yes", "--uid=factory-agent"]) assert.ok(claude.includes(p), p);
   } finally {
     setAgent(null);
   }

@@ -84,14 +84,16 @@ test("storage: one line of numbers; the adapter contract has storage", () => {
   assert.match(storageLine({ repo: { sandboxes: 0, snapshots: 0, bytes: 0 }, project: null }), /the vendor project unread$/);
 });
 
-test("workflow template: the sweep also runs when an Objective closes or its PR merges, in sandbox mode only", () => {
+test("workflow template: the sweep also runs when an Objective closes or its PR merges, in sandbox mode only; any closed issue ticks the dispatcher", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
   const sandbox = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: "main" }));
   const runner = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3" }));
   assert.deepEqual(sandbox.on.issues.types, ["opened", "labeled", "closed"]);
-  assert.deepEqual(runner.on.issues.types, ["opened", "labeled"]);
+  assert.deepEqual(runner.on.issues.types, ["opened", "labeled", "closed"]);
   const cond = sandbox.jobs.sweep.if;
   assert.match(cond, /github\.event_name == 'issues' && github\.event\.action == 'closed' && contains\(join\(github\.event\.issue\.labels\.\*\.name, ','\), 'factory:objective'\)/);
   assert.match(cond, /github\.event\.pull_request\.merged == true && startsWith\(github\.head_ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-  assert.doesNotMatch(sandbox.jobs.dispatch.if, /action == 'closed' && contains/, "a closed issue ticks no dispatcher");
+  // A closed issue may have blocked an Objective (a plain issue fires no other event Factory hears): every route ticks.
+  for (const wf of [sandbox, runner]) assert.match(wf.jobs.dispatch.if, /github\.event_name == 'issues' && \(github\.event\.action == 'closed' \|\|/);
+  assert.doesNotMatch(runner.jobs.sweep?.if ?? "", /closed/, "no sweep job without a sandbox");
 });

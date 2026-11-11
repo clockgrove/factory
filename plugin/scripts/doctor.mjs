@@ -218,6 +218,9 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     }
     if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
+    out.push(ownedTickCheck(text, env, { job }));
+    const waits = longWaitCheck(repoData);
+    if (waits) out.push(waits);
   }
   out.push(...(await workflowTokenChecks({ repo, token: inputs.githubToken || token })));
 
@@ -525,6 +528,41 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   ];
   if (!missing.length) return PASS("merge ticks", "a queue drop, a stalled queue commit and finished CI tick the merge pass");
   return (job ? WARN : FAIL)("merge ticks", `the workflow lacks ${missing.join(", ")}: a dropped or stalled merge queue PR waits for the cron`, "re-run setup --apply workflow and commit the result");
+}
+
+/**
+ * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
+ * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
+ * sandbox the launch job's tick on its own failure. A workflow rendered before them leaves those waits to GitHub's cron,
+ * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
+ */
+export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
+  let doc = null;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return WARN("dispatcher ticks", "the workflow file could not be parsed here", "re-run setup --apply workflow");
+  }
+  const on = doc?.on ?? doc?.true ?? {};
+  const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
+  const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run factory\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")) && /exit == 'deferred'/.test(String(s?.if || "")));
+  const missing = [
+    ...((on?.issues?.types || []).map(String).includes("closed") && /action == 'closed' \|\|/.test(String(jobs.dispatch?.if || "")) ? [] : ["a dispatcher tick on a closed issue"]),
+    ...(jobs.wake && on?.workflow_dispatch?.inputs?.wake ? [] : ["the wake job"]),
+    ...(jobs["launch-gate"] && !(ticks("launch") && ticks("launch-event")) ? ["the launch jobs' tick on a failed or deferred launch"] : []),
+  ];
+  if (!missing.length) return PASS("dispatcher ticks", "a closed issue, a failed launch and the waits only time ends tick the dispatcher on time");
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+}
+
+/**
+ * On a private repository the wake job sleeps only to the short waits (a quota retry, a read retry): each sleeper bills
+ * its runner minutes there. A sandbox stage's lease end and the UTC day's turn fall back to events and GitHub's cron,
+ * which can run hours late. Null on a public repository, where every wait has its wake.
+ */
+export function longWaitCheck(repoData) {
+  if (repoData?.private !== true) return null;
+  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake job sleeps only to quota and read retries, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

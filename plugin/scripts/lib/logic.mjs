@@ -2183,10 +2183,135 @@ export function watchdogMs({ minutes, sessionEnd, now = Date.now() }) {
   return Math.max(0, Number.isFinite(bySession) ? Math.min(byClock, bySession) : byClock);
 }
 
-/** Starts of `stage` that failed at or after `since`, in the record. */
-export const failedSince = (record, since) => (record?.launches || []).filter((l) => l.ok === false && Number.isFinite(Date.parse(since)) && Date.parse(l.at) >= Date.parse(since)).length;
-/** Failed starts in one Running stint before the Objective is Blocked instead of tried again. */
+/** Failed starts in one Running stint (or one review request) before the Objective is Blocked instead of tried again. */
 export const MAX_FAILED_STARTS = 3;
+/**
+ * Start failures that say nothing about the Objective: the vendor (or the launch job's clock) failed it. They are
+ * retried with a growing pause and never Block; a vendor's outage holds new picks instead (transientHold).
+ */
+export const TRANSIENT_START = Object.freeze(["rate_limited", "unavailable", "timeout"]);
+/** A launch job's limit (5 minutes) plus its wait for a runner: a starting marker this old with no outcome was lost. */
+export const START_LOST_MS = 10 * 60_000;
+/**
+ * `since` (the Running label, the review request) is GitHub's time, in whole seconds; a launch entry's `at` is the
+ * writing runner's clock. A runner behind GitHub's by a few seconds writes its marker or failure "before" the stint it
+ * belongs to, so entries this much older than `since` still count as the stint's. A stint follows a Block and a
+ * person's re-label, never seconds after the last one, so no earlier stint's entry lands inside it.
+ */
+export const CLOCK_SKEW_MS = 60_000;
+/** The first pause after a failed start; each later one doubles it, up to START_RETRY_MAX_MS: 2, 4, 8, 16, then 30 minutes. */
+export const START_RETRY_MS = 2 * 60_000;
+export const START_RETRY_MAX_MS = 30 * 60_000;
+/** The pause before the next try after `n` failed starts. */
+export const startBackoffMs = (n) => (n >= 5 ? START_RETRY_MAX_MS : Math.min(START_RETRY_MAX_MS, START_RETRY_MS * 2 ** Math.max(0, n - 1)));
+
+/**
+ * The record with every launch attempt that ended unseen stored as a failed start: the one place a failure is read from
+ * an absence. Every claim-comment write applies it first (launch.mjs writeSandboxRecord), and every reader counts
+ * through it (startFailures), so a later write never erases an attempt and the count only grows:
+ * - a starting marker (`ok: null`, the dispatcher's as it names a stage) older than START_LOST_MS is replaced by
+ *   `{ok: false, code: "lost"}` at its expiry: its launch never ran its course;
+ * - a claim (`running`, a launcher's nonce) whose lease ran out with no start since it was made gets
+ *   `{ok: false, code: "timeout"}` at the lease's end, and the record says `failed`: its launcher was cut off.
+ * Returns the same object when nothing was due.
+ */
+export function settleStale(record, now = Date.now()) {
+  if (!record) return record;
+  const launches = Array.isArray(record.launches) ? record.launches : [];
+  let changed = false;
+  const kept = [];
+  for (const l of launches) {
+    const at = Date.parse(l?.at);
+    if (l?.ok === null && Number.isFinite(at) && now - at > START_LOST_MS) {
+      kept.push({ stage: l.stage, event: l.event, ok: false, run: l.run, at: new Date(at + START_LOST_MS).toISOString(), code: "lost" });
+      changed = true;
+    } else kept.push(l);
+  }
+  let rec = changed ? { ...record, launches: kept } : record;
+  // "No start since the claim": by the launcher's claim time (`claimedAt`), never the merged record's `at`, which the
+  // started stage's own beats override; for a claim written before `claimedAt` was, by its launch run (the start's
+  // entry carries the claim's run).
+  const claimedAt = Date.parse(rec.claimedAt);
+  const started = kept.some((l) => l?.ok === true && ((Number.isFinite(claimedAt) && Date.parse(l.at) >= claimedAt) || (!!rec.run && l.run === rec.run && l.stage === rec.stage)));
+  const leaseEnd = Date.parse(rec.leaseUntil);
+  // Only a launcher's claim (work or review): the sweep's claim is no launch attempt.
+  if (rec.state === "running" && rec.claim && (rec.stage === "work" || rec.stage === "review") && Number.isFinite(leaseEnd) && now >= leaseEnd && !started && (Number.isFinite(claimedAt) || !!rec.run)) {
+    const entry = { stage: rec.stage, event: rec.event, ok: false, run: rec.run, at: new Date(leaseEnd).toISOString(), code: "timeout" };
+    rec = { ...rec, state: "failed", leaseUntil: null, error: { code: "timeout", status: null }, launches: [...kept, entry].slice(-KEEP_LAUNCHES) };
+  }
+  return rec;
+}
+
+/**
+ * The failed starts at or after `since` (the Running stint, or the review request), each `{at, code}`, oldest first:
+ * the stored failures of the record as settleStale leaves it, but a quota refusal (its own streak and limit,
+ * quotaBackoff). An entry with no code, written before codes were recorded, says nothing and is not counted.
+ */
+export function startFailures(record, since, now = Date.now()) {
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
+  if (!Number.isFinite(t) || !record) return [];
+  return (settleStale(record, now).launches || [])
+    .filter((l) => l?.ok === false && typeof l.code === "string" && l.code !== "quota" && Date.parse(l.at) >= t)
+    .map((l) => ({ at: Date.parse(l.at), code: l.code }))
+    .sort((a, b) => a.at - b.at);
+}
+/** Starts in a row that ran past the launch job's limit before it counts as a real failure: a launch that always does is not transient. */
+export const MAX_TIMEOUTS = 3;
+/** How many of the latest failed starts since `since` in a row were cut off (`timeout`). */
+export const timeoutsInRow = (record, since, now = Date.now()) => {
+  const fails = startFailures(record, since, now);
+  let n = 0;
+  for (let i = fails.length - 1; i >= 0 && fails[i].code === "timeout"; i -= 1) n += 1;
+  return n;
+};
+/** The real failed starts since `since`: every stored failure but a vendor's transient one (TRANSIENT_START); three Block. */
+export const failedSince = (record, since, now = Date.now()) => startFailures(record, since, now).filter((f) => !TRANSIENT_START.includes(f.code)).length;
+/** Why the starts since `since` Block, or null: three real failures, or MAX_TIMEOUTS cut-offs in a row. */
+export function startsBlock(record, since, now = Date.now()) {
+  if (failedSince(record, since, now) >= MAX_FAILED_STARTS) return `${MAX_FAILED_STARTS} sandbox starts failed`;
+  if (timeoutsInRow(record, since, now) >= MAX_TIMEOUTS) return `${MAX_TIMEOUTS} sandbox starts in a row ran past the launch job's limit (timeout)`;
+  return null;
+}
+/**
+ * When the stage whose starts failed since `since` is tried again: the last failure plus startBackoffMs of how many
+ * failed so far, or at once when the starts Block (startsBlock: the launcher then Blocks). Null when nothing failed
+ * since. The Objective stays Running meanwhile (a review stays labelled), so `since` never moves.
+ */
+export function startRetryAt(record, since, now = Date.now()) {
+  const fails = startFailures(record, since, now);
+  if (!fails.length) return null;
+  const last = fails.at(-1).at;
+  return startsBlock(record, since, now) ? last : last + startBackoffMs(fails.length);
+}
+/** The vendor's own refusals: these alone hold a route's new picks (a cut-off launch says nothing about the vendor). */
+export const VENDOR_DOWN = Object.freeze(["rate_limited", "unavailable"]);
+/**
+ * Vendor refusals in a row after which one Objective's failure looks like its own, not the vendor's: its retries go on
+ * every 30 minutes, but it no longer holds the route (4 refusals: about 30 minutes of backoff).
+ */
+export const VENDOR_HOLD_MAX = 4;
+/** How many of the latest failed starts since `since` in a row were the vendor refusing (VENDOR_DOWN). */
+export const refusalsInRow = (record, since, now = Date.now()) => {
+  const fails = startFailures(record, since, now);
+  let n = 0;
+  for (let i = fails.length - 1; i >= 0 && VENDOR_DOWN.includes(fails[i].code); i -= 1) n += 1;
+  return n;
+};
+/** Whether this stage's latest starts were refused by the vendor, at most VENDOR_HOLD_MAX in a row: the route's new picks wait. */
+export const transientHold = (record, since, now = Date.now()) => {
+  const n = refusalsInRow(record, since, now);
+  return n >= 1 && n <= VENDOR_HOLD_MAX;
+};
+/**
+ * A launch the dispatcher named less than START_LOST_MS ago with no outcome yet: still in flight (its job may wait for
+ * a runner, or threw before it could record anything). Returns when its marker turns into a `lost` failure, the
+ * earliest moment it may be named again, or null when none is in flight since `since`.
+ */
+export function inFlightUntil(record, since, now = Date.now()) {
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
+  const young = (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t && now - Date.parse(l.at) <= START_LOST_MS);
+  return young.length ? Math.max(...young.map((l) => Date.parse(l.at))) + START_LOST_MS + 1000 : null;
+}
 
 /**
  * The stage an Objective is due for, from its state alone: work for a Running Objective with no work start since it
@@ -2234,8 +2359,12 @@ export function launchDecision({ ev, state, question = false, record = null, tru
     if (record?.waiting === "checks" && record.head && record.head === headSha && checksDone) return { stage: record.stage };
     // The dispatcher's pick, or its sweep re-launching an event that was lost: each stage once per cue.
     if (state === "Running" && !runningSince) return { skip: "Running since an unknown time: nothing starts on a guess" };
-    if (state === "Running" && failedSince(record, runningSince) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox starts failed since it became Running` };
     if (state === "Running" && launchedSince(record, "work", runningSince)) return { skip: "work already started for this Running stint" };
+    const stuck = state === "Running" ? startsBlock(record, runningSince, now) : null;
+    if (stuck) return { block: `${stuck} since it became Running` };
+    // A review whose starts keep failing Blocks too: one request, three strikes. A vendor's refusals never do.
+    const stuckReview = state === "In review" && review?.since && !launchedSince(record, "review", review.since) ? startsBlock(record, review.since, now) : null;
+    if (stuckReview) return { block: `${stuckReview.replace("sandbox starts", "sandbox review starts")} since the review was asked for` };
     return dueStage({ state, record, runningSince, review }) || { skip: `${state}: nothing to start` };
   }
   if (ev.kind === "comment") {
@@ -2341,6 +2470,84 @@ export function quotaBackoff(prev, now = Date.now()) {
 
 /** Whether the record says the Objective waits out a quota refusal now: its retry time not reached. */
 export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.parse(record?.quota?.retryAt)) && now < Date.parse(record.quota.retryAt);
+
+/**
+ * The dispatcher's own next tick (workflow-template.yml `wake`). Each run lists its deadlines: `{issue, kind, at}`, a
+ * moment at which only time, not an event, changes what the dispatcher does. A wake job sleeps only to these kinds:
+ * - `lease`: a sandbox stage's lease end plus WAKE_SLACK_MS (a stage that died silently frees its Objective then);
+ * - `quota`: the retry time of a start the vendor's quota refused (the launcher handed the wait over);
+ * - `start-retry`: the next try of a stage whose start failed another way (startRetryAt), three strikes then Blocked;
+ * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
+ * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
+ * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
+ * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
+ */
+export const WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
+/**
+ * The kinds a repository arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end and
+ * the UTC day's turn, which can keep a sleeper up for hours, wait for an event or GitHub's cron backstop there. An
+ * unknown visibility counts as private.
+ */
+export const wakeKinds = (isPublic) => (isPublic === true ? WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
+/** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
+export const WAKE_SLACK_MS = 60_000;
+/** How soon a `retry` wake reads again. */
+export const RETRY_WAKE_MS = 2 * 60_000;
+/** The longest one wake job sleeps (hosted runners end a job at six hours): a later deadline is reached in hops. */
+export const WAKE_MAX_SLEEP_S = 350 * 60;
+
+/**
+ * When an armed wake actually ticks (ms), or null when that is not known yet: a sleep is capped at WAKE_MAX_SLEEP_S from
+ * its job's start, so a wake named for a deadline further out ticks at that cap (a plain hop) and never at its name. A
+ * wake not started yet with such a deadline has no known tick, so it covers nothing.
+ */
+export function wakeFiresAt({ at, startedAt = null }, now = Date.now()) {
+  const t = Date.parse(at);
+  const cap = WAKE_MAX_SLEEP_S * 1000;
+  if (!Number.isFinite(t)) return null;
+  const s = Date.parse(startedAt);
+  if (Number.isFinite(s)) return Math.min(t, s + cap);
+  return t - now <= cap ? t : null;
+}
+
+/** The next 00:00 UTC after `now` (ms), when today's spend starts over. */
+export const nextUtcMidnight = (now) => {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+};
+
+// Every kind a wake is armed for: a kind this does not read is a sleeper the dispatcher never sees, so they pile up.
+const WAKE = new RegExp(`^(${WAKE_KINDS.join("|")}) (\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z)$`);
+/** A wake's `{kind, at}` from its job name (`wake (<kind> <iso>)`) or its tick's `wake` input (`<kind> <iso>`); else null. */
+export function parseWake(text) {
+  const m = WAKE.exec(String(text ?? "").replace(/^wake \((.*)\)$/, "$1"));
+  return m && Number.isFinite(Date.parse(m[2])) ? { kind: m[1], at: m[2] } : null;
+}
+
+/**
+ * The one wake this run arms, `{kind, at, issue}`, or null. Only `kinds` (wakeKinds), only deadlines still ahead of `now`, the
+ * earliest first. None when a wake already queued or sleeping (`armed`, from the job names) fires before it or within
+ * WAKE_SLACK_MS after it: that wake's tick arms the rest, so sleepers never pile up and none is ever cancelled. A run a
+ * wake started (`firedBy`, its tick's input) never arms that same deadline again (a runner clock behind the sleeper's
+ * would loop on it), nor any retry after a retry wake (a read that keeps failing waits for the next event or the cron).
+ */
+export function nextWake(deadlines, { now = Date.now(), armed = [], firedBy = null, kinds = WAKE_KINDS } = {}) {
+  const fired = firedBy ? Date.parse(firedBy.at) : NaN;
+  const ahead = (deadlines || [])
+    .filter((d) => kinds.includes(d?.kind) && Date.parse(d.at) > now)
+    .filter((d) => !(firedBy?.kind === d.kind && (d.kind === "retry" || Date.parse(d.at) === fired)));
+  if (!ahead.length) return null;
+  const first = ahead.reduce((a, b) => (Date.parse(b.at) < Date.parse(a.at) ? b : a));
+  const at = Date.parse(first.at);
+  // A wake covers this deadline when it ticks after now and no later than the slack past it: by when it ticks, not by
+  // its name, since a hop ticks long before the deadline it is named for.
+  if ((armed || []).some((w) => {
+    const fires = wakeFiresAt(w, now);
+    return fires !== null && fires > now && fires <= at + WAKE_SLACK_MS;
+  })) return null;
+  return { kind: first.kind, at: new Date(at).toISOString(), issue: first.issue ?? null };
+}
 
 /** Event time to command start, in milliseconds, or null when either end is unknown. */
 export function dispatchLatency(eventAt, commandAt) {

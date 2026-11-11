@@ -26,7 +26,7 @@ import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf }
 import { lockBase } from "./lib/lock.mjs";
 import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { factorySandboxId, sandboxRecord, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
+import { factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
 
 /** Usage tarballs collected per run: the workflow's sweep job has this many upload steps. */
 export const COLLECT_SLOTS = 3;
@@ -149,7 +149,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       if (recorded) {
         claim = `sweep-${randomBytes(6).toString("hex")}`;
         base ??= await lockBase(repo, opts);
-        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, record) ? { ...written, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() } : null), { base });
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? { ...written, state: "running", stage: "sweep", claim, at: new Date(now).toISOString() } : null), { base });
         if (!w.ok) {
           out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock" });
           continue;

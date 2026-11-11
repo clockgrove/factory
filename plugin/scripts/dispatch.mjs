@@ -11,10 +11,12 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
-import { NOT_READY_STATUSES, REVIEW_LABEL, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { writeSandboxRecord } from "./launch.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -65,11 +67,29 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
   return { spentToday: usageError ? Number.POSITIVE_INFINITY : sumSpend(records.filter((r) => !r?.spendInProgress)) + localUsd, records, usageError };
 }
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {} }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
   const watch = stopwatch();
+  // Every moment at which only time changes what this dispatcher does (logic.mjs WAKE_KINDS): the wake job sleeps to
+  // the earliest of its kinds; the rest are listed so the log shows each wait and whose it is.
+  const deadlines = [];
+  const due = (issue, kind, ms) => {
+    if (Number.isFinite(ms)) deadlines.push({ issue, kind, at: new Date(ms).toISOString() });
+  };
+  // A read this run could not make: read again soon, once (nextWake arms no retry from a retry's own run).
+  // The stage each relaunch names, for its starting marker; the Objectives whose last start the vendor failed (a
+  // transient error), which hold this route's new picks.
+  const relaunchStage = {};
+  const vendorHeld = [];
+  // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
+  // its own, not a wait for the cron, since that launch will not come.
+  const graceDue = (n, kind, ms) => due(n, n === failedLaunch ? "start-retry" : kind, ms);
+  const retry = (what) => {
+    if (!deadlines.some((d) => d.kind === "retry")) due(null, "retry", now.getTime() + RETRY_WAKE_MS);
+    log(`${what} unread this tick; a retry is due`);
+  };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -95,6 +115,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!e.rateLimited) throw e;
       issue.relationsUnread = true;
       log(`#${issue.number}: blocked-by relations rate limited (HTTP ${e.status}); not picked this tick`);
+      retry(`#${issue.number}'s blocked-by relations`);
       return null;
     });
     if (rel) {
@@ -146,7 +167,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!asked) continue;
       const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       const decisions = await objectiveDecisions(repo, { issue: issue.number, prNumber: pr?.number ?? null }, opts).catch(() => []);
-      if (!missedAnswer(decisions, { questionSince: asked, graceMs: RELAUNCH_GRACE_MS })) continue;
+      if (!missedAnswer(decisions, { questionSince: asked, graceMs: RELAUNCH_GRACE_MS })) {
+        // An answer younger than the grace: its own launch is due first; the sweep's turn comes after.
+        const answer = decisions.find((d) => Date.parse(d.created_at ?? d.at) > Date.parse(asked));
+        if (answer) due(issue.number, "answer-grace", Date.parse(answer.created_at ?? answer.at) + RELAUNCH_GRACE_MS + 1000);
+        continue;
+      }
       answered.push(issue.number);
       issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
       statuses[issue.number] = "Queued";
@@ -169,7 +195,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     checkNames ??= inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     if (!checkNames.length) return false;
     const done = (await checksOn(repo, head, checkNames, opts).catch(() => null))?.done;
-    return checksResume(record, { headSha: head, checksDone: done, graceMs: RELAUNCH_GRACE_MS });
+    const resume = checksResume(record, { headSha: head, checksDone: done, graceMs: RELAUNCH_GRACE_MS });
+    // Done within the grace: the check event's own launch is due first.
+    if (done && !resume) due(n, "checks-grace", Date.parse(record.at) + RELAUNCH_GRACE_MS + 1000);
+    return resume;
+  };
+  // A stage that holds its sandbox within a lease: a stage that dies silently frees the Objective when the lease ends.
+  const leaseDue = (n, record) => {
+    if (record?.state === "running" && record.leaseUntil) due(n, "lease", Date.parse(record.leaseUntil) + WAKE_SLACK_MS);
   };
 
   // Stale Running: a Running issue with no worker job alive (a runner kill past the reserve, a crash the
@@ -189,6 +222,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       ? new Set()
       : await activeWorkIssues(repo, readToken).catch((e) => {
           log(`live jobs could not be listed (${e.message.slice(0, 120)}); stale Running left alone`);
+          retry("live jobs");
           return null;
         });
     if (alive) {
@@ -196,14 +230,34 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (alive.has(issue.number)) continue;
         if (sandbox && backend().trigger.routes(issue)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-          if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) continue;
-          if (record?.waiting === "checks") {
-            if (await checksFinished(issue.number, record)) relaunch.push(issue.number);
+          if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
+            leaseDue(issue.number, record);
             continue;
           }
+          if (record?.waiting === "checks") {
+            if (await checksFinished(issue.number, record)) {
+              relaunch.push(issue.number);
+              relaunchStage[issue.number] = record.stage;
+            }
+            continue;
+          }
+          // `since` is GitHub's clock, the record's entries the runners': logic.mjs CLOCK_SKEW_MS.
           const since = await runningSince(repo, issue.number, opts).catch(() => null);
           if (since && !launchedSince(record, "work", since)) {
-            if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+            // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
+            // launcher); one that never ran gets the grace for its own launch first.
+            const again = startRetryAt(record, since);
+            const flight = inFlightUntil(record, since);
+            if (transientHold(record, since)) vendorHeld.push(issue.number);
+            relaunchStage[issue.number] = "work";
+            // A launch named less than START_LOST_MS ago is still in flight (its job may wait for a runner, or threw
+            // before it could record anything): it is not named again before its marker turns into an outcome.
+            if (flight !== null) due(issue.number, "start-retry", flight);
+            else if (again !== null) {
+              if (Date.now() >= again) relaunch.push(issue.number);
+              else due(issue.number, "start-retry", again);
+            } else if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+            else graceDue(issue.number, "launch-grace", Date.parse(since) + RELAUNCH_GRACE_MS + 1000);
             continue;
           }
         }
@@ -219,6 +273,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (hold?.state === "alive") continue;
         if (hold?.state === "paused") {
           paused.push(issue.number);
+          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
           continue;
         }
         if (!hold && since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
@@ -289,16 +344,38 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (sandbox && reviewing && !pr.draft) {
         const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
         const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        if (labelledAt && Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS && !launchedSince(record, "review", labelledAt) && !stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000) && !quotaWaiting(record)) relaunch.push(issue.number);
+        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+        if (holds) leaseDue(issue.number, record);
+        if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
+        if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
+          const again = startRetryAt(record, labelledAt);
+          const flight = inFlightUntil(record, labelledAt);
+          if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
+          if (flight !== null) due(issue.number, "start-retry", flight);
+          else if (again !== null) {
+            if (Date.now() >= again) relaunch.push(issue.number);
+            else due(issue.number, "start-retry", again);
+          } else if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+          else graceDue(issue.number, "review-grace", Date.parse(labelledAt) + RELAUNCH_GRACE_MS + 1000);
+          relaunchStage[issue.number] = "review";
+        }
       }
       // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
       if (sandbox && !relaunch.includes(issue.number)) {
         const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        if (record?.waiting === "checks" && !stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000) && (await checksFinished(issue.number, record))) relaunch.push(issue.number);
+        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+        if (holds) leaseDue(issue.number, record);
+        if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) {
+          relaunch.push(issue.number);
+          relaunchStage[issue.number] = record.stage;
+        }
       }
       // Only a conflicting PR under review needs the live jobs read (once per tick).
       // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
-      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) {
+        liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+        if (liveJobs.failed) retry("live jobs");
+      }
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing, reviewRunning });
@@ -348,6 +425,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
   const { spentToday, records, usageError } = await spend;
+  if (usageError) retry("today's spend");
   watch.mark("spend");
 
   const held = {};
@@ -378,7 +456,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     await pooled(wanted, RELATION_READS, async (issue) => {
       if (NOT_READY_STATUSES.has(stateOf(issue, statuses[issue.number] ?? null))) return;
       const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-      if (quotaWaiting(record, now.getTime())) deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
+      if (quotaWaiting(record, now.getTime())) {
+        deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
+        due(issue.number, "quota", Date.parse(record.quota.retryAt));
+      }
     });
     watch.mark("quota");
   }
@@ -393,10 +474,20 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     dailyUsd: inputs.dailyUsd,
     spentToday,
   });
+  // Queued work daily_usd held back starts when the UTC day turns (a spend that could not be read is a retry, above).
+  if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
   // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);
     picked.ready = [...sentBack, ...picked.ready.filter((n) => !sentBack.includes(n))].slice(0, slots);
+  }
+  // The sandbox vendor failing starts (a transient error, its retry pending): nothing new starts on this route until a
+  // retry gets through, so the queue is not drained into the outage. The retries themselves still go.
+  if (sandbox && vendorHeld.length && !inputs.issue && picked.ready.length) {
+    const why = `the ${inputs.sandbox} sandbox is failing starts (#${vendorHeld.join(", #")} waits to retry); new Objectives wait`;
+    picked.skipped = [...picked.skipped, ...picked.ready.map((n) => ({ number: n, reason: why }))];
+    picked.ready = [];
+    picked.reason = why;
   }
   // A local loop's own capacity (local.mjs serve): it starts no more than the box runs, so none is labelled Running idle.
   if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
@@ -449,8 +540,36 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
   }
+  // A starting marker for each stage this run names on the sandbox route, written under the record lock: a launch that
+  // never runs its course (its job never starts, fails before it writes, or is cut off) leaves it with no outcome, and
+  // past START_LOST_MS it counts as a failed start (logic.mjs startFailures), so the next try waits its pause and three
+  // Block, whatever happened to the job.
+  const named = [...picked.ready.map((n) => [n, "work"]), ...relaunch.filter((n) => !picked.ready.includes(n)).map((n) => [n, relaunchStage[n] || "work"])];
+  if (sandbox && !dryRun && named.length) {
+    // `recordWrites`: the record writes' {api, base} (tests); else GitHub's, with the lock's base read once.
+    const base = recordWrites?.base ?? (await lockBase(repo, opts).catch(() => null));
+    for (const [n, stage] of named) {
+      const markedAt = new Date().toISOString();
+      const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: markedAt, run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
+      if (!w?.ok) log(`  #${n}: its starting marker was not written; the wake below and the launch grace catch a lost launch`);
+      // This run owns the launch it named: a launcher that exits without a tick, or never runs, is looked at again when
+      // its marker turns into an outcome, by a wake of this run's, not the cron.
+      due(n, "start-retry", Date.parse(markedAt) + START_LOST_MS + 1000);
+    }
+  }
   watch.mark("mark");
-  return { ...picked, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+}
+
+/**
+ * The record with the dispatcher's starting marker for `stage` appended (`ok: null`, no code): the launch it names
+ * settles it (its claim or its failure drops it, launch.mjs settledLaunches). With no record yet, one that says only
+ * this; the record's own time is left as it was, so a later write shows the marker was followed.
+ */
+export function startingRecord(cur, { vendor, stage, at, run }) {
+  const entry = { stage, event: "dispatch", ok: null, run, at };
+  const rec = cur ? { ...cur } : { vendor, stage, state: "named", at, launches: [] };
+  return { ...rec, launches: [...(rec.launches || []), entry].slice(-KEEP_LAUNCHES) };
 }
 
 /** How often the queue watch reads the queue, and the longest it watches (under its job's timeout). */
@@ -510,6 +629,66 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
   }
 }
 
+/**
+ * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of the kinds the repository's
+ * visibility arms (`isPublic`, logic.mjs wakeKinds) still ahead, unless a wake already queued or sleeping covers it
+ * (read from the live jobs' names; an unreadable list arms anyway, since a second sleeper only ticks twice). `firedBy`
+ * is the wake whose tick started this run, or null.
+ */
+export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, isPublic = false, readJobs }) {
+  const kinds = wakeKinds(isPublic);
+  if (!nextWake(deadlines, { now, firedBy, kinds })) return null;
+  const armed = await readJobs().then(
+    (j) => j.wakes,
+    (e) => {
+      log(`armed wakes could not be listed (${String(e.message).slice(0, 120)}); arming anyway`);
+      return [];
+    },
+  );
+  return nextWake(deadlines, { now, firedBy, armed, kinds });
+}
+
+/**
+ * Whether the repository is public: from the event's own repository payload (every Actions event but a schedule carries
+ * one), else one read of the repository, made only when a lease or daily-cap deadline would need the answer. Unknown
+ * counts as private, which arms only the short kinds.
+ */
+export async function repoIsPublic(payload, deadlines, readRepo) {
+  const known = payload?.repository && typeof payload.repository.private === "boolean" ? !payload.repository.private : null;
+  if (known !== null) return known;
+  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap")) return false;
+  return readRepo().then(
+    (r) => r?.private === false,
+    () => false,
+  );
+}
+
+/** The wake that started this run: a `workflow_dispatch` whose `wake` input the wake job set; else null. */
+export function firedByWake(eventName, payload) {
+  return eventName === "workflow_dispatch" ? parseWake(payload?.inputs?.wake) : null;
+}
+
+/**
+ * Whether a run is worth its reads: every event but an issue closing is. A closed issue is when it was an Objective, or
+ * when it blocks one: GitHub's own count in the payload (`issue_dependencies_summary.blocking`), or a "Blocked by #N"
+ * line in an open Objective's body (one listing read). A payload with no such count cannot rule a relation out, so the
+ * run goes ahead.
+ */
+export async function closedIssueTicks(eventName, payload, { objectiveLabel, objectives }) {
+  if (eventName !== "issues" || payload?.action !== "closed") return true;
+  const issue = payload.issue || {};
+  if ((issue.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === objectiveLabel)) return true;
+  const summary = issue.issue_dependencies_summary;
+  if (!summary || typeof summary.blocking !== "number") return true;
+  if (summary.blocking > 0) return true;
+  const open = await objectives().catch(() => null);
+  if (!open) return true;
+  return open.some((o) => parseBlockedBy(o.body).includes(issue.number));
+}
+
+/** The deadline kinds an event or a local loop owns: listed, never slept to on any repository. */
+const WAKE_OWNED = new Set(["launch-grace", "review-grace", "checks-grace", "answer-grace", "local-pause"]);
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = resolveInputs({ args });
@@ -526,7 +705,21 @@ async function main() {
     setOutput("tick", r.tick ? "true" : "false");
     return;
   }
-  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true" });
+  const { readFileSync } = await import("node:fs");
+  let payload = {};
+  try {
+    payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
+  } catch {
+    payload = {};
+  }
+  const eventName = process.env.GITHUB_EVENT_NAME || "";
+  if (!(await closedIssueTicks(eventName, payload, { objectiveLabel: inputs.objectiveLabel, objectives: () => listIssuesByLabel(repoOf(inputs.repo), inputs.objectiveLabel, { token }) }))) {
+    log(`issue #${payload.issue?.number} closed: not an Objective and blocks none; nothing to do`);
+    for (const [k, v] of [["issues", []], ["count", "0"], ["reason", ""], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""]]) setOutput(k, v);
+    return;
+  }
+  const failedLaunch = eventName === "workflow_dispatch" && /^[1-9]\d{0,9}$/.test(String(payload?.inputs?.failed_launch ?? "")) ? Number(payload.inputs.failed_launch) : null;
+  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch });
   const summary = {
     ready: result.ready,
     running: result.running,
@@ -563,6 +756,22 @@ async function main() {
   setOutput("count", String(named.length));
   setOutput("reason", result.reason || "");
   setOutput("queue_watch", watchOutput(result.queueWatch));
+  // The dispatcher's own next tick: never from a dry run or a run named for one issue (it saw only that issue).
+  const waits = result.deadlines || [];
+  let wake = null;
+  let kinds = null;
+  if (args.dry_run !== "true" && !inputs.issue && waits.length) {
+    const firedBy = firedByWake(eventName, payload);
+    const isPublic = await repoIsPublic(payload, waits, () => getRepo(repoOf(inputs.repo), { token }));
+    kinds = wakeKinds(isPublic);
+    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, isPublic, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
+  }
+  // Every wait, and whose it is: a wake's, its owner's (an event, a local loop), or on a private repository the cron's.
+  const whose = (d) => (WAKE_OWNED.has(d.kind) ? " (its owner's; the cron is the backstop)" : kinds && !kinds.includes(d.kind) ? " (a long wait on a private repository: events and the cron)" : "");
+  for (const d of [...waits].sort((x, y) => Date.parse(x.at) - Date.parse(y.at))) log(`  due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${whose(d)}`);
+  if (wake) log(`wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
+  setOutput("wake_at", wake?.at ?? "");
+  setOutput("wake_kind", wake?.kind ?? "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);

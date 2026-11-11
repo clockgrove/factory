@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { KEEP_LAUNCHES, RETRY_WAKE_MS, START_LOST_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, failedSince, inFlightUntil, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, sandboxRecordOf, setSelf, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
+import { KEEP_LAUNCHES, RETRY_WAKE_MS, START_LOST_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, failedSince, inFlightUntil, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, sandboxRecordOf, setSelf, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, SWEEP_WAKE_KINDS, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
 import { recordBody, writeSandboxRecord } from "../scripts/launch.mjs";
 import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
 
@@ -26,9 +26,9 @@ test("nextWake: the earliest sleeper deadline still ahead; owners' kinds, past o
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS) }] }), null);
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS + 1000) }] })?.issue, 6, "a later sleeper does not cover it");
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "lease", at: iso(T - 30_000) }] })?.issue, 6, "one already past its deadline (firing, or this run's own) covers nothing");
-  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "start-retry", "daily-cap", "retry"]);
+  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "start-retry", "daily-cap", "retry", "sweep"]);
   // A private repository sleeps only to the short waits: the lease and the day's turn wait for events and the cron.
-  assert.deepEqual(wakeKinds(true), WAKE_KINDS);
+  assert.deepEqual(wakeKinds(true), ["lease", "quota", "start-retry", "daily-cap", "retry"], "the sweep's and the image's kinds are theirs, not the dispatcher's");
   for (const v of [false, null, undefined]) assert.deepEqual(wakeKinds(v), ["quota", "start-retry", "retry"], `visibility ${v}`);
   assert.deepEqual(nextWake(deadlines, { now: T, kinds: wakeKinds(false) }), { kind: "quota", at: iso(T + 7 * min), issue: 5 });
   assert.equal(nextWake([{ kind: "daily-cap", at: iso(nextUtcMidnight(T)) }, { kind: "lease", at: iso(T + min) }], { now: T, kinds: wakeKinds(false) }), null);
@@ -199,6 +199,54 @@ test("ownedTickCheck: an installed workflow without the dispatcher's own ticks i
   const beforeDeferred = ownedTickCheck(renderWorkflow(template, sandbox).replace(/ \|\| steps\.f\.outputs\.exit == 'deferred'/g, ""), {});
   assert.equal(beforeDeferred.status, "FAIL");
   assert.match(beforeDeferred.detail, /stalls until GitHub's cron fires/);
+  // A sandbox workflow from before the sweep armed its own wakes and the dispatcher built an owed image: both wait for GitHub's cron.
+  const beforeOwn = renderWorkflow(template, sandbox).replace(/\n {2}sweep-wake:[\s\S]*$/, "\n").replace(/ \|\|\n\s*\(needs\.dispatch\.outputs\.image_owed[^\n]*\)\)/, ")");
+  const own = ownedTickCheck(beforeOwn, {});
+  assert.equal(own.status, "FAIL");
+  assert.match(own.detail, /the sweep's own wake \(sweep-wake\), the sweep's wake after an image build \(image-wake\), the dispatcher's owed image build \(image_owed\)/);
+  assert.equal(ownedTickCheck(beforeOwn, {}, { job: true }).status, "WARN");
+  const noTick = ownedTickCheck(renderWorkflow(template, sandbox).replace(" || startsWith(inputs.wake, 'sweep ')", ""), {});
+  assert.match(noTick.detail, /the sweep's own wake/, "a wake whose tick the sweep does not run on");
+});
+
+test("the sweep's own wakes: minutes, on every repository; only an armed sweep wake covers one", async () => {
+  const { armWake } = await import("../scripts/dispatch.mjs");
+  assert.deepEqual(SWEEP_WAKE_KINDS, ["sweep"]);
+  const repo = { owner: "acme", name: "app", full: "acme/app" };
+  const sweepAt = { issue: 4, kind: "sweep", at: iso(T + 10 * min) };
+  const jobs = (...wakes) => async () => ({ wakes });
+  const arm = (readJobs, firedBy = null) => armWake(repo, [sweepAt], { now: T, firedBy, kinds: SWEEP_WAKE_KINDS, runs: SWEEP_WAKE_KINDS, readJobs });
+  // A dispatcher's lease wake ticks first, but its tick runs no sweep: it covers nothing of the sweep's.
+  assert.deepEqual(await arm(jobs({ kind: "lease", at: iso(T + 5 * min) })), { kind: "sweep", at: sweepAt.at, issue: 4 });
+  assert.equal(await arm(jobs({ kind: "sweep", at: iso(T + 8 * min) })), null, "one sweep sleeper");
+  assert.equal(await arm(jobs(), { kind: "sweep", at: sweepAt.at }), null, "a sweep wake's own run never re-arms its deadline");
+  // The dispatcher never arms the sweep's kind, and a sweep wake's tick (a workflow_dispatch) also ticks it.
+  assert.ok(!wakeKinds(true).includes("sweep"));
+});
+
+test("workflow template: the sweep and the image job each have a wake job that sleeps to their deadline and ticks with it", async () => {
+  const { renderWorkflow } = await import("../scripts/setup.mjs");
+  const { parseYaml } = await import("../scripts/lib/yaml.mjs");
+  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const doc = parseYaml(renderWorkflow(template, { ...values, sandbox: "vercel", default_branch: "main" }));
+  for (const job of ["sweep", "image"]) {
+    const wake = doc.jobs[`${job}-wake`];
+    assert.equal(wake.name, `wake (\${{ needs.${job}.outputs.wake_kind }} \${{ needs.${job}.outputs.wake_at }})`, "the name every armer reads armed wakes from");
+    assert.equal(wake.needs, job);
+    assert.match(wake.if, new RegExp(`needs\\.${job}\\.outputs\\.wake_at != ''`));
+    assert.equal(wake.concurrency, undefined);
+    assert.deepEqual(wake.permissions, { actions: "write" });
+    assert.ok(Number(wake["timeout-minutes"]) >= 20, "it outlives a sweep wait (about 16 minutes at most)");
+    assert.ok(Number(wake["timeout-minutes"]) <= 30, "no long sleeper");
+    assert.match(wake.steps[0].run, /gh workflow run factory\.yml -f wake="\$WAKE_KIND \$WAKE_AT"/, "the tick carries its deadline");
+    for (const k of ["wake_at", "wake_kind"]) assert.match(doc.jobs[job].outputs[k], new RegExp(`steps\\.f\\.outputs\\.${k}`));
+    assert.ok(doc.jobs[job].permissions.actions === "read", "the job token lists the armed wakes");
+  }
+  assert.doesNotMatch(template, /nightly [0-9]|'nightly '/, "no nightly sleeper");
+  // A quota refusal's sweep that left usage for the sweep job's slots: the launch job's tick runs that job too.
+  for (const job of ["launch", "launch-event"]) assert.match(doc.jobs[job].steps.at(-1).run, /-f sweep="\$SWEEP"/, job);
+  assert.doesNotMatch(renderWorkflow(template, values), /sweep-wake|image-wake/, "no sandbox, no sandbox wakes");
 });
 
 test("a hop wake covers only up to when it ticks, not the deadline it is named for", () => {

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { checksResume, launchDecision, missedAnswer, sweepDecision } from "../scripts/lib/logic.mjs";
-import { objectiveSandboxes, usageTarball } from "../scripts/sweep.mjs";
+import { SWEEP_RETRY_MS, objectiveSandboxes, sweepWaits, usageTarball } from "../scripts/sweep.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 
@@ -31,6 +31,27 @@ test("sweep: which Objective sandboxes go", () => {
   for (const state of ["Running", "In review"]) assert.equal(sweepDecision({ ...base, state }).keep, `the Objective is ${state}`, "a live Objective's own sandbox stays, however long stopped");
   assert.equal(sweepDecision({ ...base, holds: true, issue: { state: "closed" } }).keep, "a stage holds it");
   assert.equal(sweepDecision({ ...base, sandbox: box({ createdAt: new Date(NOW - 60_000).toISOString() }), record: null }).keep, "created moments ago", "a launcher may not have recorded it yet");
+});
+
+test("sweep: what it keeps for time alone says when, and its own next runs follow", () => {
+  const ended = sweepDecision({ ...base, record: rec({ state: "ended", at: new Date(NOW - 2 * 60_000).toISOString() }) });
+  assert.equal(ended.until, NOW + 8 * 60_000, "the end's grace");
+  assert.equal(sweepDecision({ ...base, sandbox: box({ createdAt: new Date(NOW - 60_000).toISOString() }), record: null }).until, NOW + 14 * 60_000, "a new sandbox's grace");
+  const idle = sweepDecision({ ...base, record: rec({ at: "2026-11-18T00:00:00Z" }) });
+  assert.deepEqual([idle.until, idle.idle], [Date.parse("2026-11-25T00:00:00Z"), true], "a stopped sandbox's idle days");
+  assert.equal(sweepDecision({ ...base, state: "Running" }).until, undefined, "a live Objective's waits for events");
+  const slack = 60_000;
+  const at = (ms) => new Date(ms).toISOString();
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 8 * 60_000, idle: false }], now: NOW }), [{ issue: 4, kind: "sweep", at: at(NOW + 8 * 60_000 + slack) }]);
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 3600_000, idle: true }], now: NOW }), [], "idle days: no sleeper; the next event's sweep or the hourly cron");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", reason: "the Objective is Running" }], now: NOW }), []);
+  const destroyed = { issue: 3, action: "destroyed" };
+  assert.deepEqual(sweepWaits({ results: [destroyed, { issue: 4, action: "skipped", retry: "cap" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [{ issue: 4, kind: "sweep", at: at(NOW + SWEEP_RETRY_MS) }], "a cap's rest after a run that got somewhere, every time");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "cap" }], now: NOW }), [], "sweep_max_destroys 0: nothing destroyed, no endless re-arm");
+  assert.equal(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "error" }], now: NOW }).length, 1, "a failure: once");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "error" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [], "never again from a sweep wake's run");
+  assert.deepEqual(sweepWaits({ imagesUntil: NOW + 5 * 60_000, now: NOW }), [{ issue: null, kind: "sweep", at: at(NOW + 6 * 60_000) }], "a superseded image");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW - 1000, idle: true }], now: NOW }), [{ issue: 4, kind: "sweep", at: at(NOW + slack) }], "a wait that ended during the run: due at once");
 });
 
 test("sweep: only Factory's Objective sandboxes for this repository are listed; never an image sandbox", () => {
@@ -61,14 +82,15 @@ test("lost events: CI finished for the head a stage waits on; a Question answere
   assert.equal(missedAnswer([{ created_at: "2026-11-20T11:00:00Z" }], { questionSince: null, now: NOW, graceMs: 180_000 }), null);
 });
 
-test("workflow template: the sweep job, hourly or by hand, with three usage upload slots", () => {
+test("workflow template: the sweep job, on events, its own wakes, by hand and the hourly backstop, with three usage upload slots", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
   const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: "main" }));
   const job = doc.jobs.sweep;
   assert.ok(doc.on.schedule.some((s) => s.cron === "17 * * * *"));
   assert.ok(job.if.includes("github.event.schedule == '17 * * * *'"));
   assert.ok(job.if.includes("github.event.action == 'labeled' && github.event.label.name == 'factory:blocked'"), "a Block runs the sweep at once");
-  assert.deepEqual(job.permissions, { contents: "read" });
+  assert.ok(job.if.includes("inputs.sweep == 'true' || startsWith(inputs.wake, 'sweep ')"), "its own wakes' ticks run it");
+  assert.deepEqual(job.permissions, { contents: "read", actions: "read" }, "actions: read for the armed wakes only");
   assert.equal(job.steps.filter((s) => String(s.uses).startsWith("actions/upload-artifact")).length, 3);
   assert.equal(String(doc.env.FACTORY_SANDBOX_IDLE_DAYS), "7");
   assert.equal(String(doc.env.FACTORY_SWEEP_MAX_DESTROYS), "5");

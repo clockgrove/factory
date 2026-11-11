@@ -8,7 +8,7 @@
 // Paths inside the image are constants, never read from a record.
 import { SNAPSHOT_TAG } from "./adapters/sandbox.mjs";
 import { ensureLabel, getRepo, listComments, onDefaultBranch, rest, upsertComment } from "./github.mjs";
-import { isSelf, marker, selfLogin } from "./logic.mjs";
+import { WAKE_SLACK_MS, isSelf, marker, selfLogin } from "./logic.mjs";
 
 /** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
 export const IMAGE_LABEL = "factory:image";
@@ -48,7 +48,19 @@ export function imageEntry(e) {
   if (!e || typeof e !== "object" || typeof e.vendor !== "string" || !ID.test(e.vendor) || !SHA.test(e.sha ?? "") || !Number.isFinite(Date.parse(e.builtAt))) return null;
   const id = (v) => (typeof v === "string" && ID.test(v) ? v : null);
   const num = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
-  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd) };
+  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd), ...(e.attempt === true ? { attempt: true } : {}) };
+}
+
+/**
+ * The record after one more entry, newest first: `entry` replaces the attempt it ends (`attempt: true`, the same head
+ * and start, written before the build began), so a build that ran to its end is one entry; an attempt nothing ended (a
+ * crash, a timeout) stays, as a build of that head that was tried.
+ */
+export function withBuild(builds, entry) {
+  const e = imageEntry(entry);
+  if (!e) return builds;
+  const ends = (b) => !e.attempt && b.attempt === true && b.sha === e.sha && b.builtAt === e.builtAt;
+  return [e, ...builds.filter((b) => !ends(b))].slice(0, RECORDED);
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */
@@ -105,9 +117,11 @@ export async function recordImage(repo, entry, opts) {
     // Locked is part of what makes it Factory's record on Actions (findImageIssue): a failed lock fails the record.
     await rest(`repos/${repo.full}/issues/${issue}/lock`, { ...opts, method: "PUT", body: { lock_reason: "resolved" } });
   }
-  const next = [imageEntry(entry), ...builds].filter(Boolean).slice(0, RECORDED);
+  const next = withBuild(builds, entry);
   const e = next[0];
-  const human = e.snapshot
+  const human = e.attempt
+    ? `Factory's sandbox image: a build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) started at ${e.builtAt.slice(0, 16)}Z.`
+    : e.snapshot
     ? `Factory's sandbox image: \`${e.snapshot}\` (${e.vendor}) from \`${e.sha.slice(0, 7)}\`, built in ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`
     : `Factory's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`;
   await upsertComment(repo, issue, marker(issue, "image"), `${imageMarkerLine(next)}\n${human}`, opts);
@@ -174,7 +188,7 @@ export function lastNightly(now = new Date()) {
 
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
- * schedule) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
+ * schedule), `owed` (the dispatcher saw a head an earlier day left unbuilt, imageOwed) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
  * newest build Factory recorded started, failed ones included. A head already built is never built again, except by
  * hand. On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
  * unless no build was even tried since the last nightly time (GitHub's cron does not always fire): then one merge
@@ -183,12 +197,58 @@ export function lastNightly(now = new Date()) {
 export function imageDecision({ trigger, refresh, head, current, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
   if (trigger === "manual") return { build: true };
   if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
-  if (trigger === "nightly") return { build: true };
+  if (trigger === "nightly" || trigger === "owed") return { build: true };
   if (trigger !== "merge") return { skip: `no image build on ${trigger}` };
   if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it" };
   if (todayMs < dailyMinutes * 60_000) return { build: true };
   if (!lastAttemptAt || Date.parse(lastAttemptAt) < lastNightly(now).getTime()) return { build: true, note: "today's minutes are used up, but no build was tried since the last nightly time" };
   return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it` };
+}
+
+/**
+ * Whether the image is owed a build now (the dispatcher's tick runs the image job when it is): the default branch's
+ * head (`head`, committed at `headAt`) is in no build Factory recorded (`builds`, newest first: built, failed, or only
+ * started), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
+ * left to the nightly build; a merge today builds on its own push), and today's turn allows one: `merge`, today's
+ * builds under `dailyMinutes`; `nightly`, none tried yet today. So an owed build runs on the first dispatcher tick of
+ * the UTC day, an event's or a wake's, never on GitHub's nightly cron alone, which stays the backstop.
+ */
+export function imageOwed({ refresh, head, headAt, builds = [], todayMs, dailyMinutes, now = new Date() }) {
+  // Any build of the head Factory recorded ends the owing: built, failed, or only started (an attempt a crash, a timeout
+  // or a vendor error left). The next merge or the nightly cron tries again, never another tick.
+  if (!head || builds.some((b) => b.sha === head)) return false;
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  if (!(Date.parse(headAt) < today)) return false;
+  if (refresh === "nightly") return !builds.some((b) => Date.parse(b.builtAt) >= today);
+  return todayMs < dailyMinutes * 60_000;
+}
+
+/**
+ * The owed build's own check when its job starts (a tick's queued job may start after another build of the head):
+ * imageOwed against the record read now, for the default branch's head now (`tip`, committed at `tipAt`). Returns the
+ * attempt entry to record before anything else (so a crash, a timeout, a refusal or a vendor failure ends the owing),
+ * or null when the head is owed no build any more.
+ */
+export function owedAttempt({ builds, tip, tipAt, refresh, dailyMinutes, vendor, now = new Date() }) {
+  if (!imageOwed({ refresh, head: tip, headAt: tipAt, builds, todayMs: todaysBuildMs(builds, now), dailyMinutes, now })) return null;
+  return imageEntry({ vendor, snapshot: null, sha: tip, builtAt: now.toISOString(), buildMs: 0, attempt: true });
+}
+
+/**
+ * imageOwed from GitHub: Factory's record and the default branch's head commit (`commits/HEAD`), three reads. False when either
+ * cannot be read: the next tick, the next merge or the nightly cron tries again.
+ */
+export async function imageOwedNow(repo, { refresh, dailyMinutes, now = new Date() }, opts) {
+  const [{ builds }, commit] = await Promise.all([listImages(repo, opts), rest(`repos/${repo.full}/commits/HEAD`, opts)]);
+  return imageOwed({ refresh, head: commit?.sha, headAt: commit?.commit?.committer?.date, builds, todayMs: todaysBuildMs(builds, now), dailyMinutes, now });
+}
+
+/**
+ * The image job's own next run, as deadlines (lib/logic.mjs nextWake): when a build left an older image a stage may
+ * still be starting from, the sweep `PREVIOUS_IMAGE_MS` on (plus WAKE_SLACK_MS), which destroys it (prunableImages).
+ */
+export function imageWaits({ built = false, olderImage = false, now = Date.now() }) {
+  return built && olderImage ? [{ issue: null, kind: "sweep", at: new Date(now + PREVIOUS_IMAGE_MS + WAKE_SLACK_MS).toISOString() }] : [];
 }
 
 /** The images a build destroys: all but the newest KEEP by the vendor's clock, never `keep` (the one just built). */
@@ -205,33 +265,45 @@ const recordedAt = (b) => Date.parse(b.builtAt) + (Number.isFinite(b.buildMs) ? 
  * being recorded, or one stages do not start from) stay. With no current, or one the listing does not show, nothing goes.
  */
 export function prunableImages(images, current, verified = [], now = Date.now()) {
+  return imagePrune(images, current, verified, now).prune;
+}
+
+/**
+ * prunableImages' list (`prune`), and `until`: when the first image it keeps for a stage that may still be starting from
+ * it becomes prunable (ms; null when it keeps none), the sweep's next run (sweep.mjs sweepWaits).
+ */
+export function imagePrune(images, current, verified = [], now = Date.now()) {
   const at = current?.source ? images.findIndex((i) => i.source === current.source) : -1;
-  if (at < 0) return [];
+  if (at < 0) return { prune: [], until: null };
   const when = new Map((verified || []).filter((b) => b.source).map((b) => [b.source, recordedAt(b)]));
   // When the image under the cursor stopped being what a launcher reads: the earliest record of a build newer than it,
   // from the current down. A time that cannot be read counts as now (kept).
   const known = (t) => (Number.isFinite(t) ? t : now);
   let superseded = known(recordedAt(current));
-  const out = [];
+  const prune = [];
+  let until = null;
   for (const i of images.slice(at + 1)) {
     // An image no confirmed record names was never what a launcher reads.
-    if (!when.has(i.source) || now - superseded >= PREVIOUS_IMAGE_MS) out.push(i);
+    if (!when.has(i.source) || now - superseded >= PREVIOUS_IMAGE_MS) prune.push(i);
+    else until = Math.min(until ?? Infinity, superseded + PREVIOUS_IMAGE_MS);
     if (when.has(i.source)) superseded = Math.min(superseded, known(when.get(i.source)));
   }
-  return out;
+  return { prune, until };
 }
 
 /**
  * Destroy this repository's images no stage needs (prunableImages), from the vendor's listing in this project and
  * Factory's own record: never another repository's (the listing is by this repository's tag). Returns what it did per
- * image: `{source, snapshot, action: "destroyed" | "would destroy" | "skipped", reason}`.
+ * image, `images: [{source, snapshot, action: "destroyed" | "would destroy" | "skipped", reason}]`, and `until`
+ * (imagePrune): when an image it kept for a starting stage becomes prunable, or null.
  */
 export async function pruneImages(adapter, repo, { repoId, now = Date.now(), dryRun = false, log = () => {}, ...opts }) {
   const [{ builds }, { images }] = await Promise.all([listImages(repo, opts), vendorImages(adapter, String(repoId))]);
   const verified = verifiedRecords(builds, images, adapter.name);
   const current = await currentBuild(adapter, repo, verified, opts);
   const out = [];
-  for (const i of prunableImages(images, current, verified, now)) {
+  const { prune, until } = imagePrune(images, current, verified, now);
+  for (const i of prune) {
     const reason = `superseded by the current image ${current.snapshot}`;
     if (dryRun) {
       out.push({ source: i.source, snapshot: i.snapshot, action: "would destroy", reason });
@@ -245,5 +317,5 @@ export async function pruneImages(adapter, repo, { repoId, now = Date.now(), dry
       out.push({ source: i.source, snapshot: i.snapshot, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
     }
   }
-  return out;
+  return { images: out, until };
 }

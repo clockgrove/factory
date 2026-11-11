@@ -233,6 +233,14 @@ export function parseUsageText(text, { model = null } = {}) {
 }
 
 /**
+ * The stage a usage record came from, by its artifact's name: the review job's `factory-usage-<n>-review`, a local
+ * loop's `usage-review-<stamp>/`, a spend line's `spend/review/<id>`; any other name is the work stage's.
+ */
+export function stageOf(rec) {
+  return typeof rec?.artifact === "string" && /(^|[-/])review([-/]|$)/.test(rec.artifact) ? "review" : "work";
+}
+
+/**
  * The cost row from one Objective's usage records (the worker's artifact,
  * then any reviewer artifacts), on `prices` for Codex:
  *   { harness, model, unit, usd, tokens, basis, parts: [{artifact, usd, tokens, basis}], priceTableDate, note }
@@ -242,7 +250,8 @@ export function parseUsageText(text, { model = null } = {}) {
 export function costOf(records, prices, { harness: declared = null } = {}) {
   const parts = records.filter(Boolean);
   const harness = declared ?? parts[0]?.harness ?? null;
-  const out = { harness, model: parts.find((p) => p.model)?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: null, parts: [], priceTableDate: null, note: null, activity: { turns: null, calls: null, sessions: null, workRuns: 0, reviewRuns: 0 }, cache: cacheOf(parts) };
+  // The row's model is the work stage's, whatever order the artifacts are listed in: never the reviewer's.
+  const out = { harness, model: parts.find((p) => p.model && stageOf(p) === "work")?.model ?? null, unit: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: null, parts: [], priceTableDate: null, note: null, activity: { turns: null, calls: null, sessions: null, workRuns: 0, reviewRuns: 0 }, cache: cacheOf(parts) };
   if (!parts.length) {
     out.basis = "unknown: no usage artifact";
     return out;
@@ -289,7 +298,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.activity.turns = add(out.activity.turns, num(rec.turns));
     out.activity.calls = add(out.activity.calls, num(rec.sessions?.calls));
     out.activity.sessions = add(out.activity.sessions, num(rec.sessions?.sessions));
-    if (rec.runs !== 0 && typeof rec.artifact === "string") out.activity[/(^|-|\/)review(\/|$)/.test(rec.artifact) ? "reviewRuns" : "workRuns"] += 1;
+    if (rec.runs !== 0 && typeof rec.artifact === "string") out.activity[stageOf(rec) === "review" ? "reviewRuns" : "workRuns"] += 1;
     out.tokens.input = add(out.tokens.input, part.tokens?.input ?? null);
     out.tokens.output = add(out.tokens.output, part.tokens?.output ?? null);
     out.tokens.written = add(out.tokens.written, part.tokens?.written ?? null);

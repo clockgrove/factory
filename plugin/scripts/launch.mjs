@@ -1110,8 +1110,10 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const why = `the ${inputs.sandbox} sandbox's plan quota is used up (${code}); try ${quota.tries}, the next after ${clock(quota.retryAt)}`;
   // The launcher hands the wait to the dispatcher: its job ticks it on `queued` (a work stage, back to Queued) or
   // `deferred` (a review, which stays labelled), and the dispatcher's next run sees the record's retryAt and arms its wake for it.
-  if (stage === "work") return requeue(run, ctx.project, why);
-  return { exit: "deferred", reason: `#${n}: ${why}` };
+  // What this sweep left (a sandbox whose usage needs the sweep job's upload slots) the same tick hands to the sweep job.
+  const leftover = swept.results.some((r) => r.action === "skipped");
+  if (stage === "work") return { ...(await requeue(run, ctx.project, why)), sweep: leftover };
+  return { exit: "deferred", reason: `#${n}: ${why}`, sweep: leftover };
 }
 
 async function main() {
@@ -1148,6 +1150,7 @@ async function main() {
     setOutput("latency_ms", Number.isFinite(r.latencyMs) ? String(r.latencyMs) : "");
   }
   log(`${r.exit}${r.reason ? `: ${r.reason}` : ""}`);
+  setOutput("sweep", r.sweep ? "true" : "");
   setOutput("exit", r.exit);
   setOutput("reason", r.reason || "");
   if (r.failed) process.exitCode = 1;

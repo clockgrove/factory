@@ -2,8 +2,9 @@
 // Factory's sandbox sweep (mode: sweep): destroys the Objective sandboxes and the images no live Objective needs, and
 // stops one left running with no stage holding it.
 //   node scripts/sweep.mjs --repo OWNER/NAME [--dry-run]
-// Runs hourly, by hand, when an Objective closes (its issue closed, its PR merged) or is Blocked, and inside a launch the
-// vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
+// Runs when an Objective closes (its issue closed, its PR merged) or is Blocked, by hand, on its own wakes (sweepWaits:
+// what a run left for minutes later), with GitHub's hourly cron as the backstop, and inside a
+// launch the vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
 // Lists Factory's Objective sandboxes for this repository in the vendor's project (tags `factory=objective` and
 // `factory-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one
 // (logic.mjs sweepDecision) when its Objective is closed, when the Objective's record names another sandbox or none,
@@ -16,20 +17,20 @@
 // repository's images: the current one stays, and an older one until no stage can still be starting from it
 // (lib/image.mjs prunableImages); the rest go.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
-import { appToken } from "./dispatch.mjs";
+import { appToken, armSweepWake, firedByWake } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
 import { CLAIM_LEASE_MS, bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
 import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
 import { lockBase } from "./lib/lock.mjs";
 import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
+import { WAKE_SLACK_MS, factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
 
 /** Usage tarballs collected per run: the workflow's sweep job has this many upload steps. */
 export const COLLECT_SLOTS = 3;
@@ -124,7 +125,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
     } catch (e) {
       // A missing issue is gone for good; any other failure is a read to try again next run.
       if (e.status !== 404 && e.status !== 410) {
-        for (const s of mine.filter((x) => x.tags["factory-issue"] === String(n))) out.push({ id: s.id, issue: n, action: "skipped", reason: `issue unreadable (${e.status ?? "error"})` });
+        for (const s of mine.filter((x) => x.tags["factory-issue"] === String(n))) out.push({ id: s.id, issue: n, action: "skipped", reason: `issue unreadable (${e.status ?? "error"})`, retry: "error" });
         continue;
       }
     }
@@ -136,20 +137,20 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
     for (const s of mine.filter((x) => x.tags["factory-issue"] === String(n))) {
       const d = sweepDecision({ sandbox: s, issue, state, record, holds: stageHolds(record, now, staleMs), now, idleMs: idleDays * 86_400_000, graceMs: GRACE_MS });
       if (d.keep) {
-        out.push({ id: s.id, issue: n, action: "kept", reason: d.keep });
+        out.push({ id: s.id, issue: n, action: "kept", reason: d.keep, ...(d.until ? { until: d.until, idle: !!d.idle } : {}) });
         continue;
       }
       if (d.destroy && destroyed >= maxDestroys) {
-        out.push({ id: s.id, issue: n, action: "skipped", reason: `sweep_max_destroys (${maxDestroys}) reached; next run` });
+        out.push({ id: s.id, issue: n, action: "skipped", reason: `sweep_max_destroys (${maxDestroys}) reached; next run`, retry: "cap" });
         continue;
       }
       if (d.collect && slots.length >= collectSlots) {
-        out.push({ id: s.id, issue: n, action: "skipped", reason: "its usage waits for a collection slot; next run" });
+        out.push({ id: s.id, issue: n, action: "skipped", reason: "its usage waits for a collection slot; next run", retry: "cap" });
         continue;
       }
       // A stage's vendor cost not yet booked needs a slot for its usage record, unless its usage comes out with it.
       if (issue && record?.id === s.id && record.meter && !record.vendorBooked && !d.collect && slots.length >= collectSlots) {
-        out.push({ id: s.id, issue: n, action: "skipped", reason: "its vendor cost waits for a collection slot; next run" });
+        out.push({ id: s.id, issue: n, action: "skipped", reason: "its vendor cost waits for a collection slot; next run", retry: "cap" });
         continue;
       }
       if (dryRun) {
@@ -172,7 +173,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
         base ??= await lockBase(repo, opts);
         const w = await writeSandboxRecord(repo, n, opts, (cur) => (sameRecord(cur, settleStale(record, Date.now())) ? ((from = cur), { ...cur, state: "running", stage: "sweep", claim, prior: own, at: new Date(now).toISOString(), leaseUntil: new Date(Date.now() + CLAIM_LEASE_MS).toISOString() }) : null), { base });
         if (!w.ok) {
-          out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock" });
+          out.push({ id: s.id, issue: n, action: "skipped", reason: w.refused ? "the sandbox record changed since it was read (a launcher claimed it)" : "another writer held the sandbox record's lock", ...(w.refused ? {} : { retry: "error" }) });
           continue;
         }
       }
@@ -225,7 +226,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       } catch (e) {
         // The job log gets the message; the record keeps codes only. The sandbox stays for the next run.
         log(`sweep: ${s.id} (#${n}): ${e.code ?? "error"}: ${String(e.message).slice(0, 300)}`);
-        out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
+        out.push({ id: s.id, issue: n, action: "skipped", reason: `vendor ${e.code ?? "error"}`, retry: "error" });
         if (claim) await writeSandboxRecord(repo, n, opts, underClaim((cur) => ({ ...cur, state: from.state, at: from.at, leaseUntil: from.leaseUntil })), { base }).catch(() => {});
         continue;
       }
@@ -241,9 +242,37 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
   // This repository's images no stage needs, from Factory's record and the vendor's listing (lib/image.mjs).
   const pruned = images ? await pruneImages(adapter, repo, { ...opts, repoId, now, dryRun, log }).catch((e) => {
     log(`sweep: images not pruned (${e.code ?? e.status ?? "error"}): ${String(e.message).slice(0, 200)}`);
-    return [];
-  }) : [];
-  return { results: out, usage: slots, images: pruned };
+    return { images: [], until: null, failed: true };
+  }) : { images: [], until: null };
+  return { results: out, usage: slots, images: pruned.images, imagesUntil: pruned.until, imagesFailed: !!pruned.failed || pruned.images.some((i) => i.action === "skipped") };
+}
+
+/** How soon the sweep runs again for what a run left: a cap it reached, or a read or vendor call that failed. */
+export const SWEEP_RETRY_MS = 10 * 60_000;
+
+/**
+ * The sweep's own next runs, as `sweep` deadlines (`{issue, kind, at}`, lib/logic.mjs nextWake) from what one sweep
+ * left, each a wait of minutes:
+ * - a minute after a wait ends: a stage that ended moments ago (the launcher's end answers it first), a sandbox created
+ *   moments ago, a superseded image a stage may still be starting from, or any such wait that ended during this run;
+ * - SWEEP_RETRY_MS on: what a cap left (sweep_max_destroys, the collection slots) after a run that destroyed or stopped
+ *   one (a cap of 0 leaves the rest to events and the cron), and once, never from a run a `sweep` wake started, what a
+ *   failure left (an unreadable issue, a vendor error, a held lock).
+ * A stopped sandbox's idle days (days, not minutes) get no wake: the next sweep an event runs (an Objective closing,
+ * merging or Blocking), or the hourly cron's, destroys it.
+ */
+export function sweepWaits({ results = [], imagesUntil = null, imagesFailed = false, now = Date.now(), firedBy = null }) {
+  const out = [];
+  const soon = (ms) => new Date(Math.max(ms, now) + WAKE_SLACK_MS).toISOString();
+  // A cap's rest comes back only after a run that got somewhere (a cap of 0 would re-arm for ever).
+  const progress = results.some((r) => r.action === "destroyed" || r.action === "stopped");
+  for (const r of results) {
+    if (r.action === "kept" && Number.isFinite(r.until) && (!r.idle || r.until <= now)) out.push({ issue: r.issue, kind: "sweep", at: soon(r.until) });
+    if ((r.retry === "cap" && progress) || (r.retry === "error" && firedBy?.kind !== "sweep")) out.push({ issue: r.issue, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
+  }
+  if (Number.isFinite(imagesUntil)) out.push({ issue: null, kind: "sweep", at: soon(imagesUntil) });
+  if (imagesFailed && firedBy?.kind !== "sweep") out.push({ issue: null, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
+  return out;
 }
 
 async function main() {
@@ -263,7 +292,7 @@ async function main() {
   const storage = () => storageReport(adapter, repoId).catch((e) => (log(`sweep: storage not read (${e.code ?? "error"})`), null));
   const before = await storage();
   if (before) log(`sweep: storage before: ${storageLine(before)}`);
-  const { results, usage, images } = await sweep({ adapter, repo, repoId, opts, idleDays: inputs.sandboxIdleDays, maxDestroys: inputs.sweepMaxDestroys, staleMs: inputs.timeoutMinutes * 60_000, collectRoot, dryRun: args.dry_run === "true", harness: inputs.harness });
+  const { results, usage, images, imagesUntil, imagesFailed } = await sweep({ adapter, repo, repoId, opts, idleDays: inputs.sandboxIdleDays, maxDestroys: inputs.sweepMaxDestroys, staleMs: inputs.timeoutMinutes * 60_000, collectRoot, dryRun: args.dry_run === "true", harness: inputs.harness });
   for (const r of results) log(`sweep: #${r.issue} ${r.id}: ${r.action} (${r.reason})${r.usage ? `; usage collected as ${r.usage}` : ""}`);
   for (const i of images) log(`sweep: image ${i.source} (${i.snapshot}): ${i.action} (${i.reason})`);
   const after = await storage();
@@ -277,6 +306,19 @@ async function main() {
     setOutput(`usage_dir_${i + 1}`, u.dir);
     setOutput(`usage_name_${i + 1}`, u.name);
   });
+  // Its own next run (workflow-template.yml `sweep-wake`): GitHub's hourly cron is only the backstop.
+  if (args.dry_run !== "true") {
+    const eventName = process.env.GITHUB_EVENT_NAME || "";
+    let payload = {};
+    try {
+      payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
+    } catch {
+      payload = {};
+    }
+    const now = Date.now();
+    const waits = sweepWaits({ results, imagesUntil, imagesFailed, now, firedBy: firedByWake(eventName, payload) });
+    await armSweepWake("sweep", waits, { repo, payload, eventName, token: inputs.githubToken || token, now });
+  }
   const count = (a) => results.filter((r) => r.action === a).length;
   setOutput("destroyed", String(count("destroyed")));
   setOutput("images_destroyed", String(images.filter((i) => i.action === "destroyed").length));

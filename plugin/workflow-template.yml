@@ -9,14 +9,14 @@ on:
   schedule:
     - cron: "*/10 * * * *" # the dispatcher's backstop: GitHub fires a schedule late or not at all under load
     # {{#sandbox}}
-    - cron: "41 10 * * *" # the nightly sandbox image build (the image job)
-    - cron: "17 * * * *" # the hourly sandbox sweep (the sweep job)
+    - cron: "41 10 * * *" # the nightly image build's backstop (an owed build runs on the UTC day's first dispatcher tick)
+    - cron: "17 * * * *" # the sweep's hourly backstop (the sweep job; it arms its own wakes for what it left)
     # {{/sandbox}}
   workflow_dispatch:
     inputs:
       issue: { description: Objective issue number (empty runs the dispatcher), required: false }
       harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
-      wake: { description: "Set by the wake job only (the deadline it slept to); leave empty", required: false }
+      wake: { description: "Set by a wake job only (the deadline it slept to); leave empty", required: false }
       # {{#sandbox}}
       failed_launch: { description: "Set by a launch job that failed only (its Objective); leave empty", required: false }
       # {{/sandbox}}
@@ -31,7 +31,7 @@ on:
     # {{#sandbox}}
     types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so does the factory:blocked label, which stops one left running
     # {{/sandbox}}
-  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready, a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
+  pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready (the App's own ready mark starts no job), a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
   # {{#sandbox}}
   push: # a merge to the default branch refreshes the sandbox image (the image job)
@@ -70,7 +70,7 @@ env:
   # {{#sandbox}}
   FACTORY_SANDBOX: {{sandbox}} # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
   FACTORY_SANDBOX_VCPUS: {{sandbox_vcpus}} # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test
-  FACTORY_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on each merge until the minutes below, then nightly; nightly: only nightly
+  FACTORY_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on each merge until the minutes below, then on the next UTC day's first tick; nightly: once a day
   FACTORY_IMAGE_DAILY_MINUTES: {{image_daily_minutes}} # image build minutes a day on merges
   FACTORY_SANDBOX_IDLE_DAYS: {{sandbox_idle_days}} # the sweep destroys a sandbox stopped this long, its Objective neither Running nor In review
   FACTORY_SWEEP_MAX_DESTROYS: {{sweep_max_destroys}} # sandboxes one sweep run destroys at most
@@ -89,7 +89,12 @@ jobs:
     # factory/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those
     # events and ticks this job itself).
     if: >-
+      # {{^sandbox}}
       (github.event_name == 'schedule' && github.event.schedule == '*/10 * * * *') || github.event_name == 'workflow_dispatch' ||
+      # {{/sandbox}}
+      # {{#sandbox}}
+      (github.event_name == 'schedule' && github.event.schedule == '*/10 * * * *') || (github.event_name == 'workflow_dispatch' && github.event.inputs.image != 'true') ||
+      # {{/sandbox}}
       (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'factory:objective' || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/')) ||
       (github.event_name == 'pull_request' && github.event.action == 'dequeued' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
@@ -100,7 +105,15 @@ jobs:
     concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
     runs-on: ubuntu-latest
     timeout-minutes: 15 # a tick takes seconds; a hung one would hold every later tick for the runner's six hours
-    outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}", queue_watch: "${{ steps.f.outputs.queue_watch }}", wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
+    outputs:
+      issues: "${{ steps.f.outputs.issues }}"
+      count: "${{ steps.f.outputs.count }}"
+      queue_watch: "${{ steps.f.outputs.queue_watch }}"
+      wake_at: "${{ steps.f.outputs.wake_at }}"
+      wake_kind: "${{ steps.f.outputs.wake_kind }}"
+      # {{#sandbox}}
+      image_owed: "${{ steps.f.outputs.image_owed }}" # an image build an earlier day left owed: the image job runs it
+      # {{/sandbox}}
     steps:
       - uses: {{action}}
         id: f
@@ -194,7 +207,7 @@ jobs:
     name: review (${{ github.head_ref }})
     if: >-
       github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')
+      ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
     permissions: { contents: read, issues: write, actions: write } # actions: write here, for the tick below and triage's rerun of failed CI jobs
@@ -258,8 +271,9 @@ jobs:
       - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, deferred its stage to a retry time, or started nothing)
         if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked' || steps.f.outputs.exit == 'skipped')
         # A failed launch names its Objective: the dispatcher then wakes at the end of its launch grace, not the cron.
-        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && matrix.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
+        # A quota refusal's sweep that left usage for the sweep job's upload slots runs that job with the same tick.
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && matrix.issue || '' }}", SWEEP: "${{ steps.f.outputs.sweep }}" } # no checkout here: gh names the repository from GH_REPO
+        run: gh workflow run factory.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
   launch-gate:
     # An event on one Objective: a maintainer's comment, finished CI on its branch, its PR labelled for review or marked
     # ready, its stage asking for tokens or saying it ended. The gate decides in no concurrency group, so an event that starts nothing (a stranger's comment, a fork's
@@ -272,7 +286,7 @@ jobs:
       (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
       (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository) ||
       (github.event_name == 'pull_request' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository &&
-       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || github.event.action == 'ready_for_review')) ||
+       ((github.event.action == 'labeled' && github.event.label.name == 'factory:review') || (github.event.action == 'ready_for_review' && github.event.sender.type != 'Bot'))) ||
       (github.event_name == 'repository_dispatch' && github.event.action == 'factory-stage')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -312,8 +326,8 @@ jobs:
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
       - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off, deferred its stage to a retry time or started nothing)
         if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked' || steps.f.outputs.exit == 'skipped')
-        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && needs.launch-gate.outputs.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
-        run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && needs.launch-gate.outputs.issue || '' }}", SWEEP: "${{ steps.f.outputs.sweep }}" } # no checkout here: gh names the repository from GH_REPO
+        run: gh workflow run factory.yml -f failed_launch="$FAILED" -f sweep="$SWEEP" || true
   launch-tick:
     # CI finished on an In-review Objective's PR head with no stage waiting on it (the gate's answer): the dispatcher's
     # merge pass runs now, not on GitHub's cron. In no Objective group: it starts nothing there, so it replaces no launch.
@@ -332,22 +346,34 @@ jobs:
     # branch's head, the dependency store and the harness CLIs, kept as a snapshot and recorded by the Factory App on
     # its image issue (label factory:image). Built on each merge until today's builds reach FACTORY_IMAGE_DAILY_MINUTES,
     # then nightly; by hand with the workflow's `image` input. Never on a pull request: the image is the default branch's.
+    # A head an earlier day left unbuilt (today's minutes used up, or image_refresh nightly) is built on the UTC day's
+    # first dispatcher tick that finds it owed (needs.dispatch.outputs.image_owed), from the default branch's head, on
+    # any event but a pull request's (whose run reads the workflow from the PR); the nightly cron is the backstop. A push,
+    # the cron and a manual build's run skip the dispatcher by its own if: (never a pending one a newer tick cancels in
+    # its concurrency group), and a skipped need still runs this job under its !cancelled(). A build that left an older image arms the sweep's wake (image-wake below) for when
+    # no stage can still be starting from it.
+    needs: dispatch
     if: >-
+      (
       (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       github.event.schedule == '41 10 * * *' ||
-      (github.event_name == 'workflow_dispatch' && inputs.image == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+      (github.event_name == 'workflow_dispatch' && inputs.image == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (needs.dispatch.outputs.image_owed == 'true' && github.event_name != 'pull_request')) && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions: { contents: read } # the job token reads the default branch; the record is the App's (a token for issues only)
+    permissions: { contents: read, actions: read } # the job token reads the default branch and the armed wakes; the record is the App's (a token for issues only)
+    outputs: { wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
     # One build at a time; a newer merge replaces a pending one. Any run in this repository can join the group with
     # cancel-in-progress and cancel a build (Actions cannot stop that); the next build destroys what it left.
     concurrency: { group: factory-image, cancel-in-progress: false }
     steps:
       - uses: actions/checkout@v7
-        with: { fetch-depth: 0, persist-credentials: false } # the image's clone gets the whole history, from a bundle
+        with: { fetch-depth: 0, persist-credentials: false, ref: "${{ needs.dispatch.outputs.image_owed == 'true' && github.event.repository.default_branch || '' }}" } # the image's clone gets the whole history, from a bundle; an owed build, the default branch whatever the event
       - uses: {{action}}
+        id: f
         with:
           mode: image
+          image_owed: ${{ needs.dispatch.outputs.image_owed }}
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
@@ -358,19 +384,22 @@ jobs:
     # closed, its record naming another sandbox, or stopped FACTORY_SANDBOX_IDLE_DAYS with the Objective neither Running
     # nor In review) are destroyed, at most FACTORY_SWEEP_MAX_DESTROYS a run, then this repository's superseded images. A
     # stage's usage the launcher never collected is uploaded as the launcher would. Hourly, by hand, and when an
-    # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage. A
+    # Objective closes or its PR merges, so a finished Objective's stop snapshot does not hold the vendor's storage. Its own
+    # wake (sweep-wake below) runs it again when what it left is due, minutes later: an end's or a new sandbox's grace,
+    # a superseded image, a cap's rest. A stopped sandbox's idle days ride on the next event's sweep or the hourly cron. A
     # Block runs it too: a sandbox still running with no stage holding it is stopped and its cost booked at once. A stage
     # that Blocks itself also says it ended, and the launcher's end answers that; this sweep leaves a stage that ended
     # moments ago to it (logic.mjs sweepDecision), and its claim under the record lock keeps the two apart.
     if: >-
-      github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && inputs.sweep == 'true') ||
+      github.event.schedule == '17 * * * *' || (github.event_name == 'workflow_dispatch' && (inputs.sweep == 'true' || startsWith(inputs.wake, 'sweep '))) ||
       (github.event_name == 'issues' && github.event.action == 'closed' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')) ||
       (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'factory:blocked') ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions: { contents: read } # every write is the App's
+    permissions: { contents: read, actions: read } # actions: read for the armed wakes; every write is the App's
     concurrency: { group: factory-sweep, cancel-in-progress: false }
+    outputs: { wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
     steps:
       - uses: {{action}}
         id: f
@@ -390,4 +419,37 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir_3 != ''
         with: { name: "${{ steps.f.outputs.usage_name_3 }}", path: "${{ steps.f.outputs.usage_dir_3 }}", retention-days: 90, overwrite: true }
+  sweep-wake:
+    # The sweep's own next run (GitHub's hourly cron is only the backstop), as the wake job is the dispatcher's: it sleeps
+    # to the `sweep` deadline the sweep armed (about 16 minutes away at most, on every repository), then ticks the
+    # workflow with it, which runs the sweep (and the dispatcher).
+    name: wake (${{ needs.sweep.outputs.wake_kind }} ${{ needs.sweep.outputs.wake_at }})
+    needs: sweep
+    if: needs.sweep.outputs.wake_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # a sweep wait is about 16 minutes at most
+    permissions: { actions: write } # the tick only
+    steps:
+      - name: Sleep to the deadline, then tick the sweep
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", WAKE_AT: "${{ needs.sweep.outputs.wake_at }}", WAKE_KIND: "${{ needs.sweep.outputs.wake_kind }}" }
+        run: |
+          left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
+          if [ "$left" -gt 0 ]; then sleep "$left"; fi
+          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
+  image-wake:
+    # The sweep's wake an image build arms when it left an older image: the sweep destroys it once no stage can still be
+    # starting from it. Sleeps and ticks as sweep-wake does.
+    name: wake (${{ needs.image.outputs.wake_kind }} ${{ needs.image.outputs.wake_at }})
+    needs: image
+    if: needs.image.outputs.wake_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: { actions: write } # the tick only
+    steps:
+      - name: Sleep to the deadline, then tick the sweep
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", WAKE_AT: "${{ needs.image.outputs.wake_at }}", WAKE_KIND: "${{ needs.image.outputs.wake_kind }}" }
+        run: |
+          left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
+          if [ "$left" -gt 0 ]; then sleep "$left"; fi
+          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
   # {{/sandbox}}

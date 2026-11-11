@@ -182,6 +182,23 @@ test("sweep review fixes: its claim holds against a launcher, a lost claim stops
   assert.equal(seen?.holds, true, "the sweep's claim carries a live lease of its own");
   assert.ok(seen.decision.skip, "a launcher starts nothing over it");
 
+  // A collection that ran past the claim's lease: the stop still gets a fresh window, and a launcher reading then skips.
+  let late = null;
+  await sweepOne({
+    issue: blocked,
+    record: started,
+    hooks: (st) => ({
+      readFile: async () => (await st.write({ ...st.record(), leaseUntil: ago(1) }), null),
+      stop: async (id) => {
+        const r = st.record();
+        late = { holds: stageHolds(r, Date.now(), 60 * 60_000), decision: launchDecision({ ev: { kind: "swept" }, state: "Running", record: r, runningSince: ago(1), staleMs: 3600_000 }) };
+        st.calls.push(`stop ${id}`);
+      },
+    }),
+  });
+  assert.equal(late?.holds, true, "the claim's lease is renewed right before the stop");
+  assert.ok(late.decision.skip, "a launcher still starts nothing");
+
   // A launcher's claim that lands after the sweep's (between its claim and its stop): the sweep stops nothing.
   const lost = await sweepOne({
     issue: blocked,

@@ -176,11 +176,12 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
           continue;
         }
       }
-      // Under the record lock, right before the sandbox is stopped or destroyed: the record still carries this claim.
+      // Under the record lock, right before the sandbox is stopped or destroyed: the record still carries this claim, and
+      // its lease is renewed, so a collection that ran past the lease still hands the stop a fresh window.
       const stillClaimed = async () => {
         let held = false;
-        const w = await writeSandboxRecord(repo, n, opts, (cur) => ((held = cur?.claim === claim), null), { base });
-        return held && !w.contended;
+        const w = await writeSandboxRecord(repo, n, opts, (cur) => ((held = cur?.claim === claim) ? { ...cur, leaseUntil: new Date(Date.now() + CLAIM_LEASE_MS).toISOString() } : null), { base });
+        return held && !!w.ok;
       };
       let usage = null;
       let vendor = null;

@@ -5,6 +5,8 @@
 // phase. Categories: firstSetup (a local Objective's first stage on a machine: the clone, whose seconds its line
 // carries, and the cold install), setup (setup, install), model (harness, fix runs, reviewer, answer passes,
 // rebase), ciWait (waiting for required checks), other. The exit line ends a run.
+import { sandboxRecord } from "../../plugin/scripts/lib/logic.mjs";
+
 const MARK = (issue) => `<!-- factory:${issue}:progress`;
 const LINE = /^- (\d\d):(\d\d)Z (.*)$/gm;
 
@@ -108,14 +110,14 @@ export function factoryLogin(timeline, given = null) {
 }
 /** Whether a comment is Factory's own (its login is `self`, from factoryLogin). */
 export const bySelf = (comment, self) => !!self && loginKey(comment?.user?.login) === self;
-const RECORD = /^<!-- factory:sandbox (\{[^\n]*\}) -->$/m;
 
 /**
  * The stage starts the sandbox record shows (launch.mjs): {stage, run, event, at}, `at` being the event's time: the
  * entry's `eventAt`, else (an entry written before launchers recorded it) its `at` less its `latencyMs`. That fallback
  * reads late: the launcher stamps `at` after the stage started and after any lost stage's usage and vendor booking,
  * while `latencyMs` ends at the stage start, so it understates the dispatch by that gap (0.3 s in the wave-5 drill;
- * seconds when a lost stage's usage is collected). Factory's own comment only (`self`, from factoryLogin).
+ * seconds when a lost stage's usage is collected). Factory's own comments only (`self`, from factoryLogin), merged as
+ * the plugin merges them (logic.mjs sandboxRecord): a start whose launcher's write never came is the stage's entry.
  */
 export function launchesOf(comments, issue, self) {
   const eventAt = (l) => (Number.isFinite(Date.parse(l.eventAt)) ? Date.parse(l.eventAt) : Number.isFinite(l.latencyMs) && Number.isFinite(Date.parse(l.at)) ? Date.parse(l.at) - l.latencyMs : NaN);
@@ -131,14 +133,9 @@ export function failedStartsOf(comments, issue, self) {
     .map((l) => ({ stage: String(l.stage), at: Date.parse(l.at) }));
 }
 
+/** The record's launches, read as the plugin reads the record: the claim comment with its stage's part merged in. */
 function recordLaunches(comments, issue, self) {
-  const c = (comments || []).filter((x) => bySelf(x, self) && (x.body || "").startsWith(`<!-- factory:${issue}:sandbox -->`)).sort((a, b) => (a.id ?? 0) - (b.id ?? 0))[0];
-  let record = null;
-  try {
-    record = c ? JSON.parse(RECORD.exec(c.body)?.[1] ?? "null") : null;
-  } catch {
-    record = null;
-  }
+  const record = sandboxRecord(comments, issue, { self: (c) => bySelf(c, self) });
   return Array.isArray(record?.launches) ? record.launches : [];
 }
 
@@ -161,9 +158,9 @@ export function lastWrite(comment) {
 /**
  * When the stage itself last wrote its progress comment, in ms, from the comment's own header (`started HH:MMZ, N min
  * at the last line`, which every write of the stage's reporter, the exit line's included, sets), within a minute and a
- * half. Not its `updated_at`: Factory books a lost stage's sandbox cost into the comment (launch.mjs bookVendor, from
- * the sweep) hours later, and that edit leaves the header alone. Falls back to lastWrite when the header is absent
- * (a comment the booking wrote for a stage that left none), clamped to [created, lastWrite]. Null when unknown.
+ * half. Not its `updated_at`: an older stage's comment had a lost stage's sandbox cost booked into it (now its own
+ * vendor comment) hours later, an edit that left the header alone. Falls back to lastWrite when the header is absent
+ * (a comment such a booking wrote for a stage that left none), clamped to [created, lastWrite]. Null when unknown.
  */
 export function stageLastWrite(comment) {
   const created = Date.parse(comment?.created_at);

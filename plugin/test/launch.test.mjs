@@ -487,22 +487,6 @@ test("installAdapter: stop() ends an install a launch never waited for, so the j
   ok.stop();
 });
 
-test("stage record writes: a lost claim and a contended comment are told apart; only a lost claim ends the stage", async () => {
-  const { writeRecord } = await import("../scripts/stage.mjs");
-  const mine = { claim: "c1", commentId: 5, body: "v1", state: "running" };
-  let patched = 0;
-  const base = { claim: "c1", change: { state: "running" }, pauseMs: 1, patch: async () => (patched += 1) };
-  assert.deepEqual(await writeRecord({ ...base, record: async () => ({ ...mine, claim: "c2" }), read: async () => ({ body: "v1" }) }), { lost: true });
-  let gets = 0;
-  // The single read disagrees with the list twice (a launcher's write in between), then settles.
-  const flaky = await writeRecord({ ...base, tries: 3, record: async () => mine, read: async () => ({ body: (gets += 1) <= 2 ? "v2" : "v1" }) });
-  assert.deepEqual(flaky, { ok: true }, "the third try writes");
-  assert.equal(patched, 1);
-  const busy = await writeRecord({ ...base, tries: 2, record: async () => mine, read: async () => ({ body: "other" }) });
-  assert.deepEqual(busy, { contended: true }, "contention is not a lost claim: the heartbeat does not end the worker");
-  assert.equal(patched, 1, "nothing written over a version not read");
-});
-
 test("a stage that ends its child still counts its spend; a token request names itself", async () => {
   const { killedUsage } = await import("../scripts/stage.mjs");
   const claude = killedUsage({ harness: "claude", model: null, events: '{"type":"system","session_id":"s1"}\n{"type":"assistant","message":{"usage":{"input_tokens":5}}}\n', maxUsd: 12 });

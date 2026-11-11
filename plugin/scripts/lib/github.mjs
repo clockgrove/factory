@@ -850,16 +850,16 @@ const usageCache = new Map();
 const USAGE_DOWNLOADS = 8;
 
 /**
- * Today's spend by runs that upload no usage artifact (local mode, any machine): the spend lines in the progress
- * comments updated today, written by Factory or someone who can push. Actions runs write none, so
- * nothing here is counted twice with the artifacts.
+ * Today's spend by runs that upload no usage artifact (local mode, any machine, a cloud sandbox): the spend lines in
+ * the progress comments and a sandbox stage's vendor comments updated today, written by Factory or someone who can
+ * push. Actions runs write none, so nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   // One paged read of the repository's comments updated today (issues and PRs alike), not one per Objective.
   const comments = (await rest(`repos/${repo.full}/issues/comments?since=${dateIso}T00:00:00Z&per_page=100`, { token, paginate: true })) || [];
   let usd = 0;
   for (const c of comments) {
-    if (trustedAuthor(c) && /^<!-- factory:\d+:progress:/.test(c.body || "") && String(c.updated_at || "").startsWith(dateIso)) usd += spendOf(c.body);
+    if (trustedAuthor(c) && /^<!-- factory:\d+:(?:progress|vendor):/.test(c.body || "") && String(c.updated_at || "").startsWith(dateIso)) usd += spendOf(c.body);
   }
   return usd;
 }

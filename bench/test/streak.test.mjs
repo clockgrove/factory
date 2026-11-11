@@ -355,3 +355,41 @@ test("streakTable: a backslash or pipe in a cell cannot break the Markdown row",
   assert.ok(md.includes("| c\\\\\\|x |"), md);
   assert.ok(!md.includes("| c\\|x |"), md);
 });
+
+test("sandbox stages: the vendor comment's dollars sit beside the progress comment's model dollars; one without a progress comment is its own row", async () => {
+  const { spendRecords } = await import("../lib/objective.mjs");
+  const app = { login: "factory-app[bot]", type: "Bot" };
+  const at = "2031-03-02T03:00:00Z";
+  const c = (body) => ({ user: app, created_at: at, body });
+  const collected = {
+    issue: { number: 48, labels: [] },
+    issueTimeline: [{ event: "labeled", label: { name: "factory:running" }, actor: app }],
+    issueComments: [
+      c('<!-- factory:48:progress:work:9-0123456789ab -->\nFactory work run 9-0123456789ab.\n<!-- factory:spend {"usd":0.5} -->'),
+      c('<!-- factory:48:vendor:work:9-0123456789ab -->\nFactory\'s sandbox cost for this stage:\n- 03:10Z sandbox `factory-a` stopped\n<!-- factory:spend {"usd":0.02,"vendorUsd":0.02} -->'),
+      c('<!-- factory:48:vendor:review:10-ba9876543210 -->\nFactory\'s sandbox cost for this stage:\n- 03:30Z sandbox `factory-a` stopped\n<!-- factory:spend {"usd":0.33,"modelUsd":0.3,"vendorUsd":0.03} -->'),
+      // An older stage's progress spend line, model and vendor in one.
+      c('<!-- factory:48:progress:review:8-aaaaaaaaaaaa -->\nFactory review run 8.\n<!-- factory:spend {"usd":0.45,"modelUsd":0.4,"vendorUsd":0.05} -->'),
+    ],
+  };
+  const rows = spendRecords(collected);
+  assert.deepEqual(rows.map((r) => [r.usd, r.vendor?.usd ?? null]), [[0.5, 0.02], [0.4, 0.05], [0.3, 0.03]]);
+  // A booking is not an act of Factory's: the sweep's late vendor comment leaves a dead stage's wait idle.
+  const { factoryActivity } = await import("../lib/objective.mjs");
+  const late = { ...collected, issueComments: [{ ...collected.issueComments[1], created_at: "2031-03-02T09:00:00Z" }] };
+  assert.deepEqual(factoryActivity(late), []);
+});
+
+test("sandbox stages: the record's launches are read merged as the plugin reads them, a stage's own entry included", async () => {
+  const { factoryLogin, launchesOf } = await import("../lib/phases.mjs");
+  const { marker, sandboxMarkerLine } = await import("../../plugin/scripts/lib/logic.mjs");
+  const app = { login: "factory-app[bot]", type: "Bot" };
+  const self = factoryLogin(null, app.login);
+  const claim = "0123456789ab";
+  const comments = [
+    { id: 1, user: app, body: `${marker(48, "sandbox")}\n${sandboxMarkerLine({ state: "running", claim, stage: "work", launches: [] })}` },
+    // The launcher's post-start write never came; the stage's part carries the start.
+    { id: 2, user: app, body: `${marker(48, "stage", claim)}\n${sandboxMarkerLine({ state: "running", at: "2031-03-02T03:01:00Z", launch: { stage: "work", ok: true, run: "9", cue: "stint-1", event: "pull_request", eventAt: "2031-03-02T03:00:00Z" } })}` },
+  ];
+  assert.deepEqual(launchesOf(comments, 48, self), [{ stage: "work", run: "9", event: "pull_request", at: Date.parse("2031-03-02T03:00:00Z") }]);
+});

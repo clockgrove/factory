@@ -374,4 +374,8 @@ test("sandbox stages: the vendor comment's dollars sit beside the progress comme
   };
   const rows = spendRecords(collected);
   assert.deepEqual(rows.map((r) => [r.usd, r.vendor?.usd ?? null]), [[0.5, 0.02], [0.4, 0.05], [0.3, 0.03]]);
+  // A booking is not an act of Factory's: the sweep's late vendor comment leaves a dead stage's wait idle.
+  const { factoryActivity } = await import("../lib/objective.mjs");
+  const late = { ...collected, issueComments: [{ ...collected.issueComments[1], created_at: "2031-03-02T09:00:00Z" }] };
+  assert.deepEqual(factoryActivity(late), []);
 });

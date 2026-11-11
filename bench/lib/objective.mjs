@@ -377,9 +377,10 @@ export function splitInterventions(actions, requests) {
  * (factoryLogin) or, in local mode, the operator's login where localFactoryActions says the act is Factory's. Each act
  * on the issue or its PRs (a label, a comment, a review, an enqueue, the merge it armed) is a point; a progress comment
  * spans its stage (created to the stage's own last write, stageLastWrite), and each job of the runs that uploaded usage
- * spans its run. Another machine's act (the merge queue dropping a PR) is not Factory's, nor are the late edits of
- * booking a stage's sandbox cost: the sandbox record's (rewritten even after the merge) and the progress comment's
- * (a lost stage booked by the sweep hours later), so a stage that died and waited for the sweep shows as idle.
+ * spans its run. Another machine's act (the merge queue dropping a PR) is not Factory's, nor is booking a stage's
+ * sandbox cost: the sandbox record's late edits (rewritten even after the merge) and the stage's vendor comment
+ * (written by the sweep hours later for a lost stage; in older stages, an edit of the progress comment), so a stage
+ * that died and waited for the sweep shows as idle.
  */
 export function factoryActivity(collected, { app = null } = {}) {
   const self = factoryLogin(collected.issueTimeline, app);
@@ -392,6 +393,7 @@ export function factoryActivity(collected, { app = null } = {}) {
   const n = collected.issue.number;
   for (const e of collected.issueTimeline || []) point(e.created_at, e.actor ?? e.user, e.label ? `${e.event} ${e.label.name}` : e.event);
   for (const c of collected.issueComments || []) {
+    if ((c.body || "").startsWith(`<!-- factory:${n}:vendor:`)) continue;
     if ((c.body || "").startsWith(`<!-- factory:${n}:progress`) && mine(c.created_at, c.user, "progress")) {
       const end = Math.max(ms(c.created_at), stageLastWrite(c) ?? 0);
       if (Number.isFinite(ms(c.created_at))) spans.push([ms(c.created_at), end]);

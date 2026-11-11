@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, acceptanceEntries, capReached, commandPaths, decideExit, diffLines, entryKey, fixRunAllowed, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixRunAllowed, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
 import { exitRecord } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -123,6 +123,45 @@ test("blocked: each reason in the worker contract, in priority order", () => {
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, reviewUnaddressed: 2 }).reason, "2 reviewer finding(s) unaddressed after the one pass");
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: { exit: "blocked", reason: "The migration needs a credential the runner lacks.", questions: [] } }).reason, "worker blocked: The migration needs a credential the runner lacks.");
   assert.equal(decideExit({ harness: { ok: false, error: "harness error" }, pr: pr(), commits: 2, validation: green }).reason, "harness error");
+});
+
+test("clip: a long reason ends on a word boundary and shows it was cut", () => {
+  const long = `The provider serves every generated mod from a download host ${"that the sandbox never reached ".repeat(8)}end.`;
+  const c = clip(long);
+  assert.ok(c.length <= REASON_MAX, `${c.length} characters`);
+  assert.ok(c.endsWith("…"));
+  assert.ok(long.startsWith(c.slice(0, -1)), "a prefix of the reason");
+  assert.match(long.slice(c.length - 1), /^\s/, "cut where a word ends");
+  assert.equal(clip("short reason."), "short reason.", "nothing cut, nothing marked");
+  assert.equal(clip("a".repeat(REASON_MAX)), "a".repeat(REASON_MAX), "exactly the cap is not cut");
+  assert.equal(clip(`see https://example.com/${"x".repeat(300)}`), `see https://example.com/${"x".repeat(REASON_MAX - 25)}…`, "one long word is cut inside it");
+  assert.equal(clip(`${"word ".repeat(38)}four, five six`), `${"word ".repeat(38)}four…`, "no trailing comma before the mark");
+  const blocked = decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: true }, record: { exit: "blocked", reason: long, questions: [] } });
+  assert.equal(blocked.reason, `worker blocked: ${c}`);
+  const asked = decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: true }, record: { exit: "question", reason: "", questions: [long] } });
+  assert.equal(asked.reason, `question: ${c}`);
+});
+
+test("deniedHosts: a blocked exit record's host names, checked for DNS shape, become the decision's and the local fix", () => {
+  const rec = parseExitRecord(JSON.stringify({ exit: "blocked", reason: "the proof needs the download host", deniedHosts: [" Downloads.Example.com ", "downloads.example.com", "cdn.example.org", "10.0.0.1", "example.com:443", "*.example.net", "https://x.example.com/a", "a b.example.com", "`x`.example.com", "localhost", "-bad.example.com", 7] }));
+  assert.deepEqual(rec.deniedHosts, ["downloads.example.com", "cdn.example.org"], "host names only, lower case, once each");
+  assert.equal(parseExitRecord('{"exit":"blocked","reason":"x","deniedHosts":["1.2.3.4"]}').deniedHosts, undefined, "none valid, none kept");
+  assert.equal(parseExitRecord('{"exit":"delivered","deniedHosts":["cdn.example.org"]}').deniedHosts, undefined, "only a Block carries them");
+  assert.equal(parseExitRecord(JSON.stringify({ exit: "blocked", deniedHosts: Array.from({ length: 20 }, (_, i) => `h${i}.example.com`) })).deniedHosts.length, 10);
+  for (const h of ["a.b", "xn--bcher-kva.example", "a-b.c-d.example.com"]) assert.equal(isHostName(h), true, h);
+  for (const h of ["example", "1.2.3.4", "a..b.com", "a.b-.com", `${"a".repeat(64)}.com`, "A.COM", "a.com.", "a.com/x", "@a.com"]) assert.equal(isHostName(h), false, h);
+  const green = { passes: 1, green: true };
+  assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: rec }), { exit: "blocked", reason: "worker blocked: the proof needs the download host", deniedHosts: rec.deniedHosts });
+  assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).deniedHosts, rec.deniedHosts, "a Block before any commit keeps the worker's reason and hosts");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).reason, "worker blocked: the proof needs the download host");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).reason, "worker ended without commits or a PR", "without hosts nothing changes");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, protectedHits: [".github/x"], record: rec }).deniedHosts, undefined, "a Block of Factory's own carries no host fix");
+  assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, add it to `FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `factory:objective`.");
+  assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, add them to `FACTORY_LOCAL_DOMAINS`/);
+  assert.match(deniedHostsFix(["github.com", "a.cdn.example.com", "b.example.com"], ["github.com", "*.cdn.example.com"]), /denied `b\.example\.com`\./, "hosts already allowed are left out");
+  assert.equal(deniedHostsFix(["github.com"], ["github.com"]), null, "allowed already: the generic fix stands");
+  assert.equal(deniedHostsFix(["not a host"]), null);
+  assert.match(EXIT_PROMPT, /"deniedHosts"/);
 });
 
 test("a question with red validation is blocked, not question", () => {

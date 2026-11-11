@@ -28,7 +28,7 @@ import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findPr
 import { log, resolveInputs } from "./lib/inputs.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -1017,7 +1017,7 @@ async function deliver(issue, flags) {
     await removeLabel(repo, pr.number, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, pr.number, [REVIEW_LABEL], opts);
   }
-  await applyExit(repo, { issue, pr, exit: record.exit, reason: record.exit === "question" ? `question: ${(record.questions[0] || "").slice(0, 200)}` : record.reason, notify: inputs.notify, stage: "work" }, opts);
+  await applyExit(repo, { issue, pr, exit: record.exit, reason: record.exit === "question" ? `question: ${clip(record.questions[0] || "")}` : record.reason, notify: inputs.notify, stage: "work" }, opts);
   log(`#${issue}: ${record.exit}; PR #${pr.number} ${pr.html_url}${replied ? `; ${replied} repl${replied === 1 ? "y" : "ies"} posted` : ""}`);
   return record.exit === "delivered" ? 0 : 1;
 }

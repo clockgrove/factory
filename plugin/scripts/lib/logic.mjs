@@ -597,6 +597,54 @@ export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === 
 
 // --------------------------------------------------------------- exit logic
 
+/** How long a worker's Block or Question reason may run in a notice before it is shortened (clip). */
+export const REASON_MAX = 200;
+
+/**
+ * `text` cut to at most `max` characters on a word boundary, ending in "…" when anything was cut; a single word longer
+ * than half of `max` (a URL, a path) is cut inside it instead. Shorter text comes back trimmed and otherwise unchanged.
+ */
+export function clip(text, max = REASON_MAX) {
+  const s = String(text ?? "").trim();
+  if (s.length <= max) return s;
+  // Room for the "…": a space at max - 1 is itself a boundary, otherwise the last space before it.
+  const at = /\s/.test(s[max - 1]) ? max - 1 : s.slice(0, max - 1).search(/\s\S*$/);
+  let cut = s.slice(0, at > max / 2 ? at : max - 1);
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  return `${cut.replace(/[\s,;:.\-\u2013\u2014]+$/, "")}…`;
+}
+
+/** A worker's own Block: its reason, shortened, and the hosts its sandbox denied when it named them. */
+const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}) });
+
+/**
+ * A host name as DNS spells it, in lower case: two or more labels of letters, digits and inner hyphens, at most 63
+ * characters each and 253 in all, the last starting with a letter. No IP address, port, path, wildcard or space, so a
+ * value that passes is safe to quote in a GitHub comment.
+ */
+export const isHostName = (h) => typeof h === "string" && h.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(h);
+
+/** At most this many denied hosts are kept from an exit record. */
+export const DENIED_HOSTS_MAX = 10;
+
+/** An exit record's `deniedHosts`: its strings that are host names (isHostName, after trim and lower case), once each. */
+export const deniedHostsOf = (v) => [...new Set((Array.isArray(v) ? v : []).filter((h) => typeof h === "string").map((h) => h.trim().toLowerCase()).filter(isHostName))].slice(0, DENIED_HOSTS_MAX);
+
+/** Whether `host` is on a sandbox allow list: named exactly, or under a `*.` entry. */
+const allowedBy = (host, domains) => domains.some((d) => d === host || (typeof d === "string" && d.startsWith("*.") && host.endsWith(d.slice(1))));
+
+/**
+ * The fix line of a local Block whose worker named the hosts its sandbox denied: allow them in FACTORY_LOCAL_DOMAINS,
+ * then re-apply the label. Hosts the sandboxes already allow (`domains`) are left out, since allowing them again fixes
+ * nothing; null when none is left, so the Block keeps the generic fix.
+ */
+export function deniedHostsFix(hosts, domains = []) {
+  const left = deniedHostsOf(hosts).filter((h) => !allowedBy(h, domains));
+  if (!left.length) return null;
+  const them = left.length === 1 ? "it" : "them";
+  return `The local sandbox denied ${left.map((h) => `\`${h}\``).join(", ")}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
+}
+
 /**
  * The worker's exit, from what the run left behind.
  *  harness:    {ok: boolean, error?: string, budgetExceeded?: boolean, timedOut?: boolean, died?: number}
@@ -604,7 +652,7 @@ export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === 
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
  *  protectedHits: string[]
- *  record:     the harness's exit record {exit, reason, questions} (parseExitRecord), or null
+ *  record:     the harness's exit record {exit, reason, questions, deniedHosts?} (parseExitRecord), or null
  *  question:   boolean, when the caller has already decided whether a question is open
  *              (the review job: the PR's draft state after the answer pass, so a human's
  *              "mark ready" answers it)
@@ -617,7 +665,9 @@ export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === 
  *  sessionCap: string, sessionCapNote: the sandbox vendor's session cut this stage's wall clock; a time cap names it
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
- * Returns {exit: 'delivered'|'question'|'blocked', reason}
+ * Returns {exit: 'delivered'|'question'|'blocked', reason}, plus `deniedHosts` when the worker Blocked on hosts its
+ * sandbox denied (its exit record's): the stage's backend turns them into the notice's fix (backend.mjs deniedFix).
+ * A worker's reason and question are shortened on a word boundary (clip).
  */
 export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
@@ -633,6 +683,8 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   // The plan needs another repository: the owner decides, so no commit (the plan-time stop) is no Block.
   if (planNeeds) return { exit: "question", reason: planNeeds };
   if (!pr?.exists) {
+    // A worker that stopped because the sandbox denied a host it needs: its own reason and hosts, not the missing commits.
+    if (record?.exit === "blocked" && record.deniedHosts?.length) return workerBlocked(record);
     if (commits === 0) return { exit: "blocked", reason: harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR" };
     return { exit: "blocked", reason: "no PR could be opened for the branch" };
   }
@@ -646,9 +698,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     return { exit: "blocked", reason: `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}` };
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
-  if (record?.exit === "blocked") return { exit: "blocked", reason: `worker blocked: ${(record.reason || "no reason given").slice(0, 200)}` };
+  if (record?.exit === "blocked") return workerBlocked(record);
   const open = question !== undefined ? question : record?.exit === "question";
-  if (open) return { exit: "question", reason: record?.questions?.length ? `question: ${record.questions[0].slice(0, 200)}` : "an assumption would change a public contract or a recorded decision" };
+  if (open) return { exit: "question", reason: record?.questions?.length ? `question: ${clip(record.questions[0])}` : "an assumption would change a public contract or a recorded decision" };
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
   return { exit: "delivered", reason: "" };
 }
@@ -800,7 +852,8 @@ export function evaluateChecks(names, checkRuns) {
 /**
  * The harness's exit record: the first JSON object in `text` (a file the task card names, or
  * the harness's answer to EXIT_PROMPT) with `exit` in EXITS. `questions` and `reason` are
- * normalized to strings. Null when there is no such object: the caller then asks the harness.
+ * normalized to strings; a blocked record's `deniedHosts` keeps host names only (deniedHostsOf). Null when there is
+ * no such object: the caller then asks the harness.
  */
 export function parseExitRecord(text) {
   const s = String(text || "");
@@ -834,7 +887,9 @@ export function parseExitRecord(text) {
             const part = Array.isArray(v.part?.remaining) ? { remaining: v.part.remaining.map(text).filter(Boolean) } : null;
             // A question exit's questions that name no test of the Question rule (questionFounded); none at all is one.
             const unfounded = v.exit === "question" ? (items.length ? items.filter((q) => !questionFounded(q)).map(text) : [typeof v.reason === "string" && v.reason ? v.reason : "a question exit with no question"]) : [];
-            return { exit: v.exit, reason: typeof v.reason === "string" ? v.reason : "", questions, ...(part ? { part } : {}), ...(unfounded.length ? { unfounded } : {}) };
+            // A Block's hosts the sandbox denied (deniedHostsOf: host names only), which the Blocked notice names.
+            const deniedHosts = v.exit === "blocked" ? deniedHostsOf(v.deniedHosts) : [];
+            return { exit: v.exit, reason: typeof v.reason === "string" ? v.reason : "", questions, ...(part ? { part } : {}), ...(unfounded.length ? { unfounded } : {}), ...(deniedHosts.length ? { deniedHosts } : {}) };
           }
           break;
         }
@@ -859,7 +914,7 @@ export const questionFounded = (q) =>
 const QUESTION_SHAPE = '{"question": "the question a human must answer, verbatim", "test": "contract" | "decision" | "access", "existing": "the existing contract it changes or removes, the recorded decision it contradicts, or the access it grants"}';
 
 /** What Factory asks a harness that left no exit record (resumed in its own session where it can). */
-export const EXIT_PROMPT = `Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": [${QUESTION_SHAPE}], "reason": "why you are blocked, else empty", "part": {"remaining": ["each checklist item left for the next PR"]}}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered". Leave out "part" unless you split the Objective and items remain for a later PR.`;
+export const EXIT_PROMPT = `Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": [${QUESTION_SHAPE}], "reason": "why you are blocked, else empty", "deniedHosts": ["each host the sandbox denied that blocked you"], "part": {"remaining": ["each checklist item left for the next PR"]}}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered". Leave out "deniedHosts" unless the sandbox denying a host is why you are blocked, and "part" unless you split the Objective and items remain for a later PR.`;
 
 /** The questions of a question exit that already name a test of the Question rule: they stand whatever the check says. */
 export const standingQuestions = (record) => (record?.questions || []).filter((q) => !(record.unfounded || []).includes(q));

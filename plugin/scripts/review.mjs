@@ -786,7 +786,9 @@ async function main() {
       }
     } else log(`auto_merge is false: PR #${pr.number} is ready for a human merge`);
   }
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review" }, token);
+  // Hosts the answer pass's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
+  const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts) : null;
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix }, token);
   await finish(decision.exit, decision.reason);
   }
 }

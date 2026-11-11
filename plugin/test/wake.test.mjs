@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RETRY_WAKE_MS, WAKE_KINDS, WAKE_SLACK_MS, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
+import { RETRY_WAKE_MS, WAKE_KINDS, WAKE_SLACK_MS, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
 
 const T = Date.parse("2026-11-10T12:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();
@@ -25,6 +25,11 @@ test("nextWake: the earliest sleeper deadline still ahead; owners' kinds, past o
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS + 1000) }] })?.issue, 6, "a later sleeper does not cover it");
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "lease", at: iso(T - 30_000) }] })?.issue, 6, "one already past its deadline (firing, or this run's own) covers nothing");
   assert.deepEqual(WAKE_KINDS, ["lease", "quota", "daily-cap", "retry"]);
+  // A private repository sleeps only to the short waits: the lease and the day's turn wait for events and the cron.
+  assert.deepEqual(wakeKinds(true), WAKE_KINDS);
+  for (const v of [false, null, undefined]) assert.deepEqual(wakeKinds(v), ["quota", "retry"], `visibility ${v}`);
+  assert.deepEqual(nextWake(deadlines, { now: T, kinds: wakeKinds(false) }), { kind: "quota", at: iso(T + 7 * min), issue: 5 });
+  assert.equal(nextWake([{ kind: "daily-cap", at: iso(nextUtcMidnight(T)) }, { kind: "lease", at: iso(T + min) }], { now: T, kinds: wakeKinds(false) }), null);
 });
 
 test("nextWake: a wake's own run never re-arms its deadline, and a retry is armed once", () => {
@@ -55,17 +60,46 @@ test("armWake: reads the armed wakes only when one is due; an unreadable list ar
     reads += 1;
     return { wakes: [{ kind: "quota", at: iso(T + 3 * min) }] };
   };
-  assert.equal(await armWake(repo, [{ kind: "checks-grace", at: iso(T + min) }], { now, readJobs }), null);
+  assert.equal(await armWake(repo, [{ kind: "checks-grace", at: iso(T + min) }], { now, isPublic: true, readJobs }), null);
+  assert.equal(await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + min) }], { now, readJobs }), null, "a private repository (the default) leaves a lease to events and the cron");
   assert.equal(reads, 0, "no deadline of its kinds: no read");
-  assert.equal(await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 4 * min) }], { now, readJobs }), null, "covered by the sleeper at +3 min");
-  assert.equal((await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 1 * min) }], { now, readJobs }))?.at, iso(T + 1 * min), "it fires before the sleeper at +3 min");
+  assert.equal(await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 4 * min) }], { now, isPublic: true, readJobs }), null, "covered by the sleeper at +3 min");
+  assert.equal((await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 1 * min) }], { now, isPublic: true, readJobs }))?.at, iso(T + 1 * min), "it fires before the sleeper at +3 min");
   const failing = async () => {
     throw new Error("HTTP 502");
   };
-  assert.equal((await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 4 * min) }], { now, readJobs: failing }))?.kind, "lease", "a second sleeper only ticks twice");
+  assert.equal((await armWake(repo, [{ issue: 2, kind: "lease", at: iso(T + 4 * min) }], { now, isPublic: true, readJobs: failing }))?.kind, "lease", "a second sleeper only ticks twice");
   assert.deepEqual(firedByWake("workflow_dispatch", { inputs: { wake: "quota 2026-11-10T12:07:00.000Z" } }), { kind: "quota", at: "2026-11-10T12:07:00.000Z" });
   assert.equal(firedByWake("workflow_dispatch", { inputs: { issue: "12" } }), null);
   assert.equal(firedByWake("schedule", { inputs: { wake: "quota 2026-11-10T12:07:00.000Z" } }), null);
+});
+
+test("repoIsPublic: the event's repository payload first; one read only when a long wait needs it; unknown is private", async () => {
+  const { repoIsPublic } = await import("../scripts/dispatch.mjs");
+  let reads = 0;
+  const read = (r) => async () => {
+    reads += 1;
+    if (r instanceof Error) throw r;
+    return r;
+  };
+  const lease = [{ kind: "lease", at: iso(T + min) }];
+  assert.equal(await repoIsPublic({ repository: { private: false } }, lease, read({ private: true })), true);
+  assert.equal(await repoIsPublic({ repository: { private: true } }, lease, read({ private: false })), false);
+  assert.equal(reads, 0, "the payload answers: no read");
+  assert.equal(await repoIsPublic({ schedule: "*/10 * * * *" }, [{ kind: "quota", at: iso(T + min) }], read({ private: false })), false);
+  assert.equal(reads, 0, "only short waits: the answer changes nothing, so no read");
+  assert.equal(await repoIsPublic({ schedule: "*/10 * * * *" }, lease, read({ private: false })), true);
+  assert.equal(await repoIsPublic({}, lease, read(new Error("HTTP 502"))), false, "an unread repository counts as private");
+  assert.equal(reads, 2);
+});
+
+test("longWaitCheck: a private repository is told its long waits fall back to the cron; a public one gets no line", async () => {
+  const { longWaitCheck } = await import("../scripts/doctor.mjs");
+  const line = longWaitCheck({ private: true });
+  assert.equal(line.status, "PASS");
+  assert.match(line.detail, /fall back to events and GitHub's cron/);
+  assert.equal(longWaitCheck({ private: false }), null);
+  assert.equal(longWaitCheck(null), null);
 });
 
 test("dispatch deadlines: a stage's lease, a quota retry and the UTC day's turn, or one retry when today's spend is unread", async () => {

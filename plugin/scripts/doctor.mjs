@@ -219,6 +219,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
     out.push(ownedTickCheck(text, env, { job }));
+    const waits = longWaitCheck(repoData);
+    if (waits) out.push(waits);
   }
   out.push(...(await workflowTokenChecks({ repo, token: inputs.githubToken || token })));
 
@@ -551,6 +553,16 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   ];
   if (!missing.length) return PASS("dispatcher ticks", "a closed issue, a failed launch and the waits only time ends tick the dispatcher on time");
   return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: those waits last until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+}
+
+/**
+ * On a private repository the wake job sleeps only to the short waits (a quota retry, a read retry): each sleeper bills
+ * its runner minutes there. A sandbox stage's lease end and the UTC day's turn fall back to events and GitHub's cron,
+ * which can run hours late. Null on a public repository, where every wait has its wake.
+ */
+export function longWaitCheck(repoData) {
+  if (repoData?.private !== true) return null;
+  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake job sleeps only to quota and read retries, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

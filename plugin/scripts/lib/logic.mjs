@@ -2353,6 +2353,13 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
  */
 export const WAKE_KINDS = Object.freeze(["lease", "quota", "daily-cap", "retry"]);
+/**
+ * The kinds a repository arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `retry`); a stage's lease end and
+ * the UTC day's turn, which can keep a sleeper up for hours, wait for an event or GitHub's cron backstop there. An
+ * unknown visibility counts as private.
+ */
+export const wakeKinds = (isPublic) => (isPublic === true ? WAKE_KINDS : Object.freeze(["quota", "retry"]));
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
 export const WAKE_SLACK_MS = 60_000;
 /** How soon a `retry` wake reads again. */
@@ -2374,16 +2381,16 @@ export function parseWake(text) {
 }
 
 /**
- * The one wake this run arms, `{kind, at, issue}`, or null. Only WAKE_KINDS, only deadlines still ahead of `now`, the
+ * The one wake this run arms, `{kind, at, issue}`, or null. Only `kinds` (wakeKinds), only deadlines still ahead of `now`, the
  * earliest first. None when a wake already queued or sleeping (`armed`, from the job names) fires before it or within
  * WAKE_SLACK_MS after it: that wake's tick arms the rest, so sleepers never pile up and none is ever cancelled. A run a
  * wake started (`firedBy`, its tick's input) never arms that same deadline again (a runner clock behind the sleeper's
  * would loop on it), nor any retry after a retry wake (a read that keeps failing waits for the next event or the cron).
  */
-export function nextWake(deadlines, { now = Date.now(), armed = [], firedBy = null } = {}) {
+export function nextWake(deadlines, { now = Date.now(), armed = [], firedBy = null, kinds = WAKE_KINDS } = {}) {
   const fired = firedBy ? Date.parse(firedBy.at) : NaN;
   const ahead = (deadlines || [])
-    .filter((d) => WAKE_KINDS.includes(d?.kind) && Date.parse(d.at) > now)
+    .filter((d) => kinds.includes(d?.kind) && Date.parse(d.at) > now)
     .filter((d) => !(firedBy?.kind === d.kind && (d.kind === "retry" || Date.parse(d.at) === fired)));
   if (!ahead.length) return null;
   const first = ahead.reduce((a, b) => (Date.parse(b.at) < Date.parse(a.at) ? b : a));

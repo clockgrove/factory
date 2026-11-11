@@ -131,9 +131,11 @@ jobs:
     # stage's lease end (a stage that died silently), a retry the sandbox vendor's quota set, the UTC day's turn when
     # daily_usd held work back, or one retry of a read that failed. The dispatcher arms one only when no wake already
     # queued or sleeping fires before it; none is ever cancelled, and a second one only ticks twice. It sleeps on a
-    # hosted runner: on a private repository each sleeper bills its minutes (about $0.36 an hour on a 2-core Linux
-    # runner) and holds one of the account's concurrent-job slots while it sleeps; public repositories pay nothing.
-    # A deadline past 350 minutes is reached in hops, each a plain tick that arms the rest.
+    # hosted runner and holds one of the account's concurrent-job slots while it sleeps. Cost: a public repository pays
+    # nothing and sleeps to every wait (a deadline past 350 minutes in hops, each a plain tick that arms the rest). A
+    # private one pays about $0.36 a sleeper-hour (a 2-core Linux runner at $0.006 a minute), so it sleeps only to the
+    # short waits (a quota retry, a read retry, minutes each); a lease end and the day's turn wait for events and the
+    # cron there.
     name: wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})
     needs: dispatch
     if: needs.dispatch.outputs.wake_at != ''

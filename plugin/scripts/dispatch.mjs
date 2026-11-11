@@ -11,10 +11,10 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
-import { NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_KINDS, WAKE_SLACK_MS, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -559,12 +559,14 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
 }
 
 /**
- * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of WAKE_KINDS still ahead,
- * unless a wake already queued or sleeping covers it (read from the live jobs' names; an unreadable list arms anyway,
- * since a second sleeper only ticks twice). `firedBy` is the wake whose tick started this run, or null.
+ * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of the kinds the repository's
+ * visibility arms (`isPublic`, logic.mjs wakeKinds) still ahead, unless a wake already queued or sleeping covers it
+ * (read from the live jobs' names; an unreadable list arms anyway, since a second sleeper only ticks twice). `firedBy`
+ * is the wake whose tick started this run, or null.
  */
-export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, readJobs }) {
-  if (!nextWake(deadlines, { now, firedBy })) return null;
+export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, isPublic = false, readJobs }) {
+  const kinds = wakeKinds(isPublic);
+  if (!nextWake(deadlines, { now, firedBy, kinds })) return null;
   const armed = await readJobs().then(
     (j) => j.wakes,
     (e) => {
@@ -572,13 +574,31 @@ export async function armWake(repo, deadlines, { now = Date.now(), firedBy = nul
       return [];
     },
   );
-  return nextWake(deadlines, { now, firedBy, armed });
+  return nextWake(deadlines, { now, firedBy, armed, kinds });
+}
+
+/**
+ * Whether the repository is public: from the event's own repository payload (every Actions event but a schedule carries
+ * one), else one read of the repository, made only when a lease or daily-cap deadline would need the answer. Unknown
+ * counts as private, which arms only the short kinds.
+ */
+export async function repoIsPublic(payload, deadlines, readRepo) {
+  const known = payload?.repository && typeof payload.repository.private === "boolean" ? !payload.repository.private : null;
+  if (known !== null) return known;
+  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap")) return false;
+  return readRepo().then(
+    (r) => r?.private === false,
+    () => false,
+  );
 }
 
 /** The wake that started this run: a `workflow_dispatch` whose `wake` input the wake job set; else null. */
 export function firedByWake(eventName, payload) {
   return eventName === "workflow_dispatch" ? parseWake(payload?.inputs?.wake) : null;
 }
+
+/** The deadline kinds an event or a local loop owns: listed, never slept to on any repository. */
+const WAKE_OWNED = new Set(["launch-grace", "review-grace", "checks-grace", "answer-grace", "local-pause"]);
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -635,8 +655,8 @@ async function main() {
   setOutput("queue_watch", watchOutput(result.queueWatch));
   // The dispatcher's own next tick: never from a dry run or a run named for one issue (it saw only that issue).
   const waits = result.deadlines || [];
-  for (const d of [...waits].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) log(`  due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${WAKE_KINDS.includes(d.kind) ? "" : " (its owner's; the cron is the backstop)"}`);
   let wake = null;
+  let kinds = null;
   if (args.dry_run !== "true" && !inputs.issue && waits.length) {
     const { readFileSync } = await import("node:fs");
     let payload = {};
@@ -646,8 +666,13 @@ async function main() {
       payload = {};
     }
     const firedBy = firedByWake(process.env.GITHUB_EVENT_NAME || "", payload);
-    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
+    const isPublic = await repoIsPublic(payload, waits, () => getRepo(repoOf(inputs.repo), { token }));
+    kinds = wakeKinds(isPublic);
+    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, isPublic, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
   }
+  // Every wait, and whose it is: a wake's, its owner's (an event, a local loop), or on a private repository the cron's.
+  const whose = (d) => (WAKE_OWNED.has(d.kind) ? " (its owner's; the cron is the backstop)" : kinds && !kinds.includes(d.kind) ? " (a long wait on a private repository: events and the cron)" : "");
+  for (const d of [...waits].sort((x, y) => Date.parse(x.at) - Date.parse(y.at))) log(`  due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${whose(d)}`);
   if (wake) log(`wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
   setOutput("wake_at", wake?.at ?? "");
   setOutput("wake_kind", wake?.kind ?? "");

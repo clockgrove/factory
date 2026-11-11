@@ -614,7 +614,7 @@ export function stageLock(n, ev, record) {
  * when its payload names none. With `gate` only the decision is made. After an Objective goes back to Queued, or on a
  * tick, the launch job's own step ticks the dispatcher. `adapterReady` is the vendor SDK's install still running
  * (installAdapter), awaited only before the first vendor call. Returns {exit, reason, issue, start, stage, sandboxId,
- * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | quota | tick | started | token | stopped | blocked;
+ * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | deferred | tick | started | token | stopped | blocked;
  * `usage` ({dir, name}) is a stage's usage directory to upload; `ms` the milliseconds per sub-step (stopwatch).
  */
 export async function launchOne({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null }) {
@@ -650,6 +650,40 @@ export async function launchOne({ inputs, eventName, payload = {}, gate = false,
   if (decision.requeue) return out(await requeue(run, ctx.project, decision.requeue));
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
 
+  // A start that throws before its own failure is recorded (the SDK's install, the vendor's or GitHub's reads before the
+  // claim) records one here, so the dispatcher's next try waits START_RETRY_MS and the third failure Blocks.
+  try {
+    return await afterDecision(run, ctx, decision, { adapterReady, repoId });
+  } catch (e) {
+    if (decision.stage && !run.started) await recordFailedStart(run, { stage: decision.stage, error: e }).catch((x) => log(`#${n}: the failed start was not recorded (${x.status ?? "error"})`));
+    throw e;
+  }
+}
+
+/**
+ * A failed start's entry appended to the Objective's record as it is now, everything else kept (a launcher that threw
+ * before its claim holds no claim to write over). With no record yet, a new one that says only this.
+ */
+export function failedStartRecord(now, { vendor, stage, event, run, at, code }) {
+  const entry = { stage, event, ok: false, run, at, code };
+  const rec = now ? strip(now) : { vendor, stage, state: "failed", error: { code, status: null }, at, launches: [] };
+  return { ...rec, launches: [...(rec.launches || []), entry].slice(-KEEP_LAUNCHES) };
+}
+
+async function recordFailedStart({ inputs, eventName, runId, repo, n, opts, claim }, { stage, error }) {
+  const code = typeof error?.code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(error.code) ? error.code : "error";
+  const now = sandboxRecord(await listComments(repo, n, opts), n);
+  // Another launcher's live claim is left alone: its own outcome is what counts. This launcher's own claim (it threw
+  // after writing it) is released with the failure, so the next try need not wait for its lease.
+  const mine = !!claim && now?.claim === claim;
+  if (!mine && now?.state === "running" && now.leaseUntil && Date.now() < Date.parse(now.leaseUntil)) return;
+  const rec = failedStartRecord(now, { vendor: inputs.sandbox, stage, event: eventName, run: runId, at: new Date().toISOString(), code });
+  await upsertComment(repo, n, marker(n, "sandbox"), recordBody(mine ? { ...rec, state: "failed", leaseUntil: null, error: { code, status: null } } : rec), opts);
+}
+
+async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
+  const { inputs, repo, opts, watch, ev } = run;
+  const timed = (r) => ({ ...r, ms: watch.ms });
   // The SDK (its install still finishing, when the caller started one) and the lock's base, at once.
   const [adapter, id, base] = await Promise.all([
     Promise.resolve(adapterReady).then(() => openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId })),
@@ -661,6 +695,16 @@ export async function launchOne({ inputs, eventName, payload = {}, gate = false,
   if (decision.token) return timed(await handOver(run, ctx));
   if (ev.kind === "stage") return timed(await endStage(run, ctx));
   return timed(await startCue(run, ctx, decision));
+}
+
+/**
+ * What a failed start leads to: `quota` (quotaWait's own streak), `retry` (a transient vendor error with fewer than
+ * MAX_FAILED_STARTS failures in the stint: the stage keeps its state and the dispatcher tries again at startRetryAt; it
+ * never goes back to Queued, whose re-pick would start a new stint and reset the count), or `block`.
+ */
+export function startFailure({ code, failures }) {
+  if (code === "quota") return "quota";
+  return TRANSIENT.has(code) && failures < MAX_FAILED_STARTS ? "retry" : "block";
 }
 
 /** The Objective Blocked with Factory's own reason (codes and times). */
@@ -855,6 +899,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   });
   adapter.account().then((a) => log(`${inputs.sandbox}: account ${a.account ?? "?"}, plan ${a.plan ?? "?"}${a.status ? ` (${a.status})` : ""}`), (e) => log(`${inputs.sandbox}: account not read (${e.code || "error"})`));
   const claim = randomBytes(6).toString("hex");
+  run.claim = claim;
   const leaseUntil = () => new Date(Date.now() + CLAIM_LEASE_MS).toISOString();
   // A quota streak (the vendor refusing starts for its quota) carries over the claim, so the next refusal counts on.
   const claimed = await write((cur) => (sameRecord(cur, prior) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: prior?.launches || [], ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
@@ -882,11 +927,13 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     log(`#${n}: the stage did not start: ${String(e.message).slice(0, 800)}`);
     const error = { code: typeof e.code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(e.code) ? e.code : "error", status: Number.isInteger(e.status) ? e.status : null };
     const at = new Date().toISOString();
-    const entry = { stage, event: eventName, ok: false, found: e.found ?? null, run: runId, at, ms: { ...watch.ms } };
+    const entry = { stage, event: eventName, ok: false, found: e.found ?? null, run: runId, at, code: error.code, ms: { ...watch.ms } };
     // The vendor refused for its quota (HTTP 402: snapshot storage, on Vercel): wait and try again, never Block at once.
     const quota = error.code === "quota" ? quotaBackoff(prior?.quota, Date.now()) : null;
-    const failures = failedSince({ launches: launches(entry) }, ctx.runningSince);
-    const retried = TRANSIENT.has(error.code) && failures < MAX_FAILED_STARTS;
+    // Failures count from the Running stint for work and from the review's request for a review: neither moves while the
+    // stage is retried, since a retried stage keeps its state (startFailure).
+    const failures = failedSince({ launches: launches(entry) }, stage === "review" ? (ctx.review?.since ?? ctx.runningSince) : ctx.runningSince);
+    const retried = startFailure({ code: error.code, failures }) === "retry";
     // Another failure tried again keeps the streak as it was, so a refusal after it counts on from the first one.
     const streak = quota ? (quota.giveUp ? {} : { quota: { since: quota.since, tries: quota.tries, retryAt: quota.retryAt } }) : retried && prior?.quota ? { quota: prior.quota } : {};
     await write((cur) => (cur?.claim === claim ? { ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry, cur.launches), ...streak } : null)).then(
@@ -895,14 +942,17 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     );
     if (quota) return out({ ...(await quotaWait(run, ctx, { stage, error, quota })), stage });
     if (retried) {
-      // Worth another try: a work stage goes back to Queued for the dispatcher; a review stays labelled, and the
-      // dispatcher's sweep re-launches a labelled PR with no review start since its label.
-      const why = `the ${inputs.sandbox} sandbox was unavailable (${error.code}); it is tried again`;
-      if (stage === "work") return out({ ...(await requeue(run, ctx.project, why)), stage });
-      return out({ exit: "skipped", stage, reason: `#${n}: ${why}` });
+      // Worth another try, by the dispatcher (startRetryAt): a work stage stays Running and a review stays labelled, so
+      // the stint (or the request) the failures count from never moves, and the third failure Blocks. Going back to
+      // Queued would start a new stint at each re-pick and never reach the third.
+      const why = `the ${inputs.sandbox} sandbox was unavailable (${error.code}); it is tried again after a pause`;
+      return out({ exit: "deferred", stage, reason: `#${n}: ${why}` });
     }
     return out({ ...(await block(run, `launcher: the ${stage} stage did not start (${error.code}${error.status ? `, HTTP ${error.status}` : ""})${failures >= MAX_FAILED_STARTS ? `; ${failures} failed starts since it became Running` : ""}`)), stage });
   }
+  // Started: from here a throw is no failed start (the stage runs and its heartbeat keeps the claim), so it is not one.
+  run.claim = null;
+  run.started = true;
   // An earlier stage whose end was never answered (its event lost): its usage comes out now, beside this stage's start.
   let usage = null;
   const lost = ev.kind !== "stage" && prior?.claim && prior.claim !== claim && ["ended", "stopped", "running"].includes(prior.state);
@@ -970,10 +1020,10 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const note = `Factory: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Factory frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;
   await upsertComment(repo, n, marker(n, "quota"), note, opts).catch((e) => log(`#${n}: the quota note was not written (${e.status ?? "error"})`));
   const why = `the ${inputs.sandbox} sandbox's plan quota is used up (${code}); try ${quota.tries}, the next after ${clock(quota.retryAt)}`;
-  // The launcher hands the wait to the dispatcher: its job ticks it on `queued` (a work stage, back to Queued) or `quota`
-  // (a review, which stays labelled), and the dispatcher's next run sees the record's retryAt and arms its wake for it.
+  // The launcher hands the wait to the dispatcher: its job ticks it on `queued` (a work stage, back to Queued) or
+  // `deferred` (a review, which stays labelled), and the dispatcher's next run sees the record's retryAt and arms its wake for it.
   if (stage === "work") return requeue(run, ctx.project, why);
-  return { exit: "quota", reason: `#${n}: ${why}` };
+  return { exit: "deferred", reason: `#${n}: ${why}` };
 }
 
 async function main() {

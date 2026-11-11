@@ -14,7 +14,7 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
-import { NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -232,7 +232,13 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           const since = await runningSince(repo, issue.number, opts).catch(() => null);
           if (since && !launchedSince(record, "work", since)) {
-            if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+            // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
+            // launcher); one that never ran gets the grace for its own launch first.
+            const again = startRetryAt(record, since);
+            if (again !== null) {
+              if (Date.now() >= again) relaunch.push(issue.number);
+              else due(issue.number, "start-retry", again);
+            } else if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
             else due(issue.number, "launch-grace", Date.parse(since) + RELAUNCH_GRACE_MS + 1000);
             continue;
           }
@@ -324,7 +330,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (holds) leaseDue(issue.number, record);
         if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
         if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
-          if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+          const again = startRetryAt(record, labelledAt);
+          if (again !== null) {
+            if (Date.now() >= again) relaunch.push(issue.number);
+            else due(issue.number, "start-retry", again);
+          } else if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
           else due(issue.number, "review-grace", Date.parse(labelledAt) + RELAUNCH_GRACE_MS + 1000);
         }
       }
@@ -597,6 +607,24 @@ export function firedByWake(eventName, payload) {
   return eventName === "workflow_dispatch" ? parseWake(payload?.inputs?.wake) : null;
 }
 
+/**
+ * Whether a run is worth its reads: every event but an issue closing is. A closed issue is when it was an Objective, or
+ * when it blocks one: GitHub's own count in the payload (`issue_dependencies_summary.blocking`), or a "Blocked by #N"
+ * line in an open Objective's body (one listing read). A payload with no such count cannot rule a relation out, so the
+ * run goes ahead.
+ */
+export async function closedIssueTicks(eventName, payload, { objectiveLabel, objectives }) {
+  if (eventName !== "issues" || payload?.action !== "closed") return true;
+  const issue = payload.issue || {};
+  if ((issue.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === objectiveLabel)) return true;
+  const summary = issue.issue_dependencies_summary;
+  if (!summary || typeof summary.blocking !== "number") return true;
+  if (summary.blocking > 0) return true;
+  const open = await objectives().catch(() => null);
+  if (!open) return true;
+  return open.some((o) => parseBlockedBy(o.body).includes(issue.number));
+}
+
 /** The deadline kinds an event or a local loop owns: listed, never slept to on any repository. */
 const WAKE_OWNED = new Set(["launch-grace", "review-grace", "checks-grace", "answer-grace", "local-pause"]);
 
@@ -614,6 +642,19 @@ async function main() {
     }
     const r = await watchQueue(repoOf(inputs.repo), Array.isArray(prs) ? prs : [], { token }, { actionsToken: inputs.githubToken || null });
     setOutput("tick", r.tick ? "true" : "false");
+    return;
+  }
+  const { readFileSync } = await import("node:fs");
+  let payload = {};
+  try {
+    payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
+  } catch {
+    payload = {};
+  }
+  const eventName = process.env.GITHUB_EVENT_NAME || "";
+  if (!(await closedIssueTicks(eventName, payload, { objectiveLabel: inputs.objectiveLabel, objectives: () => listIssuesByLabel(repoOf(inputs.repo), inputs.objectiveLabel, { token }) }))) {
+    log(`issue #${payload.issue?.number} closed: not an Objective and blocks none; nothing to do`);
+    for (const [k, v] of [["issues", []], ["count", "0"], ["reason", ""], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""]]) setOutput(k, v);
     return;
   }
   const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true" });
@@ -658,14 +699,7 @@ async function main() {
   let wake = null;
   let kinds = null;
   if (args.dry_run !== "true" && !inputs.issue && waits.length) {
-    const { readFileSync } = await import("node:fs");
-    let payload = {};
-    try {
-      payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
-    } catch {
-      payload = {};
-    }
-    const firedBy = firedByWake(process.env.GITHUB_EVENT_NAME || "", payload);
+    const firedBy = firedByWake(eventName, payload);
     const isPublic = await repoIsPublic(payload, waits, () => getRepo(repoOf(inputs.repo), { token }));
     kinds = wakeKinds(isPublic);
     wake = await armWake(repoOf(inputs.repo), waits, { firedBy, isPublic, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });

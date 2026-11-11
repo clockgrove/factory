@@ -2183,10 +2183,27 @@ export function watchdogMs({ minutes, sessionEnd, now = Date.now() }) {
   return Math.max(0, Number.isFinite(bySession) ? Math.min(byClock, bySession) : byClock);
 }
 
-/** Starts of `stage` that failed at or after `since`, in the record. */
-export const failedSince = (record, since) => (record?.launches || []).filter((l) => l.ok === false && Number.isFinite(Date.parse(since)) && Date.parse(l.at) >= Date.parse(since)).length;
-/** Failed starts in one Running stint before the Objective is Blocked instead of tried again. */
+/**
+ * Failed starts at or after `since`, in the record: every failure but a quota refusal, which has its own streak and
+ * limit (quotaBackoff). A launcher that threw before its claim records one too (launch.mjs failedStartRecord).
+ */
+const failuresSince = (record, since) => (record?.launches || []).filter((l) => l?.ok === false && l.code !== "quota" && Number.isFinite(Date.parse(since)) && Date.parse(l.at) >= Date.parse(since));
+export const failedSince = (record, since) => failuresSince(record, since).length;
+/** Failed starts in one Running stint (or one review request) before the Objective is Blocked instead of tried again. */
 export const MAX_FAILED_STARTS = 3;
+/** The pause after a failed start, per failure so far: the next try after one failure waits 2 minutes, after two 4. */
+export const START_RETRY_MS = 2 * 60_000;
+/**
+ * When the stage whose starts failed since `since` (the Running stint, or the review request) is tried again: the last
+ * failure plus START_RETRY_MS per failure, or at once when MAX_FAILED_STARTS is reached (the launcher then Blocks).
+ * Null when nothing failed since. The Objective stays Running meanwhile, so `since` never moves and the count holds.
+ */
+export function startRetryAt(record, since) {
+  const fails = failuresSince(record, since);
+  if (!fails.length) return null;
+  const last = Math.max(...fails.map((l) => Date.parse(l.at)));
+  return fails.length >= MAX_FAILED_STARTS ? last : last + START_RETRY_MS * fails.length;
+}
 
 /**
  * The stage an Objective is due for, from its state alone: work for a Running Objective with no work start since it
@@ -2236,6 +2253,8 @@ export function launchDecision({ ev, state, question = false, record = null, tru
     if (state === "Running" && !runningSince) return { skip: "Running since an unknown time: nothing starts on a guess" };
     if (state === "Running" && failedSince(record, runningSince) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox starts failed since it became Running` };
     if (state === "Running" && launchedSince(record, "work", runningSince)) return { skip: "work already started for this Running stint" };
+    // A review whose starts keep failing Blocks too: one request, three strikes.
+    if (state === "In review" && review?.since && !launchedSince(record, "review", review.since) && failedSince(record, review.since) >= MAX_FAILED_STARTS) return { block: `${MAX_FAILED_STARTS} sandbox review starts failed since the review was asked for` };
     return dueStage({ state, record, runningSince, review }) || { skip: `${state}: nothing to start` };
   }
   if (ev.kind === "comment") {
@@ -2347,25 +2366,40 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * moment at which only time, not an event, changes what the dispatcher does. A wake job sleeps only to these kinds:
  * - `lease`: a sandbox stage's lease end plus WAKE_SLACK_MS (a stage that died silently frees its Objective then);
  * - `quota`: the retry time of a start the vendor's quota refused (the launcher handed the wait over);
+ * - `start-retry`: the next try of a stage whose start failed another way (startRetryAt), three strikes then Blocked;
  * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
  */
-export const WAKE_KINDS = Object.freeze(["lease", "quota", "daily-cap", "retry"]);
+export const WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
 /**
  * The kinds a repository arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
- * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `retry`); a stage's lease end and
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end and
  * the UTC day's turn, which can keep a sleeper up for hours, wait for an event or GitHub's cron backstop there. An
  * unknown visibility counts as private.
  */
-export const wakeKinds = (isPublic) => (isPublic === true ? WAKE_KINDS : Object.freeze(["quota", "retry"]));
+export const wakeKinds = (isPublic) => (isPublic === true ? WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
 export const WAKE_SLACK_MS = 60_000;
 /** How soon a `retry` wake reads again. */
 export const RETRY_WAKE_MS = 2 * 60_000;
 /** The longest one wake job sleeps (hosted runners end a job at six hours): a later deadline is reached in hops. */
 export const WAKE_MAX_SLEEP_S = 350 * 60;
+
+/**
+ * When an armed wake actually ticks (ms), or null when that is not known yet: a sleep is capped at WAKE_MAX_SLEEP_S from
+ * its job's start, so a wake named for a deadline further out ticks at that cap (a plain hop) and never at its name. A
+ * wake not started yet with such a deadline has no known tick, so it covers nothing.
+ */
+export function wakeFiresAt({ at, startedAt = null }, now = Date.now()) {
+  const t = Date.parse(at);
+  const cap = WAKE_MAX_SLEEP_S * 1000;
+  if (!Number.isFinite(t)) return null;
+  const s = Date.parse(startedAt);
+  if (Number.isFinite(s)) return Math.min(t, s + cap);
+  return t - now <= cap ? t : null;
+}
 
 /** The next 00:00 UTC after `now` (ms), when today's spend starts over. */
 export const nextUtcMidnight = (now) => {
@@ -2395,7 +2429,12 @@ export function nextWake(deadlines, { now = Date.now(), armed = [], firedBy = nu
   if (!ahead.length) return null;
   const first = ahead.reduce((a, b) => (Date.parse(b.at) < Date.parse(a.at) ? b : a));
   const at = Date.parse(first.at);
-  if ((armed || []).some((w) => Date.parse(w?.at) > now && Date.parse(w.at) <= at + WAKE_SLACK_MS)) return null;
+  // A wake covers this deadline when it ticks after now and no later than the slack past it: by when it ticks, not by
+  // its name, since a hop ticks long before the deadline it is named for.
+  if ((armed || []).some((w) => {
+    const fires = wakeFiresAt(w, now);
+    return fires !== null && fires > now && fires <= at + WAKE_SLACK_MS;
+  })) return null;
   return { kind: first.kind, at: new Date(at).toISOString(), issue: first.issue ?? null };
 }
 

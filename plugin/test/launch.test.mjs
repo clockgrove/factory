@@ -209,7 +209,7 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   for (const job of ["launch", "launch-event"]) {
     const tick = doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || ""));
     assert.match(tick.if, /^always\(\) && \(steps\.f\.outcome != 'success' \|\|/, `${job}: ticks on its own failure`);
-    for (const exit of ["queued", "quota", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
+    for (const exit of ["queued", "deferred", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
     assert.match(tick.env.GH_REPO, /github\.repository/);
   }
   // Only the */10 schedule runs the dispatcher: the hourly sweep and the nightly image are other jobs' schedules.

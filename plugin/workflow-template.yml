@@ -128,14 +128,14 @@ jobs:
         run: gh workflow run factory.yml
   wake:
     # The dispatcher's own next tick, for a wait only time ends (GitHub's cron fires late or not at all): a sandbox
-    # stage's lease end (a stage that died silently), a retry the sandbox vendor's quota set, the UTC day's turn when
-    # daily_usd held work back, or one retry of a read that failed. The dispatcher arms one only when no wake already
-    # queued or sleeping fires before it; none is ever cancelled, and a second one only ticks twice. It sleeps on a
-    # hosted runner and holds one of the account's concurrent-job slots while it sleeps. Cost: a public repository pays
-    # nothing and sleeps to every wait (a deadline past 350 minutes in hops, each a plain tick that arms the rest). A
-    # private one pays about $0.36 a sleeper-hour (a 2-core Linux runner at $0.006 a minute), so it sleeps only to the
-    # short waits (a quota retry, a read retry, minutes each); a lease end and the day's turn wait for events and the
-    # cron there.
+    # stage's lease end (a stage that died silently), a retry the sandbox vendor's quota set, the next try of a start
+    # that failed another way (three failures Block), the UTC day's turn when daily_usd held work back, or one retry
+    # of a read that failed. The dispatcher arms one only when no wake already queued or sleeping ticks before it;
+    # none is ever cancelled, and a second one only ticks twice. It sleeps on a hosted runner and holds one of the
+    # account's concurrent-job slots while it sleeps. Cost: a public repository pays nothing and sleeps to every wait
+    # (a deadline past 350 minutes in hops, each a plain tick that arms the rest). A private one pays about $0.36 a
+    # sleeper-hour (a 2-core Linux runner at $0.006 a minute), so it sleeps only to the short waits (a quota retry, a
+    # failed start's retry, a read retry: minutes each); a lease end and the day's turn wait for events and the cron.
     name: wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})
     needs: dispatch
     if: needs.dispatch.outputs.wake_at != ''
@@ -252,8 +252,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
-      - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, or met the sandbox vendor's quota)
-        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'quota' || steps.f.outputs.exit == 'blocked')
+      - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, or deferred its stage to a retry time)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml || true
   launch-gate:
@@ -306,8 +306,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
-      - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off or met the vendor's quota)
-        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'quota' || steps.f.outputs.exit == 'blocked')
+      - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off or deferred its stage to a retry time)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml || true
   launch-tick:

@@ -912,7 +912,7 @@ export async function activeWorkIssues(repo, opts) {
 
 /**
  * The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed, and the
- * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at}]`.
+ * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
  * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
  */
 export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
@@ -932,7 +932,7 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
         const r = /^review \(factory\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
         const wake = parseWake(j.name);
-        if (wake) out.wakes.push(wake);
+        if (wake) out.wakes.push({ ...wake, startedAt: j.status === "in_progress" ? (j.started_at ?? null) : null });
       }
     }
   }

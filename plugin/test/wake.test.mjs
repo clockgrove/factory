@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RETRY_WAKE_MS, WAKE_KINDS, WAKE_SLACK_MS, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, RETRY_WAKE_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, setSelf, startRetryAt, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
 
 const T = Date.parse("2026-11-10T12:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();
@@ -24,10 +24,10 @@ test("nextWake: the earliest sleeper deadline still ahead; owners' kinds, past o
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS) }] }), null);
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS + 1000) }] })?.issue, 6, "a later sleeper does not cover it");
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "lease", at: iso(T - 30_000) }] })?.issue, 6, "one already past its deadline (firing, or this run's own) covers nothing");
-  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "daily-cap", "retry"]);
+  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "start-retry", "daily-cap", "retry"]);
   // A private repository sleeps only to the short waits: the lease and the day's turn wait for events and the cron.
   assert.deepEqual(wakeKinds(true), WAKE_KINDS);
-  for (const v of [false, null, undefined]) assert.deepEqual(wakeKinds(v), ["quota", "retry"], `visibility ${v}`);
+  for (const v of [false, null, undefined]) assert.deepEqual(wakeKinds(v), ["quota", "start-retry", "retry"], `visibility ${v}`);
   assert.deepEqual(nextWake(deadlines, { now: T, kinds: wakeKinds(false) }), { kind: "quota", at: iso(T + 7 * min), issue: 5 });
   assert.equal(nextWake([{ kind: "daily-cap", at: iso(nextUtcMidnight(T)) }, { kind: "lease", at: iso(T + min) }], { now: T, kinds: wakeKinds(false) }), null);
 });
@@ -193,4 +193,127 @@ test("ownedTickCheck: an installed workflow without the dispatcher's own ticks i
   assert.equal(ownedTickCheck(old, {}, { job: true }).status, "WARN", "a run never Blocks every Objective before the re-render");
   const sandboxOld = renderWorkflow(template, sandbox).replace(/steps\.f\.outcome != 'success' \|\| /g, "");
   assert.match(ownedTickCheck(sandboxOld, {}).detail, /the launch jobs' tick on a failed launch/);
+});
+
+test("a hop wake covers only up to when it ticks, not the deadline it is named for", () => {
+  const cap = WAKE_MAX_SLEEP_S * 1000;
+  const turn = { kind: "daily-cap", at: iso(T + 4 * 3600_000) };
+  // A hop started 350 minutes ago for the day's turn: its plain tick is this run, and its job is still finishing.
+  const hop = { kind: "daily-cap", at: turn.at, startedAt: iso(T - cap) };
+  assert.equal(wakeFiresAt(hop, T), T);
+  assert.deepEqual(nextWake([turn], { now: T, armed: [hop] }), { kind: "daily-cap", at: turn.at, issue: null }, "the hop that just ticked does not hide the deadline");
+  // A hop for a deadline 6 hours out, started an hour ago, ticks in 4h50m: it covers a later deadline, not the 4-hour one.
+  const far = { kind: "daily-cap", at: iso(T + 6 * 3600_000), startedAt: iso(T - 3600_000) };
+  assert.equal(wakeFiresAt(far, T), T - 3600_000 + cap);
+  assert.equal(nextWake([turn], { now: T, armed: [far] })?.kind, "daily-cap");
+  assert.equal(nextWake([{ kind: "daily-cap", at: far.at }], { now: T, armed: [far] }), null);
+  // Not started yet: a deadline within one sleep is when it ticks; one further out is not known, so it covers nothing.
+  assert.equal(wakeFiresAt({ kind: "quota", at: iso(T + 5 * min) }, T), T + 5 * min);
+  assert.equal(wakeFiresAt({ kind: "daily-cap", at: iso(T + cap + min) }, T), null);
+  assert.equal(nextWake([turn], { now: T, armed: [{ kind: "daily-cap", at: iso(T + cap + min) }] })?.kind, "daily-cap");
+});
+
+test("closedIssueTicks: a closed issue runs the dispatcher only when it was an Objective or blocks one", async () => {
+  const { closedIssueTicks } = await import("../scripts/dispatch.mjs");
+  let reads = 0;
+  const objectives = (list) => async () => {
+    reads += 1;
+    return list;
+  };
+  const closed = (issue) => ({ action: "closed", issue });
+  const opts = (list = []) => ({ objectiveLabel: "factory:objective", objectives: objectives(list) });
+  assert.equal(await closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts()), true);
+  assert.equal(await closedIssueTicks("schedule", {}, opts()), true);
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts()), true);
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts()), true);
+  assert.equal(reads, 0);
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts([{ number: 9, body: "Blocked by #3" }])), true, "a body line");
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts([{ number: 9, body: "Blocked by #4" }])), false, "blocks nothing: no run");
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [] }), opts()), true, "no count in the payload rules nothing out");
+});
+
+test("a failed start: a pause between tries, the stint held, and the third failure Blocks (no requeue loop)", async () => {
+  const { startFailure } = await import("../scripts/launch.mjs");
+  // Transient errors are retried in place: never back to Queued, whose re-pick resets the stint the count is kept from.
+  assert.equal(startFailure({ code: "unavailable", failures: 1 }), "retry");
+  assert.equal(startFailure({ code: "rate_limited", failures: MAX_FAILED_STARTS - 1 }), "retry");
+  assert.equal(startFailure({ code: "unavailable", failures: MAX_FAILED_STARTS }), "block");
+  assert.equal(startFailure({ code: "quota", failures: 9 }), "quota");
+  assert.equal(startFailure({ code: "auth", failures: 1 }), "block");
+  const since = "2026-11-10T11:50:00.000Z";
+  const fail = (at, code = "unavailable") => ({ stage: "work", ok: false, at, code });
+  const rec = (...launches) => ({ state: "failed", launches });
+  assert.equal(startRetryAt(rec(), since), null);
+  assert.equal(startRetryAt(rec(fail("2026-11-10T11:40:00.000Z")), since), null, "a failure from an earlier stint");
+  assert.equal(startRetryAt(rec(fail("2026-11-10T11:51:00.000Z", "quota")), since), null, "a quota refusal has its own streak");
+  assert.equal(startRetryAt(rec(fail("2026-11-10T11:51:00.000Z")), since), Date.parse("2026-11-10T11:51:00.000Z") + START_RETRY_MS);
+  assert.equal(startRetryAt(rec(fail("2026-11-10T11:51:00.000Z"), fail("2026-11-10T11:54:00.000Z")), since), Date.parse("2026-11-10T11:54:00.000Z") + 2 * START_RETRY_MS);
+  const three = rec(fail("2026-11-10T11:51:00.000Z"), fail("2026-11-10T11:54:00.000Z"), fail("2026-11-10T11:59:00.000Z"));
+  assert.equal(startRetryAt(three, since), Date.parse("2026-11-10T11:59:00.000Z"), "at once: the launcher Blocks it");
+  const swept = { kind: "swept", issue: 1 };
+  assert.deepEqual(launchDecision({ ev: swept, state: "Running", runningSince: since, record: rec(fail("2026-11-10T11:51:00.000Z"), fail("2026-11-10T11:54:00.000Z")) }), { stage: "work" });
+  assert.match(launchDecision({ ev: swept, state: "Running", runningSince: since, record: three }).block, /3 sandbox starts failed/);
+  const review = { pr: 40, labelled: true, labelledAt: since, readyAt: null, since, draft: false };
+  assert.match(launchDecision({ ev: swept, state: "In review", review, record: { state: "failed", launches: three.launches.map((l) => ({ ...l, stage: "review" })) } }).block, /review starts failed/, "a review's retries are bounded too");
+});
+
+test("failedStartRecord: a launcher that threw before its claim appends a failed start, everything else kept", async () => {
+  const { failedStartRecord } = await import("../scripts/launch.mjs");
+  const at = "2026-11-10T12:00:00.000Z";
+  const prior = { commentId: 7, updatedAt: at, vendor: "vercel", id: "factory-abc", stage: "work", state: "stopped", claim: "c1", launches: Array.from({ length: KEEP_LAUNCHES }, (_, i) => ({ stage: "work", ok: true, at: iso(T - i * min) })) };
+  const r = failedStartRecord(prior, { vendor: "vercel", stage: "work", event: "workflow_dispatch", run: "9", at, code: "unavailable" });
+  assert.equal(r.id, "factory-abc");
+  assert.equal(r.claim, "c1");
+  assert.equal(r.state, "stopped");
+  assert.equal(r.commentId, undefined, "the comment's own fields are not written back");
+  assert.equal(r.launches.length, KEEP_LAUNCHES);
+  assert.deepEqual(r.launches.at(-1), { stage: "work", event: "workflow_dispatch", ok: false, run: "9", at, code: "unavailable" });
+  const fresh = failedStartRecord(null, { vendor: "vercel", stage: "work", event: "issues", run: "9", at, code: "error" });
+  assert.equal(fresh.state, "failed");
+  assert.equal(fresh.launches.length, 1);
+  assert.equal(startRetryAt(fresh, iso(Date.parse(at) - min)), Date.parse(at) + START_RETRY_MS);
+});
+
+test("dispatch: a failed start is relaunched after its pause, not at once and not after the launch grace", async () => {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const now = Date.now();
+  const self = { login: "factory-app[bot]", type: "Bot" };
+  setSelf(self.login);
+  const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const record = (n, launches) => [{ id: 100 + n, user: self, updated_at: iso(now), body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state: "failed", at: iso(now - min), launches })}` }];
+  const fail = (ms) => ({ stage: "work", ok: false, at: iso(now - ms), code: "unavailable" });
+  // #20: Running 4 minutes, failed 30 s ago: before, past the grace, it was relaunched at once (a hot loop).
+  // #21: Running 1 minute, a start that threw 40 s ago: before, its tick fell inside the grace and waited for the cron.
+  // #22: failed 3 minutes ago, once: its pause is over. #23: three failures: relaunched at once so the launcher Blocks it.
+  const since = { 20: 4 * min, 21: min, 22: 6 * min, 23: 10 * min };
+  const comments = { 20: record(20, [fail(30_000)]), 21: record(21, [fail(40_000)]), 22: record(22, [fail(3 * min)]), 23: record(23, [fail(9 * min), fail(6 * min), fail(min)]) };
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
+    if (method === "GET" && u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : [20, 21, 22, 23].map(iss));
+    if (method === "GET" && u.pathname === "/repos/acme/app/issues/comments") return json([]);
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json(comments[n] || []);
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - since[n]) }]);
+    if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method !== "GET") return json({}, 200);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now) });
+    assert.deepEqual([...r.relaunch].sort(), [22, 23]);
+    const retries = r.deadlines.filter((d) => d.kind === "start-retry");
+    assert.deepEqual(retries.map((d) => [d.issue, d.at]).sort(), [[20, iso(now - 30_000 + START_RETRY_MS)], [21, iso(now - 40_000 + START_RETRY_MS)]]);
+    assert.ok(wakeKinds(false).includes("start-retry"), "armed on a private repository too: minutes, not hours");
+    assert.equal(r.deadlines.some((d) => d.kind === "launch-grace"), false);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+    setSelf(null);
+  }
 });

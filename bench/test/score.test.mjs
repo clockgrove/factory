@@ -13,6 +13,8 @@ import { factoryRequests, humanActions, localFactoryActions, markdownTable, scor
 import { bySelf, dispatchLatency, factoryLogin, failedStartsOf, lastWrite, launchesOf, phaseMinutes, setupSeconds } from "../lib/phases.mjs";
 import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-drill.mjs";
 import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
+import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
+import { usdText } from "../../plugin/scripts/lib/logic.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const USAGE = join(import.meta.dirname, "fixtures", "usage");
@@ -113,6 +115,25 @@ test("cost: Codex tokens are priced from prices.json, with its date in the basis
   assert.equal(costOf([raw], prices).usd, 0.1815);
   assert.equal(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).usd, null);
   assert.match(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
+});
+
+test("cost: a Codex stage with no completed turn says so, in the worker's record, its exit line and the scorecard alike; never a missing price", () => {
+  // clockgrove/factory-scratch#498: three gpt-6.1-sol calls, each refused before any turn completed (events.jsonl, one run's lines).
+  const events = read(join(import.meta.dirname, "..", "..", "plugin", "test", "fixtures", "codex-0.167-refused-400.jsonl"));
+  const worker = mergeUsage([1, 2, 3].map(() => parseUsage("codex", events, "gpt-6.1-sol", 1)));
+  assert.equal(worker.usd, null, "spend unknown, not zero: a cut turn may have spent tokens");
+  assert.equal(worker.basis, CODEX_NO_TOKENS);
+  assert.equal(usdText(worker), "unmetered (no Codex turn completed, so Codex reported no tokens)");
+  // The scorecard, from the uploaded result.json (as session.mjs writes it) or from the raw events.
+  const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "factory-usage-498/result.json" };
+  for (const rec of [result, parseUsageText(events, { model: "gpt-6.1-sol" })]) {
+    const cost = costOf([rec], prices);
+    assert.equal(cost.usd, null);
+    assert.equal(cost.basis, CODEX_NO_TOKENS);
+  }
+  // A model the table lacks, with tokens, is still a missing price.
+  assert.match(costOf([{ ...result, model: "gpt-unknown-9", tokens: { input: 10, output: 1, cached: 0, written: null } }], prices).basis, /no price for gpt-unknown-9/);
+  assert.equal(usdText({ usd: 0.25, basis: "x" }), "0.25");
 });
 
 test("cost: Copilot dollars are the AI credits the worker priced, premium requests beside; an old artifact without credits stays unmetered", () => {

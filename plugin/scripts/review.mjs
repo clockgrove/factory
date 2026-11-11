@@ -63,6 +63,7 @@ import {
   mergeReadyOne,
   unreadNow,
 } from "./lib/session.mjs";
+import { usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -240,7 +241,7 @@ async function main() {
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     if (spendInProgress()) progress.spend(usage.usd);
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}${copilotCount(usage)}${costByPhase(records)}`);
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("issue", String(issue));

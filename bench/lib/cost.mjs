@@ -18,6 +18,7 @@
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { CODEX_NO_TOKENS } from "../../plugin/scripts/lib/usage.mjs";
 
 export const PRICES_FILE = join(import.meta.dirname, "..", "prices.json");
 
@@ -265,7 +266,9 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     } else if (rec.harness === "codex") {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
       part.usd = priceTokens(prices, rec.model, rec.tokens);
-      part.basis = part.usd === null ? `unmetered: no price for ${rec.model ?? "unknown model"} in prices.json` : `tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+      // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
+      const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
+      part.basis = part.usd === null ? (noTokens ? CODEX_NO_TOKENS : `unmetered: no price for ${rec.model ?? "unknown model"} in prices.json`) : `tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
     } else if (rec.harness === "copilot") {
       // The worker prices the AI credits its usage file reports (usage.mjs parseCopilot); an artifact from before that,
       // or a run that reported none, stays unmetered.

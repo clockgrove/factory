@@ -624,6 +624,9 @@ export function refusalReason(r) {
   return `${r.harness} was refused by its provider${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; not retried: the fix is on the credential's account or in the harness settings, not in the code`;
 }
 
+/** A Question from the worker's exit record: its first question, else the generic line. */
+const openQuestion = (record) => ({ exit: "question", reason: record?.questions?.length ? `question: ${clip(record.questions[0])}` : "an assumption would change a public contract or a recorded decision" });
+
 /** A worker's own Block: its reason, shortened, and the hosts its sandbox denied when it named them. */
 const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}) });
 
@@ -663,6 +666,8 @@ export function deniedHostsFix(hosts, domains = []) {
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?} (parseExitRecord), or null
+ *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
+ *              the harness left none and the ask could not run or got none, so it is not the worker's own reason
  *  question:   boolean, when the caller has already decided whether a question is open
  *              (the review job: the PR's draft state after the answer pass, so a human's
  *              "mark ready" answers it)
@@ -679,7 +684,7 @@ export function deniedHostsFix(hosts, domains = []) {
  * sandbox denied (its exit record's): the stage's backend turns them into the notice's fix (backend.mjs deniedFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
   if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)" };
   if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}` };
@@ -697,7 +702,15 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (!pr?.exists) {
     // A worker that stopped because the sandbox denied a host it needs: its own reason and hosts, not the missing commits.
     if (record?.exit === "blocked" && record.deniedHosts?.length) return workerBlocked(record);
-    if (commits === 0) return { exit: "blocked", reason: harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR" };
+    if (commits === 0) {
+      // A worker that stopped on purpose before any commit: its own Block or Question, with the reason it gave. A record
+      // Factory filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.
+      const own = record && recordBasis !== "none";
+      if (own && record.exit === "blocked" && record.reason) return workerBlocked(record);
+      if (own && record.exit === "question") return openQuestion(record);
+      const why = harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR";
+      return { exit: "blocked", reason: record?.exit === "blocked" && !own && record.reason ? `${why}; ${clip(record.reason)}` : why };
+    }
     return { exit: "blocked", reason: "no PR could be opened for the branch" };
   }
   if (validation && !validation.green) {
@@ -712,7 +725,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (record?.exit === "blocked") return workerBlocked(record);
   const open = question !== undefined ? question : record?.exit === "question";
-  if (open) return { exit: "question", reason: record?.questions?.length ? `question: ${clip(record.questions[0])}` : "an assumption would change a public contract or a recorded decision" };
+  if (open) return openQuestion(record);
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
   return { exit: "delivered", reason: "" };
 }

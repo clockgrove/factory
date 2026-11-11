@@ -116,13 +116,13 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   for (const doc of ["README.md", "plugin/skills/setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
 });
 
-test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap or socat; no shell-credential WARN anywhere", async () => {
+test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat or rg; no shell-credential WARN anywhere", async () => {
   const names = (rows) => rows.map((r) => `${r.name}:${r.status}`);
   const none = async () => false;
   const all = async () => true;
   const claude = { harness: "claude" };
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["claude sandbox: bwrap:FAIL", "claude sandbox: socat:FAIL"]);
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS"]);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["claude sandbox: bwrap:FAIL", "claude sandbox: socat:FAIL", "claude sandbox: rg:FAIL"]);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"]);
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: {}, local: false, has: none }), [], "a person's machine checking an Actions repository");
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: true, has: none }), [], "local mode checks its own sandboxes");
   assert.deepEqual(await claudeSandboxChecks({ inputs: { harness: "codex" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none }), []);

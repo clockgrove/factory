@@ -567,20 +567,15 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
   };
 }
 
-/** Where a runner's Claude Code loads Factory's skills and agent definitions from: in the agent's home, out of every sandbox's write reach. */
-export const runnerClaudeDir = (home) => join(home, ".factory", "claude");
-
 /**
  * Claude Code's settings on the Actions runner and in a cloud sandbox VM, where it runs as the agent uid (agent.mjs):
- * local mode's bar (claudeLocalSettings), fitted to the agent's home. Commands may write the agent's home (the
- * checkout, the temp directory, the package caches), never Claude Code's own state, the agent's git config, Factory's
- * files there (`.factory`: the read-only token and the skills Claude Code loads) or the checkout's git hooks, config and
- * harness configuration, any of which code Claude Code or Factory's git runs outside the sandbox would read. No
- * credential store is hidden: the agent's home holds only its read-only GitHub token, which is for its commands.
+ * local mode's bar (claudeLocalSettings), fitted to the runner (lib/claude-runner.mjs). Commands may write only
+ * `writable`: the checkout, the agent's temp directory, Claude Code's own command temp directory and the package
+ * caches; never the checkout's git hooks, config and harness configuration, nor anything else in the agent's home.
+ * No credential store is hidden: the agent's home holds only its read-only GitHub token, which is for its commands.
  */
-export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, home, secretEnv = CLAUDE_SECRET_ENV }) {
-  const own = [join(home, ".claude"), join(home, ".claude.json"), join(home, ".gitconfig"), join(home, ".config", "git"), join(home, ".factory")];
-  return claudeLocalSettings({ domains, clone, home, readOnly: own, writable: [home], secrets: [], secretEnv });
+export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable, secretEnv = CLAUDE_SECRET_ENV }) {
+  return claudeLocalSettings({ domains, clone, writable, secrets: [], secretEnv });
 }
 
 /**
@@ -588,10 +583,14 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, home, sec
  * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space. An entry is a host name or
  * `*.` and one; anything else is dropped.
  */
+const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
+const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
 export function runnerDomains(value = "") {
-  const extra = String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter((d) => /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/.test(d));
-  return [...new Set([...LOCAL_DOMAINS, ...extra])];
+  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter((d) => DOMAIN_ENTRY.test(d))])];
 }
+
+/** The `allowed_domains` entries runnerDomains drops (doctor names each). */
+export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !DOMAIN_ENTRY.test(d));
 
 const isDir = (p) => {
   try {

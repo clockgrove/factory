@@ -15,8 +15,8 @@ test("backend: FACTORY_LOCAL=1 picks local, anything else the Action's runner", 
 
 test("deniedFix: a local Block on denied hosts gets the FACTORY_LOCAL_DOMAINS fix, a runner's (Claude's sandbox) the allowed_domains input", () => {
   const env = { FACTORY_LOCAL_SANDBOX: JSON.stringify({ domains: ["github.com", "extra.example.com"] }) };
-  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}), /^Claude Code's sandbox denied `cdn\.example\.org`\. .*`allowed_domains` input.*re-apply `factory:objective`\.$/);
-  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org", "registry.npmjs.org"], { FACTORY_INPUT_ALLOWED_DOMAINS: "*.example.org" }), null, "allowed already, by the input or by default");
+  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "claude"), /^Claude Code's sandbox denied `cdn\.example\.org`\. .*`allowed_domains` input.*re-apply `factory:objective`\.$/);
+  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org", "registry.npmjs.org"], { FACTORY_INPUT_ALLOWED_DOMAINS: "*.example.org" }, "claude"), null, "allowed already, by the input or by default");
   assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org", "extra.example.com"], env), /^The local sandbox denied `cdn\.example\.org`\. .*FACTORY_LOCAL_DOMAINS.*re-apply `factory:objective`\.$/);
   assert.equal(BACKENDS.local.sandbox.deniedFix(["github.com"], env), null, "an allowed host is no allow-list fix");
   assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org"], { FACTORY_LOCAL_SANDBOX: "{not json" }), /cdn\.example\.org/, "unreadable settings never fail the notice");

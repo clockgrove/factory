@@ -12,12 +12,12 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
-import { mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
+import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { readWorkflowEnv } from "./lib/local.mjs";
+import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage } from "./lib/usage.mjs";
@@ -726,16 +726,41 @@ export async function runnerChecks({ inputs, env = process.env }) {
   return out;
 }
 
+/** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */
+export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-bwrap && sudo apparmor_parser -r /etc/apparmor.d/factory-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
+
 /**
- * Claude Code on Actions and in a cloud sandbox runs its commands in its bubblewrap sandbox (harness.mjs claudeRunner),
- * which needs bwrap and socat where the job runs: the Action and the stage's start install them on Ubuntu. Not on a
- * person's machine checking an Actions repository, and not in local mode, whose own checks name them (local.mjs).
+ * Claude Code on Actions and in a cloud sandbox runs its commands in its bubblewrap sandbox (harness.mjs claudeRunner).
+ * Wherever its settings are checked: each `allowed_domains` entry it would drop is a WARN. Where the job runs (a runner
+ * job, a sandbox stage): bwrap, socat and rg, which the Action and the stage's start install on Ubuntu; on a
+ * self-hosted runner, AppArmor letting bwrap make user namespaces, which the Action does not change there. Not in local
+ * mode, whose own checks name them (local.mjs). `has`, `read` and `profiles` are seams for the tests.
  */
-export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath }) {
-  if (inputs.harness !== "claude" || local || !(env.GITHUB_ACTIONS || env.FACTORY_STAGE_SANDBOX === "1")) return [];
+export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles }) {
+  if (inputs.harness !== "claude" || local) return [];
   const out = [];
-  for (const [bin, pkg] of [["bwrap", "bubblewrap"], ["socat", "socat"]]) out.push((await has(bin)) ? PASS(`claude sandbox: ${bin}`, "present") : FAIL(`claude sandbox: ${bin}`, `${bin} not on PATH; Claude Code runs every command in its bubblewrap sandbox here and refuses to start without it`, `install ${pkg} on the runner (sudo apt-get install -y bubblewrap socat ripgrep; the Action does this on Ubuntu runners with passwordless sudo)`));
+  const dropped = droppedDomains(input("allowed_domains", { env }));
+  if (dropped.length) out.push(WARN("allowed_domains", `not host names, so Claude Code's sandbox does not allow them: ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address"));
+  if (!(env.GITHUB_ACTIONS || env.FACTORY_STAGE_SANDBOX === "1")) return out;
+  for (const [bin, pkg] of [["bwrap", "bubblewrap"], ["socat", "socat"], ["rg", "ripgrep"]]) out.push((await has(bin)) ? PASS(`claude sandbox: ${bin}`, "present") : FAIL(`claude sandbox: ${bin}`, `${bin} not on PATH; Claude Code runs every command in its bubblewrap sandbox here and refuses to start without it`, `install ${pkg} on the runner (sudo apt-get install -y bubblewrap socat ripgrep; the Action does this on GitHub's hosted runners)`));
+  if (env.RUNNER_ENVIRONMENT === "self-hosted") {
+    let restricted = false;
+    try {
+      restricted = read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").trim() === "1";
+    } catch {
+      // no such restriction on this kernel
+    }
+    const loaded = restricted || (await has("apparmor_parser")) ? await profiles() : "";
+    const blocks = (restricted && !/^factory-bwrap /m.test(loaded)) || /^unpriv_bwrap /m.test(loaded);
+    out.push(blocks ? FAIL("claude sandbox: apparmor", "AppArmor keeps bwrap from making the user namespaces Claude Code's sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners", APPARMOR_ADMIN_STEP) : PASS("claude sandbox: apparmor", restricted ? "the factory-bwrap profile lets bwrap make user namespaces" : "no user-namespace restriction"));
+  }
   return out;
+}
+
+/** The AppArmor profiles loaded (root's to read), or "" when they cannot be read. */
+async function apparmorProfiles() {
+  const r = await exec("/usr/bin/sudo", ["-n", "/bin/cat", "/sys/kernel/security/apparmor/profiles"], { env: { PATH: "/usr/bin:/bin" } }).catch(() => ({ code: 1 }));
+  return r.code === 0 ? String(r.stdout) : "";
 }
 
 /**

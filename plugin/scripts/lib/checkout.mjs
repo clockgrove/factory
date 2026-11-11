@@ -1,7 +1,7 @@
 // The worker's checkout: the branch, the plugin's skills and agent definitions
 // written in (git-excluded, never committed), the repository's validation and
 // setup commands, and the commit guard for protected paths.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { putFiles, readAgentTree } from "./handoff.mjs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ import { backend } from "./backend.mjs";
 import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { runnerClaudeDir } from "./local.mjs";
+import { prepareClaudeHome, runnerLayout } from "./claude-runner.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -68,27 +68,38 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
   await excludeFromGit(checkout, written, env);
   const local = backend(env).sandbox.harness(env);
   if (harness === "claude" && local?.claudeDir) await claudePlugin(checkout, local.claudeDir, env);
-  // On a runner and in a cloud sandbox VM the same copy, made by the agent in its own home (harness.mjs claudeRunner).
-  else if (harness === "claude" && agentUser() && backend(env).name !== "local") await claudePlugin(checkout, runnerClaudeDir(agentUser().home), env, { asAgent: true });
+  // On a runner and in a cloud sandbox VM the same copy, in Factory's own HOME for Claude Code, made afresh first
+  // (lib/claude-runner.mjs): the agent reads it and never writes it.
+  else if (harness === "claude" && agentUser() && backend(env).name !== "local") {
+    const layout = runnerLayout(agentUser());
+    await prepareClaudeHome(layout);
+    await claudePlugin(checkout, layout.pluginDir, env, { shared: true });
+  }
   return written;
 }
 
 /**
- * A sandboxed Claude Code run's skills and agent definitions (local mode, and a runner's in the agent's home): the clone's .claude/skills and .claude/agents as installPlugin
+ * A sandboxed Claude Code run's skills and agent definitions (local mode, and a runner's in Factory's HOME for it): the clone's .claude/skills and .claude/agents as installPlugin
  * left them (Factory's, the repository's own and its mirrored .agents/skills), copied out in the git sandbox into `dir`,
  * a directory of the stage's usage directory that no sandbox may write. Claude Code loads them from there (harness.mjs)
  * and never reads the clone's .claude, which sandboxed code can write. The skills become a plugin named factory (a skill
  * is then factory:<name>); the agents keep their names in an --agents file holding only their description, prompt, tools
  * and model, so no hook, MCP server or permission mode an agent file declares applies.
  */
-export async function claudePlugin(checkout, dir, env = process.env, { asAgent = false } = {}) {
+export async function claudePlugin(checkout, dir, env = process.env, { shared = false } = {}) {
   const files = claudePluginFiles(await readAgentTree(checkout, [".claude/skills", ".claude/agents"], env));
-  // On a runner the directory is in the agent's 700 home: the agent writes it (handoff.mjs putFiles).
-  if (asAgent) return putFiles(dir, Object.fromEntries(Object.entries(files).map(([rel, text]) => [rel, { text, replace: true }])), env);
   rmSync(dir, { recursive: true, force: true });
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, rel)), { recursive: true });
     writeFileSync(join(dir, rel), text);
+  }
+  // `shared`: a runner's agent uid reads it, whatever this process's umask (a sandbox stage's is 077).
+  if (shared) {
+    const open = (p) => {
+      chmodSync(p, 0o755);
+      for (const e of readdirSync(p, { withFileTypes: true })) e.isDirectory() ? open(join(p, e.name)) : chmodSync(join(p, e.name), 0o644);
+    };
+    open(dir);
   }
 }
 

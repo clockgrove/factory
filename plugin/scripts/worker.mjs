@@ -10,6 +10,7 @@
 // back to the same harness); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
+import { pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
@@ -216,6 +217,9 @@ async function main() {
   const lfs = await outbox.lfsSetup(resumed ? outbox.expected() : base, { timeoutMs: remainingMs(deadlineAt) });
   // Factory's own git work on the checkout is done: locally its git state is recorded, and checked before each harness start.
   backend(childBase).sandbox.pinGitState(childBase);
+  // A runner's Claude Code: the same state, put back before each start (lib/claude-runner.mjs), since the repository's
+  // install and validation run as the agent outside Claude Code's sandbox.
+  if (inputs.harness === "claude" && access.agent) await pinRunnerGit(checkout, childBase);
   if (lfs.used) log(!lfs.ok ? lfs.reason : lfs.warning ? `warning: ${lfs.warning}; the run goes on with pointer files` : "Git LFS: filters set up in the checkout, objects handed over");
   if (!lfs.ok) {
     await applyExit(repo, { issue, pr: null, exit: "blocked", reason: lfs.reason, notify: inputs.notify, stage: "lfs" }, token);
@@ -621,7 +625,7 @@ async function main() {
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).
   if (askedAtPlan) await progress.planAsked(needs.repos);
   // Hosts the worker's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
-  const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts) : null;
+  const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix }, token);
   await finish(decision.exit, decision.reason);
   }

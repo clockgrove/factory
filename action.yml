@@ -264,7 +264,9 @@ runs:
                    # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap: a profile grants them to
                    # /usr/bin/bwrap alone (not the sysctl, which lifts it for every program), and Ubuntu 26.04's
                    # bwrap-userns-restrict profile, which takes the capabilities its sandbox needs, is unloaded when loaded.
-                   if [ "$RUNNER_OS" = Linux ] && command -v apt-get >/dev/null && sudo -n true 2>/dev/null; then
+                   # Only on GitHub's hosted runners, which are thrown away after the job: on a self-hosted runner these
+                   # would outlast it and change the whole host, so doctor names the one-time admin step instead.
+                   if [ "$RUNNER_OS" = Linux ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && command -v apt-get >/dev/null && sudo -n true 2>/dev/null; then
                      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap socat ripgrep >/dev/null || { sudo -n apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap socat ripgrep >/dev/null; } || echo "::warning::bubblewrap, socat and ripgrep did not install; doctor names what is missing"
                      if [ -d /sys/kernel/security/apparmor ]; then
                        if sudo -n grep -q '^unpriv_bwrap ' /sys/kernel/security/apparmor/profiles; then sudo -n apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict || echo "::warning::bwrap-userns-restrict could not be unloaded"; fi

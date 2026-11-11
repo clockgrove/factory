@@ -90,8 +90,11 @@ const ACTIONS = {
     sessions: "artifacts",
     /** Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's. */
     cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_NOTE : ""),
-    /** Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input. */
-    deniedFix: (hosts, env = process.env) => deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner"),
+    /**
+     * Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input.
+     * Codex and Copilot skip their sandboxes here, so their Block keeps its own fix.
+     */
+    deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },

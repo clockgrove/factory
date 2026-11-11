@@ -337,6 +337,7 @@ test("a session restored from an earlier job counts its own share: the transcrip
 test("a resumed Codex pass counts its own share, in this process and from an earlier stage; output is priced once", async () => {
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   const { restoreTranscript } = await import("../scripts/lib/session.mjs");
+  const { harnessActivity } = await import("../scripts/lib/logic.mjs");
   // Real Codex 0.167.0 streams: `codex exec`, then `codex exec resume` on its thread at high effort. turn.completed
   // carries the thread's running total; the rollout's own last_token_usage for the resumed turn was input 22888,
   // cached 12288, output 50 of which reasoning 43 (total_tokens 22938 = input + output).
@@ -351,14 +352,25 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
   const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
   process.env.PATH = `${bin}:${saved.PATH}`;
   const model = "gpt-6.1-sol";
-  const run = (resume, label) => runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label });
+  // Each pass feeds a live counter as the progress line does (session.mjs liveActivity), resumed passes told their prior.
+  const live = [];
+  const run = (resume, label) => {
+    const tracker = harnessActivity();
+    live.push(tracker);
+    return runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label, onLine: tracker.feed, onResume: tracker.since });
+  };
+  const shown = () => live.at(-1).snapshot().tokens;
+  const turn = (input, cached) => ({ unit: "turn", input, cached, written: null });
   const near = (a, b, why) => assert.ok(Math.abs(a - b) < 1e-3, `${why}: ${a} vs ${b}`);
   try {
     const first = await run(null, "work-1");
     const thread = first.sessionId;
     assert.deepEqual(first.tokens, { input: 16151, output: 5, cached: 12288, written: null });
+    assert.deepEqual(shown(), { input: 16151, output: 5 }, "the live counter: input includes cached, output includes reasoning");
     const fix = await run(thread, "validation-fix-1");
     assert.deepEqual(fix.tokens, { input: 22888, output: 50, cached: 12288, written: null }, "the resumed pass's own share, reasoning inside output");
+    assert.deepEqual(shown(), { input: 22888, output: 50 }, "the live counter shows the resumed pass's own share");
+    assert.deepEqual(fix.cache.first, turn(22888, 12288), "the cache split after a CI wait is the pass's own");
     near(fix.usd, priceCodex(model, fix.tokens), "priced on its own share");
     assert.deepEqual(fix.sessionTotal.tokens, { input: 39039, output: 55, cached: 24576, written: null });
     near(mergeUsage([first, fix]).usd, priceCodex(model, fix.sessionTotal.tokens), "the run costs what the thread reported last");
@@ -376,6 +388,8 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
     delete process.env.FACTORY_LOCAL;
     const review = await run("t2", "review-fix-1");
     assert.deepEqual(review.tokens, fix.tokens, "a restored thread counts only its own share too");
+    assert.deepEqual(shown(), { input: 22888, output: 50 });
+    assert.deepEqual(review.cache.first, turn(22888, 12288));
     rmSync(root, { recursive: true, force: true });
   } finally {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];

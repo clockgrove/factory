@@ -287,7 +287,7 @@ export function seedSessionTotal(sessionId, total) {
   if (sessionId && total && !SESSION_TOTALS.has(sessionId)) SESSION_TOTALS.set(sessionId, total);
 }
 
-export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
+export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.
   const agentUid = agentUser();
   const usageName = `copilot-usage-${label}-${Date.now()}.json`;
@@ -318,6 +318,9 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     mkdirSync(dirname(eventsFile), { recursive: true });
     appendOwn(eventsFile, `${JSON.stringify({ type: "factory.run", label, harness, model: model || null, effort: effort || null, started: new Date().toISOString(), resume: !!resume })}\n`);
   }
+  // A resumed session's prior running total, for the live counter (onResume) and for this pass's own share (sinceSession).
+  const prior = RUNNING_TOTALS.has(harness) && resume ? (SESSION_TOTALS.get(resume) ?? null) : null;
+  if (prior) onResume?.(resume, prior);
   const started = new Date().toISOString();
   // On Actions the harness runs as the agent uid (its cwd is the agent's checkout), with its model credential and nothing
   // else from the job; locally it leads its own process group, killed when it exits. Then its leftovers are reaped.
@@ -347,7 +350,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     if (got !== undefined) writeNew(usagePath, got);
   }
   const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd });
-  const rec = RUNNING_TOTALS.has(harness) && resume ? sinceSession(reported, SESSION_TOTALS.get(resume)) : reported;
+  const rec = prior ? sinceSession(reported, prior) : reported;
   // A pass with no result line (killed, crashed) reports no total; the session's last good one stays.
   if (RUNNING_TOTALS.has(harness) && reported.sessionId && reported.usd !== null) {
     const total = { usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime };

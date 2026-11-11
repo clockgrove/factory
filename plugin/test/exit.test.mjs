@@ -432,7 +432,16 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   c.feed('{"type":"turn.started"}');
   c.feed('{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}');
   c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
-  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 150, output: 25 }]);
+  // input_tokens already includes the cached part, output_tokens the reasoning part.
+  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20 }]);
+  // Claude reports a resumed session's cost as its running total: the line shows the pass's own share.
+  const r = harnessActivity(() => 0);
+  r.since("s1", { usd: 12.9695405, tokens: { input: 1, output: 1 } });
+  r.feed('{"type":"system","subtype":"init","session_id":"s1"}');
+  r.feed('{"type":"result","session_id":"s1","total_cost_usd":14.2617083}');
+  assert.match(activityLine(r.snapshot(), { harness: "claude" }), /\$1\.29/);
+  r.feed('{"type":"result","session_id":"s2","total_cost_usd":0.5}');
+  assert.equal(r.snapshot().usd, 0.5, "another session's total is its own");
 });
 
 test("exec: onLine sees each stdout line; a child silent for idleMs is killed and reported idle", async () => {

@@ -167,6 +167,14 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   const doc = parseYaml(rendered);
   assert.deepEqual(Object.keys(doc.jobs), ["dispatch", "queue-watch", "wake", "launch", "launch-gate", "launch-event", "launch-tick", "image", "sweep", "sweep-wake", "image-wake"]);
   assert.equal(doc.jobs["launch-gate"].concurrency, undefined, "the gate queues in no group");
+  // A job downstream of one that runs past a skipped need must state its own status condition: GitHub's implicit
+  // success() is false whenever any ancestor was skipped (#53: image-wake after a push, cron or manual build).
+  const runsPastSkip = (job) => /cancelled\(\)|always\(\)/.test(String(doc.jobs[job]?.if ?? ""));
+  for (const [name, job] of Object.entries(doc.jobs)) {
+    const needs = [job.needs ?? []].flat();
+    if (needs.some(runsPastSkip)) assert.ok(runsPastSkip(name), `${name} needs ${needs.join(", ")}, which runs past a skipped need, so its own if must too`);
+  }
+  assert.match(doc.jobs["image-wake"].if, /needs\.image\.result == 'success'/);
   assert.equal(doc.jobs["launch-tick"].concurrency, undefined, "a merge tick joins no Objective's group, so it never replaces a pending launch");
   assert.match(doc.jobs["launch-tick"].if, /launch-gate\.outputs\.tick == 'true'/);
   assert.deepEqual(doc.jobs["launch-tick"].permissions, { actions: "write" });

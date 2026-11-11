@@ -13,6 +13,14 @@ test("backend: FACTORY_LOCAL=1 picks local, anything else the Action's runner", 
   assert.equal(backend({ FACTORY_LOCAL_SANDBOX: "{}" }).name, "local", "sandbox settings alone still mean local");
 });
 
+test("deniedFix: a local Block on denied hosts gets the FACTORY_LOCAL_DOMAINS fix; the Action's runner keeps its own", () => {
+  const env = { FACTORY_LOCAL_SANDBOX: JSON.stringify({ domains: ["github.com", "extra.example.com"] }) };
+  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], env), null);
+  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org", "extra.example.com"], env), /^The local sandbox denied `cdn\.example\.org`\. .*FACTORY_LOCAL_DOMAINS.*re-apply `factory:objective`\.$/);
+  assert.equal(BACKENDS.local.sandbox.deniedFix(["github.com"], env), null, "an allowed host is no allow-list fix");
+  assert.match(BACKENDS.local.sandbox.deniedFix(["cdn.example.org"], { FACTORY_LOCAL_SANDBOX: "{not json" }), /cdn\.example\.org/, "unreadable settings never fail the notice");
+});
+
 test("trigger: the Action takes unlabelled Objectives, a local loop the factory:local ones (or all with FACTORY_LOCAL_ALL)", () => {
   assert.equal(BACKENDS.actions.trigger.routes(issue("factory:objective")), true);
   assert.equal(BACKENDS.actions.trigger.routes(issue("factory:objective", "factory:local")), false);
@@ -34,6 +42,7 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.match(BACKENDS.local.sandbox.cardNotes({}), /\$TMPDIR/);
   assert.doesNotMatch(BACKENDS.local.sandbox.cardNotes({}), /factory-db/);
   assert.match(BACKENDS.local.sandbox.cardNotes({ FACTORY_LOCAL_DB: "1" }), /factory-db npm run test:db/);
+  assert.match(BACKENDS.local.sandbox.cardNotes({}), /`deniedHosts`/);
   assert.deepEqual([BACKENDS.actions.gate.commandsFirst, BACKENDS.local.gate.commandsFirst], [false, true]);
   assert.equal(await BACKENDS.local.trigger.stepsAside(), false);
 });

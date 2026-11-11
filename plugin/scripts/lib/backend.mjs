@@ -6,6 +6,7 @@
 import { getIssue } from "./github.mjs";
 import { CLAIM_PAUSE_MS, GitRefusal, checkGitState, clearHarnessConfig, gitDirChanged, pinGitState, hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
 import { agentUser, asAgent, exec, reapAgent } from "./proc.mjs";
+import { deniedHostsFix } from "./logic.mjs";
 
 /** A local loop holds the Objective while its claim's heartbeat is fresh. */
 const claimedLocally = async (repo, issue, opts) => (await localClaim(repo, issue, opts).catch(() => null))?.fresh === true;
@@ -20,6 +21,16 @@ const localHold = async (repo, issue, opts, now = Date.now()) => {
   if (!c) return null;
   const state = c.fresh ? "alive" : now - Date.parse(c.heartbeat) < CLAIM_PAUSE_MS ? "paused" : "expired";
   return { state, holder: c.holder, heartbeat: c.heartbeat, commentId: c.commentId };
+};
+
+/** The hosts this stage's local sandboxes allow, read from FACTORY_LOCAL_SANDBOX as-is (a notice never fails on it). */
+const sandboxDomains = (env) => {
+  try {
+    const d = JSON.parse(env.FACTORY_LOCAL_SANDBOX || "{}").domains;
+    return Array.isArray(d) ? d : [];
+  } catch {
+    return [];
+  }
 };
 
 const ACTIONS = {
@@ -66,6 +77,8 @@ const ACTIONS = {
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
     cardNotes: () => "",
+    /** A runner keeps no host list, so a host the worker names as denied has no allow-list fix: the Block's own fix stands. */
+    deniedFix: () => null,
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },
@@ -139,10 +152,17 @@ const LOCAL = {
     reap: async () => {},
     /** A later stage's session comes from the earlier stage directories beside this one on the box. */
     sessions: "stage-dirs",
+    /**
+     * The Blocked notice's fix when the worker stopped on hosts this sandbox denied (its exit record's `deniedHosts`):
+     * allow them in FACTORY_LOCAL_DOMAINS (logic.mjs deniedHostsFix), leaving out any the sandboxes already allow.
+     */
+    deniedFix: (hosts, env = process.env) => deniedHostsFix(hosts, sandboxDomains(env)),
     cardNotes: (env = process.env) =>
       // The sandboxes give /tmp no lasting space (Codex's is read-only, Copilot's is fresh for each command).
       "\n\nPut scratch files under `$TMPDIR`, not /tmp: in this sandbox /tmp may be read-only or emptied between commands." +
       // The sandbox cannot reach Git LFS's storage host; Factory's own push uploads the media (lib/session.mjs push).
+      // A denied host is the operator's to allow (FACTORY_LOCAL_DOMAINS): the worker names it rather than working around it.
+      "\n\nThe sandbox reaches only the hosts the operator allows. If it denies a host your work cannot do without (a 403 from its proxy, or a `<sandbox_violations>` line naming the host), do not work around it: stop blocked, with each such host name in exit.json's `deniedHosts`, so the operator can allow it." +
       "\n\nIf your work adds or changes files that `.gitattributes` routes through Git LFS, commit them and stop: this sandbox cannot reach Git LFS storage, so a push carrying new media fails here. Factory uploads the media and pushes the branch after you exit; do not retry the push, and never use `--no-verify`." +
       // The sandbox cannot reach the box's Postgres, so tests that need one run through factory-db.
       (env.FACTORY_LOCAL_DB === "1" ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards." : ""),

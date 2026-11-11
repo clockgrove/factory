@@ -31,6 +31,6 @@ If Factory's validation is red after its push, it sends you the failure; fix it 
 
 ## Stop
 
-Write your exit record last, as one JSON object in `$FACTORY_OUT/exit.json`: {"exit": "delivered" | "question" | "blocked", "questions": [{"question": "verbatim", "test": "contract" | "decision" | "access", "existing": "the existing contract it changes or removes, the decision it contradicts, or the access it grants"}], "reason": "why you are blocked, else empty"}, with "part": {"remaining": [...]} only for a split Objective with items left. Factory reads that file, never the PR body, to decide whether you delivered, raised a question or are blocked.
+Write your exit record last, as one JSON object in `$FACTORY_OUT/exit.json`: {"exit": "delivered" | "question" | "blocked", "questions": [{"question": "verbatim", "test": "contract" | "decision" | "access", "existing": "the existing contract it changes or removes, the decision it contradicts, or the access it grants"}], "reason": "why you are blocked, else empty"}, with "part": {"remaining": [...]} only for a split Objective with items left, and "deniedHosts": ["host.example.com"] only when you are blocked because the sandbox denied those hosts (bare host names; the operator decides whether to allow them). Factory reads that file, never the PR body, to decide whether you delivered, raised a question or are blocked.
 
 Your outputs are the commits on `factory/<issue>` and the files in `$FACTORY_OUT`. Anything else is noise that a human has to read.

@@ -3,6 +3,7 @@
 
 import { parseToml } from "./toml.mjs";
 import { parseYaml } from "./yaml.mjs";
+import { refusalFields } from "./usage.mjs";
 
 // ---------------------------------------------------------------- validation commands
 
@@ -614,6 +615,15 @@ export function clip(text, max = REASON_MAX) {
   return `${cut.replace(/[\s,;:.\-\u2013\u2014]+$/, "")}…`;
 }
 
+/**
+ * The Blocked reason for a provider's refusal (usage.mjs providerRefusal): the harness, the status, type and code, and the
+ * provider's own message shortened (clip). Retrying cannot pass it, so the fix is the credential's account or the settings.
+ */
+export function refusalReason(r) {
+  const fields = refusalFields(r);
+  return `${r.harness} was refused by its provider${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; not retried: the fix is on the credential's account or in the harness settings, not in the code`;
+}
+
 /** A worker's own Block: its reason, shortened, and the hosts its sandbox denied when it named them. */
 const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}) });
 
@@ -647,7 +657,7 @@ export function deniedHostsFix(hosts, domains = []) {
 
 /**
  * The worker's exit, from what the run left behind.
- *  harness:    {ok: boolean, error?: string, budgetExceeded?: boolean, timedOut?: boolean, died?: number}
+ *  harness:    {ok: boolean, error?: string, budgetExceeded?: boolean, timedOut?: boolean, died?: number, refusal?: object}
  *  pr:         {exists, draft, body} | null
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
@@ -675,6 +685,8 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}` };
   // Factory refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
   if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}` };
+  // A provider's refusal (usage.mjs providerRefusal) is never retried: it Blocks at once, naming the refusal.
+  if (harness?.refusal) return { exit: "blocked", reason: refusalReason(harness.refusal) };
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached" };

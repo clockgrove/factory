@@ -392,6 +392,7 @@ async function main() {
     // A Copilot run Factory stopped at its plan writes no usage file: unmetered, but nothing more runs after it (the plan-time
     // Question skips every later pass), so it is no cap reached and the exit stays the Question.
     if (inputs.maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, rec.stopped ? { unmetered: true } : { budgetExceeded: true, unmetered: true });
+    if (rec.refusal) log(`harness ${inputs.harness} was refused by the provider (${rec.error}); not retried`);
     if (rec.budgetExceeded || !crashed(rec)) break;
     // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
     if (attempt === 1 && restored?.id) {
@@ -425,7 +426,7 @@ async function main() {
   // spends nothing on it: its draft just does not go up.
   const catchConflict = () => !pushed && !!outbox.conflict && !outbox.failed;
   if (catchConflict() && remainingMs(deadlineAt) <= 0) rec.timedOut = true;
-  if (catchConflict() && !planNeeds && !rec.budgetExceeded && !rec.timedOut) {
+  if (catchConflict() && !planNeeds && !rec.budgetExceeded && !rec.timedOut && !rec.refusal) {
     log(`${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run and ${branch} conflicts with it; the harness resolves the conflict`);
     await progress(`conflict with ${defaultBranch}: harness ${inputs.harness} resolves it`);
     await outbox.feed();
@@ -442,15 +443,18 @@ async function main() {
     if (pass.budgetExceeded || (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd)) rec.budgetExceeded = true;
     if (inputs.maxUsd > 0 && unmeteredRun(pass)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
     await io.collect();
-    const busy = rec.timedOut || rec.budgetExceeded || crashed(pass) ? { ops: [] } : await outbox.inProgress();
+    // A provider's refusal of the pass Blocks the stage with it (decideExit), unpushed.
+    if (pass.refusal) rec.refusal = pass.refusal;
+    const busy = rec.timedOut || rec.budgetExceeded || rec.refusal || crashed(pass) ? { ops: [] } : await outbox.inProgress();
     if (rec.timedOut || rec.budgetExceeded) log(`the conflict pass reached the ${rec.timedOut ? "time" : "dollar"} cap; ${branch} is not pushed`);
+    else if (rec.refusal) log(`the conflict pass was refused by the provider (${pass.error}); ${branch} is not pushed`);
     else if (crashed(pass)) outbox.block(`the harness died resolving ${branch}'s conflict with ${defaultBranch} (exit ${pass.exitCode ?? "none"}${pass.signal ? `, ${pass.signal}` : ""}); nothing was pushed`);
     else if (busy.code !== undefined) outbox.block(`after the conflict pass Factory could not check the checkout for a rebase or merge left in progress (exit ${busy.code}); ${branch} was not pushed`);
     else if (busy.ops.length) outbox.block(`the conflict pass left a ${busy.ops.join(" and ")} in progress in the checkout; ${branch} was not pushed`);
     else pushed = await outbox.push();
   }
   // A conflict no pass resolved, and no cap or plan-time Question to name: Blocked with it, not as a run that left no commits.
-  if (catchConflict() && !planNeeds && !rec.timedOut && !rec.budgetExceeded) outbox.block(outbox.error);
+  if (catchConflict() && !planNeeds && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) outbox.block(outbox.error);
   if (!pushed) log(`push refused: ${outbox.error}${outbox.detail ? ` (GitHub: ${outbox.detail})` : ""}`);
   else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}`);
   let { pr: found, delta } = await observe(repo, outbox, { branch }, token);
@@ -477,7 +481,7 @@ async function main() {
   // 7. Factory's own validation passes (validationLoop caps them), failures back to the harness.
   let validation = null;
   // Hard stops only; a harness that errored but left commits still gets Factory's validation pass.
-  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
+  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
   if (early.exit !== "blocked" && !planNeeds) {
     validation = await validationLoop({
       onPhase: progress,
@@ -514,8 +518,9 @@ async function main() {
   }
 
   // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
-  // a run that had no harness (clean rebase) delivered by construction.
-  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered: !!(rec?.unmetered || validation?.harness?.unmetered) });
+  // a run that had no harness (clean rebase) delivered by construction. A provider's refusal is not asked again.
+  const refusal = rec?.refusal || validation?.harness?.refusal || null;
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered: !!(rec?.unmetered || validation?.harness?.unmetered) });
   records.push(...asked.usage);
   if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // The question check may have turned QUESTION: items into assumptions: the PR body and plan comment follow pr.md and plan.md.
@@ -531,7 +536,7 @@ async function main() {
   // goes to In review for the dispatcher's send-back (a rebase onto the default branch first), not to the reviewer.
   const conflict = !!validation?.conflict;
   const decision = decideExit({
-    harness: { ...rec, ok: rec.ok || evidenceOk, died, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
+    harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
     validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, scope: validation.scope } : undefined,

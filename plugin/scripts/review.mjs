@@ -20,7 +20,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installPlugin,
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -501,6 +501,7 @@ async function main() {
   const missed = !alreadyReviewed && reviewMissed({ ok: reviewRec.ok, review: reviewOf(reviewRec), entries });
   const retryTimeout = reviewCallTimeout(remainingMs(deadlineAt));
   if (missed && retryTimeout === null) log(`reviewer ended in ${reviewCallEnd(reviewRec, reviewOf(reviewRec))} with the stage's time cap reached: it is not run again`);
+  else if (missed && reviewRec.refusal) log(`reviewer was refused by the provider (${reviewRec.error}): it is not run again`);
   else if (missed) {
     const again = reviewRetry({ model: inputs.reviewerModel, effort: inputs.reviewerEffort, fallback: inputs.reviewerFallback });
     log(`reviewer on ${inputs.reviewerModel || inputs.harness} ended in ${reviewCallEnd(reviewRec, reviewOf(reviewRec))}${reviewRec.ok && reviewOf(reviewRec).parsed ? " that judged no acceptance entry" : ""}${reviewRec.error ? ` (${reviewRec.error})` : ""}; running it once more on ${again.model || inputs.harness}${again.effort ? ` at ${again.effort}` : ""}`);
@@ -527,7 +528,7 @@ async function main() {
   // stands in for it) and the stage Blocks; Factory never merges past the review (handoff.mjs reviewAnswer).
   const answer = alreadyReviewed ? reviewRec : reviewAnswer(reviewRec, retryRec, reviewOf);
   if (!answer) {
-    const reason = noReviewReason([reviewRec, retryRec], reviewOf);
+    const reason = reviewRec.refusal && !retryRec ? refusalReason(reviewRec.refusal) : noReviewReason([reviewRec, retryRec], reviewOf);
     log(reason);
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
@@ -618,7 +619,7 @@ async function main() {
     answerRun = rec;
     let out = await io.collect();
     // Toolchain files the answer changed outside its scope: one turn to put them back, else the push below is refused.
-    if (!crashed(rec) && !rec.timedOut && !rec.budgetExceeded) {
+    if (!crashed(rec) && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) {
       const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), label: "answer-scope", progress, io });
       for (const r of held.usage) mark(r, r);
       records.push(...held.usage);
@@ -641,7 +642,8 @@ async function main() {
         });
     if (toAnswer.length) log(`${replied} of ${toAnswer.length} reviewer comment(s) answered`);
     // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
-    const asked = unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
+    // A provider's refusal is not asked again: the answer Blocks with it.
+    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
     records.push(...asked.usage);
     for (const r of asked.usage) mark(r);
     answerRecord = asked.record;
@@ -658,7 +660,7 @@ async function main() {
     if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
-  const validation = answering && !unmetered && !outbox.failed && !heldQuestion
+  const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);

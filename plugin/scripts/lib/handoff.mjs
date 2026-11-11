@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, rest, updatePr, upsertComment } from "./github.mjs";
 import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, snapComments } from "./logic.mjs";
+import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
 import { log } from "./inputs.mjs";
 
@@ -111,6 +112,7 @@ export function reviewCallEnd(rec, review) {
   if (rec.timedOut) return "the time cap";
   if (rec.idle) return "no output (killed as hung)";
   if (rec.stopped) return "a stop by Factory";
+  if (rec.refusal) return `a refusal by the provider (${refusalFields(rec.refusal)})`;
   return rec.signal ? `a crash (signal ${rec.signal})` : `a crash (exit ${rec.exitCode ?? "?"})`;
 }
 

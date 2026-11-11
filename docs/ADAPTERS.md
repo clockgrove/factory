@@ -187,7 +187,7 @@ Rules:
 
 ## Sweep
 
-Two kinds of lost work, picked up on the cron:
+Two kinds of lost work, picked up on the dispatcher's next tick (an event's, a wake's, or the cron's as the backstop) and the sweep job:
 
 - **Lost events (the dispatcher, every tick, `FACTORY_SANDBOX` set).** The sweep names an Objective again, after a three-minute grace for the event's own launch:
   - a Running Objective with no work start since it became Running;

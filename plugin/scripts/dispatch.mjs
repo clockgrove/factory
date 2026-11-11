@@ -14,7 +14,8 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
-import { NOT_READY_STATUSES, REVIEW_LABEL, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_KINDS, WAKE_SLACK_MS, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, staleDecision, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -70,6 +71,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
   const watch = stopwatch();
+  // Every moment at which only time changes what this dispatcher does (logic.mjs WAKE_KINDS): the wake job sleeps to
+  // the earliest of its kinds; the rest are listed so the log shows each wait and whose it is.
+  const deadlines = [];
+  const due = (issue, kind, ms) => {
+    if (Number.isFinite(ms)) deadlines.push({ issue, kind, at: new Date(ms).toISOString() });
+  };
+  // A read this run could not make: read again soon, once (nextWake arms no retry from a retry's own run).
+  const retry = (what) => {
+    if (!deadlines.some((d) => d.kind === "retry")) due(null, "retry", now.getTime() + RETRY_WAKE_MS);
+    log(`${what} unread this tick; a retry is due`);
+  };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -95,6 +107,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!e.rateLimited) throw e;
       issue.relationsUnread = true;
       log(`#${issue.number}: blocked-by relations rate limited (HTTP ${e.status}); not picked this tick`);
+      retry(`#${issue.number}'s blocked-by relations`);
       return null;
     });
     if (rel) {
@@ -146,7 +159,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!asked) continue;
       const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       const decisions = await objectiveDecisions(repo, { issue: issue.number, prNumber: pr?.number ?? null }, opts).catch(() => []);
-      if (!missedAnswer(decisions, { questionSince: asked, graceMs: RELAUNCH_GRACE_MS })) continue;
+      if (!missedAnswer(decisions, { questionSince: asked, graceMs: RELAUNCH_GRACE_MS })) {
+        // An answer younger than the grace: its own launch is due first; the sweep's turn comes after.
+        const answer = decisions.find((d) => Date.parse(d.created_at ?? d.at) > Date.parse(asked));
+        if (answer) due(issue.number, "answer-grace", Date.parse(answer.created_at ?? answer.at) + RELAUNCH_GRACE_MS + 1000);
+        continue;
+      }
       answered.push(issue.number);
       issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
       statuses[issue.number] = "Queued";
@@ -169,7 +187,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     checkNames ??= inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     if (!checkNames.length) return false;
     const done = (await checksOn(repo, head, checkNames, opts).catch(() => null))?.done;
-    return checksResume(record, { headSha: head, checksDone: done, graceMs: RELAUNCH_GRACE_MS });
+    const resume = checksResume(record, { headSha: head, checksDone: done, graceMs: RELAUNCH_GRACE_MS });
+    // Done within the grace: the check event's own launch is due first.
+    if (done && !resume) due(n, "checks-grace", Date.parse(record.at) + RELAUNCH_GRACE_MS + 1000);
+    return resume;
+  };
+  // A stage that holds its sandbox within a lease: a stage that dies silently frees the Objective when the lease ends.
+  const leaseDue = (n, record) => {
+    if (record?.state === "running" && record.leaseUntil) due(n, "lease", Date.parse(record.leaseUntil) + WAKE_SLACK_MS);
   };
 
   // Stale Running: a Running issue with no worker job alive (a runner kill past the reserve, a crash the
@@ -189,6 +214,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       ? new Set()
       : await activeWorkIssues(repo, readToken).catch((e) => {
           log(`live jobs could not be listed (${e.message.slice(0, 120)}); stale Running left alone`);
+          retry("live jobs");
           return null;
         });
     if (alive) {
@@ -196,7 +222,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (alive.has(issue.number)) continue;
         if (sandbox && backend().trigger.routes(issue)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-          if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) continue;
+          if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
+            leaseDue(issue.number, record);
+            continue;
+          }
           if (record?.waiting === "checks") {
             if (await checksFinished(issue.number, record)) relaunch.push(issue.number);
             continue;
@@ -204,6 +233,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           const since = await runningSince(repo, issue.number, opts).catch(() => null);
           if (since && !launchedSince(record, "work", since)) {
             if (Date.now() - Date.parse(since) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+            else due(issue.number, "launch-grace", Date.parse(since) + RELAUNCH_GRACE_MS + 1000);
             continue;
           }
         }
@@ -219,6 +249,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (hold?.state === "alive") continue;
         if (hold?.state === "paused") {
           paused.push(issue.number);
+          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
           continue;
         }
         if (!hold && since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
@@ -289,16 +320,27 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (sandbox && reviewing && !pr.draft) {
         const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
         const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        if (labelledAt && Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS && !launchedSince(record, "review", labelledAt) && !stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000) && !quotaWaiting(record)) relaunch.push(issue.number);
+        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+        if (holds) leaseDue(issue.number, record);
+        if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
+        if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
+          if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+          else due(issue.number, "review-grace", Date.parse(labelledAt) + RELAUNCH_GRACE_MS + 1000);
+        }
       }
       // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
       if (sandbox && !relaunch.includes(issue.number)) {
         const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        if (record?.waiting === "checks" && !stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000) && (await checksFinished(issue.number, record))) relaunch.push(issue.number);
+        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+        if (holds) leaseDue(issue.number, record);
+        if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) relaunch.push(issue.number);
       }
       // Only a conflicting PR under review needs the live jobs read (once per tick).
       // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
-      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) {
+        liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+        if (liveJobs.failed) retry("live jobs");
+      }
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing, reviewRunning });
@@ -348,6 +390,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
   const { spentToday, records, usageError } = await spend;
+  if (usageError) retry("today's spend");
   watch.mark("spend");
 
   const held = {};
@@ -378,7 +421,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     await pooled(wanted, RELATION_READS, async (issue) => {
       if (NOT_READY_STATUSES.has(stateOf(issue, statuses[issue.number] ?? null))) return;
       const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-      if (quotaWaiting(record, now.getTime())) deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
+      if (quotaWaiting(record, now.getTime())) {
+        deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
+        due(issue.number, "quota", Date.parse(record.quota.retryAt));
+      }
     });
     watch.mark("quota");
   }
@@ -393,6 +439,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     dailyUsd: inputs.dailyUsd,
     spentToday,
   });
+  // Queued work daily_usd held back starts when the UTC day turns (a spend that could not be read is a retry, above).
+  if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
   // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);
@@ -450,7 +498,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /** How often the queue watch reads the queue, and the longest it watches (under its job's timeout). */
@@ -510,6 +558,28 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
   }
 }
 
+/**
+ * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of WAKE_KINDS still ahead,
+ * unless a wake already queued or sleeping covers it (read from the live jobs' names; an unreadable list arms anyway,
+ * since a second sleeper only ticks twice). `firedBy` is the wake whose tick started this run, or null.
+ */
+export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, readJobs }) {
+  if (!nextWake(deadlines, { now, firedBy })) return null;
+  const armed = await readJobs().then(
+    (j) => j.wakes,
+    (e) => {
+      log(`armed wakes could not be listed (${String(e.message).slice(0, 120)}); arming anyway`);
+      return [];
+    },
+  );
+  return nextWake(deadlines, { now, firedBy, armed });
+}
+
+/** The wake that started this run: a `workflow_dispatch` whose `wake` input the wake job set; else null. */
+export function firedByWake(eventName, payload) {
+  return eventName === "workflow_dispatch" ? parseWake(payload?.inputs?.wake) : null;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = resolveInputs({ args });
@@ -563,6 +633,24 @@ async function main() {
   setOutput("count", String(named.length));
   setOutput("reason", result.reason || "");
   setOutput("queue_watch", watchOutput(result.queueWatch));
+  // The dispatcher's own next tick: never from a dry run or a run named for one issue (it saw only that issue).
+  const waits = result.deadlines || [];
+  for (const d of [...waits].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) log(`  due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${WAKE_KINDS.includes(d.kind) ? "" : " (its owner's; the cron is the backstop)"}`);
+  let wake = null;
+  if (args.dry_run !== "true" && !inputs.issue && waits.length) {
+    const { readFileSync } = await import("node:fs");
+    let payload = {};
+    try {
+      payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
+    } catch {
+      payload = {};
+    }
+    const firedBy = firedByWake(process.env.GITHUB_EVENT_NAME || "", payload);
+    wake = await armWake(repoOf(inputs.repo), waits, { firedBy, readJobs: () => activeFactoryJobs(repoOf(inputs.repo), { token: inputs.githubToken || token }, { strict: true }) });
+  }
+  if (wake) log(`wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
+  setOutput("wake_at", wake?.at ?? "");
+  setOutput("wake_kind", wake?.kind ?? "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);

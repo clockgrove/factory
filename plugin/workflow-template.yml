@@ -16,6 +16,7 @@ on:
     inputs:
       issue: { description: Objective issue number (empty runs the dispatcher), required: false }
       harness: { description: "Override FACTORY_HARNESS for this run (claude | codex | copilot)", required: false }
+      wake: { description: "Set by the wake job only (the deadline it slept to); leave empty", required: false }
       # {{#sandbox}}
       image: { description: "true builds the sandbox image from the default branch now", required: false }
       sweep: { description: "true runs the sandbox sweep now", required: false }
@@ -96,7 +97,7 @@ jobs:
     concurrency: { group: factory-dispatch, cancel-in-progress: false } # ticks run one at a time
     runs-on: ubuntu-latest
     timeout-minutes: 15 # a tick takes seconds; a hung one would hold every later tick for the runner's six hours
-    outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}", queue_watch: "${{ steps.f.outputs.queue_watch }}" }
+    outputs: { issues: "${{ steps.f.outputs.issues }}", count: "${{ steps.f.outputs.count }}", queue_watch: "${{ steps.f.outputs.queue_watch }}", wake_at: "${{ steps.f.outputs.wake_at }}", wake_kind: "${{ steps.f.outputs.wake_kind }}" }
     steps:
       - uses: {{action}}
         id: f
@@ -125,6 +126,32 @@ jobs:
         if: steps.w.outputs.tick == 'true'
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml
+  wake:
+    # The dispatcher's own next tick, for a wait only time ends (GitHub's cron fires late or not at all): a sandbox
+    # stage's lease end (a stage that died silently), a retry the sandbox vendor's quota set, the UTC day's turn when
+    # daily_usd held work back, or one retry of a read that failed. The dispatcher arms one only when no wake already
+    # queued or sleeping fires before it; none is ever cancelled, and a second one only ticks twice. It sleeps on a
+    # hosted runner: on a private repository each sleeper bills its minutes (about $0.36 an hour on a 2-core Linux
+    # runner) and holds one of the account's concurrent-job slots while it sleeps; public repositories pay nothing.
+    # A deadline past 350 minutes is reached in hops, each a plain tick that arms the rest.
+    name: wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})
+    needs: dispatch
+    if: needs.dispatch.outputs.wake_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions: { actions: write } # the dispatcher tick only
+    steps:
+      - name: Sleep to the deadline, then tick the dispatcher
+        env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", WAKE_AT: "${{ needs.dispatch.outputs.wake_at }}", WAKE_KIND: "${{ needs.dispatch.outputs.wake_kind }}" }
+        run: |
+          left=$(( $(date -u -d "$WAKE_AT" +%s) - $(date -u +%s) ))
+          if [ "$left" -gt 21000 ]; then
+            sleep 21000
+            gh workflow run factory.yml || { sleep 30; gh workflow run factory.yml; }
+            exit 0
+          fi
+          if [ "$left" -gt 0 ]; then sleep "$left"; fi
+          gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT" || { sleep 30; gh workflow run factory.yml -f wake="$WAKE_KIND $WAKE_AT"; }
   # {{^sandbox}}
   work:
     needs: dispatch

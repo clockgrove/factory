@@ -2342,6 +2342,56 @@ export function quotaBackoff(prev, now = Date.now()) {
 /** Whether the record says the Objective waits out a quota refusal now: its retry time not reached. */
 export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.parse(record?.quota?.retryAt)) && now < Date.parse(record.quota.retryAt);
 
+/**
+ * The dispatcher's own next tick (workflow-template.yml `wake`). Each run lists its deadlines: `{issue, kind, at}`, a
+ * moment at which only time, not an event, changes what the dispatcher does. A wake job sleeps only to these kinds:
+ * - `lease`: a sandbox stage's lease end plus WAKE_SLACK_MS (a stage that died silently frees its Objective then);
+ * - `quota`: the retry time of a start the vendor's quota refused (the launcher handed the wait over);
+ * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
+ * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
+ * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
+ * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
+ */
+export const WAKE_KINDS = Object.freeze(["lease", "quota", "daily-cap", "retry"]);
+/** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
+export const WAKE_SLACK_MS = 60_000;
+/** How soon a `retry` wake reads again. */
+export const RETRY_WAKE_MS = 2 * 60_000;
+/** The longest one wake job sleeps (hosted runners end a job at six hours): a later deadline is reached in hops. */
+export const WAKE_MAX_SLEEP_S = 350 * 60;
+
+/** The next 00:00 UTC after `now` (ms), when today's spend starts over. */
+export const nextUtcMidnight = (now) => {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+};
+
+const WAKE = /^(lease|quota|daily-cap|retry) (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/;
+/** A wake's `{kind, at}` from its job name (`wake (<kind> <iso>)`) or its tick's `wake` input (`<kind> <iso>`); else null. */
+export function parseWake(text) {
+  const m = WAKE.exec(String(text ?? "").replace(/^wake \((.*)\)$/, "$1"));
+  return m && Number.isFinite(Date.parse(m[2])) ? { kind: m[1], at: m[2] } : null;
+}
+
+/**
+ * The one wake this run arms, `{kind, at, issue}`, or null. Only WAKE_KINDS, only deadlines still ahead of `now`, the
+ * earliest first. None when a wake already queued or sleeping (`armed`, from the job names) fires before it or within
+ * WAKE_SLACK_MS after it: that wake's tick arms the rest, so sleepers never pile up and none is ever cancelled. A run a
+ * wake started (`firedBy`, its tick's input) never arms that same deadline again (a runner clock behind the sleeper's
+ * would loop on it), nor any retry after a retry wake (a read that keeps failing waits for the next event or the cron).
+ */
+export function nextWake(deadlines, { now = Date.now(), armed = [], firedBy = null } = {}) {
+  const fired = firedBy ? Date.parse(firedBy.at) : NaN;
+  const ahead = (deadlines || [])
+    .filter((d) => WAKE_KINDS.includes(d?.kind) && Date.parse(d.at) > now)
+    .filter((d) => !(firedBy?.kind === d.kind && (d.kind === "retry" || Date.parse(d.at) === fired)));
+  if (!ahead.length) return null;
+  const first = ahead.reduce((a, b) => (Date.parse(b.at) < Date.parse(a.at) ? b : a));
+  const at = Date.parse(first.at);
+  if ((armed || []).some((w) => Date.parse(w?.at) > now && Date.parse(w.at) <= at + WAKE_SLACK_MS)) return null;
+  return { kind: first.kind, at: new Date(at).toISOString(), issue: first.issue ?? null };
+}
+
 /** Event time to command start, in milliseconds, or null when either end is unknown. */
 export function dispatchLatency(eventAt, commandAt) {
   const a = Date.parse(eventAt);

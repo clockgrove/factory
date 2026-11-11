@@ -504,10 +504,12 @@ const readOr = (f) => {
 export const SHARED_TMP = ["/tmp/claude", "/private/tmp/claude"];
 
 /**
- * Git LFS's download host on GitHub, seen in a traced pull (the batch API is on github.com). Local mode reads LFS media
- * and never uploads it, so the upload hosts stay out: one is an S3 hostname through which any bucket is addressable.
+ * Git LFS's download hosts on GitHub: the batch download a pull makes (github-cloud, seen in a traced pull; the batch
+ * API is on github.com) and a repository's LFS file read over HTTPS (media.githubusercontent.com, as raw files are on
+ * raw.githubusercontent.com). Local mode reads LFS media and never uploads it, so the upload hosts stay out: one is an
+ * S3 hostname through which any bucket is addressable.
  */
-export const LFS_DOMAINS = ["github-cloud.githubusercontent.com"];
+export const LFS_DOMAINS = ["github-cloud.githubusercontent.com", "media.githubusercontent.com"];
 
 /** The hosts a sandboxed command may reach: GitHub (Git LFS included) and the npm and Yarn registries, plus the adopter's list. */
 export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", ...LFS_DOMAINS, "registry.npmjs.org", "registry.yarnpkg.com", "repo.yarnpkg.com"];

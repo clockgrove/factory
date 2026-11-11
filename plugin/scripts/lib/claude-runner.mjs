@@ -14,7 +14,7 @@
 //   refuses the start.
 // - Its commands get the agent's own HOME and TMPDIR back through CLAUDE_ENV_FILE, which Claude Code sources inside the
 //   sandbox before each command, so package caches and the agent's read-only gh login work as before.
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
@@ -26,10 +26,26 @@ export const CLAUDE_HOME = "/var/lib/factory-claude";
 /** The package caches in the agent's home that Claude Code's sandboxed commands may write. */
 export const RUNNER_CACHES = [".npm", ".cache", ".local/share/pnpm", ".bun", ".yarn"];
 
-/** Where everything lives for one agent: Factory's directory, and the per-start state in the agent's home. */
+/** A user's uid from /etc/passwd, or null. */
+export function uidOf(user, passwd = () => readFileSync("/etc/passwd", "utf8")) {
+  try {
+    const line = passwd().split("\n").find((l) => l.split(":")[0] === user);
+    return line ? Number(line.split(":")[2]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where everything lives for one agent: Factory's directory, and the per-start state in the agent's home.
+ * `editDiffs`: the directory Claude Code keeps its Bash edits' diffs in (`<command temp>/claude-<uid>/bash-edit-diff`),
+ * which its own git reads outside the sandbox, so its commands must not write it.
+ */
 export function runnerLayout(agent, claudeHome = CLAUDE_HOME) {
   const state = join(agent.home, ".factory-claude");
+  const uid = agent.uid ?? uidOf(agent.user);
   return {
+    editDiffs: uid === null || uid === undefined ? null : join(state, "cmd", `claude-${uid}`, "bash-edit-diff"),
     home: claudeHome,
     envFile: join(claudeHome, "env.sh"),
     pluginDir: join(claudeHome, "claude"),
@@ -91,7 +107,8 @@ export const RUNNER_SESSION_ROOT = ".factory-claude/config/projects";
  * then every session archive Factory holds unpacked into projects/.
  */
 export async function resetClaudeState(layout, env = process.env) {
-  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/tmp" "$1/cmd"; shift; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, ...layout.caches], { cwd: layout.agentHome, env });
+  // The edit-diff directory is made too, so the sandbox's write denial holds a real directory.
+  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/tmp" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"; shift 2; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.editDiffs || "", ...layout.caches], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Claude Code's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS.values()) {
     const put = await exec("tar", ["-xf", "-", "-C", join(layout.config, "projects")], { cwd: layout.agentHome, env, input: tar });

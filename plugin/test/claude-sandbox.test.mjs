@@ -6,19 +6,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand } from "../scripts/lib/harness.mjs";
-import { CLAUDE_HOME, asClaudeAgent, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
+import { CLAUDE_HOME, uidOf, asClaudeAgent, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
 import { CLAUDE_SECRET_ENV, GitRefusal, LOCAL_DOMAINS, claudeLocalSettings, claudeRunnerSettings, droppedDomains, runnerDomains } from "../scripts/lib/local.mjs";
 import { asAgent, setAgent } from "../scripts/lib/proc.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
-const AGENT = { user: "factory-agent", home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
+const AGENT = { user: "factory-agent", uid: 1002, home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
 const denied = (settings) => settings.sandbox.credentials.envVars.filter((v) => v.mode === "deny").map((v) => v.name);
 
 /** A throwaway agent home, temp directory and Factory-owned Claude home, for the runner's start-up path. */
 function fakeRunner() {
   const root = mkdtempSync(join(tmpdir(), "cr-"));
-  const agent = { home: join(root, "agent"), tmp: join(root, "agent", "tmp") };
+  const agent = { home: join(root, "agent"), tmp: join(root, "agent", "tmp"), uid: process.getuid() };
   mkdirSync(agent.tmp, { recursive: true });
   return { root, agent, layout: runnerLayout(agent, join(root, "claude-home")) };
 }
@@ -73,6 +73,11 @@ test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it; C
   assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), ["/home/factory-agent/repo", "/home/factory-agent/tmp"]);
   const settings = JSON.parse(flag("--settings"));
   assert.deepEqual(denied(settings), SHELL_SECRET_KEYS, "every credential the harness could hold");
+  const editDiffs = "/home/factory-agent/.factory-claude/cmd/claude-1002/bash-edit-diff";
+  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/home/factory-agent/.factory-claude/cmd"), "its command temp directory is writable");
+  assert.ok(settings.sandbox.filesystem.denyWrite.includes(editDiffs), "but not its Bash edits' diffs, which its own git reads outside the sandbox");
+  assert.ok(settings.permissions.deny.includes(`Edit(/${editDiffs})`));
+  assert.throws(() => claudeRunner({ harness: "claude", agent: { ...AGENT, uid: undefined, user: "no-such-user-f30" }, clone: "/c" }), /no uid/, "no uid, no start");
   assert.equal(settings.sandbox.network.allowedDomains.at(-1), "pypi.org");
   assert.equal(env.CLAUDE_CONFIG_DIR, "/home/factory-agent/.factory-claude/config");
   assert.equal(env.CLAUDE_CODE_TMPDIR, "/home/factory-agent/.factory-claude/cmd");
@@ -123,6 +128,7 @@ test("Claude's state is made afresh before every start: what was planted is gone
   assert.ok(!existsSync(join(layout.config, "settings.json")) && !existsSync(join(layout.config, ".claude.json")) && !existsSync(join(layout.ownTmp, "planted")));
   assert.equal(readFileSync(join(projects, "-repo", "s1.jsonl"), "utf8"), '{"turn":1}\n', "Factory's captured copy, not the planted one");
   for (const c of layout.caches) assert.ok(existsSync(c), `${c} made for the sandbox to write`);
+  assert.ok(existsSync(layout.editDiffs), "the edit-diff directory is a real one, for the write denial to hold");
   dropSessions();
   holdSession("s2", execFileSync("tar", ["-C", projects, "-cf", "-", "--", "-repo/s1.jsonl"]));
   await resetClaudeState(layout);
@@ -185,4 +191,11 @@ test("the agent's unit keeps ProtectKernelTunables, but Claude Code's (bwrap mou
   } finally {
     setAgent(null);
   }
+});
+
+test("uidOf reads a user's uid from /etc/passwd", () => {
+  const passwd = () => "root:x:0:0::/root:/bin/bash\nfactory-agent:x:1002:1002::/home/factory-agent:/bin/bash\n";
+  assert.equal(uidOf("factory-agent", passwd), 1002);
+  assert.equal(uidOf("nobody-here", passwd), null);
+  assert.equal(runnerLayout({ user: "x", uid: 7, home: "/h", tmp: "/h/tmp" }).editDiffs, "/h/.factory-claude/cmd/claude-7/bash-edit-diff");
 });

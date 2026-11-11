@@ -571,11 +571,12 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
  * Claude Code's settings on the Actions runner and in a cloud sandbox VM, where it runs as the agent uid (agent.mjs):
  * local mode's bar (claudeLocalSettings), fitted to the runner (lib/claude-runner.mjs). Commands may write only
  * `writable`: the checkout, the agent's temp directory, Claude Code's own command temp directory and the package
- * caches; never the checkout's git hooks, config and harness configuration, nor anything else in the agent's home.
+ * caches; never the checkout's git hooks, config and harness configuration, `readOnly` (Claude Code's edit-diff
+ * directory, which its own git reads outside the sandbox), nor anything else in the agent's home.
  * No credential store is hidden: the agent's home holds only its read-only GitHub token, which is for its commands.
  */
-export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable, secretEnv = CLAUDE_SECRET_ENV }) {
-  return claudeLocalSettings({ domains, clone, writable, secrets: [], secretEnv });
+export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable, readOnly = [], secretEnv = CLAUDE_SECRET_ENV }) {
+  return claudeLocalSettings({ domains, clone, writable, readOnly, secrets: [], secretEnv });
 }
 
 /**

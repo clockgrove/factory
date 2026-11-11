@@ -168,7 +168,10 @@ export function promptCacheTtl(harness, env = {}) {
  */
 export function claudeRunner({ harness, agent, clone, env = process.env, claudeHome }) {
   if (harness !== "claude" || !agent || !clone || backend(env).name === "local") return null;
-  return { clone, ...runnerLayout(agent, claudeHome), domains: runnerDomains(input("allowed_domains", { env })) };
+  const layout = runnerLayout(agent, claudeHome);
+  // Its edit-diff directory is named by the agent's uid; without it the sandbox could not keep commands out of it.
+  if (!layout.editDiffs) throw new Error(`no uid for ${agent.user}: refusing to start Claude Code without its sandbox's full write list`);
+  return { clone, ...layout, domains: runnerDomains(input("allowed_domains", { env })) };
 }
 
 /**
@@ -200,7 +203,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const plugin = pluginDir ? ["--plugin-dir", join(pluginDir, "plugin"), "--agents", join(pluginDir, "agents.json")] : [];
       // The package caches are writable to shell commands only, never added directories, whose CLAUDE.md would load.
       const caches = local?.cacheDirs || [];
-      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: SHELL_SECRET_KEYS }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], secretEnv: SHELL_SECRET_KEYS }) : null;
+      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: SHELL_SECRET_KEYS }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: SHELL_SECRET_KEYS }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];

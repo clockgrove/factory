@@ -42,11 +42,8 @@ test("sweep: what it keeps for time alone says when, and its own next runs follo
   assert.equal(sweepDecision({ ...base, state: "Running" }).until, undefined, "a live Objective's waits for events");
   const slack = 60_000;
   const at = (ms) => new Date(ms).toISOString();
-  // NOW is 12:00 UTC, so the next nightly pass is tomorrow 10:41.
-  const nightly = Date.parse("2026-11-21T10:41:00Z");
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 8 * 60_000, idle: false }], now: NOW }), [{ issue: 4, kind: "sweep", at: at(NOW + 8 * 60_000 + slack) }]);
-  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: nightly - 3600_000, idle: true }], now: NOW }), [{ issue: 4, kind: "nightly", at: at(nightly) }], "idle days ending before the nightly pass");
-  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: nightly + 3600_000, idle: true }], now: NOW }), [], "ending later: no sleeper for days; a later sweep sees it within a day");
+  assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", until: NOW + 3600_000, idle: true }], now: NOW }), [], "idle days: no sleeper; the next event's sweep or the hourly cron");
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "kept", reason: "the Objective is Running" }], now: NOW }), []);
   assert.deepEqual(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "cap" }], now: NOW, firedBy: { kind: "sweep", at: at(NOW) } }), [{ issue: 4, kind: "sweep", at: at(NOW + SWEEP_RETRY_MS) }], "a cap's rest, every time");
   assert.equal(sweepWaits({ results: [{ issue: 4, action: "skipped", retry: "error" }], now: NOW }).length, 1, "a failure: once");
@@ -90,7 +87,7 @@ test("workflow template: the sweep job, on events, its own wakes, by hand and th
   assert.ok(doc.on.schedule.some((s) => s.cron === "17 * * * *"));
   assert.ok(job.if.includes("github.event.schedule == '17 * * * *'"));
   assert.ok(job.if.includes("github.event.action == 'labeled' && github.event.label.name == 'factory:blocked'"), "a Block runs the sweep at once");
-  assert.ok(job.if.includes("startsWith(inputs.wake, 'sweep ') || startsWith(inputs.wake, 'nightly ')"), "its own wakes' ticks run it");
+  assert.ok(job.if.includes("inputs.sweep == 'true' || startsWith(inputs.wake, 'sweep ')"), "its own wakes' ticks run it");
   assert.deepEqual(job.permissions, { contents: "read", actions: "read" }, "actions: read for the armed wakes only");
   assert.equal(job.steps.filter((s) => String(s.uses).startsWith("actions/upload-artifact")).length, 3);
   assert.equal(String(doc.env.FACTORY_SANDBOX_IDLE_DAYS), "7");

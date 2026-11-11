@@ -172,12 +172,9 @@ export function lastNightly(now = new Date()) {
   return t > now ? new Date(t.getTime() - 86_400_000) : t;
 }
 
-/** The next nightly build time after `now`: the nightly pass a `nightly` wake sleeps to (lib/logic.mjs WAKE_KINDS). */
-export const nextNightly = (now = new Date()) => new Date(lastNightly(now).getTime() + 86_400_000);
-
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
- * schedule) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
+ * schedule), `owed` (the dispatcher saw a head an earlier day left unbuilt, imageOwed) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
  * newest build Factory recorded started, failed ones included. A head already built is never built again, except by
  * hand. On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
  * unless no build was even tried since the last nightly time (GitHub's cron does not always fire): then one merge
@@ -186,30 +183,45 @@ export const nextNightly = (now = new Date()) => new Date(lastNightly(now).getTi
 export function imageDecision({ trigger, refresh, head, current, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
   if (trigger === "manual") return { build: true };
   if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
-  if (trigger === "nightly") return { build: true };
+  if (trigger === "nightly" || trigger === "owed") return { build: true };
   if (trigger !== "merge") return { skip: `no image build on ${trigger}` };
-  if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it", owed: true };
+  if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it" };
   if (todayMs < dailyMinutes * 60_000) return { build: true };
   if (!lastAttemptAt || Date.parse(lastAttemptAt) < lastNightly(now).getTime()) return { build: true, note: "today's minutes are used up, but no build was tried since the last nightly time" };
-  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it`, owed: true };
+  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it` };
 }
 
 /**
- * The image job's own next runs, as deadlines (lib/logic.mjs nextWake), so neither waits for GitHub's cron:
- * - `nightly` at the next nightly time, when this run left the head to the nightly build (`decision.owed`: a merge
- *   skipped for image_refresh or the day's minutes) or a merge's build failed (the nightly pass tries again; a failed
- *   nightly pass waits for the next merge or the cron);
- * - `nightly` at its own deadline, on a hop's tick (`hop`: the wake that slept the longest one job may, its deadline
- *   still ahead);
- * - `sweep`, PREVIOUS_IMAGE_MS on, when a build left an older image a stage may still be starting from: the sweep
- *   destroys it then (prunableImages).
+ * Whether the image is owed a build now (the dispatcher's tick runs the image job when it is): the default branch's
+ * head (`head`, committed at `headAt`) is not the newest build Factory tried (`builds`, newest first, failed ones
+ * included), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
+ * left to the nightly build; a merge today builds on its own push), and today's turn allows one: `merge`, today's
+ * builds under `dailyMinutes`; `nightly`, none tried yet today. So an owed build runs on the first dispatcher tick of
+ * the UTC day, an event's or a wake's, never on GitHub's nightly cron alone, which stays the backstop.
  */
-export function imageWaits({ trigger, decision = null, failed = false, built = false, olderImage = false, hop = null, now = Date.now() }) {
-  if (hop) return [{ issue: null, kind: "nightly", at: hop.at }];
-  const at = (ms) => [{ issue: null, kind: "nightly", at: new Date(ms).toISOString() }];
-  if (decision?.owed || (failed && trigger === "merge")) return at(nextNightly(new Date(now)).getTime());
-  if (built && olderImage) return [{ issue: null, kind: "sweep", at: new Date(now + PREVIOUS_IMAGE_MS + WAKE_SLACK_MS).toISOString() }];
-  return [];
+export function imageOwed({ refresh, head, headAt, builds = [], todayMs, dailyMinutes, now = new Date() }) {
+  if (!head || builds[0]?.sha === head) return false;
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  if (!(Date.parse(headAt) < today)) return false;
+  if (refresh === "nightly") return !builds.some((b) => Date.parse(b.builtAt) >= today);
+  return todayMs < dailyMinutes * 60_000;
+}
+
+/**
+ * imageOwed from GitHub: Factory's record and the default branch's head commit (`commits/HEAD`), three reads. False when either
+ * cannot be read: the next tick, the next merge or the nightly cron tries again.
+ */
+export async function imageOwedNow(repo, { refresh, dailyMinutes, now = new Date() }, opts) {
+  const [{ builds }, commit] = await Promise.all([listImages(repo, opts), rest(`repos/${repo.full}/commits/HEAD`, opts)]);
+  return imageOwed({ refresh, head: commit?.sha, headAt: commit?.commit?.committer?.date, builds, todayMs: todaysBuildMs(builds, now), dailyMinutes, now });
+}
+
+/**
+ * The image job's own next run, as deadlines (lib/logic.mjs nextWake): when a build left an older image a stage may
+ * still be starting from, the sweep `PREVIOUS_IMAGE_MS` on (plus WAKE_SLACK_MS), which destroys it (prunableImages).
+ */
+export function imageWaits({ built = false, olderImage = false, now = Date.now() }) {
+  return built && olderImage ? [{ issue: null, kind: "sweep", at: new Date(now + PREVIOUS_IMAGE_MS + WAKE_SLACK_MS).toISOString() }] : [];
 }
 
 /** The images a build destroys: all but the newest KEEP by the vendor's clock, never `keep` (the one just built). */

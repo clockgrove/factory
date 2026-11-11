@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, findImageIssue, currentImage, imageDecision, imageWaits, nextNightly, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
+import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, findImageIssue, currentImage, imageDecision, imageOwed, imageWaits, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
 import { marker, setSelf } from "../scripts/lib/logic.mjs";
 import { changePath, imageTrigger, privilegedChanges, unexplainedChanges } from "../scripts/image.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -113,24 +113,29 @@ test("refresh: merges until today's minutes, then nightly, unless no build was t
   assert.deepEqual(imageDecision({ ...base, trigger: "merge", current: null }), { build: true });
   assert.equal(lastNightly(new Date("2026-11-08T09:00:00Z")).toISOString(), "2026-11-07T10:41:00.000Z");
   assert.equal(lastNightly(now).toISOString(), "2026-11-08T10:41:00.000Z");
-  assert.equal(nextNightly(now).toISOString(), "2026-11-09T10:41:00.000Z");
-  assert.equal(nextNightly(new Date("2026-11-08T09:00:00Z")).toISOString(), "2026-11-08T10:41:00.000Z");
-  // A merge left to the nightly build owes it; a head already built owes nothing.
-  assert.equal(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000 }).owed, true);
-  assert.equal(imageDecision({ ...base, trigger: "merge", refresh: "nightly" }).owed, true);
-  assert.equal(imageDecision({ ...base, trigger: "merge", current: { sha: SHA } }).owed, undefined);
+  assert.deepEqual(imageDecision({ ...base, trigger: "owed", todayMs: 99 * 60_000 }), { build: true }, "the dispatcher checked today's turn");
+  assert.match(imageDecision({ ...base, trigger: "owed", current: { sha: SHA } }).skip, /already built/, "a second owed tick during a build skips");
 });
 
-test("the image job's own wakes: the nightly pass only when a build is owed, a hop's deadline again, the sweep after a build left an older image", () => {
+test("an owed build: a head an earlier day left unbuilt, on the UTC day's first tick today's turn allows", () => {
+  const now = new Date("2026-11-09T03:00:00Z");
+  const yesterday = "2026-11-08T22:00:00Z";
+  const base = { refresh: "merge", head: SHA, headAt: yesterday, builds: [{ sha: OTHER, builtAt: "2026-11-08T20:00:00Z", buildMs: 200_000 }], todayMs: 0, dailyMinutes: 5, now };
+  assert.equal(imageOwed(base), true, "yesterday's capped merge: built on today's first tick");
+  assert.equal(imageOwed({ ...base, headAt: "2026-11-09T01:00:00Z" }), false, "a merge today builds on its own push");
+  assert.equal(imageOwed({ ...base, builds: [{ sha: SHA, builtAt: yesterday, buildMs: 1000 }] }), false, "its head already tried (a failed build waits for the next merge or the cron)");
+  assert.equal(imageOwed({ ...base, todayMs: 5 * 60_000 }), false, "today's minutes used up");
+  assert.equal(imageOwed({ ...base, refresh: "nightly" }), true, "image_refresh nightly: once a day");
+  assert.equal(imageOwed({ ...base, refresh: "nightly", builds: [{ sha: OTHER, builtAt: "2026-11-09T00:30:00Z", buildMs: 1000 }] }), false, "already one today");
+  assert.equal(imageOwed({ ...base, head: undefined }), false, "an unread head");
+  assert.equal(imageOwed({ ...base, builds: [] }), true, "no build yet");
+});
+
+test("the image job's own wake: the sweep's, minutes after a build that left an older image", () => {
   const now = Date.parse("2026-11-08T15:00:00Z");
-  const nightly = [{ issue: null, kind: "nightly", at: "2026-11-09T10:41:00.000Z" }];
-  assert.deepEqual(imageWaits({ trigger: "merge", decision: { skip: "cap", owed: true }, now }), nightly);
-  assert.deepEqual(imageWaits({ trigger: "merge", failed: true, now }), nightly, "a merge's failed build: the nightly pass tries again");
-  assert.deepEqual(imageWaits({ trigger: "nightly", failed: true, now }), [], "a failed nightly pass waits for the next merge or the cron");
-  assert.deepEqual(imageWaits({ trigger: "nightly", decision: { skip: "already built" }, now }), [], "nothing owed: no sleeper");
-  assert.deepEqual(imageWaits({ hop: { kind: "nightly", at: nightly[0].at } }), nightly);
-  assert.deepEqual(imageWaits({ trigger: "merge", built: true, olderImage: true, now }), [{ issue: null, kind: "sweep", at: new Date(now + 16 * 60_000).toISOString() }]);
-  assert.deepEqual(imageWaits({ trigger: "merge", built: true, olderImage: false, now }), [], "the first image: nothing to prune");
+  assert.deepEqual(imageWaits({ built: true, olderImage: true, now }), [{ issue: null, kind: "sweep", at: new Date(now + 16 * 60_000).toISOString() }]);
+  assert.deepEqual(imageWaits({ built: true, olderImage: false, now }), [], "the first image: nothing to prune");
+  assert.deepEqual(imageWaits({ built: false, now }), []);
 });
 
 test("triggers, privileged config changes and the setup script", () => {
@@ -138,12 +143,8 @@ test("triggers, privileged config changes and the setup script", () => {
   assert.equal(imageTrigger("push", { ref: "refs/heads/factory/4" }, "main"), null);
   assert.equal(imageTrigger("schedule", { schedule: NIGHTLY_CRON }, "main"), "nightly");
   assert.equal(imageTrigger("schedule", { schedule: "*/10 * * * *" }, "main"), null);
-  assert.equal(imageTrigger("workflow_dispatch", {}, "main"), "manual");
-  // Its own nightly wake: the nightly pass at the deadline, a hop before it; `image: true` is always by hand.
-  const at = "2026-11-09T10:41:00.000Z";
-  assert.equal(imageTrigger("workflow_dispatch", { inputs: { wake: `nightly ${at}` } }, "main", Date.parse(at) + 5_000), "nightly");
-  assert.equal(imageTrigger("workflow_dispatch", { inputs: { wake: `nightly ${at}` } }, "main", Date.parse(at) - 4 * 3600_000), "hop");
-  assert.equal(imageTrigger("workflow_dispatch", { inputs: { wake: `nightly ${at}`, image: "true" } }, "main", Date.parse(at)), "manual");
+  assert.equal(imageTrigger("workflow_dispatch", {}, "main"), null, "a plain tick builds only what the dispatcher found owed");
+  assert.equal(imageTrigger("workflow_dispatch", { inputs: { image: "true" } }, "main"), "manual");
   assert.deepEqual(privilegedChanges("a  /etc/sudoers\n", "a  /etc/sudoers\nb  /etc/sudoers.d/x\n"), ["+ b  /etc/sudoers.d/x"]);
   assert.deepEqual(privilegedChanges("x\n", "x\n"), []);
   const h = "a".repeat(64);
@@ -178,7 +179,14 @@ test("workflow template: the image job runs on the default branch's pushes, the 
   assert.ok(doc.on.schedule.some((s) => s.cron === NIGHTLY_CRON));
   const job = doc.jobs.image;
   assert.ok(job.if.includes(`github.event.schedule == '${NIGHTLY_CRON}'`), "the job's cron and the code's are one");
-  assert.match(job.if, /\(inputs\.image == 'true' \|\| startsWith\(inputs\.wake, 'nightly '\)\) && github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/, "by hand and on its nightly wake, only on the default branch");
+  assert.match(job.if, /inputs\.image == 'true' && github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/, "by hand only on the default branch");
+  // An owed build rides on the dispatcher's tick, never a pull request's run, and checks out the default branch.
+  assert.equal(job.needs, "dispatch");
+  assert.match(job.if, /^!cancelled\(\) && \(/, "a push or the cron, where the dispatcher is skipped, still runs it");
+  assert.match(job.if, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event_name != 'pull_request'/);
+  assert.match(job.steps[0].with.ref, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event\.repository\.default_branch/);
+  assert.match(job.steps.find((s) => s.with?.mode === "image").with.image_owed, /needs\.dispatch\.outputs\.image_owed/);
+  assert.match(doc.jobs.dispatch.outputs.image_owed, /steps\.f\.outputs\.image_owed/);
   assert.deepEqual(job.permissions, { contents: "read", actions: "read" }, "the record is the App's; the job token reads the armed wakes");
   assert.equal(String(job.concurrency["cancel-in-progress"]), "false");
   const step = job.steps.find((s) => s.with?.mode === "image");

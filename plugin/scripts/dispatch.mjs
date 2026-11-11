@@ -11,11 +11,12 @@
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
+import { imageOwedNow } from "./lib/image.mjs";
 import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, WAKE_RUNS, WAKE_SLACK_MS, sandboxWakeKinds, wakeHop, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -636,9 +637,8 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
  * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of the kinds the repository's
  * visibility arms (`isPublic`, logic.mjs wakeKinds) still ahead, unless a wake already queued or sleeping covers it
  * (read from the live jobs' names; an unreadable list arms anyway, since a second sleeper only ticks twice). `firedBy`
- * is the wake whose tick started this run, or null. The sweep and the image jobs arm theirs the same way with their
- * own `kinds` (logic.mjs sandboxWakeKinds), where only a wake whose tick runs them again (`runs`, logic.mjs WAKE_RUNS)
- * covers a deadline; every wake's tick runs the dispatcher.
+ * is the wake whose tick started this run, or null. The sweep's wakes are armed the same way (armSweepWake), with their
+ * own `kinds`, where only an armed wake of the kinds in `runs` covers a deadline; every wake's tick runs the dispatcher.
  */
 export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, isPublic = false, kinds = wakeKinds(isPublic), runs = null, readJobs }) {
   if (!nextWake(deadlines, { now, firedBy, kinds })) return null;
@@ -653,26 +653,19 @@ export async function armWake(repo, deadlines, { now = Date.now(), firedBy = nul
 }
 
 /**
- * Arm the sweep's or the image job's own next run (workflow-template.yml `sweep-wake`, `image-wake`): logs every wait
- * and the wake armed, and sets the job's `wake_at` and `wake_kind` outputs. `job` is `sweep` or `image` (WAKE_RUNS).
- * The repository's visibility comes from the event's payload, else one read. A run a wake's final tick started never
- * arms that deadline again; a hop's tick (a deadline still ahead) re-arms it.
+ * Arm the sweep's own next run, from the sweep or the image job (workflow-template.yml `sweep-wake`, `image-wake`):
+ * logs every wait and the wake armed, and sets the job's `wake_at` and `wake_kind` outputs. Only `sweep` waits, minutes
+ * each, so on every repository; only an armed `sweep` wake covers one (every wake's tick runs the dispatcher, but only
+ * a `sweep` wake's runs the sweep). A run a `sweep` wake started never arms that same deadline again.
  */
-export async function armOwnWake(job, deadlines, { repo, payload, eventName, token, readRepo, now = Date.now() }) {
-  const fired = firedByWake(eventName, payload);
-  const firedBy = fired && !wakeHop(fired, now) ? fired : null;
+export async function armSweepWake(job, deadlines, { repo, payload, eventName, token, now = Date.now() }) {
   let wake = null;
-  let kinds = sandboxWakeKinds(false);
   try {
-    if ((deadlines || []).length) {
-      const isPublic = await repoIsPublic(payload, deadlines, readRepo);
-      kinds = sandboxWakeKinds(isPublic);
-      wake = await armWake(repo, deadlines, { now, firedBy, kinds, runs: WAKE_RUNS[job], readJobs: () => activeFactoryJobs(repo, { token }, { strict: true }) });
-    }
+    if ((deadlines || []).length) wake = await armWake(repo, deadlines, { now, firedBy: firedByWake(eventName, payload), kinds: SWEEP_WAKE_KINDS, runs: SWEEP_WAKE_KINDS, readJobs: () => activeFactoryJobs(repo, { token }, { strict: true }) });
   } catch (e) {
-    log(`${job}: no wake armed (${String(e.message).slice(0, 120)}); events and the cron run it next`);
+    log(`${job}: no wake armed (${String(e.message).slice(0, 120)}); events and the cron run the sweep next`);
   }
-  for (const d of [...(deadlines || [])].sort((x, y) => Date.parse(x.at) - Date.parse(y.at))) log(`${job}: due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${kinds.includes(d.kind) ? "" : " (a long wait on a private repository: events and the cron)"}`);
+  for (const d of [...(deadlines || [])].sort((x, y) => Date.parse(x.at) - Date.parse(y.at))) log(`${job}: due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}`);
   if (wake) log(`${job}: wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
   setOutput("wake_at", wake?.at ?? "");
   setOutput("wake_kind", wake?.kind ?? "");
@@ -681,13 +674,13 @@ export async function armOwnWake(job, deadlines, { repo, payload, eventName, tok
 
 /**
  * Whether the repository is public: from the event's own repository payload (every Actions event but a schedule carries
- * one), else one read of the repository, made only when a lease, daily-cap or nightly deadline would need the answer. Unknown
+ * one), else one read of the repository, made only when a lease or daily-cap deadline would need the answer. Unknown
  * counts as private, which arms only the short kinds.
  */
 export async function repoIsPublic(payload, deadlines, readRepo) {
   const known = payload?.repository && typeof payload.repository.private === "boolean" ? !payload.repository.private : null;
   if (known !== null) return known;
-  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap" || d.kind === "nightly")) return false;
+  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap")) return false;
   return readRepo().then(
     (r) => r?.private === false,
     () => false,
@@ -746,7 +739,7 @@ async function main() {
   const eventName = process.env.GITHUB_EVENT_NAME || "";
   if (!(await closedIssueTicks(eventName, payload, { objectiveLabel: inputs.objectiveLabel, objectives: () => listIssuesByLabel(repoOf(inputs.repo), inputs.objectiveLabel, { token }) }))) {
     log(`issue #${payload.issue?.number} closed: not an Objective and blocks none; nothing to do`);
-    for (const [k, v] of [["issues", []], ["count", "0"], ["reason", ""], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""]]) setOutput(k, v);
+    for (const [k, v] of [["issues", []], ["count", "0"], ["reason", ""], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""], ["image_owed", ""]]) setOutput(k, v);
     return;
   }
   const failedLaunch = eventName === "workflow_dispatch" && /^[1-9]\d{0,9}$/.test(String(payload?.inputs?.failed_launch ?? "")) ? Number(payload.inputs.failed_launch) : null;
@@ -803,6 +796,17 @@ async function main() {
   if (wake) log(`wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
   setOutput("wake_at", wake?.at ?? "");
   setOutput("wake_kind", wake?.kind ?? "");
+  // On the sandbox route, an image build an earlier day left owed runs on this tick (the image job's `if:`): the
+  // first tick of the UTC day, an event's or a wake's (never a pull request's), not GitHub's nightly cron alone.
+  let owed = false;
+  if (inputs.sandbox && args.dry_run !== "true" && !inputs.issue && eventName !== "pull_request") {
+    owed = await imageOwedNow(repoOf(inputs.repo), { refresh: inputs.imageRefresh, dailyMinutes: inputs.imageDailyMinutes }, { token }).catch((e) => {
+      log(`the image record could not be read (${String(e.message).slice(0, 120)}); no owed build this tick`);
+      return false;
+    });
+    if (owed) log("the image is owed a build of the default branch's head (an earlier day left it unbuilt); the image job builds it now");
+  }
+  setOutput("image_owed", owed ? "true" : "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);

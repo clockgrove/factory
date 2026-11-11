@@ -2492,16 +2492,14 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
- * On the sandbox route the sweep and the image jobs arm wakes of their own (sandboxWakeKinds), whose ticks run them:
+ * On the sandbox route the sweep and the image job arm wakes of their own, whose tick runs the sweep:
  * - `sweep`: a sweep wait of minutes (a stage's end grace, a new sandbox's grace, a superseded image's last minutes,
- *   the rest of a run that reached a cap), which ticks the sweep;
- * - `nightly`: the nightly pass (lib/image.mjs nextNightly), armed only when it has work: a build a merge left to it
- *   or a failed build, or a stopped sandbox whose idle days end by then; its tick runs the image job and the sweep.
+ *   the rest of a run that reached a cap), on every repository.
  * Every wake's tick is a `workflow_dispatch`, so it also ticks the dispatcher.
  */
 export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
 /** Every kind a wake job is named for and its tick carries (parseWake reads only these). */
-export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep", "nightly"]);
+export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep"]);
 /**
  * The kinds a repository's dispatcher arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
  * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end and
@@ -2509,17 +2507,10 @@ export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep", "night
  * unknown visibility counts as private.
  */
 export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
-/**
- * The kinds the sweep and the image jobs arm, by the same rule: `sweep` (minutes) on every repository, `nightly` (up to
- * a day) on a public one only; a private one leaves the nightly pass to GitHub's cron and the next event.
- */
-export const sandboxWakeKinds = (isPublic) => (isPublic === true ? Object.freeze(["sweep", "nightly"]) : Object.freeze(["sweep"]));
-/** The armed wakes whose tick runs a job again: the sweep runs on a `sweep` or a `nightly` tick, the image job on a `nightly` one. */
-export const WAKE_RUNS = Object.freeze({ sweep: Object.freeze(["sweep", "nightly"]), image: Object.freeze(["nightly"]) });
+/** The kinds the sweep and the image job arm: `sweep` only, minutes each, so on every repository. */
+export const SWEEP_WAKE_KINDS = Object.freeze(["sweep"]);
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
 export const WAKE_SLACK_MS = 60_000;
-/** Whether a wake's tick is a hop (a sleep capped at WAKE_MAX_SLEEP_S), its deadline still ahead: its run arms it again. */
-export const wakeHop = (wake, now = Date.now()) => Date.parse(wake?.at) - now > WAKE_SLACK_MS;
 /** How soon a `retry` wake reads again. */
 export const RETRY_WAKE_MS = 2 * 60_000;
 /** The longest one wake job sleeps (hosted runners end a job at six hours): a later deadline is reached in hops. */

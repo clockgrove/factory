@@ -3,7 +3,7 @@
 // stops one left running with no stage holding it.
 //   node scripts/sweep.mjs --repo OWNER/NAME [--dry-run]
 // Runs when an Objective closes (its issue closed, its PR merged) or is Blocked, by hand, on its own wakes (sweepWaits:
-// what a run left for minutes later, and the nightly pass), with GitHub's hourly cron as the backstop, and inside a
+// what a run left for minutes later), with GitHub's hourly cron as the backstop, and inside a
 // launch the vendor refused for its quota (launch.mjs). The job log and summary show the snapshot storage before and after.
 // Lists Factory's Objective sandboxes for this repository in the vendor's project (tags `factory=objective` and
 // `factory-repo=<repository id>`; image sandboxes and anything else are never listed, never touched) and destroys one
@@ -23,14 +23,14 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
-import { appToken, armOwnWake, firedByWake } from "./dispatch.mjs";
+import { appToken, armSweepWake, firedByWake } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
 import { CLAIM_LEASE_MS, bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
 import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
 import { lockBase } from "./lib/lock.mjs";
-import { IMAGE_TAG, nextNightly, pruneImages } from "./lib/image.mjs";
+import { IMAGE_TAG, pruneImages } from "./lib/image.mjs";
 import { log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { WAKE_SLACK_MS, wakeHop, factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
+import { WAKE_SLACK_MS, factorySandboxId, sandboxRecord, settleStale, stageHolds, stateOf, sweepDecision } from "./lib/logic.mjs";
 
 /** Usage tarballs collected per run: the workflow's sweep job has this many upload steps. */
 export const COLLECT_SLOTS = 3;
@@ -251,26 +251,23 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
 export const SWEEP_RETRY_MS = 10 * 60_000;
 
 /**
- * The sweep's own next runs, as deadlines (`{issue, kind, at}`, lib/logic.mjs nextWake) from what one sweep left:
- * - `sweep`, at the end of a wait of minutes plus WAKE_SLACK_MS: a stage that ended moments ago (the launcher's end
- *   answers it first), a sandbox created moments ago, a superseded image a stage may still be starting from;
- * - `sweep`, SWEEP_RETRY_MS on: what a cap left (sweep_max_destroys, the collection slots), and once, never from a run a
- *   `sweep` wake started, what a failure left (an unreadable issue, a vendor error, a held lock);
- * - `nightly` (lib/image.mjs nextNightly): a stopped sandbox whose idle days end by the next nightly pass. One whose idle
- *   days end later waits for a later sweep (an event's, a nightly pass's, the cron's) to see it within a day.
+ * The sweep's own next runs, as `sweep` deadlines (`{issue, kind, at}`, lib/logic.mjs nextWake) from what one sweep
+ * left, each a wait of minutes:
+ * - a minute after a wait ends: a stage that ended moments ago (the launcher's end answers it first), a sandbox created
+ *   moments ago, a superseded image a stage may still be starting from, or any such wait that ended during this run;
+ * - SWEEP_RETRY_MS on: what a cap left (sweep_max_destroys, the collection slots), and once, never from a run a `sweep`
+ *   wake started, what a failure left (an unreadable issue, a vendor error, a held lock).
+ * A stopped sandbox's idle days (days, not minutes) get no wake: the next sweep an event runs (an Objective closing,
+ * merging or Blocking), or the hourly cron's, destroys it.
  */
 export function sweepWaits({ results = [], imagesUntil = null, imagesFailed = false, now = Date.now(), firedBy = null }) {
   const out = [];
-  const nightly = nextNightly(new Date(now)).getTime();
+  const soon = (ms) => new Date(Math.max(ms, now) + WAKE_SLACK_MS).toISOString();
   for (const r of results) {
-    if (r.action === "kept" && Number.isFinite(r.until)) {
-      // A wait that ended while this run went on is due at once.
-      if (!r.idle || r.until <= now) out.push({ issue: r.issue, kind: "sweep", at: new Date(Math.max(r.until, now) + WAKE_SLACK_MS).toISOString() });
-      else if (r.until <= nightly) out.push({ issue: r.issue, kind: "nightly", at: new Date(nightly).toISOString() });
-    }
+    if (r.action === "kept" && Number.isFinite(r.until) && (!r.idle || r.until <= now)) out.push({ issue: r.issue, kind: "sweep", at: soon(r.until) });
     if (r.retry === "cap" || (r.retry === "error" && firedBy?.kind !== "sweep")) out.push({ issue: r.issue, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
   }
-  if (Number.isFinite(imagesUntil)) out.push({ issue: null, kind: "sweep", at: new Date(Math.max(imagesUntil, now) + WAKE_SLACK_MS).toISOString() });
+  if (Number.isFinite(imagesUntil)) out.push({ issue: null, kind: "sweep", at: soon(imagesUntil) });
   if (imagesFailed && firedBy?.kind !== "sweep") out.push({ issue: null, kind: "sweep", at: new Date(now + SWEEP_RETRY_MS).toISOString() });
   return out;
 }
@@ -316,9 +313,8 @@ async function main() {
       payload = {};
     }
     const now = Date.now();
-    const fired = firedByWake(eventName, payload);
-    const waits = sweepWaits({ results, imagesUntil, imagesFailed, now, firedBy: fired && !wakeHop(fired, now) ? fired : null });
-    await armOwnWake("sweep", waits, { repo, payload, eventName, token: inputs.githubToken || token, readRepo: () => getRepo(repo, opts), now });
+    const waits = sweepWaits({ results, imagesUntil, imagesFailed, now, firedBy: firedByWake(eventName, payload) });
+    await armSweepWake("sweep", waits, { repo, payload, eventName, token: inputs.githubToken || token, now });
   }
   const count = (a) => results.filter((r) => r.action === a).length;
   setOutput("destroyed", String(count("destroyed")));

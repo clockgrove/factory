@@ -170,8 +170,14 @@ outputs:
   queue_watch:
     description: (dispatch) The JSON list of PRs the merge pass left in the merge queue, for the queue-watch job (`pr` in mode watch); empty when there are none.
     value: ${{ steps.run.outputs.queue_watch }}
+  wake_at:
+    description: (dispatch) When the wake job ticks the dispatcher next (an ISO time), for a wait only time ends; empty when no wake is due or one already armed covers it.
+    value: ${{ steps.run.outputs.wake_at }}
+  wake_kind:
+    description: (dispatch) What `wake_at` waits for, one of `lease`, `quota`, `start-retry`, `daily-cap` or `retry`.
+    value: ${{ steps.run.outputs.wake_kind }}
   exit:
-    description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `tick`, `stopped`, `token`, `skipped` or `blocked`.
+    description: (work, review) `delivered`, `question`, `blocked` or `skipped`; (gate) `start`, `tick` or `skipped`; (launch) `started`, `queued`, `deferred` (the stage did not start and waits for its retry time, after a transient vendor error or for a review the vendor's quota refused), `tick`, `stopped`, `token`, `skipped` or `blocked`.
     value: ${{ steps.run.outputs.exit }}
   reason:
     description: (work, review) The one-line reason for a blocked or question exit.

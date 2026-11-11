@@ -161,11 +161,11 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   const plain = renderWorkflow(template, values);
   assert.doesNotMatch(plain, /(?<!\$)\{\{|launch|FACTORY_SANDBOX|issue_comment/);
   const runner = parseYaml(plain);
-  assert.deepEqual(Object.keys(runner.jobs), ["dispatch", "queue-watch", "work", "review"]);
+  assert.deepEqual(Object.keys(runner.jobs), ["dispatch", "queue-watch", "wake", "work", "review"]);
   const rendered = renderWorkflow(template, { ...values, sandbox: "vercel", maintainer_ids: "123,456", default_branch: "main" });
   assert.match(rendered, /fromJSON\('\[123,456\]'\), github\.event\.comment\.user\.id/, "pinned maintainers pass the gate's first filter by id");
   const doc = parseYaml(rendered);
-  assert.deepEqual(Object.keys(doc.jobs), ["dispatch", "queue-watch", "launch", "launch-gate", "launch-event", "launch-tick", "image", "sweep"]);
+  assert.deepEqual(Object.keys(doc.jobs), ["dispatch", "queue-watch", "wake", "launch", "launch-gate", "launch-event", "launch-tick", "image", "sweep"]);
   assert.equal(doc.jobs["launch-gate"].concurrency, undefined, "the gate queues in no group");
   assert.equal(doc.jobs["launch-tick"].concurrency, undefined, "a merge tick joins no Objective's group, so it never replaces a pending launch");
   assert.match(doc.jobs["launch-tick"].if, /launch-gate\.outputs\.tick == 'true'/);
@@ -204,7 +204,16 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "check_suite", "workflow_run"]);
   assert.deepEqual(doc.on.workflow_run.workflows, ["Quality"]);
   assert.equal(doc.env.FACTORY_SANDBOX, "vercel");
-  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "read" }, "the job token reads; every write is the App's");
+  assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" }, "the job token reads and ticks the dispatcher; every other write is the App's");
+  // A launch that fails, is cut off, requeues, Blocks or meets the vendor's quota ticks the dispatcher itself: no wait on the cron.
+  for (const job of ["launch", "launch-event"]) {
+    const tick = doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || ""));
+    assert.match(tick.if, /^always\(\) && \(steps\.f\.outcome != 'success' \|\|/, `${job}: ticks on its own failure`);
+    for (const exit of ["queued", "deferred", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
+    assert.match(tick.env.GH_REPO, /github\.repository/);
+  }
+  // Only the */10 schedule runs the dispatcher: the hourly sweep and the nightly image are other jobs' schedules.
+  assert.match(doc.jobs.dispatch.if, /^\(github\.event_name == 'schedule' && github\.event\.schedule == '\*\/10 \* \* \* \*'\)/);
 });
 
 test("stage lifecycle: the lease, a stage's own requests, the next stage when one ends, and the leftovers' rules", async () => {
@@ -228,8 +237,9 @@ test("stage lifecycle: the lease, a stage's own requests, the next stage when on
 
   const swept = { kind: "swept", issue: 9 };
   assert.match(launchDecision({ ev: swept, state: "Running", runningSince: null }).skip, /unknown time/, "fails closed");
-  const failed = { state: "failed", launches: [1, 2, 3].map((i) => ({ stage: "work", ok: false, at: `2026-11-08T10:0${i}:00Z` })) };
+  const failed = { state: "failed", launches: [1, 2, 3].map((i) => ({ stage: "work", ok: false, at: `2026-11-08T10:0${i}:00Z`, code: "error" })) };
   assert.equal(failedSince(failed, "2026-11-08T10:00:00Z"), 3);
+  assert.equal(failedSince({ launches: failed.launches.map(({ code, ...l }) => l) }, "2026-11-08T10:00:00Z"), 0, "entries from before codes were recorded (a quota refusal among them) are no strikes");
   assert.match(launchDecision({ ev: swept, state: "Running", runningSince: "2026-11-08T10:00:00Z", record: failed }).block, /3 sandbox starts failed/);
   assert.deepEqual(launchDecision({ ev: swept, state: "Running", runningSince: "2026-11-08T10:02:30Z", record: failed }), { stage: "work" }, "failures before this stint do not count");
   const review = { kind: "review", issue: 9, pr: 40, human: false, ready: false, draft: false, at: "2026-11-08T10:00:00Z" };

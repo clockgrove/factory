@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 
@@ -911,11 +911,12 @@ export async function activeWorkIssues(repo, opts) {
 }
 
 /**
- * The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed.
+ * The Objectives with a live Factory job, by kind: `work (N)` and `review (factory/N)` jobs not yet completed, and the
+ * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
  * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
  */
 export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
-  const out = { work: new Set(), review: new Set() };
+  const out = { work: new Set(), review: new Set(), wakes: [] };
   const read = (path) => rest(path, opts).catch((e) => {
     if (strict) throw e;
     return null;
@@ -930,6 +931,8 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
         if (w) out.work.add(Number(w[1]));
         const r = /^review \(factory\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
+        const wake = parseWake(j.name);
+        if (wake) out.wakes.push({ ...wake, startedAt: j.status === "in_progress" ? (j.started_at ?? null) : null });
       }
     }
   }

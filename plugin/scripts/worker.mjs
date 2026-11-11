@@ -10,7 +10,7 @@
 // back to the same harness); decide the exit (delivered, question, blocked); move the
 // card, set the label, draft/comment/request as the exit says; write usage/events.jsonl
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
-import { noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
+import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
 import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
@@ -319,6 +319,7 @@ async function main() {
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     harness: inputs.harness,
+    services: inputs.harness === "claude" && access.agent ? agentServicePorts(access.agent) : [],
     issue,
     issueTitle: issueData.title,
     issueBody: issueData.body,

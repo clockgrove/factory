@@ -43,8 +43,11 @@ const DENIED_NOTE = "\n\nThe sandbox reaches only the hosts the operator allows.
 
 // On Linux a sandboxed command's localhost is its own (its own network namespace): the ports of the services the
 // repository's setup started are relayed to it through the sandbox's proxy (claude-runner.mjs envFileText); any other
-// service on the machine stays out of reach.
-const SERVICES_NOTE = "\n\nServices the repository's setup started on this machine (a database or server on `localhost`) are reachable from your commands at their usual `localhost` ports. Any other service on this machine is outside your sandbox: a refused connection there is no denied host. Factory runs the validation commands after you exit, and a failure comes back to you with its output.";
+// service on the machine stays out of reach. The card names the ports offered, and says nothing when none are.
+const servicesNote = (ports = []) =>
+  ports.length
+    ? `\n\nThe services the repository's setup started on this machine are reachable from your commands at ${ports.map((p) => `\`localhost:${p}\``).join(", ")}. Any other service on this machine is outside your sandbox: a refused connection there is no denied host. Factory runs the validation commands after you exit, and a failure comes back to you with its output.`
+    : "";
 
 const ACTIONS = {
   name: "actions",
@@ -89,8 +92,11 @@ const ACTIONS = {
     outer: () => null,
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
-    /** Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's. */
-    cardNotes: (env = process.env, harness = null) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_NOTE : ""),
+    /**
+     * Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's,
+     * and the ports of setup's services it reaches (`services`, claude-runner.mjs agentServicePorts).
+     */
+    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : ""),
     /**
      * Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input.
      * Codex and Copilot skip their sandboxes here, so their Block keeps its own fix.

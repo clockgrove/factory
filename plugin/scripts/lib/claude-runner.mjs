@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal } from "./local.mjs";
+import { log } from "./inputs.mjs";
 
 /** Claude Code's HOME on a runner: Factory's own, outside every home the agent can write. */
 export const CLAUDE_HOME = "/var/lib/factory-claude";
@@ -64,12 +65,19 @@ const q = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 // ------------------------------------------------------------- services
 
 /**
- * The TCP ports listening on this machine's loopback (or on every address), from /proc/net/tcp and tcp6: what a
- * service the repository's setup started answers on. `read` is a seam for the tests.
+ * The IPv4 loopback and every-address forms in /proc/net/tcp and tcp6 (each 32-bit word in host byte order): 127.0.0.1,
+ * 0.0.0.0, `::`, and the IPv4-mapped ::ffff:127.0.0.1 and ::ffff:0.0.0.0 a dual-stack listener (a JVM's) shows. Never
+ * `::1`: the sandbox's proxy connects to `127.0.0.1:<port>`, so a service on `::1` alone would be offered and unreachable.
  */
-export function loopbackListeners(read = (p) => readFileSync(p, "utf8")) {
+const LOOPBACK = new Set(["0100007F", "00000000", "00000000000000000000000000000000", "0000000000000000FFFF00000100007F", "0000000000000000FFFF000000000000"]);
+
+/**
+ * The TCP ports listening on this machine's IPv4 loopback (or on every address), from /proc/net/tcp and tcp6: what a
+ * service the repository's setup started answers on. A socket owned by `skipUid` (the agent's) never counts, so nothing
+ * the agent started is offered, whatever the reap left. `read` is a seam for the tests.
+ */
+export function loopbackListeners(read = (p) => readFileSync(p, "utf8"), { skipUid = null } = {}) {
   const ports = new Set();
-  const LOOPBACK = new Set(["0100007F", "00000000", "00000000000000000000000001000000", "00000000000000000000000000000000"]);
   for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     let text = "";
     try {
@@ -79,9 +87,10 @@ export function loopbackListeners(read = (p) => readFileSync(p, "utf8")) {
     }
     for (const line of text.split("\n").slice(1)) {
       const f = line.trim().split(/\s+/);
-      if (f.length < 4 || f[3] !== "0A") continue;
+      if (f.length < 8 || f[3] !== "0A") continue;
+      if (skipUid !== null && skipUid !== undefined && Number(f[7]) === Number(skipUid)) continue;
       const [addr, port] = f[1].split(":");
-      if (LOOPBACK.has(addr)) ports.add(Number.parseInt(port, 16));
+      if (LOOPBACK.has(addr.toUpperCase())) ports.add(Number.parseInt(port, 16));
     }
   }
   return [...ports].filter((p) => p > 0 && p < 65536).sort((a, b) => a - b);
@@ -99,11 +108,25 @@ export const dropSetupStart = () => {
 };
 /** At most this many services are offered to Claude Code's commands. */
 export const SERVICES_MAX = 20;
+const DROPPED_SAID = new Set();
 /**
- * The ports of the services the repository's setup started: listening on loopback now, not before the setup ran.
- * Claude Code's commands reach exactly these through its sandbox's proxy (envFileText, harness.mjs claudeRunner).
+ * The ports of the services the repository's setup started: listening on loopback now, not before the setup ran, and
+ * not the agent's (`skipUid`). Claude Code's commands reach exactly these through its sandbox's proxy (envFileText,
+ * harness.mjs claudeRunner). Past SERVICES_MAX the rest are dropped, and the log names them once.
  */
-export const servicePorts = (read) => (BEFORE_SETUP ? loopbackListeners(read).filter((p) => !BEFORE_SETUP.has(p)).slice(0, SERVICES_MAX) : []);
+export function servicePorts(read, { skipUid = null } = {}) {
+  if (!BEFORE_SETUP) return [];
+  const fresh = loopbackListeners(read, { skipUid }).filter((p) => !BEFORE_SETUP.has(p));
+  const dropped = fresh.slice(SERVICES_MAX);
+  if (dropped.length && !DROPPED_SAID.has(dropped.join(","))) {
+    DROPPED_SAID.add(dropped.join(","));
+    log(`setup's services: only the first ${SERVICES_MAX} ports are offered to Claude Code's commands; dropped ${dropped.join(", ")}`);
+  }
+  return fresh.slice(0, SERVICES_MAX);
+}
+
+/** The services offered to this agent's Claude Code commands (servicePorts without the agent's own sockets). */
+export const agentServicePorts = (agent, read) => servicePorts(read, { skipUid: agent.uid ?? uidOf(agent.user) });
 
 /**
  * The file Claude Code sources inside its sandbox before each command: the agent's own HOME and TMPDIR back, and for
@@ -111,7 +134,8 @@ export const servicePorts = (read) => (BEFORE_SETUP ? loopbackListeners(read).fi
  * through the sandbox's proxy (HTTP CONNECT, with the proxy's per-session login from HTTPS_PROXY), which allows only
  * `127.0.0.1:<port>` for these ports. So `localhost:5432` in a command reaches the database setup started, and nothing
  * outside the sandbox runs anything for it: the relay runs inside, and the proxy only connects. It starts only where
- * the sandbox's proxy is set (its login starts with `srt.`), so never in Claude Code's own shell outside the sandbox.
+ * the sandbox's proxy is set (its login is `srt` or starts with `srt.`), so never in Claude Code's own shell outside
+ * the sandbox.
  */
 export function envFileText(layout, ports = []) {
   const head = `export HOME=${q(layout.agentHome)}\nexport TMPDIR=${q(layout.agentTmp)}\n`;
@@ -124,7 +148,7 @@ const RELAY = [
   "# Services the repository's setup started, through the sandbox's proxy (Factory: lib/claude-runner.mjs).",
   "__f_x=\"${HTTPS_PROXY:-}\"; __f_x=\"${__f_x#*://}\"; __f_a=\"${__f_x%@*}\"; __f_h=\"${__f_x#*@}\"; __f_h=\"${__f_h%%/*}\"",
   "case \"$__f_a\" in",
-  "  srt.*:*)",
+  "  srt:*|srt.*:*)",
   "    if command -v socat >/dev/null 2>&1; then",
   "      __f_a=\"$(printf '%b' \"$(printf '%s' \"$__f_a\" | sed 's/%\\([0-9A-Fa-f][0-9A-Fa-f]\\)/\\\\x\\1/g')\")\"",
   "      for __f_p in @PORTS@; do",

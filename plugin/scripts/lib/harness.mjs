@@ -7,7 +7,7 @@ import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
-import { asClaudeAgent, captureSession, resetClaudeState, servicePorts, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
+import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { FACTORY_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -172,7 +172,7 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
   // Its edit-diff directory is named by the agent's uid; without it the sandbox could not keep commands out of it.
   if (!layout.editDiffs) throw new Error(`no uid for ${agent.user}: refusing to start Claude Code without its sandbox's full write list`);
   // The services the repository's setup started: their loopback ports through the sandbox's proxy (claude-runner.mjs).
-  const offered = services ?? servicePorts();
+  const offered = services ?? agentServicePorts(agent);
   return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env })), ...offered.map((p) => `127.0.0.1:${p}`)] };
 }
 

@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -227,11 +227,27 @@ test("services: the loopback ports that started listening after the setup began,
   assert.deepEqual(servicePorts(read), [], "no baseline, no service");
   noteSetupStart(read);
   tcp += row("00000000", 5432) + row("0100007F", 9999, "01") + row("0A000001", 7000);
-  tcp6 += row("00000000000000000000000001000000", 6379);
-  assert.deepEqual(loopbackListeners(read), [5432, 6379, 8080], "listening on loopback or every address; not 127.0.0.53, another address or a connected socket");
-  assert.deepEqual(servicePorts(read), [5432, 6379], "what was listening before the setup is no service of its");
+  tcp6 += row("00000000000000000000000001000000", 6379) + row("0000000000000000FFFF00000100007F", 8443) + row("0000000000000000FFFF000000000000", 9092) + row("00000000000000000000000000000000", 3000);
+  assert.deepEqual(loopbackListeners(read), [3000, 5432, 8080, 8443, 9092], "IPv4 loopback or every address, IPv4-mapped included; not ::1 (the proxy connects to 127.0.0.1), 127.0.0.53, another address or a connected socket");
+  assert.deepEqual(servicePorts(read), [3000, 5432, 8443, 9092], "what was listening before the setup is no service of its");
   for (let p = 20000; p < 20030; p++) tcp += row("0100007F", p);
   assert.equal(servicePorts(read).length, SERVICES_MAX);
+  dropSetupStart();
+});
+
+test("services: a socket the agent uid owns is never offered, whatever the reap left", async () => {
+  const { dropSetupStart, agentServicePorts, loopbackListeners, noteSetupStart, servicePorts } = await import("../scripts/lib/claude-runner.mjs");
+  const head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+  const row = (port, uid) => `   0: 0100007F:${port.toString(16).toUpperCase().padStart(4, "0")} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 ${uid} 0 1 1\n`;
+  let tcp = head;
+  const read = (p) => (p.endsWith("tcp6") ? head : tcp);
+  dropSetupStart();
+  noteSetupStart(read);
+  tcp += row(5432, 115) + row(4000, 1001);
+  assert.deepEqual(loopbackListeners(read), [4000, 5432]);
+  assert.deepEqual(loopbackListeners(read, { skipUid: 1001 }), [5432]);
+  assert.deepEqual(servicePorts(read, { skipUid: 1001 }), [5432], "the agent's own listener is no service of the setup's");
+  assert.deepEqual(agentServicePorts({ ...AGENT, uid: 1001 }, read), [5432], "the agent's uid from its record");
   dropSetupStart();
 });
 
@@ -243,11 +259,32 @@ test("services: the env file relays each port inside the sandbox through its pro
   assert.match(text, /TCP4-LISTEN:\$__f_p,bind=127\.0\.0\.1/);
   assert.match(text, /TCP6-LISTEN:\$__f_p,bind=\[::1\]/);
   assert.match(text, /PROXY:\$\{__f_h%:\*\}:127\.0\.0\.1:\$__f_p,proxyport=/);
-  assert.match(text, /case "\$__f_a" in\n {2}srt\.\*:\*\)/, "only inside Claude Code's sandbox, whose proxy login starts with srt.");
+  assert.match(text, /case "\$__f_a" in\n {2}srt:\*\|srt\.\*:\*\)/, "only inside Claude Code's sandbox, whose proxy login is srt or starts with srt.");
   execFileSync("bash", ["-n", "-c", text]);
   // Outside the sandbox (no proxy set) sourcing it starts nothing and leaves no variable behind.
   const out = execFileSync("bash", ["-c", `${text}\nset | grep -c '^__f_' || true`], { encoding: "utf8", env: { PATH: process.env.PATH } });
   assert.equal(out.trim(), "0");
+});
+
+test("services: the relay starts for a proxy login of srt or srt.<session>, and for no other", async (t) => {
+  const bin = mkdtempSync(join(tmpdir(), "relay-bin-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const calls = join(bin, "calls");
+  writeFileSync(join(bin, "socat"), `#!/bin/sh\necho "$2" >> ${calls}\n`, { mode: 0o755 });
+  // ss runs in the relay's branch before the env file returns: a branch not taken leaves no line at all.
+  writeFileSync(join(bin, "ss"), `#!/bin/sh\necho ss >> ${calls}\necho LISTEN\n`, { mode: 0o755 });
+  const text = envFileText(runnerLayout(AGENT), [5432]);
+  const started = async (proxy, n = 3) => {
+    writeFileSync(calls, "");
+    execFileSync("bash", ["-c", text], { env: { PATH: `${bin}:/usr/bin:/bin`, HTTPS_PROXY: proxy } });
+    for (let i = 0; i < 40 && readFileSync(calls, "utf8").split("\n").filter(Boolean).length < n; i++) await new Promise((r) => setTimeout(r, 50));
+    return readFileSync(calls, "utf8").split("\n").filter(Boolean).sort();
+  };
+  const want = (auth) => [...Array(2).fill(`PROXY:127.0.0.1:127.0.0.1:5432,proxyport=3128,proxyauth=${auth}`), "ss"];
+  assert.deepEqual(await started("http://srt:tok@127.0.0.1:3128"), want("srt:tok"), "a plain srt login");
+  assert.deepEqual(await started("http://srt.s1:tok%3D@127.0.0.1:3128"), want("srt.s1:tok="), "a session login, percent-decoded");
+  assert.deepEqual(await started("http://user:tok@127.0.0.1:3128", 0), [], "another proxy: nothing starts");
+  assert.deepEqual(await started("http://srtx:tok@127.0.0.1:3128", 0), [], "a login that only begins with srt");
 });
 
 test("services: their 127.0.0.1 ports join Claude's allowed hosts on a runner", () => {

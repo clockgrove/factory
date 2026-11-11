@@ -549,12 +549,12 @@ export async function questionRaisedAt(repo, pr, opts) {
   return drafted.at(-1) || pr.created_at;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [] }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
-  return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
+  return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
 }
 
 /**

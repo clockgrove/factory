@@ -262,18 +262,22 @@ const PROBE = 'echo "$HOME"; [ "$(cat "$HOME/factory/plugin/.factory-digest" 2>/
  * Runs in the sandbox as its default user: the plugin unpacked when one was uploaded, the harness CLI installed system
  * wide (the agent runs it) when absent or not the version asked, then the stage started detached, the VM's clock
  * printed just before it. Arguments: claim, tarball or "", digest, CLI binary, npm package, version.
+ * Only the stage gets the start command's environment (its tokens and the harness's credential). The package steps (apt,
+ * npm and the install scripts they run) and the CLI's version check run with none of it, only HOME and PATH: the
+ * image's sudo keeps the caller's environment (`!env_reset`), so sudo alone would pass it on.
  */
-const START = [
+export const START = [
   "set -eu",
+  'bare() { env -i HOME="$HOME" PATH="$PATH" "$@"; }',
   'd="$HOME/factory"; mkdir -p "$d/logs"; chmod 700 "$HOME" "$d" "$d/logs"',
   'if [ -n "$2" ]; then rm -rf "$d/plugin.new"; mkdir -p "$d/plugin.new"; tar xzf "$2" -C "$d/plugin.new"; rm -f "$2"; echo "$3" > "$d/plugin.new/.factory-digest"; rm -rf "$d/plugin"; mv "$d/plugin.new" "$d/plugin"; fi',
   // Factory's own tools, which a vendor's base image may lack (the adopter's image keeps them once installed).
   'need=""; command -v git-lfs >/dev/null || need="$need git-lfs"; command -v gh >/dev/null || need="$need gh"',
   // System installs are for every uid (the agent runs the harness): umask 022 for them, whatever the stage's own is.
-  'if [ -n "$need" ]; then sudo -n apt-get update -qq >&2 && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need >&2; git lfs install --skip-repo >&2 || true; fi',
-  'want="$6"; if [ "$want" = latest ]; then want="$(npm view "$5" version 2>/dev/null || true)"; fi',
-  'have="$(/usr/local/bin/"$4" --version 2>/dev/null | head -1 || true)"',
-  'if [ -z "$have" ] || { [ -n "$want" ] && [ "${have#*"$want"}" = "$have" ]; }; then sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
+  'if [ -n "$need" ]; then bare sudo -n apt-get update -qq >&2 && bare sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need >&2; bare git lfs install --skip-repo >&2 || true; fi',
+  'want="$6"; if [ "$want" = latest ]; then want="$(bare npm view "$5" version 2>/dev/null || true)"; fi',
+  'have="$(bare /usr/local/bin/"$4" --version 2>/dev/null | head -1 || true)"',
+  'if [ -z "$have" ] || { [ -n "$want" ] && [ "${have#*"$want"}" = "$have" ]; }; then bare sudo -n sh -c \'umask 022; exec npm install -g --prefix /usr/local --no-audit --no-fund --loglevel=error "$1"\' sh "$5@$6" >&2; fi',
   // Everything the stage writes is its user's alone: the logs, the usage, the tokens' socket.
   "umask 077",
   // The stage's start time, the launcher's and the stage's alike (its record writes carry it).

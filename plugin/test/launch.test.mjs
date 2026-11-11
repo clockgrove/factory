@@ -1,10 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dispatchLatency, launchDecision, launchEvent, launchedSince, marker, pickSandbox, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, stageHolds } from "../scripts/lib/logic.mjs";
-import { launchCue } from "../scripts/launch.mjs";
+import { START, launchCue } from "../scripts/launch.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 
@@ -529,4 +531,33 @@ test("vendor session cap: a stage the session cut Blocks naming the vendor's cap
   const checks = await runnerChecks({ inputs: { harness: "claude", timeoutMinutes: 240, sandbox: "vercel" }, env: {} });
   assert.deepEqual(checks.filter((c) => c.status === "WARN" && /session/.test(`${c.name} ${c.detail}`)), [], "a plan may grant 24 hours: only the vendor's answer at a start shows the cap");
   assert.equal(checks.find((c) => c.name === "timeout")?.status, "PASS", "the runner's ceiling is still checked");
+});
+
+test("a sandbox stage's start: apt, npm and the CLI's version check get no credential; only the stage gets the start environment", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "start-"));
+  const [bin, home, log] = [join(dir, "bin"), join(dir, "home"), join(dir, "log")];
+  mkdirSync(bin);
+  mkdirSync(home);
+  // Only these on PATH, so git-lfs and gh are missing and the apt step runs; the rest are stubs that log their env.
+  for (const t of ["bash", "sh", "env", "mkdir", "chmod", "rm", "mv", "tar", "date", "head", "setsid", "nohup"]) symlinkSync(`/usr/bin/${t}`, join(bin, t));
+  const stub = (name, body = "") => {
+    writeFileSync(join(bin, name), `#!/bin/sh\n{ echo "== \${0##*/} $*"; env; } >> ${JSON.stringify(log)}\n${body}\n`);
+    chmodSync(join(bin, name), 0o755);
+  };
+  stub("sudo", '[ "$1" = -n ] && shift; exec "$@"');
+  stub("apt-get");
+  stub("git");
+  stub("npm", '[ "$1" = view ] && echo 9.9.9; exit 0');
+  stub("node");
+  const secrets = { ANTHROPIC_API_KEY: "sekrit-1", FACTORY_INPUT_ANTHROPIC_API_KEY: "sekrit-2", FACTORY_APP_TOKEN: "sekrit-3", FACTORY_READ_TOKEN: "sekrit-4" };
+  const out = execFileSync("/usr/bin/bash", ["-c", START, "factory-stage-start", "c1", "", "d", "factory-test-cli", "@x/cli", "latest"], { env: { HOME: home, PATH: bin, ...secrets }, encoding: "utf8" });
+  assert.match(out.trim().split("\n").at(-1), /^\d+$/, "the VM's clock, printed last");
+  // The stage starts detached: wait for it.
+  for (let i = 0; i < 100 && !(existsSync(log) && readFileSync(log, "utf8").includes("== node ")); i++) await new Promise((r) => setTimeout(r, 50));
+  const runs = readFileSync(log, "utf8").split(/^== /m).filter(Boolean).map((b) => ({ head: b.split("\n")[0], text: b }));
+  const tools = runs.map((r) => r.head.split(" ").slice(0, 2).join(" "));
+  for (const t of ["sudo -n", "apt-get update", "apt-get install", "git lfs", "npm view", "npm install", "node /"]) assert.ok(tools.some((x) => x.startsWith(t)), `${t} ran: ${tools.join(", ")}`);
+  for (const r of runs.filter((x) => !x.head.startsWith("node "))) assert.ok(!r.text.includes("sekrit-"), `${r.head}: no credential`);
+  const stage = runs.find((x) => x.head.startsWith("node "));
+  for (const v of Object.values(secrets)) assert.ok(stage.text.includes(v), "the stage keeps its tokens and the harness's credential");
 });

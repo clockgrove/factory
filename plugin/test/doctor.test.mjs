@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { workflowText } from "../scripts/doctor.mjs";
+import { credentialChecks, workflowText } from "../scripts/doctor.mjs";
 
 const repo = { full: "o/r", owner: "o", name: "r" };
 const wf = (pin) => `on: issues\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${pin}\n`;
@@ -114,4 +114,17 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   assert.match(wf[1].fix, /workflows permission off/);
   const root = join(import.meta.dirname, "..", "..");
   for (const doc of ["README.md", "plugin/skills/setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
+});
+
+test("doctor: Claude off local mode WARNs that its Bash commands can read its credential; local mode and Codex do not", async () => {
+  const env = { GITHUB_ACTIONS: "true" };
+  const shell = (rows) => rows.filter((r) => r.name === "claude shell credential");
+  for (const credential of ["api", "plan"]) {
+    const rows = shell(await credentialChecks({ inputs: { harness: "claude", credential, anthropicApiKey: credential === "api" ? "k" : "", claudeCodeOauthToken: credential === "plan" ? "t" : "" }, env, local: false }));
+    assert.deepEqual(rows.map((r) => r.status), ["WARN"], `claude ${credential} on Actions or in a sandbox`);
+    assert.match(rows[0].detail, /bubblewrap/);
+  }
+  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "login" }, env: {}, local: false })).map((r) => r.status), ["WARN"], "a person's doctor run for an Actions repository, on the CLI login");
+  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env, local: true })), [], "local mode runs Claude's commands in its sandbox");
+  assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "codex", credential: "api", codexApiKey: "k", model: "m" }, env, local: false })), [], "Codex withholds its key on every route");
 });

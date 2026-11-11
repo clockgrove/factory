@@ -35,15 +35,28 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
-export async function credentialChecks({ inputs, env = process.env, probe = false }) {
+/**
+ * Claude Code off local mode (Actions, a cloud sandbox): its Bash commands, and the repository's code and dependencies
+ * they run, can read its model credential. Claude Code withholds it only from commands in its own bubblewrap sandbox,
+ * which those routes do not run (PLAN.md, Credentials and billing). Codex and Copilot withhold it on every route, and
+ * local mode runs Claude's commands in its sandbox.
+ */
+export function claudeShellCheck({ harness, local }) {
+  if (harness !== "claude" || local) return null;
+  return WARN("claude shell credential", "on Actions and in a cloud sandbox, Claude Code's Bash commands (and the repository code and dependencies they run) can read ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN: Claude Code withholds it only inside its own bubblewrap sandbox, which these routes do not run", "accept it (docs/PLAN.md, Credentials and billing), run Claude Objectives in local mode, or use codex or copilot, which withhold their credential on every route");
+}
+
+export async function credentialChecks({ inputs, env = process.env, probe = false, local = backend(env).name === "local" }) {
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
+  const shell = claudeShellCheck({ harness: h, local });
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
   if (inputs.credential === "login" || localFallback) {
     out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
+    if (shell) out.push(shell);
     if (probe) out.push(await probeHarness({ inputs, env }));
     return out;
   }
@@ -59,6 +72,7 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     else if (fed) out.push(PASS("claude credential", "workload identity federation configured (id-token: write, exchange URL set)"));
     else out.push(FAIL("claude credential", "no ANTHROPIC_API_KEY and no federation", "gh secret set ANTHROPIC_API_KEY, or add id-token: write and anthropic_oidc_exchange_url"));
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
+    if (shell) out.push(shell);
   }
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
@@ -869,11 +883,12 @@ async function main() {
     }
   }
   const results = [];
-  results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
+  const local = args.local === "true" || backend().name === "local";
+  results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
-  results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local: args.local === "true" || backend().name === "local" })));
+  results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local })));
   results.push(...(await runnerChecks({ inputs })));
   const fails = results.filter((r) => r.status === "FAIL").length;
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);

@@ -31,9 +31,10 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorLine, withLaunch, withVendorCost } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxRecordOf, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorLine, withLaunch, withVendorCost } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
+import { casComment } from "./lib/record.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -124,6 +125,31 @@ export function recordBody(rec) {
   const latency = last.ok && Number.isFinite(last.latencyMs) ? ` Dispatch latency ${secs(last.latencyMs)} (\`${plain(last.event, /^[a-z_]{1,40}$/)}\` at ${clock(rec.eventAt)} → stage start ${clock(rec.commandAt)}; sandbox ${last.found ? "found" : "created"}).` : "";
   const run = /^\d{1,20}$/.test(String(rec.run || "")) ? `run ${rec.run}` : "";
   return `${sandboxMarkerLine(rec)}\nFactory's sandbox for this Objective: ${id} (${plain(rec.vendor)}); ${what}.${latency} ${run}`.trimEnd();
+}
+
+/**
+ * Write the sandbox record compare-and-set (lib/record.mjs casComment): `next(cur)` gets the record as it is at the
+ * write (null: none) and returns the record to write, or null to write nothing (the answer is then `refused`). Every
+ * writer of the record (the launcher, the stage, the sweep) writes it this way, so none lands over another unseen.
+ */
+export const writeSandboxRecord = (repo, n, opts, next, more = {}) =>
+  casComment(repo, n, {
+    ...opts,
+    ...more,
+    marker: marker(n, "sandbox"),
+    update: (text) => {
+      const r = next(sandboxRecordOf(text));
+      return r ? recordBody(r) : null;
+    },
+  });
+
+/** Whether two reads of the record say the same (the comment's own id and time aside); none and an unreadable one are the same. */
+export function sameRecord(a, b) {
+  const plain = (r) => {
+    const s = r ? strip(r) : null;
+    return s && Object.keys(s).length ? JSON.stringify(s) : null;
+  };
+  return plain(a) === plain(b);
 }
 
 /**
@@ -490,7 +516,10 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       const head = mine ? mine.body.slice(0, mine.body.indexOf("\n")) : marker(n, "progress", `${record.stage}:${stageProgressKey(record.run, record.claim)}`);
       const body = mine ? mine.body.slice(head.length + 1) : `Factory ${record.stage} run ${record.claim}: the stage left no progress of its own.`;
       const line = vendorLine({ id: record.id, state, cost, rates: adapter.rates, error });
-      await upsertComment(repo, n, head, withVendorCost(body, { line, vendorUsd: cost.usd, modelUsd }), opts);
+      // Compare-and-set: merged onto the comment as it is at the write (lib/record.mjs), so a progress line the stage
+      // writes meanwhile is kept, and the stage's own writes keep this line (lib/session.mjs progressReporter).
+      const w = await casComment(repo, n, { ...opts, marker: head, update: (text) => withVendorCost(text === null ? body : text.slice(head.length + 1), { line, vendorUsd: cost.usd, modelUsd }) });
+      if (!w.ok) log(`#${n}: the vendor cost was not written into the progress comment (another write was still landing)`);
     } catch (e) {
       log(`#${n}: the vendor cost was not written into the progress comment (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"})`);
     }
@@ -698,7 +727,9 @@ function endStage(run, ctx) {
       }
       watch.mark("destroy");
     }
-    await upsertComment(repo, n, marker(n, "sandbox"), recordBody({ ...strip(prior), state: "stopped", collected: !!usage, ...(stopError ? { stopError } : { stoppedAt }), ...(destroyedAt ? { id: null, destroyedAt } : {}), ...(booked.vendor ? { vendorBooked: true, vendorUsd: booked.vendor.usd } : {}), at: new Date().toISOString(), leaseUntil: null }), opts);
+    // Onto the record as it is now, while it still carries the ended stage's claim; another launcher's claim is not undone.
+    const recorded = await writeSandboxRecord(repo, n, opts, (cur) => (cur?.claim === prior.claim ? { ...cur, state: "stopped", collected: !!usage, ...(stopError ? { stopError } : { stoppedAt }), ...(destroyedAt ? { id: null, destroyedAt } : {}), ...(booked.vendor ? { vendorBooked: true, vendorUsd: booked.vendor.usd } : {}), at: new Date().toISOString(), leaseUntil: null } : null), { base: run.base });
+    if (!recorded.ok) log(`#${n}: the stop was not recorded (${recorded.refused ? "the record carries another claim now" : "another write was still landing"})`);
     watch.mark("record");
     usage = booked.usage;
     if (again.stop) return out({ exit: "stopped", reason: `#${n}: no stage is due; sandbox ${prior.id ?? "found by its tags"} ${destroyedAt ? "destroyed (the Objective is closed)" : "stopped"}`, usage });
@@ -757,15 +788,15 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;
   const base = { vendor: inputs.sandbox, stage, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };
-  const write = (rec) => upsertComment(repo, n, marker(n, "sandbox"), recordBody(rec), opts);
-  const launches = (entry) => [...(prior?.launches || []), { ...entry, cue }].slice(-KEEP_LAUNCHES);
+  const write = (next) => writeSandboxRecord(repo, n, opts, next, { base: run.base });
+  const launches = (entry, list = prior?.launches) => [...(list || []), { ...entry, cue }].slice(-KEEP_LAUNCHES);
 
-  // The claim: the record says `running` with a short lease before any sandbox call, and is read back (once more after a
-  // pause when it is not there yet: a fresh comment can lag the list). A launcher that does not find its own claim lost
-  // a race and starts nothing; a stage that never starts frees the Objective when the lease runs out. The cue's lock
-  // already keeps a second launcher of this cue out; the claim keeps out one of another cue.
+  // The claim: the record says `running` with a short lease before any sandbox call, written compare-and-set over the
+  // record this decision read. A record that changed since (another launcher's claim, a stage's beat, the sweep's claim)
+  // is not written over: the launcher starts nothing. A stage that never starts frees the Objective when the lease runs
+  // out. The cue's lock already keeps a second launcher of this cue out; the claim keeps out one of another cue.
   const { tokens } = run;
-  // Reads only, beside the claim's write and read-back: the CI token check doctor makes before every job (here, with this
+  // Reads only, beside the claim's write: the CI token check doctor makes before every job (here, with this
   // job's token: the stage has none), the adopter's image (Factory's own record of it, confirmed by the vendor's; none
   // yet, or unreadable, starts from the base) and which account and plan the vendor credentials act for (names only:
   // the plan sets the session's ceiling). No sandbox is created, resumed or run before the claim is read back and the
@@ -780,12 +811,8 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   const claim = randomBytes(6).toString("hex");
   const leaseUntil = () => new Date(Date.now() + CLAIM_LEASE_MS).toISOString();
   // A quota streak (the vendor refusing starts for its quota) carries over the claim, so the next refusal counts on.
-  await write({ ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: prior?.launches || [], ...(prior?.quota ? { quota: prior.quota } : {}) });
-  const claimNow = async () => sandboxRecord(await listComments(repo, n, opts), n)?.claim;
-  if ((await claimNow()) !== claim) {
-    await new Promise((r) => setTimeout(r, 3000));
-    if ((await claimNow()) !== claim) return out({ exit: "skipped", reason: `#${n}: another launcher claimed the sandbox record` });
-  }
+  const claimed = await write((cur) => (sameRecord(cur, prior) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: prior?.launches || [], ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
+  if (!claimed.ok) return out({ exit: "skipped", reason: `#${n}: ${claimed.refused ? "the sandbox record changed since it was read (another launcher's claim, a stage or the sweep)" : "another write of the sandbox record was still landing"}; nothing started` });
   watch.mark("claim");
 
   // The session asked for: the stage's wall clock and its reserve, plus room for the start; the vendor's plan may grant less.
@@ -816,7 +843,10 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     const retried = TRANSIENT.has(error.code) && failures < MAX_FAILED_STARTS;
     // Another failure tried again keeps the streak as it was, so a refusal after it counts on from the first one.
     const streak = quota ? (quota.giveUp ? {} : { quota: { since: quota.since, tries: quota.tries, retryAt: quota.retryAt } }) : retried && prior?.quota ? { quota: prior.quota } : {};
-    await write({ ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry), ...streak }).catch((x) => log(`record: ${x.message.slice(0, 120)}`));
+    await write((cur) => (cur?.claim === claim ? { ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry, cur.launches), ...streak } : null)).then(
+      (w) => w.ok || log(`record: the failed start was not recorded (${w.refused ? "another claim holds the record" : "another write was still landing"})`),
+      (x) => log(`record: ${x.message.slice(0, 120)}`),
+    );
     if (quota) return out({ ...(await quotaWait(run, ctx, { stage, error, quota })), stage });
     if (retried) {
       // Worth another try: a work stage goes back to Queued for the dispatcher; a review stays labelled, and the
@@ -845,13 +875,13 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   const latencyMs = dispatchLatency(ctx.eventAt, result.commandAt);
   watch.mark("lost");
   const at = new Date().toISOString();
-  // The stage's own heartbeat takes the lease from here; this write must not undo one it already made.
-  const comments = await listComments(repo, n, opts);
-  const now = sandboxRecord(comments, n);
   // Started: a quota streak is over, and its note goes.
-  await dropQuotaNote(run, comments);
+  await dropQuotaNote(run);
+  // The stage's own heartbeat takes the lease from here: merged onto the record as it is at the write, so this write
+  // never undoes a beat, and a beat after it keeps what it adds.
   const entry = { ...startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }), latencyMs, found: result.found, at, ms: { ...watch.ms } };
-  if (now?.claim === claim) await write(startedRecord(now, { base, result, claim, progress: stageProgressKey(runId, claim), latencyMs, at, leaseUntil: leaseUntil(), entry }));
+  const wrote = await write((cur) => (cur?.claim === claim ? startedRecord(cur, { base, result, claim, progress: stageProgressKey(runId, claim), latencyMs, at, leaseUntil: leaseUntil(), entry }) : null));
+  if (!wrote.ok) log(`#${n}: the start was not recorded (${wrote.refused ? "the record carries another claim now" : "another write was still landing"}); the stage's beats carry it`);
   watch.mark("record");
   log(`#${n}: stage ${stage} started in ${inputs.sandbox} sandbox ${result.id} (${result.found ? "the recorded one" : result.image ? `created from the image of ${String(result.image.sha).slice(0, 7)}` : "created from the base image"}${result.uploaded ? ", plugin uploaded" : ""})`);
   log(`#${n}: dispatch latency ${secs(latencyMs)} (event ${ctx.eventAt} → stage start ${result.commandAt})`);

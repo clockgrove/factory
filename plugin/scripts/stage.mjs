@@ -18,9 +18,10 @@ import net from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENT_USER } from "./lib/agent.mjs";
-import { findPr, listComments, repoOf, rest } from "./lib/github.mjs";
+import { findPr, repoOf, rest } from "./lib/github.mjs";
+import { casComment } from "./lib/record.mjs";
 import { log } from "./lib/inputs.mjs";
-import { STAGE_GRACE_MS, dispatchLatency, launcherWrote, marker, sandboxRecord, sessionCapNote, setSelf, stageDeadline, stageMinutes, watchdogMs, withLaunch } from "./lib/logic.mjs";
+import { STAGE_GRACE_MS, dispatchLatency, marker, sandboxRecordOf, sessionCapNote, setSelf, stageDeadline, stageMinutes, watchdogMs, withLaunch } from "./lib/logic.mjs";
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
 import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
@@ -33,16 +34,9 @@ const BEAT_MS = 2 * 60_000;
 /** An installation token lives an hour: fresh ones are asked for after this long, and again every few minutes until they come. */
 const TOKEN_ASK_MS = 40 * 60_000;
 const TOKEN_RETRY_MS = 5 * 60_000;
-/** A contended record write is tried this many times, this far apart, before the stage gives up on that write. */
-const WRITE_TRIES = 3;
+/** A record write waits on another writer's write in flight this many reads, this far apart, before it leaves it to the next beat. */
+const WRITE_TRIES = 4;
 const WRITE_PAUSE_MS = 2000;
-/**
- * The first beat waits this many reads, this far apart, for the launcher's post-start write: that write carries what
- * only the launcher knows (its step timings), so a beat that read before it and landed after would drop them. Past
- * that the beat writes anyway; a launcher write later still merges onto it (launch.mjs startedRecord).
- */
-const LAUNCHER_WAIT_TRIES = 20;
-const LAUNCHER_WAIT_PAUSE_MS = 3000;
 /** The secrets this process may be started with: moved into memory, gone from the environment. */
 const SECRETS = ["FACTORY_APP_TOKEN", "FACTORY_READ_TOKEN", "FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_INPUT_CODEX_API_KEY", "FACTORY_INPUT_COPILOT_GITHUB_TOKEN", "FACTORY_INPUT_AI_GATEWAY_API_KEY"];
 
@@ -79,18 +73,10 @@ async function run() {
   mkdirSync(join(dir, "out"), { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
 
-  // The record: read, then written only while it still carries this stage's claim (another launcher may hold it now),
-  // and only over the version read: the comment is read again just before the write and compared.
-  const record = async () => {
-    const comments = await listComments(repo, issue, opts);
-    const r = sandboxRecord(comments, issue);
-    return r && { ...r, body: comments.find((c) => c.id === r.commentId)?.body ?? null };
-  };
-  // Compared by the whole body, not the update time: GitHub keeps that to the second, and two writes can share one.
-  // The answer says which: {ok}; {lost} when the record carries another claim (another launcher holds the sandbox);
-  // {contended} when the comment kept changing between the read and the write (a launcher's write, or the list and the
-  // single read disagreeing for a moment), which the next try settles.
-  const write = (change) => writeRecord({ record, claim, launch, tries: WRITE_TRIES, pauseMs: WRITE_PAUSE_MS, read: (id) => rest(`repos/${repo.full}/issues/comments/${id}`, opts), patch: (id, rec) => rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "sandbox")}\n${recordBody(rec)}` } }), change });
+  // The record: written compare-and-set (lib/record.mjs), only while it still carries this stage's claim (another
+  // launcher may hold it now). The answer says which: {ok}; {lost} when the record carries
+  // another claim; {contended} when another writer's write was still landing on every try, which the next beat settles.
+  const write = (change) => writeRecord({ claim, launch, change, cas: (update) => casComment(repo, issue, { ...opts, marker: marker(issue, "sandbox"), update, tries: WRITE_TRIES, pauseMs: WRITE_PAUSE_MS }) });
   // `ask` names one token request (its time, in seconds), so the launcher answers each request once (lib/lock.mjs).
   const dispatch = (want, ask = null) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: { event_type: "factory-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}) } } });
 
@@ -152,11 +138,6 @@ async function run() {
     watchdog.unref();
   };
   arm(watchdogMs({ minutes: minutes || Infinity, sessionEnd }));
-  // The first beat, once the launcher's post-start write is in (or the wait is over); the stage goes on meanwhile.
-  inflight = awaitLauncher({ record, launch, claim, tries: LAUNCHER_WAIT_TRIES, pauseMs: LAUNCHER_WAIT_PAUSE_MS }).then(
-    (r) => r === "timeout" && log("the launcher's post-start write was not in the record yet; the first beat goes ahead"),
-    (e) => log(`the launcher's write was not read (${String(e.message).slice(0, 120)}); the first beat goes ahead`),
-  );
   heartbeat();
   const sock = socketOf(env);
   const usageDir = join(dir, "usage", claim);
@@ -299,8 +280,8 @@ const isoOf = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? 
  * the start's cost readings (`meter`), the image it started from, the session's end and the progress key; with the
  * start's time (`commandMs`, FACTORY_STAGE_COMMAND_MS, the one the launcher reads) its time and dispatch latency, and
  * with the wall clock the launcher gave (`minutes`, FACTORY_TIMEOUT_MINUTES) the same `deadlineAt` it writes. The
- * launcher writes them too, but the stage's first beat can land over that write (GitHub has no compare-and-set on a
- * comment), so the stage writes them with every beat. Only plain shapes pass.
+ * launcher writes them too, after the start; the stage's first beat can come before that write, so the stage writes them
+ * with every beat. Only plain shapes pass.
  */
 export function startedFields(text, commandMs = null, minutes = null) {
   const r = handedRecord(text);
@@ -352,41 +333,19 @@ export function startedLaunch(text, started = {}) {
 }
 
 /**
- * Wait for the launcher's post-start write: until the record holds the launcher's entry of this start (`launch`,
- * startedLaunch; logic.mjs launcherWrote), at most `tries` reads `pauseMs` apart. A beat that reads after it keeps it.
- * Returns "written", "lost" (the record carries another claim: the beat sees that too), "timeout", or "none" when the
- * launcher handed no entry to wait for.
+ * One compare-and-set write of the stage's record: `cas(update)` is casComment on its marker. The change is merged onto
+ * the record as it is at the write, and `launch` (startedLaunch) stays among its launches. A stage writes only once it
+ * started, so a quota streak (launch.mjs) is over: the write drops it, as the launcher's does. Returns {ok}, {lost}
+ * (the record no longer carries `claim`) or {contended} (another writer's write was in flight on every try).
  */
-export async function awaitLauncher({ record, launch, claim, tries, pauseMs }) {
-  if (!launch) return "none";
-  for (let i = 0; i < tries; i += 1) {
-    if (i) await new Promise((r) => setTimeout(r, pauseMs));
-    const r = await record();
-    if (r && r.claim !== claim) return "lost";
-    if (launcherWrote(r?.launches, launch)) return "written";
-  }
-  return "timeout";
-}
-
-/**
- * One compare-and-write of the stage's record. `record()` reads it from the list (with the comment's body), `read(id)`
- * reads the one comment, `patch(id, rec)` writes it. `launch` (startedLaunch) stays among its launches. A stage writes
- * only once it started, so a quota streak (launch.mjs) is over: the write drops it, as the launcher's does. Returns
- * {ok}, {lost} (the record no longer carries `claim`) or {contended} (its body changed between the two reads on every
- * try).
- */
-export async function writeRecord({ record, read, patch, claim, change, launch = null, tries = WRITE_TRIES, pauseMs = WRITE_PAUSE_MS }) {
-  for (let i = 0; i < tries; i += 1) {
-    if (i) await new Promise((r) => setTimeout(r, pauseMs));
-    const r = await record();
-    if (r?.claim !== claim || !r.commentId) return { lost: true };
-    const { commentId, updatedAt, body, quota, ...kept } = r;
-    const current = await read(commentId);
-    if (current?.body !== body) continue;
-    await patch(commentId, { ...kept, ...change, ...(launch ? { launches: withLaunch(kept.launches, launch) } : {}), at: new Date().toISOString() });
-    return { ok: true };
-  }
-  return { contended: true };
+export async function writeRecord({ cas, claim, change, launch = null }) {
+  const r = await cas((text) => {
+    const cur = sandboxRecordOf(text);
+    if (cur?.claim !== claim) return null;
+    const { quota, ...kept } = cur;
+    return recordBody({ ...kept, ...change, ...(launch ? { launches: withLaunch(kept.launches, launch) } : {}), at: new Date().toISOString() });
+  });
+  return r.ok ? { ok: true } : r.refused ? { lost: true } : { contended: true };
 }
 
 /**

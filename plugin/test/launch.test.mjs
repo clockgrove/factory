@@ -487,18 +487,23 @@ test("installAdapter: stop() ends an install a launch never waited for, so the j
 
 test("stage record writes: a lost claim and a contended comment are told apart; only a lost claim ends the stage", async () => {
   const { writeRecord } = await import("../scripts/stage.mjs");
-  const mine = { claim: "c1", commentId: 5, body: "v1", state: "running" };
-  let patched = 0;
-  const base = { claim: "c1", change: { state: "running" }, pauseMs: 1, patch: async () => (patched += 1) };
-  assert.deepEqual(await writeRecord({ ...base, record: async () => ({ ...mine, claim: "c2" }), read: async () => ({ body: "v1" }) }), { lost: true });
-  let gets = 0;
-  // The single read disagrees with the list twice (a launcher's write in between), then settles.
-  const flaky = await writeRecord({ ...base, tries: 3, record: async () => mine, read: async () => ({ body: (gets += 1) <= 2 ? "v2" : "v1" }) });
-  assert.deepEqual(flaky, { ok: true }, "the third try writes");
-  assert.equal(patched, 1);
-  const busy = await writeRecord({ ...base, tries: 2, record: async () => mine, read: async () => ({ body: "other" }) });
-  assert.deepEqual(busy, { contended: true }, "contention is not a lost claim: the heartbeat does not end the worker");
-  assert.equal(patched, 1, "nothing written over a version not read");
+  const { recordBody } = await import("../scripts/launch.mjs");
+  const { marker, sandboxRecordOf } = await import("../scripts/lib/logic.mjs");
+  const text = (rec) => `${marker(5, "sandbox")}\n${recordBody(rec)}`;
+  let wrote = null;
+  // casComment as the stage calls it: update on the comment as it is now, null to write nothing.
+  const cas = (now) => async (update) => {
+    const next = update(now);
+    if (next === null) return { refused: true, text: now };
+    wrote = sandboxRecordOf(next);
+    return { ok: true };
+  };
+  const base = { claim: "c1", change: { state: "running", leaseUntil: "L" } };
+  assert.deepEqual(await writeRecord({ ...base, cas: cas(text({ claim: "c2", state: "running" })) }), { lost: true });
+  assert.deepEqual(await writeRecord({ ...base, cas: cas(null) }), { lost: true }, "no record: not this stage's");
+  assert.deepEqual(await writeRecord({ ...base, cas: cas(text({ claim: "c1", state: "running", id: "factory-x", quota: { tries: 2 } })) }), { ok: true });
+  assert.deepEqual([wrote.id, wrote.leaseUntil, wrote.quota], ["factory-x", "L", undefined], "merged onto the record as it is; a started stage drops the quota streak");
+  assert.deepEqual(await writeRecord({ ...base, cas: async () => ({ contended: true }) }), { contended: true }, "contention is not a lost claim: the heartbeat does not end the worker");
 });
 
 test("a stage that ends its child still counts its spend; a token request names itself", async () => {

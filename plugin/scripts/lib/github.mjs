@@ -259,13 +259,19 @@ export async function listComments(repo, number, opts) {
   return (await rest(`repos/${repo.full}/issues/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [];
 }
 
-/** Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). */
+/**
+ * Factory's own comment carrying `marker` on its first line, the oldest when there are two, or undefined. Anyone can
+ * paste the marker into theirs; before Factory knows its login (a failed read), one by someone who can push counts.
+ */
+export const ownComment = (comments, marker) => (comments || []).find((c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(marker));
+
+/**
+ * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). A blind write: a record
+ * with more than one writer goes through lib/record.mjs casComment instead.
+ */
 export async function upsertComment(repo, number, marker, body, opts) {
   const text = `${marker}\n${body}`;
-  // Only Factory's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
-  // Before Factory knows its login (a failed read), one by someone who can push is.
-  const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(marker);
-  const existing = (await listComments(repo, number, opts)).find(ours);
+  const existing = ownComment(await listComments(repo, number, opts), marker);
   if (existing) return rest(`repos/${repo.full}/issues/comments/${existing.id}`, { ...opts, method: "PATCH", body: { body: text } });
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body: text } });
 }

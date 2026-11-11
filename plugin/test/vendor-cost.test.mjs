@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { checkRates, harnessBudgetUsd, sessionCeilingUsd, stageVendorCost, storedUsd } from "../scripts/lib/adapters/sandbox.mjs";
 import { VERCEL_RATES } from "../scripts/lib/adapters/sandbox-vercel.mjs";
-import { spendMarker, spendOf, spendParts, vendorLine, withVendorCost } from "../scripts/lib/logic.mjs";
+import { keepVendorCost, spendMarker, spendOf, spendParts, vendorLine, withVendorCost } from "../scripts/lib/logic.mjs";
 import { progressRunId } from "../scripts/lib/session.mjs";
 import { startedFields } from "../scripts/stage.mjs";
 import { bookVendor, recordBody, stageEnvironment, stageProgressComment, stageProgressKey, startInSandbox } from "../scripts/launch.mjs";
@@ -76,6 +76,13 @@ test("progress comment: the vendor line carries state, seconds, size and dated r
   assert.equal(twice.split(line).length - 1, 1);
   // A stage that died before its spend line: the usage record's model dollars stand in.
   close(spendOf(withVendorCost("Factory work run x.", { line, vendorUsd: 0.01, modelUsd: 2 })), 2.01, "model from the usage record");
+  // The stage rewrites its comment whole: a write after the booking keeps it, with the stage's own model dollars.
+  const later = `Factory work run 7-abc: started 01:12Z, 4 min at the last line.\n- 01:12Z setup\n- 01:15Z exit: delivered; usd 0.3\n- 01:16Z pushed\n${spendMarker(0.3)}`;
+  const kept = keepVendorCost(once, later);
+  assert.equal(kept.split(line).length - 1, 1, "the vendor line stays");
+  close(spendOf(kept), 0.3 + cost.usd, "model now plus the vendor booked");
+  assert.ok(kept.includes("01:16Z pushed"), "the stage's new line is in");
+  assert.equal(keepVendorCost(body, later), later, "nothing booked: the stage's body as it is");
   // An upper bound says so; nothing but codes and numbers reaches the comment.
   const bound = vendorLine({ id: "factory-a0dd", state: "running", cost: stageVendorCost(R, { before: null, after: null, ceilingUsd: 0.2 }), rates: R, error: "unavailable" });
   assert.match(bound, /running: usage not settled \(unavailable\), counted at the session's ceiling, .* vendor at most \$0\.2000 this stage/);

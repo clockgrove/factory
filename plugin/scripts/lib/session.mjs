@@ -48,7 +48,7 @@ import {
   transientError,
 } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, keepVendorCost, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, exec, git } from "./proc.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -57,6 +57,7 @@ import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
 import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
+import { casComment } from "./record.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
 import { mergeTriage, notStartedJobs, notStartedReason, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
@@ -653,6 +654,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const lines = [];
   const links = [];
   const started = Date.now();
+  // Keyed by the launcher (a stage in a cloud sandbox): the comment the launcher books the vendor cost into.
+  const shared = !!process.env.FACTORY_PROGRESS_RUN && runId === process.env.FACTORY_PROGRESS_RUN;
   let status = "";
   let spend = null;
   let read = null;
@@ -668,7 +671,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const tail = progressTail({ harness, model, spend, read, triage, asked });
     const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
     lastWrite = Date.now();
-    await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
+    const key = marker(issue, "progress", `${stage}:${runId}`);
+    // A cloud stage's comment has a second writer, its launcher booking the vendor cost: compare-and-set, keeping it.
+    if (shared) {
+      await casComment(repo, issue, { token, marker: key, update: (text) => keepVendorCost(text, body) }).then(
+        (w) => w.ok || log("progress: another write was still landing; the next line carries this one"),
+        (e) => log(`progress: ${e.message.slice(0, 120)}`),
+      );
+    } else await upsertComment(repo, issue, key, body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
   };
   const progress = async (phase) => {
     // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.

@@ -1872,6 +1872,17 @@ export function withVendorCost(body, { line, vendorUsd, modelUsd = null }) {
   return `${lines.join("\n")}\n${spendMarker(round(model + vendor), { modelUsd: round(model), vendorUsd: round(vendor) })}`;
 }
 
+/**
+ * A progress body as a stage writes it, with the vendor cost booked in `text` (the comment as it is now) kept: the
+ * stage rewrites its comment whole, and a write after the booking must not drop it.
+ */
+export function keepVendorCost(text, body) {
+  const line = String(text || "").split("\n").find((l) => VENDOR_LINE.test(l));
+  if (!line) return body;
+  const had = spendParts(text);
+  return withVendorCost(body, { line, vendorUsd: had?.vendorUsd ?? 0, modelUsd: had?.modelUsd ?? null });
+}
+
 // ----------------------------------------------------------------- launch
 
 /** The Objective an event's branch names (`factory/<n>`), or null. */
@@ -1953,7 +1964,7 @@ export function sandboxRecordOf(body) {
 }
 /**
  * The Objective's sandbox record: Factory's own marker comment only (anyone can paste the marker into theirs), the
- * oldest one when a race left two. Carries the comment's id and updated_at for the launcher's compare-and-set.
+ * oldest one when a race left two. Carries the comment's id and updated_at.
  */
 export function sandboxRecord(comments, issue, { self = isSelf } = {}) {
   const head = marker(issue, "sandbox");
@@ -1965,8 +1976,8 @@ export function sandboxRecord(comments, issue, { self = isSelf } = {}) {
 export const KEEP_LAUNCHES = 10;
 /**
  * `launches` with a started stage's entry in it. A start is one entry per cue and launch run, which both writers of the
- * record carry: the launcher after the start, and the stage with every beat (its first can land over the launcher's
- * write, which GitHub cannot compare-and-set). `replace`: the launcher's own entry, with its timings, takes the place
+ * record carry: the launcher after the start, and the stage with every beat (its first can come before the launcher's
+ * write). `replace`: the launcher's own entry, with its timings, takes the place
  * of the stage's; without it an entry already there is kept.
  */
 const sameStart = (entry) => (l) => l?.ok === true && l.cue === entry.cue && l.run === entry.run;
@@ -1976,9 +1987,6 @@ export function withLaunch(launches, entry, { replace = false } = {}) {
   if (!replace && list.some(same)) return list;
   return [...list.filter((l) => !same(l)), entry].slice(-KEEP_LAUNCHES);
 }
-
-/** Whether `launches` hold the launcher's own entry of this start: the one with its step timings (`ms`), not the stage's. */
-export const launcherWrote = (launches, entry) => Array.isArray(launches) && launches.some((l) => sameStart(entry)(l) && !!l.ms && typeof l.ms === "object");
 
 /** The tags an Objective's sandbox carries: the vendor-side half of finding it (docs/ADAPTERS.md). */
 export const sandboxTags = (repoId, issue) => ({ factory: "objective", "factory-repo": String(repoId), "factory-issue": String(issue) });

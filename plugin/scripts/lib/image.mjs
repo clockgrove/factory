@@ -8,7 +8,7 @@
 // Paths inside the image are constants, never read from a record.
 import { SNAPSHOT_TAG } from "./adapters/sandbox.mjs";
 import { ensureLabel, getRepo, listComments, onDefaultBranch, rest, upsertComment } from "./github.mjs";
-import { isSelf, marker, selfLogin } from "./logic.mjs";
+import { WAKE_SLACK_MS, isSelf, marker, selfLogin } from "./logic.mjs";
 
 /** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
 export const IMAGE_LABEL = "factory:image";
@@ -172,6 +172,9 @@ export function lastNightly(now = new Date()) {
   return t > now ? new Date(t.getTime() - 86_400_000) : t;
 }
 
+/** The next nightly build time after `now`: the nightly pass a `nightly` wake sleeps to (lib/logic.mjs WAKE_KINDS). */
+export const nextNightly = (now = new Date()) => new Date(lastNightly(now).getTime() + 86_400_000);
+
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
  * schedule) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
@@ -185,10 +188,28 @@ export function imageDecision({ trigger, refresh, head, current, lastAttemptAt =
   if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
   if (trigger === "nightly") return { build: true };
   if (trigger !== "merge") return { skip: `no image build on ${trigger}` };
-  if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it" };
+  if (refresh === "nightly") return { skip: "image_refresh is nightly; the nightly build refreshes it", owed: true };
   if (todayMs < dailyMinutes * 60_000) return { build: true };
   if (!lastAttemptAt || Date.parse(lastAttemptAt) < lastNightly(now).getTime()) return { build: true, note: "today's minutes are used up, but no build was tried since the last nightly time" };
-  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it` };
+  return { skip: `today's image builds took ${(todayMs / 60_000).toFixed(1)} min, at or over image_daily_minutes (${dailyMinutes}); the nightly build refreshes it`, owed: true };
+}
+
+/**
+ * The image job's own next runs, as deadlines (lib/logic.mjs nextWake), so neither waits for GitHub's cron:
+ * - `nightly` at the next nightly time, when this run left the head to the nightly build (`decision.owed`: a merge
+ *   skipped for image_refresh or the day's minutes) or a merge's build failed (the nightly pass tries again; a failed
+ *   nightly pass waits for the next merge or the cron);
+ * - `nightly` at its own deadline, on a hop's tick (`hop`: the wake that slept the longest one job may, its deadline
+ *   still ahead);
+ * - `sweep`, PREVIOUS_IMAGE_MS on, when a build left an older image a stage may still be starting from: the sweep
+ *   destroys it then (prunableImages).
+ */
+export function imageWaits({ trigger, decision = null, failed = false, built = false, olderImage = false, hop = null, now = Date.now() }) {
+  if (hop) return [{ issue: null, kind: "nightly", at: hop.at }];
+  const at = (ms) => [{ issue: null, kind: "nightly", at: new Date(ms).toISOString() }];
+  if (decision?.owed || (failed && trigger === "merge")) return at(nextNightly(new Date(now)).getTime());
+  if (built && olderImage) return [{ issue: null, kind: "sweep", at: new Date(now + PREVIOUS_IMAGE_MS + WAKE_SLACK_MS).toISOString() }];
+  return [];
 }
 
 /** The images a build destroys: all but the newest KEEP by the vendor's clock, never `keep` (the one just built). */
@@ -205,33 +226,45 @@ const recordedAt = (b) => Date.parse(b.builtAt) + (Number.isFinite(b.buildMs) ? 
  * being recorded, or one stages do not start from) stay. With no current, or one the listing does not show, nothing goes.
  */
 export function prunableImages(images, current, verified = [], now = Date.now()) {
+  return imagePrune(images, current, verified, now).prune;
+}
+
+/**
+ * prunableImages' list (`prune`), and `until`: when the first image it keeps for a stage that may still be starting from
+ * it becomes prunable (ms; null when it keeps none), the sweep's next run (sweep.mjs sweepWaits).
+ */
+export function imagePrune(images, current, verified = [], now = Date.now()) {
   const at = current?.source ? images.findIndex((i) => i.source === current.source) : -1;
-  if (at < 0) return [];
+  if (at < 0) return { prune: [], until: null };
   const when = new Map((verified || []).filter((b) => b.source).map((b) => [b.source, recordedAt(b)]));
   // When the image under the cursor stopped being what a launcher reads: the earliest record of a build newer than it,
   // from the current down. A time that cannot be read counts as now (kept).
   const known = (t) => (Number.isFinite(t) ? t : now);
   let superseded = known(recordedAt(current));
-  const out = [];
+  const prune = [];
+  let until = null;
   for (const i of images.slice(at + 1)) {
     // An image no confirmed record names was never what a launcher reads.
-    if (!when.has(i.source) || now - superseded >= PREVIOUS_IMAGE_MS) out.push(i);
+    if (!when.has(i.source) || now - superseded >= PREVIOUS_IMAGE_MS) prune.push(i);
+    else until = Math.min(until ?? Infinity, superseded + PREVIOUS_IMAGE_MS);
     if (when.has(i.source)) superseded = Math.min(superseded, known(when.get(i.source)));
   }
-  return out;
+  return { prune, until };
 }
 
 /**
  * Destroy this repository's images no stage needs (prunableImages), from the vendor's listing in this project and
  * Factory's own record: never another repository's (the listing is by this repository's tag). Returns what it did per
- * image: `{source, snapshot, action: "destroyed" | "would destroy" | "skipped", reason}`.
+ * image, `images: [{source, snapshot, action: "destroyed" | "would destroy" | "skipped", reason}]`, and `until`
+ * (imagePrune): when an image it kept for a starting stage becomes prunable, or null.
  */
 export async function pruneImages(adapter, repo, { repoId, now = Date.now(), dryRun = false, log = () => {}, ...opts }) {
   const [{ builds }, { images }] = await Promise.all([listImages(repo, opts), vendorImages(adapter, String(repoId))]);
   const verified = verifiedRecords(builds, images, adapter.name);
   const current = await currentBuild(adapter, repo, verified, opts);
   const out = [];
-  for (const i of prunableImages(images, current, verified, now)) {
+  const { prune, until } = imagePrune(images, current, verified, now);
+  for (const i of prune) {
     const reason = `superseded by the current image ${current.snapshot}`;
     if (dryRun) {
       out.push({ source: i.source, snapshot: i.snapshot, action: "would destroy", reason });
@@ -245,5 +278,5 @@ export async function pruneImages(adapter, repo, { repoId, now = Date.now(), dry
       out.push({ source: i.source, snapshot: i.snapshot, action: "skipped", reason: `vendor ${e.code ?? "error"}` });
     }
   }
-  return out;
+  return { images: out, until };
 }

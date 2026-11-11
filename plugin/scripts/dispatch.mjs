@@ -15,7 +15,7 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, WAKE_RUNS, WAKE_SLACK_MS, sandboxWakeKinds, wakeHop, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -636,13 +636,14 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
  * The wake this dispatcher run arms (workflow-template.yml `wake`): the earliest deadline of the kinds the repository's
  * visibility arms (`isPublic`, logic.mjs wakeKinds) still ahead, unless a wake already queued or sleeping covers it
  * (read from the live jobs' names; an unreadable list arms anyway, since a second sleeper only ticks twice). `firedBy`
- * is the wake whose tick started this run, or null.
+ * is the wake whose tick started this run, or null. The sweep and the image jobs arm theirs the same way with their
+ * own `kinds` (logic.mjs sandboxWakeKinds), where only a wake whose tick runs them again (`runs`, logic.mjs WAKE_RUNS)
+ * covers a deadline; every wake's tick runs the dispatcher.
  */
-export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, isPublic = false, readJobs }) {
-  const kinds = wakeKinds(isPublic);
+export async function armWake(repo, deadlines, { now = Date.now(), firedBy = null, isPublic = false, kinds = wakeKinds(isPublic), runs = null, readJobs }) {
   if (!nextWake(deadlines, { now, firedBy, kinds })) return null;
   const armed = await readJobs().then(
-    (j) => j.wakes,
+    (j) => j.wakes.filter((w) => !runs || runs.includes(w.kind)),
     (e) => {
       log(`armed wakes could not be listed (${String(e.message).slice(0, 120)}); arming anyway`);
       return [];
@@ -652,14 +653,41 @@ export async function armWake(repo, deadlines, { now = Date.now(), firedBy = nul
 }
 
 /**
+ * Arm the sweep's or the image job's own next run (workflow-template.yml `sweep-wake`, `image-wake`): logs every wait
+ * and the wake armed, and sets the job's `wake_at` and `wake_kind` outputs. `job` is `sweep` or `image` (WAKE_RUNS).
+ * The repository's visibility comes from the event's payload, else one read. A run a wake's final tick started never
+ * arms that deadline again; a hop's tick (a deadline still ahead) re-arms it.
+ */
+export async function armOwnWake(job, deadlines, { repo, payload, eventName, token, readRepo, now = Date.now() }) {
+  const fired = firedByWake(eventName, payload);
+  const firedBy = fired && !wakeHop(fired, now) ? fired : null;
+  let wake = null;
+  let kinds = sandboxWakeKinds(false);
+  try {
+    if ((deadlines || []).length) {
+      const isPublic = await repoIsPublic(payload, deadlines, readRepo);
+      kinds = sandboxWakeKinds(isPublic);
+      wake = await armWake(repo, deadlines, { now, firedBy, kinds, runs: WAKE_RUNS[job], readJobs: () => activeFactoryJobs(repo, { token }, { strict: true }) });
+    }
+  } catch (e) {
+    log(`${job}: no wake armed (${String(e.message).slice(0, 120)}); events and the cron run it next`);
+  }
+  for (const d of [...(deadlines || [])].sort((x, y) => Date.parse(x.at) - Date.parse(y.at))) log(`${job}: due ${d.at}: ${d.kind}${d.issue ? ` #${d.issue}` : ""}${kinds.includes(d.kind) ? "" : " (a long wait on a private repository: events and the cron)"}`);
+  if (wake) log(`${job}: wake armed for ${wake.at} (${wake.kind}${wake.issue ? ` #${wake.issue}` : ""})`);
+  setOutput("wake_at", wake?.at ?? "");
+  setOutput("wake_kind", wake?.kind ?? "");
+  return wake;
+}
+
+/**
  * Whether the repository is public: from the event's own repository payload (every Actions event but a schedule carries
- * one), else one read of the repository, made only when a lease or daily-cap deadline would need the answer. Unknown
+ * one), else one read of the repository, made only when a lease, daily-cap or nightly deadline would need the answer. Unknown
  * counts as private, which arms only the short kinds.
  */
 export async function repoIsPublic(payload, deadlines, readRepo) {
   const known = payload?.repository && typeof payload.repository.private === "boolean" ? !payload.repository.private : null;
   if (known !== null) return known;
-  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap")) return false;
+  if (!(deadlines || []).some((d) => d.kind === "lease" || d.kind === "daily-cap" || d.kind === "nightly")) return false;
   return readRepo().then(
     (r) => r?.private === false,
     () => false,

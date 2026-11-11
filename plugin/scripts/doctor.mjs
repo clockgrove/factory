@@ -533,7 +533,7 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
 /**
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
- * sandbox the launch job's tick on its own failure. A workflow rendered before them leaves those waits to GitHub's cron,
+ * sandbox the launch job's tick on its own failure and the sweep's and the image job's own wakes (sweep-wake, image-wake). A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
 export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
@@ -545,24 +545,32 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   }
   const on = doc?.on ?? doc?.true ?? {};
   const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
+  // The sweep's or the image job's wake: a `<job>-wake` job ticking with the deadline that job armed, and the job running on that tick.
+  const ownWake = (name) => {
+    const w = jobs[`${name}-wake`];
+    return !!w && String(w.needs) === name && /gh workflow run factory\.yml -f wake=/.test(String(w.steps?.[0]?.run || "")) && /inputs\.wake/.test(String(jobs[name]?.if || "")) && /steps\.f\.outputs\.wake_at/.test(String(jobs[name]?.outputs?.wake_at || ""));
+  };
   const ticks = (j) => (jobs[j]?.steps || []).some((s) => /gh workflow run factory\.yml/.test(s?.run || "") && /steps\.f\.outcome != 'success'/.test(String(s?.if || "")) && /exit == 'deferred'/.test(String(s?.if || "")));
   const missing = [
     ...((on?.issues?.types || []).map(String).includes("closed") && /action == 'closed' \|\|/.test(String(jobs.dispatch?.if || "")) ? [] : ["a dispatcher tick on a closed issue"]),
     ...(jobs.wake && on?.workflow_dispatch?.inputs?.wake ? [] : ["the wake job"]),
     ...(jobs["launch-gate"] && !(ticks("launch") && ticks("launch-event")) ? ["the launch jobs' tick on a failed or deferred launch"] : []),
+    ...(jobs["launch-gate"] && !ownWake("sweep") ? ["the sweep's own wake (sweep-wake)"] : []),
+    ...(jobs["launch-gate"] && !ownWake("image") ? ["the image build's own wake (image-wake)"] : []),
   ];
-  if (!missing.length) return PASS("dispatcher ticks", "a closed issue, a failed launch and the waits only time ends tick the dispatcher on time");
-  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+  if (!missing.length) return PASS("dispatcher ticks", `a closed issue, a failed launch and the waits only time ends tick the dispatcher on time${jobs["launch-gate"] ? "; the sandbox sweep and the image build arm their own wakes" : ""}`);
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a sandbox left to sweep or an image left to the nightly build, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
 
 /**
- * On a private repository the wake job sleeps only to the short waits (a quota retry, a read retry): each sleeper bills
- * its runner minutes there. A sandbox stage's lease end and the UTC day's turn fall back to events and GitHub's cron,
- * which can run hours late. Null on a public repository, where every wait has its wake.
+ * On a private repository the wake jobs sleep only to the short waits (a quota retry, a read retry, the sweep's minutes):
+ * each sleeper bills its runner minutes there. A sandbox stage's lease end, the UTC day's turn and the nightly pass (an
+ * image build a merge left to it, a stopped sandbox's idle days) fall back to events and GitHub's cron, which can run
+ * hours late. Null on a public repository, where every wait has its wake.
  */
 export function longWaitCheck(repoData) {
   if (repoData?.private !== true) return null;
-  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake job sleeps only to quota and read retries, so no long sleeper bills runner minutes");
+  return PASS("long waits", "private repository: a sandbox stage's lease end, the UTC day's turn after daily_usd and, with a sandbox, the nightly pass (an image build a merge left to it, a stopped sandbox's idle days) fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

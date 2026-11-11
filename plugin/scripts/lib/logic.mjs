@@ -2421,7 +2421,8 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * state, `record` its sandbox record, `holds` whether a stage holds the sandbox now. Returns
  * `{destroy: reason, collect}` (collect: the record's stage left a usage tarball not yet collected), `{stop: reason,
  * collect}` (the record's own sandbox, running with no stage holding it on an Objective neither Running nor In review)
- * or `{keep: reason}`.
+ * or `{keep: reason, until}`: `until` (ms) is when time alone makes a kept sandbox the sweep's (an end's or a new
+ * sandbox's grace; a stopped one's idle days, `idle: true`), the sweep's own next run (sweep.mjs sweepWaits).
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
 export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = START_LOST_MS }) {
@@ -2430,10 +2431,10 @@ export function sweepDecision({ sandbox, issue, state, record, holds, now = Date
   // A stage that said it ended moments ago: the launcher's end answers it (collects its usage, stops the sandbox, books
   // its cost) within a launch job's time. The sweep a stage's own Block runs leaves it to that end, so the usage comes
   // out once; an end whose event was lost is the sweep's after the grace.
-  if (mine && record.state === "ended" && now - Date.parse(record.at) < endGraceMs) return { keep: "its stage ended moments ago; the launcher's end answers it" };
+  if (mine && record.state === "ended" && now - Date.parse(record.at) < endGraceMs) return { keep: "its stage ended moments ago; the launcher's end answers it", until: Date.parse(record.at) + endGraceMs };
   // The grace is for a sandbox no record names yet; the record's own sandbox is judged by the record at once, so a
   // short Objective's sandbox goes when it closes, not an hour later.
-  if (!mine && now - Date.parse(sandbox.createdAt) < graceMs) return { keep: "created moments ago" };
+  if (!mine && now - Date.parse(sandbox.createdAt) < graceMs) return { keep: "created moments ago", until: Date.parse(sandbox.createdAt) + graceMs };
   const collect = mine && typeof record.claim === "string" && !!record.claim && record.collected !== true && typeof record.home === "string";
   if (!issue || issue.state !== "open" || issue.pull_request) return { destroy: "its Objective is closed", collect };
   if (!record) return { destroy: "no sandbox record names it", collect: false };
@@ -2445,7 +2446,7 @@ export function sweepDecision({ sandbox, issue, state, record, holds, now = Date
   if (sandbox.state === "running") return { stop: `running with no stage holding it, the Objective ${state}`, collect };
   const last = Date.parse(record.at) || Date.parse(sandbox.createdAt);
   if (sandbox.state === "stopped" && now - last > idleMs) return { destroy: `stopped ${Math.floor((now - last) / 86_400_000)} days, the Objective ${state}`, collect };
-  return { keep: `${sandbox.state}, the Objective ${state}` };
+  return { keep: `${sandbox.state}, the Objective ${state}`, ...(sandbox.state === "stopped" && Number.isFinite(last) ? { until: last + idleMs, idle: true } : {}) };
 }
 
 /** How long an Objective waits, from the first start the vendor refused for its quota, before it is handed back Blocked. */
@@ -2491,17 +2492,34 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
+ * On the sandbox route the sweep and the image jobs arm wakes of their own (sandboxWakeKinds), whose ticks run them:
+ * - `sweep`: a sweep wait of minutes (a stage's end grace, a new sandbox's grace, a superseded image's last minutes,
+ *   the rest of a run that reached a cap), which ticks the sweep;
+ * - `nightly`: the nightly pass (lib/image.mjs nextNightly), armed only when it has work: a build a merge left to it
+ *   or a failed build, or a stopped sandbox whose idle days end by then; its tick runs the image job and the sweep.
+ * Every wake's tick is a `workflow_dispatch`, so it also ticks the dispatcher.
  */
-export const WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
+export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
+/** Every kind a wake job is named for and its tick carries (parseWake reads only these). */
+export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep", "nightly"]);
 /**
- * The kinds a repository arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
+ * The kinds a repository's dispatcher arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
  * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end and
  * the UTC day's turn, which can keep a sleeper up for hours, wait for an event or GitHub's cron backstop there. An
  * unknown visibility counts as private.
  */
-export const wakeKinds = (isPublic) => (isPublic === true ? WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
+export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
+/**
+ * The kinds the sweep and the image jobs arm, by the same rule: `sweep` (minutes) on every repository, `nightly` (up to
+ * a day) on a public one only; a private one leaves the nightly pass to GitHub's cron and the next event.
+ */
+export const sandboxWakeKinds = (isPublic) => (isPublic === true ? Object.freeze(["sweep", "nightly"]) : Object.freeze(["sweep"]));
+/** The armed wakes whose tick runs a job again: the sweep runs on a `sweep` or a `nightly` tick, the image job on a `nightly` one. */
+export const WAKE_RUNS = Object.freeze({ sweep: Object.freeze(["sweep", "nightly"]), image: Object.freeze(["nightly"]) });
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */
 export const WAKE_SLACK_MS = 60_000;
+/** Whether a wake's tick is a hop (a sleep capped at WAKE_MAX_SLEEP_S), its deadline still ahead: its run arms it again. */
+export const wakeHop = (wake, now = Date.now()) => Date.parse(wake?.at) - now > WAKE_SLACK_MS;
 /** How soon a `retry` wake reads again. */
 export const RETRY_WAKE_MS = 2 * 60_000;
 /** The longest one wake job sleeps (hosted runners end a job at six hours): a later deadline is reached in hops. */

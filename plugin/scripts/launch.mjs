@@ -31,7 +31,7 @@ import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, TRANSIENT_START, settleStale, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
@@ -929,7 +929,8 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // The record must be the one this decision read, as the write settles it (a lost marker or a cut-off claim stored
   // first). A dispatcher's marker written in between also refuses the claim: that is its own launch, named again, and
   // this launcher starts nothing; the marked launch recovers on its own.
-  const claimed = await write((cur) => (sameRecord(cur, settleStale(prior ? strip(prior) : null, Date.now())) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: new Date().toISOString(), leaseUntil: leaseUntil(), claim, launches: settledLaunches(prior?.launches), ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
+  const claimedAt = new Date().toISOString();
+  const claimed = await write((cur) => (sameRecord(cur, settleStale(prior ? strip(prior) : null, Date.now())) ? { ...base, id: prior?.id ?? null, ...(prior?.id ? { image: prior.image ?? null } : {}), state: "running", at: claimedAt, claimedAt, leaseUntil: leaseUntil(), claim, launches: settledLaunches(prior?.launches), ...(prior?.quota ? { quota: prior.quota } : {}) } : null));
   if (!claimed.ok) return out({ exit: "skipped", reason: `#${n}: ${claimed.refused ? "the sandbox record changed since it was read (another launcher's claim, a stage or the sweep)" : "another writer held the sandbox record's lock"}; nothing started` });
   watch.mark("claim");
 
@@ -963,9 +964,15 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     const retried = startFailure({ code: error.code }) === "retry";
     // Another failure tried again keeps the streak as it was, so a refusal after it counts on from the first one.
     const streak = quota ? (quota.giveUp ? {} : { quota: { since: quota.since, tries: quota.tries, retryAt: quota.retryAt } }) : retried && prior?.quota ? { quota: prior.quota } : {};
-    await write((cur) => (cur?.claim === claim ? { ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry, cur.launches), ...streak } : null)).then(
-      (w) => w.ok || log(`record: the failed start was not recorded (${w.refused ? "another claim holds the record" : "the record lock stayed held"})`),
-      (x) => log(`record: ${x.message.slice(0, 120)}`),
+    const recorded = await write((cur) => (cur?.claim === claim ? { ...base, id: e.sandboxId ?? prior?.id ?? null, state: "failed", error, at, leaseUntil: null, claim, launches: launches(entry, cur.launches), ...streak } : null)).then(
+      (w) => {
+        if (!w.ok) log(`record: the failed start was not recorded (${w.refused ? "another claim holds the record" : "the record lock stayed held"})`);
+        return w;
+      },
+      (x) => {
+        log(`record: ${x.message.slice(0, 120)}`);
+        return null;
+      },
     );
     if (quota) return out({ ...(await quotaWait(run, ctx, { stage, error, quota })), stage });
     if (retried) {
@@ -973,6 +980,14 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
       // stays labelled, and nothing new starts on this route meanwhile (logic.mjs transientHold). Going back to Queued
       // would let each re-pick start a new stint and drain the queue into the outage.
       const why = `the ${inputs.sandbox} sandbox was unavailable (${error.code}); it is tried again after a pause`;
+      const since = stage === "review" ? (ctx.review?.since ?? ctx.runningSince) : ctx.runningSince;
+      const rec = recorded?.ok ? recorded.record : null;
+      const tries = rec ? startFailures(rec, since).length : 1;
+      // A deferred stage says so on its issue, in one note it updates: at the first deferral and at each 30-minute try.
+      if (tries <= 1 || startBackoffMs(tries) >= START_RETRY_MAX_MS) {
+        const next = rec ? startRetryAt(rec, since) : Date.now() + startBackoffMs(1);
+        await upsertComment(repo, n, marker(n, "deferred"), deferredNote({ stage, vendor: inputs.sandbox, code: error.code, tries, next, holds: rec ? transientHold(rec, since) : true }), opts).catch((x) => log(`#${n}: the deferral note was not written (${x.status ?? "error"})`));
+      }
       return out({ exit: "deferred", stage, reason: `#${n}: ${why}` });
     }
     return out({ ...(await block(run, `launcher: the ${stage} stage did not start (${error.code}${error.status ? `, HTTP ${error.status}` : ""})${failures >= MAX_FAILED_STARTS ? `; ${failures} failed starts since it became Running` : ""}`)), stage });
@@ -1000,6 +1015,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   const at = new Date().toISOString();
   // Started: a quota streak is over, and its note goes.
   await dropQuotaNote(run);
+  await dropDeferredNote(run);
   // The stage's own beats take the lease from here, in its own comment; this write folds them in (startedRecord).
   const entry = { ...startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }), latencyMs, found: result.found, at, ms: { ...watch.ms } };
   const wrote = await write((cur) => (cur?.claim === claim ? startedRecord(cur, { base, result, claim, progress: stageProgressKey(runId, claim), latencyMs, at, leaseUntil: leaseUntil(), entry }) : null));
@@ -1008,6 +1024,24 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   log(`#${n}: stage ${stage} started in ${inputs.sandbox} sandbox ${result.id} (${result.found ? "the recorded one" : result.image ? `created from the image of ${String(result.image.sha).slice(0, 7)}` : "created from the base image"}${result.uploaded ? ", plugin uploaded" : ""})`);
   log(`#${n}: dispatch latency ${secs(latencyMs)} (event ${ctx.eventAt} → stage start ${result.commandAt})`);
   return out({ exit: "started", stage, sandboxId: result.id, found: result.found, latencyMs, usage, reason: "" });
+}
+
+/**
+ * The deferral note on the Objective (marker `deferred`): codes and times only. `holds`: whether this Objective still
+ * holds its route's new picks (logic.mjs transientHold).
+ */
+export function deferredNote({ stage, vendor, code, tries, next, holds }) {
+  const when = Number.isFinite(next) ? new Date(next).toISOString().slice(0, 16).replace("T", " ") + "Z" : "soon";
+  const route = holds ? "New Objectives on this route wait until a start gets through." : "It no longer holds new Objectives on this route; only its own tries go on.";
+  return `Factory: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
+}
+
+/** The deferral note, deleted once a stage starts; a failed delete is logged and left. */
+async function dropDeferredNote({ repo, n, opts }) {
+  const head = marker(n, "deferred");
+  for (const c of (await listComments(repo, n, opts).catch(() => [])).filter((x) => isSelf(x) && (x.body || "").startsWith(head))) {
+    await rest(`repos/${repo.full}/issues/comments/${c.id}`, { ...opts, method: "DELETE" }).catch((e) => log(`#${n}: the deferral note was not deleted (${e.status ?? "error"})`));
+  }
 }
 
 /** The quota note on the Objective (Factory's own marker comment), deleted; a failed delete is logged and left. */

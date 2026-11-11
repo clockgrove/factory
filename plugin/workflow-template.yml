@@ -255,8 +255,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
-      - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, or deferred its stage to a retry time)
-        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
+      - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, deferred its stage to a retry time, or started nothing)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked' || steps.f.outputs.exit == 'skipped')
         # A failed launch names its Objective: the dispatcher then wakes at the end of its launch grace, not the cron.
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && matrix.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
@@ -310,8 +310,8 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
-      - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off or deferred its stage to a retry time)
-        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked')
+      - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off, deferred its stage to a retry time or started nothing)
+        if: always() && (steps.f.outcome != 'success' || steps.f.outputs.exit == 'queued' || steps.f.outputs.exit == 'stopped' || steps.f.outputs.exit == 'tick' || steps.f.outputs.exit == 'deferred' || steps.f.outputs.exit == 'blocked' || steps.f.outputs.exit == 'skipped')
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}", FAILED: "${{ steps.f.outcome != 'success' && needs.launch-gate.outputs.issue || '' }}" } # no checkout here: gh names the repository from GH_REPO
         run: gh workflow run factory.yml -f failed_launch="$FAILED" || true
   launch-tick:

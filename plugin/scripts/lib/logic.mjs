@@ -2192,6 +2192,13 @@ export const MAX_FAILED_STARTS = 3;
 export const TRANSIENT_START = Object.freeze(["rate_limited", "unavailable", "timeout"]);
 /** A launch job's limit (5 minutes) plus its wait for a runner: a starting marker this old with no outcome was lost. */
 export const START_LOST_MS = 10 * 60_000;
+/**
+ * `since` (the Running label, the review request) is GitHub's time, in whole seconds; a launch entry's `at` is the
+ * writing runner's clock. A runner behind GitHub's by a few seconds writes its marker or failure "before" the stint it
+ * belongs to, so entries this much older than `since` still count as the stint's. A stint follows a Block and a
+ * person's re-label, never seconds after the last one, so no earlier stint's entry lands inside it.
+ */
+export const CLOCK_SKEW_MS = 60_000;
 /** The first pause after a failed start; each later one doubles it, up to START_RETRY_MAX_MS: 2, 4, 8, 16, then 30 minutes. */
 export const START_RETRY_MS = 2 * 60_000;
 export const START_RETRY_MAX_MS = 30 * 60_000;
@@ -2221,9 +2228,14 @@ export function settleStale(record, now = Date.now()) {
     } else kept.push(l);
   }
   let rec = changed ? { ...record, launches: kept } : record;
-  const claimedAt = Date.parse(rec.at);
+  // "No start since the claim": by the launcher's claim time (`claimedAt`), never the merged record's `at`, which the
+  // started stage's own beats override; for a claim written before `claimedAt` was, by its launch run (the start's
+  // entry carries the claim's run).
+  const claimedAt = Date.parse(rec.claimedAt);
+  const started = kept.some((l) => l?.ok === true && ((Number.isFinite(claimedAt) && Date.parse(l.at) >= claimedAt) || (!!rec.run && l.run === rec.run && l.stage === rec.stage)));
   const leaseEnd = Date.parse(rec.leaseUntil);
-  if (rec.state === "running" && rec.claim && Number.isFinite(leaseEnd) && now >= leaseEnd && !kept.some((l) => l?.ok === true && Date.parse(l.at) >= claimedAt)) {
+  // Only a launcher's claim (work or review): the sweep's claim is no launch attempt.
+  if (rec.state === "running" && rec.claim && (rec.stage === "work" || rec.stage === "review") && Number.isFinite(leaseEnd) && now >= leaseEnd && !started && (Number.isFinite(claimedAt) || !!rec.run)) {
     const entry = { stage: rec.stage, event: rec.event, ok: false, run: rec.run, at: new Date(leaseEnd).toISOString(), code: "timeout" };
     rec = { ...rec, state: "failed", leaseUntil: null, error: { code: "timeout", status: null }, launches: [...kept, entry].slice(-KEEP_LAUNCHES) };
   }
@@ -2236,7 +2248,7 @@ export function settleStale(record, now = Date.now()) {
  * quotaBackoff). An entry with no code, written before codes were recorded, says nothing and is not counted.
  */
 export function startFailures(record, since, now = Date.now()) {
-  const t = Date.parse(since);
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
   if (!Number.isFinite(t) || !record) return [];
   return (settleStale(record, now).launches || [])
     .filter((l) => l?.ok === false && typeof l.code === "string" && l.code !== "quota" && Date.parse(l.at) >= t)
@@ -2273,15 +2285,30 @@ export function startRetryAt(record, since, now = Date.now()) {
 }
 /** The vendor's own refusals: these alone hold a route's new picks (a cut-off launch says nothing about the vendor). */
 export const VENDOR_DOWN = Object.freeze(["rate_limited", "unavailable"]);
-/** Whether the stage's latest failed start since `since` was the vendor refusing (VENDOR_DOWN): the route's picks wait. */
-export const transientHold = (record, since, now = Date.now()) => VENDOR_DOWN.includes(startFailures(record, since, now).at(-1)?.code);
+/**
+ * Vendor refusals in a row after which one Objective's failure looks like its own, not the vendor's: its retries go on
+ * every 30 minutes, but it no longer holds the route (4 refusals: about 30 minutes of backoff).
+ */
+export const VENDOR_HOLD_MAX = 4;
+/** How many of the latest failed starts since `since` in a row were the vendor refusing (VENDOR_DOWN). */
+export const refusalsInRow = (record, since, now = Date.now()) => {
+  const fails = startFailures(record, since, now);
+  let n = 0;
+  for (let i = fails.length - 1; i >= 0 && VENDOR_DOWN.includes(fails[i].code); i -= 1) n += 1;
+  return n;
+};
+/** Whether this stage's latest starts were refused by the vendor, at most VENDOR_HOLD_MAX in a row: the route's new picks wait. */
+export const transientHold = (record, since, now = Date.now()) => {
+  const n = refusalsInRow(record, since, now);
+  return n >= 1 && n <= VENDOR_HOLD_MAX;
+};
 /**
  * A launch the dispatcher named less than START_LOST_MS ago with no outcome yet: still in flight (its job may wait for
  * a runner, or threw before it could record anything). Returns when its marker turns into a `lost` failure, the
  * earliest moment it may be named again, or null when none is in flight since `since`.
  */
 export function inFlightUntil(record, since, now = Date.now()) {
-  const t = Date.parse(since);
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
   const young = (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t && now - Date.parse(l.at) <= START_LOST_MS);
   return young.length ? Math.max(...young.map((l) => Date.parse(l.at))) + START_LOST_MS + 1000 : null;
 }
@@ -2490,7 +2517,8 @@ export const nextUtcMidnight = (now) => {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
 };
 
-const WAKE = /^(lease|quota|daily-cap|retry) (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/;
+// Every kind a wake is armed for: a kind this does not read is a sleeper the dispatcher never sees, so they pile up.
+const WAKE = new RegExp(`^(${WAKE_KINDS.join("|")}) (\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z)$`);
 /** A wake's `{kind, at}` from its job name (`wake (<kind> <iso>)`) or its tick's `wake` input (`<kind> <iso>`); else null. */
 export function parseWake(text) {
   const m = WAKE.exec(String(text ?? "").replace(/^wake \((.*)\)$/, "$1"));

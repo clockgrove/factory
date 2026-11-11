@@ -15,7 +15,7 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -241,6 +241,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             }
             continue;
           }
+          // `since` is GitHub's clock, the record's entries the runners': logic.mjs CLOCK_SKEW_MS.
           const since = await runningSince(repo, issue.number, opts).catch(() => null);
           if (since && !launchedSince(record, "work", since)) {
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
@@ -548,8 +549,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     // `recordWrites`: the record writes' {api, base} (tests); else GitHub's, with the lock's base read once.
     const base = recordWrites?.base ?? (await lockBase(repo, opts).catch(() => null));
     for (const [n, stage] of named) {
-      const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
-      if (!w?.ok) log(`  #${n}: its starting marker was not written; a lost launch is caught by the launch grace and the cron`);
+      const markedAt = new Date().toISOString();
+      const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: markedAt, run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
+      if (!w?.ok) log(`  #${n}: its starting marker was not written; the wake below and the launch grace catch a lost launch`);
+      // This run owns the launch it named: a launcher that exits without a tick, or never runs, is looked at again when
+      // its marker turns into an outcome, by a wake of this run's, not the cron.
+      due(n, "start-retry", Date.parse(markedAt) + START_LOST_MS + 1000);
     }
   }
   watch.mark("mark");

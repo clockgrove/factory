@@ -94,19 +94,19 @@ test("cost: a raw Codex stream counts a resumed pass's own share", () => {
   const fixtures = join(BENCH, "..", "plugin", "test", "fixtures");
   const pass = (label, f) => `{"type":"factory.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
   const raw = parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl"), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: null });
+  assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
   assert.equal(raw.turns, 2);
 });
 
-test("cost: Codex tokens are priced from prices.json, with its date in the basis", () => {
+test("cost: Codex tokens are priced from the Codex price table, with its date in the basis", () => {
   const row = scoreObjective(cleanMerge(46, usage("codex")), { prices, now: NOW });
   assert.equal(row.harness, "codex");
   assert.equal(row.cost.unit, "usd"); // dollars priced from the table are the measure
   // 35,000 uncached in, 115,000 cached, 10,000 out (reasoning is inside output_tokens) at the gpt-6.1-sol standard rates (2.00 / 0.10 / 10.00)
   assert.equal(row.cost.usd, priceTokens(prices, "gpt-6.1-sol", { input: 150000, cached: 115000, output: 10000 }));
   assert.equal(row.cost.usd, 0.1815);
-  assert.match(row.cost.basis, /prices\.json dated 2026-11-05$|prices\.json dated 2026-11-05;/);
-  assert.equal(row.cost.priceTableDate, "2026-11-05");
+  assert.match(row.cost.basis, /codex-prices\.json dated 2026-11-11$|codex-prices\.json dated 2026-11-11;/);
+  assert.equal(row.cost.priceTableDate, "2026-11-11");
   assert.equal(row.cost.note, null);
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);

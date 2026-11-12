@@ -119,6 +119,9 @@ inputs:
   codex_api_key:
     description: CODEX_API_KEY for the Codex harness; passed to the harness child process only, never to the job environment.
     required: false
+  codex_gateway_key:
+    description: 'A Vercel AI Gateway key (secret FACTORY_CODEX_GATEWAY_KEY) for the Codex harness: Codex then runs through the gateway and bills its credits at the provider''s list price. Wins over codex_api_key when both are set. Passed to the harness child process only, never to the job environment or the worker''s shell; never Factory''s own AI_GATEWAY_API_KEY.'
+    required: false
   copilot_github_token:
     description: 'A fine-grained token with only the Copilot Requests permission, from a user with a Copilot seat, for the Copilot harness; it bills that seat. Passed to the harness process only; doctor checks it cannot write to the repository. Required for Copilot: the job token is never used.'
     required: false
@@ -345,6 +348,7 @@ runs:
         FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
         FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
         FACTORY_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
+        FACTORY_INPUT_CODEX_GATEWAY_KEY: ${{ inputs.codex_gateway_key }}
         FACTORY_INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_github_token }}
         FACTORY_INPUT_AI_GATEWAY_API_KEY: ${{ inputs.ai_gateway_api_key }}
         FACTORY_INPUT_WORKER_SECRETS: ${{ inputs.worker_secrets }}

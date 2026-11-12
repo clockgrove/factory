@@ -72,8 +72,8 @@ export const isSecretEnv = (k) => BARE_SECRETS.has(k) || [...SECRET_INPUTS, ...M
 /** Inputs a stage does not take from the launcher's settings: this job's own, and every secret. */
 const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "repo", "sandbox", "app_id", ...SECRET_INPUTS, ...MORE_SECRETS]);
 /** The harness's credentials, by harness: only the one the stage's harness needs goes into the sandbox. */
-const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexApiKey"], copilot: ["copilotGithubToken"] };
-const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
+const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexGatewayKey", "codexApiKey"], copilot: ["copilotGithubToken"] };
+const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
 const GITHUB_CONTEXT = ["GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REPOSITORY_OWNER", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_GRAPHQL_URL", "GITHUB_WORKFLOW_REF"];
 
@@ -315,7 +315,9 @@ export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, 
   Object.assign(out, { FACTORY_HARNESS: inputs.harness, FACTORY_MODEL: inputs.model, FACTORY_SUBAGENT_MODEL: inputs.subagentModel, FACTORY_REVIEWER_MODEL: inputs.reviewerModel, FACTORY_REVIEWER_EFFORT: inputs.reviewerEffort, FACTORY_EFFORT: inputs.effort });
   for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) if (!out[k]) delete out[k];
   for (const k of GITHUB_CONTEXT) if (env[k]) out[k] = env[k];
-  for (const key of [...(HARNESS_SECRETS[inputs.harness] || []), "aiGatewayApiKey"]) if (inputs[key]) out[`FACTORY_INPUT_${INPUT_NAME[key]}`] = inputs[key];
+  // Codex with both keys gets the gateway's only: the one it runs on (harness.mjs credentialEnv).
+  const harnessKeys = (HARNESS_SECRETS[inputs.harness] || []).filter((k) => !(k === "codexApiKey" && inputs.codexGatewayKey));
+  for (const key of [...harnessKeys, "aiGatewayApiKey"]) if (inputs[key]) out[`FACTORY_INPUT_${INPUT_NAME[key]}`] = inputs[key];
   // The worker secrets' values (lib/worker-secrets.mjs), for a work stage only: its worker hands them to its harness alone.
   if (stage === "work" && inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
   Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });

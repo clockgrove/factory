@@ -1,0 +1,32 @@
+{
+  "_note": "Codex reports tokens, not dollars, so the worker and the scorecard price them from this table (usage.mjs codexRate). USD per million tokens, standard tier, as listed on the two sources below on `date`; they agreed on every model both list. gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini and gpt-5.2-codex are no longer on OpenAI's page: their rates are the gateway's. `cached` is the cached-input rate and `write` the cache-write rate (OpenAI's 30-minute write, the gateway's `input_cache_write`); Codex's input_tokens already includes both its cached and its written parts (cache_write_input_tokens). A model with no `write` rate bills writes as input. `long` is the rate for a request over `longContextAbove` input tokens; it is recorded, not applied: Codex reports usage per turn, not per request, so no request's context size is visible and every token is priced at the short-context rate (a lower bound for a run with such a request). A model matches by its exact id, after any provider prefix (`openai/`), or as that id plus a dated snapshot suffix (`-2026-08-07`); any other model is unmetered. GPT-5.6 Sol's rates are OpenAI's promotional pricing, listed until November 30, 2026.",
+  "date": "2026-11-11",
+  "status": "verified",
+  "sources": ["https://developers.openai.com/api/docs/pricing", "https://ai-gateway.vercel.sh/v1/models"],
+  "longContextAbove": 272000,
+  "perMillion": {
+    "gpt-6-astra": { "input": 10.0, "cached": 1.0, "write": 12.5, "output": 50.0, "long": { "input": 20.0, "cached": 2.0, "write": 25.0, "output": 75.0 } },
+    "gpt-6.1-sol": { "input": 2.0, "cached": 0.1, "write": 2.5, "output": 10.0, "long": { "input": 4.0, "cached": 0.2, "write": 5.0, "output": 15.0 } },
+    "gpt-6.1-terra": { "input": 1.0, "cached": 0.05, "write": 1.25, "output": 5.0, "long": { "input": 2.0, "cached": 0.1, "write": 2.5, "output": 7.5 } },
+    "gpt-6-sol": { "input": 2.0, "cached": 0.2, "write": 2.5, "output": 10.0, "long": { "input": 4.0, "cached": 0.4, "write": 5.0, "output": 15.0 } },
+    "gpt-6-luna": { "input": 0.1, "cached": 0.01, "write": 0.125, "output": 0.5, "long": { "input": 0.2, "cached": 0.02, "write": 0.25, "output": 0.75 } },
+    "gpt-5.6-sol": { "input": 4.0, "cached": 0.4, "write": 5.0, "output": 20.0, "long": { "input": 8.0, "cached": 0.8, "write": 10.0, "output": 30.0 } },
+    "gpt-5.6-terra": { "input": 2.0, "cached": 0.2, "write": 2.5, "output": 12.0, "long": { "input": 4.0, "cached": 0.4, "write": 5.0, "output": 18.0 } },
+    "gpt-5.6-luna": { "input": 0.2, "cached": 0.02, "write": 0.25, "output": 1.2, "long": { "input": 0.4, "cached": 0.04, "write": 0.5, "output": 1.8 } },
+    "gpt-5.5": { "input": 5.0, "cached": 0.5, "output": 30.0, "long": { "input": 10.0, "cached": 1.0, "output": 45.0 } },
+    "gpt-5.4": { "input": 2.5, "cached": 0.25, "output": 15.0, "long": { "input": 5.0, "cached": 0.5, "output": 22.5 } },
+    "gpt-5.4-mini": { "input": 0.75, "cached": 0.075, "output": 4.5 },
+    "gpt-5.4-nano": { "input": 0.2, "cached": 0.02, "output": 1.25 },
+    "gpt-5.3-codex": { "input": 1.75, "cached": 0.175, "output": 14.0 },
+    "gpt-5.2": { "input": 1.75, "cached": 0.175, "output": 14.0 },
+    "gpt-5.2-codex": { "input": 1.75, "cached": 0.175, "output": 14.0 },
+    "gpt-5.1": { "input": 1.25, "cached": 0.125, "output": 10.0 },
+    "gpt-5.1-codex": { "input": 1.25, "cached": 0.13, "output": 10.0 },
+    "gpt-5.1-codex-max": { "input": 1.25, "cached": 0.125, "output": 10.0 },
+    "gpt-5.1-codex-mini": { "input": 0.25, "cached": 0.03, "output": 2.0 },
+    "gpt-5": { "input": 1.25, "cached": 0.125, "output": 10.0 },
+    "gpt-5-codex": { "input": 1.25, "cached": 0.13, "output": 10.0 },
+    "gpt-5-mini": { "input": 0.25, "cached": 0.025, "output": 2.0 },
+    "gpt-5-nano": { "input": 0.05, "cached": 0.005, "output": 0.4 }
+  }
+}

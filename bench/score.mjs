@@ -46,7 +46,7 @@
  *   --replay FILE          score from such a snapshot instead of GitHub
  *   --print                print the JSON rows to stdout too
  *   --token TOKEN          a GitHub token (default: GH_TOKEN, GITHUB_TOKEN, the gh login)
- *   --prices FILE          a price table other than bench/prices.json
+ *   --prices FILE          a Codex price table other than plugin/scripts/lib/codex-prices.json
  *
  * Exit codes: 0 scored; 64 usage; 65 nothing to score; 70 GitHub failed.
  */

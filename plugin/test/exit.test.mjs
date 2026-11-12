@@ -471,7 +471,7 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   assert.equal(snap.toolCalls, 2);
   assert.equal(snap.lastTool, "Bash: pnpm test --filter web");
   assert.deepEqual([snap.subagentsActive.length, snap.subagentsDone], [0, 1]);
-  assert.deepEqual(snap.tokens, { input: 24991, output: 8 });
+  assert.deepEqual(snap.tokens, { input: 24991, output: 8, written: 11978 }, "cache writes inside the input, counted beside it");
   assert.equal(snap.events, 5);
   const line = activityLine(snap, { harness: "claude", model: "claude-opus-5-5" });
   assert.match(line, /^claude \(claude-opus-5-5\) working: 6 min, 1 turns, 2 tool calls; sub-agents 1 done; active now; 25k tokens in, 8 out; last tool Bash: pnpm test --filter web$/);
@@ -487,7 +487,7 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   c.feed('{"type":"item.started","item":{"type":"command_execution","command":"npm test"}}');
   c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
   // input_tokens already includes the cached part, output_tokens the reasoning part.
-  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20 }]);
+  assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20, written: 0 }]);
   // Claude reports a resumed session's cost as its running total: the line shows the pass's own share.
   const r = harnessActivity(() => 0);
   r.since("s1", { usd: 12.9695405, tokens: { input: 1, output: 1 } });

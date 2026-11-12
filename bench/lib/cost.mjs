@@ -8,7 +8,7 @@
 // JSONL (`events.jsonl`) is accepted too, for runs made outside the Action.
 //
 //   claude   unit usd      total_cost_usd, modelUsage (sub-agents included)
-//   codex    unit tokens   priced from prices.json (placeholder rates, dated)
+//   codex    unit tokens   priced from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
 //   copilot  unit usd      AI credits from --usage-output-file at the run's $/credit (GitHub: $0.01), premium requests beside
 //
 // A count a harness does not report is null, never zero.
@@ -18,9 +18,11 @@
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CODEX_NO_TOKENS } from "../../plugin/scripts/lib/usage.mjs";
+import { CODEX_NO_TOKENS, priceTokens } from "../../plugin/scripts/lib/usage.mjs";
 
-export const PRICES_FILE = join(import.meta.dirname, "..", "prices.json");
+/** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
+export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
+const PRICES_NAME = "codex-prices.json";
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
@@ -33,19 +35,8 @@ export function loadPrices(file = PRICES_FILE) {
   return prices;
 }
 
-/** USD for Codex tokens by the longest model prefix in the table; null when the model is not listed. */
-export function priceTokens(prices, model, tokens) {
-  if (!model || !tokens) return null;
-  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
-  const key = Object.keys(prices.perMillion)
-    .sort((a, b) => b.length - a.length)
-    .find((k) => model === k || model.startsWith(k));
-  if (!key) return null;
-  const p = prices.perMillion[key];
-  const cached = tokens.cached ?? 0;
-  const uncached = Math.max(0, (tokens.input ?? 0) - cached);
-  return round4((uncached * p.input + cached * p.cached + (tokens.output ?? 0) * p.output) / 1e6);
-}
+/** USD for Codex tokens at the table's rates (usage.mjs codexRate: exact id or dated snapshot); null when unlisted. */
+export { priceTokens };
 
 /** Non-JSON lines are skipped (CLIs print warnings on stdout). */
 function jsonLines(text) {
@@ -149,7 +140,7 @@ export function vendorOf(records) {
 
 /**
  * Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already
- * includes the reasoning tokens. Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
+ * includes the reasoning tokens, and `input_tokens` the cached and written ones (`cache_write_input_tokens`). Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
  * the stream reports the thread's running total, so it counts only its own share (as the worker's runHarness does).
  */
 export function fromCodexEvents(text, model = null) {
@@ -161,7 +152,7 @@ export function fromCodexEvents(text, model = null) {
     if (!pass) return;
     const prior = thread ? totals.get(thread) : null;
     if (thread) totals.set(thread, pass);
-    for (const k of ["input", "output", "cached"]) rec.tokens[k] = add(rec.tokens[k], prior ? less(pass[k], prior[k]) : pass[k]);
+    for (const k of ["input", "output", "cached", "written"]) rec.tokens[k] = add(rec.tokens[k], prior ? less(pass[k], prior[k]) : pass[k]);
     pass = null;
   };
   for (const e of jsonLines(text)) {
@@ -172,10 +163,11 @@ export function fromCodexEvents(text, model = null) {
     if (e.type !== "turn.completed") continue;
     rec.turns += 1;
     const u = e.usage || {};
-    pass ??= { input: null, output: null, cached: null };
+    pass ??= { input: null, output: null, cached: null, written: null };
     pass.input = add(pass.input, num(u.input_tokens));
     pass.output = add(pass.output, num(u.output_tokens));
     pass.cached = add(pass.cached, num(u.cached_input_tokens));
+    pass.written = add(pass.written, num(u.cache_write_input_tokens));
   }
   close();
   return rec;
@@ -277,7 +269,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.usd = priceTokens(prices, rec.model, rec.tokens);
       // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
       const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
-      part.basis = part.usd === null ? (noTokens ? CODEX_NO_TOKENS : `unmetered: no price for ${rec.model ?? "unknown model"} in prices.json`) : `tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+      part.basis = part.usd === null ? (noTokens ? CODEX_NO_TOKENS : `unmetered: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}`) : `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
     } else if (rec.harness === "copilot") {
       // The worker prices the AI credits its usage file reports (usage.mjs parseCopilot); an artifact from before that,
       // or a run that reported none, stays unmetered.
@@ -319,8 +311,8 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // Dollars priced from the table are the measure (PLAN.md); tokens stay the unit only while unpriced.
       out.unit = priced.length ? "usd" : "tokens";
       out.priceTableDate = prices.date;
-      out.basis = priced.length ? `${partial}tokens priced from prices.json dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unmetered[0].basis;
-      out.note = prices.status === "placeholder" ? "prices.json carries placeholder rates; replace them before reading this as dollars" : null;
+      out.basis = priced.length ? `${partial}tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unmetered[0].basis;
+      out.note = prices.status === "placeholder" ? `${PRICES_NAME} carries placeholder rates; replace them before reading this as dollars` : null;
       break;
     case "copilot":
       out.unit = "usd";

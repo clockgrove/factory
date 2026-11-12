@@ -10,39 +10,48 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Codex prices, USD per million tokens, by model prefix: the bench's one table
- * (bench/prices.json) when it sits beside the action, else this copy of it. Codex
- * reports tokens, not dollars, so the worker prices them here; the bench re-prices.
- * `status: "placeholder"` travels into every basis string until the rates are real.
- * Unknown models give usd: null and basis "unmetered: no price for <model>"; a run that reported no tokens at all (no
- * turn completed) gives CODEX_NO_TOKENS instead, whatever the model.
+ * Codex prices, USD per million tokens: the one table (codex-prices.json beside this file), which the bench reads too.
+ * Codex reports tokens, not dollars, so the worker prices them here; the bench re-prices from the same file. The table
+ * records its date and sources. Unknown models give usd: null and basis "unmetered: no price for <model>"; a run that
+ * reported no tokens at all (no turn completed) gives CODEX_NO_TOKENS instead, whatever the model.
  */
-const FALLBACK_PRICES = {
-  status: "placeholder",
-  date: "2026-11-02",
-  perMillion: {
-    "gpt-6.1-sol": { input: 2.5, cached: 0.25, output: 15 },
-    "gpt-6.1": { input: 2.5, cached: 0.25, output: 15 },
-    "gpt-5.5-codex": { input: 1.25, cached: 0.125, output: 10 },
-    "gpt-5.5": { input: 1.25, cached: 0.125, output: 10 },
-    "gpt-5-codex": { input: 1.25, cached: 0.125, output: 10 },
-    "gpt-5": { input: 1.25, cached: 0.125, output: 10 },
-  },
-};
-function loadPrices() {
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const f of [join(here, "..", "..", "..", "bench", "prices.json"), join(here, "..", "..", "bench", "prices.json")]) {
-    if (!existsSync(f)) continue;
-    try {
-      const p = JSON.parse(readFileSync(f, "utf8"));
-      if (p?.perMillion) return p;
-    } catch {
-      // unreadable: fall through
-    }
-  }
-  return FALLBACK_PRICES;
+export const CODEX_PRICES = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "codex-prices.json"), "utf8"));
+
+/** A model id without its provider prefix: `openai/gpt-6.1-sol` (the AI Gateway's form) is `gpt-6.1-sol`. */
+export const bareModel = (model) => String(model ?? "").replace(/^[A-Za-z0-9._-]+\//, "");
+
+/**
+ * The table's rates for `model`, or null: its exact id after any provider prefix, or that id plus a dated snapshot suffix
+ * (`gpt-5.5-2026-04-23`). Nothing else matches, so `gpt-5-mini` never takes `gpt-5`'s rates: an unlisted model is
+ * unmetered, not mispriced. Short-context rates (the table's `long` entry is recorded, not applied: Codex reports usage
+ * per turn, so no request's context size is visible).
+ */
+export function codexRate(table, model) {
+  const id = bareModel(model);
+  if (!id || !table?.perMillion) return null;
+  const snapshot = id.match(/^(.+)-\d{4}-\d{2}-\d{2}$/)?.[1];
+  const p = (Object.hasOwn(table.perMillion, id) && table.perMillion[id]) || (snapshot && Object.hasOwn(table.perMillion, snapshot) && table.perMillion[snapshot]) || null;
+  const rate = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  return p && [p.input, p.cached, p.output].every(rate) && (p.write === undefined || rate(p.write)) ? p : null;
 }
-export const CODEX_PRICES = loadPrices();
+
+/**
+ * USD for Codex `tokens` at `table`'s rates, rounded to 1/100 cent; null when the model is unlisted or nothing was
+ * reported. `input` includes the cached and the written tokens (Codex's input_tokens counts both): the cached part at the
+ * cached rate, the written part (cache_write_input_tokens) at the write rate, or the input rate for a model with none.
+ */
+export function priceTokens(table, model, tokens) {
+  if (!model || !tokens) return null;
+  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
+  const p = codexRate(table, model);
+  if (!p) return null;
+  const cached = tokens.cached ?? 0;
+  const written = tokens.written ?? 0;
+  const uncached = Math.max(0, (tokens.input ?? 0) - cached - written);
+  const usd = uncached * p.input + cached * p.cached + written * (p.write ?? p.input) + (tokens.output ?? 0) * p.output;
+  return Math.round((usd / 1e6) * 10000) / 10000;
+}
+
 /**
  * The basis of a Codex run that reported no token counts: no `turn.completed` (a refused request, a turn cut short). Its
  * spend is unknown, not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
@@ -90,12 +99,51 @@ export function jsonLines(text) {
 
 /**
  * Error types and codes that no retry can pass, whatever the status: an exhausted quota or billing (OpenAI's
- * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit).
+ * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit), a rejected key, and the Vercel AI
+ * Gateway's budget (`quota_for_entity_exceeded`, HTTP 402) and payment-method (`customer_verification_required`, 403)
+ * types, which decide a gateway body that carries no status.
  */
-const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authorization"]);
+const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "customer_verification_required"]);
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+
+/**
+ * The provider error a failed Codex run ended on, as structure: {status, type, code, message} from the last `turn.failed`
+ * (else `error`) event's JSON body, or null when the run's last word was a completed turn or the message is prose.
+ */
+function codexError(events) {
+  const last = [...events].reverse().find((e) => e?.type === "turn.failed" || e?.type === "error" || e?.type === "turn.completed");
+  if (!last || last.type === "turn.completed") return null;
+  const raw = last.type === "turn.failed" ? last.error?.message : last.message;
+  let body = null;
+  if (typeof raw === "string" && raw.trim().startsWith("{")) {
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+  }
+  if (!body || typeof body !== "object" || !body.error || typeof body.error !== "object") return null;
+  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message) };
+}
+
+/**
+ * The error codes of a resumed Codex thread whose encrypted reasoning the provider cannot read: the thread was written
+ * through another provider credential (an AI Gateway session pin that moved to another account between passes, or an
+ * OpenAI key from another organization). A fresh thread passes; a retry of the resume never does.
+ */
+export const ROTATED_PIN_CODES = new Set(["invalid_encrypted_content", "organization_mismatch"]);
+
+/**
+ * Whether a failed Codex resume ended on that rejection (runHarness then runs a fresh thread once): HTTP 400, or no status
+ * (a bare gateway body), with a ROTATED_PIN_CODES code or type. Structure only, never the message's words.
+ */
+export function rotatedPin(harness, events) {
+  if (harness !== "codex") return false;
+  const e = codexError(events);
+  return !!e && (e.status === 400 || e.status === null) && (ROTATED_PIN_CODES.has(e.code) || ROTATED_PIN_CODES.has(e.type));
+}
 
 /**
  * A provider's refusal the harness reported as structure, when no retry can pass it: {harness, status, type, code,
@@ -104,7 +152,8 @@ const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
  * the run stays a death or a harness error as before. The parsers ask only for a run that failed. Each harness's structure:
  *   claude  : the result line with is_error and `api_error_status`; the type is the API error message's `error`
  *   codex   : the last `turn.failed` (else `error`) event, whose `error.message` is the provider's JSON error body
- *             ({status, error: {type, code, message}}); a message that is not a JSON object is prose: null
+ *             ({status, error: {type, code, message}}), or the AI Gateway's bare body ({error: {type, message}}, no
+ *             status: decided by its type); a message that is not a JSON object is prose: null
  *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
  */
 export function providerRefusal(harness, events) {
@@ -116,19 +165,8 @@ export function providerRefusal(harness, events) {
     if (res?.is_error !== true || status === null) return null;
     r = { status, type: str(api?.error), code: null, message: str(res.result) };
   } else if (harness === "codex") {
-    const last = [...events].reverse().find((e) => e?.type === "turn.failed" || e?.type === "error" || e?.type === "turn.completed");
-    if (!last || last.type === "turn.completed") return null;
-    const raw = last.type === "turn.failed" ? last.error?.message : last.message;
-    let body = null;
-    if (typeof raw === "string" && raw.trim().startsWith("{")) {
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        body = null;
-      }
-    }
-    if (!body || typeof body !== "object") return null;
-    r = { status: num(body.status), type: str(body.error?.type), code: str(body.error?.code), message: str(body.error?.message) };
+    r = codexError(events);
+    if (!r) return null;
   } else if (harness === "copilot") {
     const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
     if (!d || typeof d !== "object") return null;
@@ -280,28 +318,17 @@ export function cacheSummary(records) {
   return { ttl: live.find((r) => r.cacheTtl)?.cacheTtl ?? null, ...(ttlSeconds === null ? {} : { harnessTtlSeconds: ttlSeconds }), writeShare: writeShare(tokens), afterWait };
 }
 
-/** Price Codex tokens from the table; null when the model is not listed. */
-export function priceCodex(model, tokens) {
-  if (!model) return null;
-  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
-  const key = Object.keys(CODEX_PRICES.perMillion)
-    .sort((a, b) => b.length - a.length)
-    .find((k) => model === k || model.startsWith(k));
-  if (!key) return null;
-  const p = CODEX_PRICES.perMillion[key];
-  const cached = tokens.cached ?? 0;
-  const uncached = Math.max(0, (tokens.input ?? 0) - cached);
-  const usd = (uncached * p.input + cached * p.cached + (tokens.output ?? 0) * p.output) / 1e6;
-  return Math.round(usd * 10000) / 10000;
-}
+/** Price Codex tokens from the table (a provider prefix stripped); null when the model is not listed. */
+export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, tokens);
 
 /**
  * Codex: `codex exec --json` prints JSONL ending in one `turn.completed` whose
- * `usage.{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens}` is the
+ * `usage.{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` is the
  * thread's running total, restored by `codex exec resume` (sinceSession takes a resumed pass's
- * share). `input_tokens` already includes the cached part and `output_tokens` the reasoning
- * part, so reasoning is not added again. Sub-agent threads are folded in by Codex where it
- * reports them at all. Dollars come from the price table.
+ * share). `input_tokens` already includes the cached and the written parts and `output_tokens` the reasoning
+ * part, so neither is added again. Sub-agent threads are folded in by Codex where it
+ * reports them at all. Dollars come from the price table. An `item.completed` of type `error` followed by a completed
+ * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure.
  */
 export function parseCodex(stdout, model) {
   const rec = empty("codex", model);
@@ -313,30 +340,38 @@ export function parseCodex(stdout, model) {
   let input = null;
   let output = null;
   let cached = null;
+  let written = null;
   let turns = 0;
   let failed = null;
+  let itemError = null;
   let first = null;
   for (const e of events) {
     if (e.type === "thread.started" && e.thread_id) rec.sessionId = e.thread_id;
     if (e.type === "turn.completed") {
       turns += 1;
+      // An item error the turn completed after was a warning.
+      itemError = null;
       const u = e.usage || {};
-      // Codex reports usage per turn, not per request, and no cache writes (OpenAI's caching has no write charge).
-      if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: null };
+      // Codex reports usage per turn, not per request; cache writes where the provider bills them (the AI Gateway does).
+      if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
       input = add(input, num(u.input_tokens));
       output = add(output, num(u.output_tokens));
       cached = add(cached, num(u.cached_input_tokens));
+      written = add(written, num(u.cache_write_input_tokens));
     }
     if (e.type === "turn.failed" || e.type === "error") failed = e.error?.message || e.message || e.type;
-    if (e.type === "item.completed" && e.item?.type === "error") failed = e.item.message || "item error";
+    if (e.type === "item.completed" && e.item?.type === "error") itemError = e.item.message || "item error";
   }
+  failed = failed || itemError;
   rec.turns = turns;
-  rec.tokens = { input, output, cached, written: null };
+  rec.tokens = { input, output, cached, written };
   rec.cache = { first };
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
   const refusal = rec.ok ? null : providerRefusal("codex", events);
   if (refusal) rec.refusal = refusal;
+  // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
+  if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
   rec.usd = priceCodex(rec.model, rec.tokens);
   rec.basis = rec.usd === null ? (input === null && output === null ? CODEX_NO_TOKENS : rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
   return rec;
@@ -558,7 +593,7 @@ export function sinceSession(rec, prior) {
   const pt = prior.tokens ?? {};
   const counts = Object.fromEntries(["premiumRequests", "aiu"].filter((k) => typeof rec[k] === "number").map((k) => [k, Math.round(less(rec[k], prior[k]) * 1000) / 1000]));
   const first = rec.cache?.first;
-  const cache = rec.harness === "codex" && first ? { cache: { ...rec.cache, first: { ...first, input: less(first.input, pt.input), cached: less(first.cached, pt.cached) } } } : {};
+  const cache = rec.harness === "codex" && first ? { cache: { ...rec.cache, first: { ...first, input: less(first.input, pt.input), cached: less(first.cached, pt.cached), written: less(first.written, pt.written) } } } : {};
   return { ...rec, ...counts, ...cache, usd: less(rec.usd, prior.usd), tokens: { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) }, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
 }
 

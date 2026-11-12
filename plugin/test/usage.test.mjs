@@ -70,7 +70,7 @@ test("codex: unknown model is unmetered, never zero", () => {
   assert.equal(rec.usd, null);
   assert.match(rec.basis, /unmetered: no price for gpt-unknown-9/);
   assert.equal(priceCodex(null, { input: 1 }), null);
-  assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), 5, "prefix match on gpt-5.5 at its published input rate");
+  assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), null, "no prefix match: an unlisted model is unmetered, not priced as gpt-5.5");
 });
 
 test("copilot: no usage output is unmetered, never zero; a non-zero exit is an error, not a death", () => {
@@ -110,7 +110,7 @@ test("codex 0.160: the real probe JSONL (captured Nov 2) parses to one turn with
   assert.equal(rec.ok, true);
   assert.equal(rec.turns, 1);
   assert.equal(rec.sessionId, "01a19f63-ef53-7ef1-9da6-43fdffaa3891");
-  assert.deepEqual(rec.tokens, { input: 14614, output: 5, cached: 12288, written: null });
+  assert.deepEqual(rec.tokens, { input: 14614, output: 5, cached: 12288, written: 0 });
   assert.equal(finalText("codex", fixture("codex-probe.jsonl")), "ok");
 });
 
@@ -376,19 +376,19 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
     return runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label, onLine: tracker.feed, onResume: tracker.since });
   };
   const shown = () => live.at(-1).snapshot().tokens;
-  const turn = (input, cached) => ({ unit: "turn", input, cached, written: null });
+  const turn = (input, cached) => ({ unit: "turn", input, cached, written: 0 });
   const near = (a, b, why) => assert.ok(Math.abs(a - b) < 1e-3, `${why}: ${a} vs ${b}`);
   try {
     const first = await run(null, "work-1");
     const thread = first.sessionId;
-    assert.deepEqual(first.tokens, { input: 16151, output: 5, cached: 12288, written: null });
-    assert.deepEqual(shown(), { input: 16151, output: 5 }, "the live counter: input includes cached, output includes reasoning");
+    assert.deepEqual(first.tokens, { input: 16151, output: 5, cached: 12288, written: 0 });
+    assert.deepEqual(shown(), { input: 16151, output: 5, written: 0 }, "the live counter: input includes cached, output includes reasoning");
     const fix = await run(thread, "validation-fix-1");
-    assert.deepEqual(fix.tokens, { input: 22888, output: 50, cached: 12288, written: null }, "the resumed pass's own share, reasoning inside output");
-    assert.deepEqual(shown(), { input: 22888, output: 50 }, "the live counter shows the resumed pass's own share");
+    assert.deepEqual(fix.tokens, { input: 22888, output: 50, cached: 12288, written: 0 }, "the resumed pass's own share, reasoning inside output");
+    assert.deepEqual(shown(), { input: 22888, output: 50, written: 0 }, "the live counter shows the resumed pass's own share");
     assert.deepEqual(fix.cache.first, turn(22888, 12288), "the cache split after a CI wait is the pass's own");
     near(fix.usd, priceCodex(model, fix.tokens), "priced on its own share");
-    assert.deepEqual(fix.sessionTotal.tokens, { input: 39039, output: 55, cached: 24576, written: null });
+    assert.deepEqual(fix.sessionTotal.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
     near(mergeUsage([first, fix]).usd, priceCodex(model, fix.sessionTotal.tokens), "the run costs what the thread reported last");
 
     // A later stage restores the thread: the prior total is the one Factory recorded in the saving stage's result.json.
@@ -404,7 +404,7 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
     delete process.env.FACTORY_LOCAL;
     const review = await run("t2", "review-fix-1");
     assert.deepEqual(review.tokens, fix.tokens, "a restored thread counts only its own share too");
-    assert.deepEqual(shown(), { input: 22888, output: 50 });
+    assert.deepEqual(shown(), { input: 22888, output: 50, written: 0 });
     assert.deepEqual(review.cache.first, turn(22888, 12288));
     rmSync(root, { recursive: true, force: true });
   } finally {

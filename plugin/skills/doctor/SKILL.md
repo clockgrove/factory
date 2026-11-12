@@ -15,7 +15,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## Credentials
 
-- The harness's credential is present and is an API credential: Claude `ANTHROPIC_API_KEY` or workload identity federation (`id-token: write` on the job and the Anthropic organization linked); Codex `CODEX_API_KEY`; Copilot `copilot_github_token`, which a probe shows cannot write to the repository. Fix: add the secret the workflow names.
+- The harness's credential is present and is an API credential: Claude `ANTHROPIC_API_KEY` or workload identity federation (`id-token: write` on the job and the Anthropic organization linked); Codex `FACTORY_CODEX_GATEWAY_KEY` (through the Vercel AI Gateway; `--probe` checks the key against the gateway's free model list) or `CODEX_API_KEY`; Copilot `copilot_github_token`, which a probe shows cannot write to the repository. Fix: add the secret the workflow names.
 - Warn when `CLAUDE_CODE_OAUTH_TOKEN` is set: plan limits assume ordinary individual use, and a present API key silently wins. Fix: `credential: plan` only on your own repository.
 - With `--probe`, a one-call probe through the worker's own harness command reports the resolved model and that usage output is present. Fix: install or log in to the CLI; for Codex confirm the key is on the step, not the job.
 

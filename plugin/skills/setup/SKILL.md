@@ -20,7 +20,7 @@ Walk it; never read, print or copy the key.
 3. Install it on this repository only.
 4. Save the two secrets: `gh secret set FACTORY_APP_ID` and `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, run by the user, with the path they give as text.
 
-Then the model credential, by the user (`gh secret set`): `ANTHROPIC_API_KEY` (none for Claude federation), `CODEX_API_KEY`, or `COPILOT_GITHUB_TOKEN` (only the Copilot Requests permission; doctor fails without it).
+Then the model credential, by the user (`gh secret set`): `ANTHROPIC_API_KEY` (none for Claude federation), `FACTORY_CODEX_GATEWAY_KEY` (an AI Gateway key) or `CODEX_API_KEY`, or `COPILOT_GITHUB_TOKEN` (only the Copilot Requests permission; doctor fails without it).
 
 ## 3. GitHub settings
 

@@ -827,20 +827,28 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       return [...(green ? [green] : []), ...base];
     };
     const classify = async (x) => {
-      const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history });
+      const files = async () => ((await rest(`repos/${checks.repo.full}/pulls/${checks.prNumber}/files?per_page=100`, { token: checks.token, paginate: true })) || []).flatMap((f) => [f.filename, f.previous_filename].filter(Boolean));
+      const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history, files });
       return checksNotStarted({ sha, names: checks.names, checkRuns: x.runs || [], ...read, waitedMin: Math.round((Date.now() - waitedFrom) / 60000) });
     };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
     const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;
       let stuck = await classify(x);
-      if (!stuck.githubDelay) return { stuck };
+      if (!stuck.waits) return { stuck };
       const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
       if (capMs <= 0) return { stuck };
-      if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for GitHub to start ${stuck.runs.length > 1 ? "them" : "it"}, no fix run`);
+      if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`);
       x = await wait(ignoreIds, capMs, { appearMs: Infinity, maxPollMs: checks.maxPollMs ?? 5 * 60_000 });
       if (x.conflict || !unfinished(x)) return x;
       stuck = await classify(x);
+      // Started during that wait and still running: it gets the checks' normal timeout, as a check that started at once does.
+      if (stuck.kind === "running") {
+        if (onPhase) await onPhase(`required checks on ${sha.slice(0, 7)} started late; waiting for them as usual`);
+        x = await wait(ignoreIds);
+        if (x.conflict || !unfinished(x)) return x;
+        stuck = await classify(x);
+      }
       return { stuck };
     };
     r = await settle(r);

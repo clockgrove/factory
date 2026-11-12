@@ -1,14 +1,14 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { COPILOT_PROBE_SCRIPT, SHELL_SECRET_KEYS, copilotLocalCheck, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { dropSessions, holdSession } from "../scripts/lib/claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
-import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_RULE, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState, stageNode, toolchainDirs } from "../scripts/lib/copilot-runner.mjs";
+import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_CHECK, TOOLCHAIN_RULE, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState, stageNode, toolchainDirs } from "../scripts/lib/copilot-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, copilotPrivateTmp, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
@@ -306,22 +306,32 @@ test("Copilot's commands get the stage's toolchain (#105): each PATH directory i
   const layout = copilotRunnerLayout(AGENT, COPILOT_RUNNER_HOME);
   const actions = ["/opt/hostedtoolcache/node/22.23.4/x64/bin", "/home/factory-agent/.local/bin", "/opt/pipx_bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/games", "/snap/bin", `${COPILOT_RUNNER_HOME}/bin`, "/tmp/bin", "/home/bin", "/run/x/bin", "/opt/hostedtoolcache/node/22.23.4/x64/lib", "/bin2", "/", "rel/bin"].join(":");
   assert.deepEqual(toolchainDirs(layout, actions), ["/opt/hostedtoolcache/node/22.23.4/x64", "/opt/pipx_bin", "/usr/local", "/usr/games", "/snap", "/bin2"], "npm's prefix, not only its bin; nothing the sandbox binds itself; never the agent's home, Factory's, Copilot's TMPDIR, /run or a directory above one");
-  // As the agent: a directory it cannot reach, or a link into its home, is left out (bubblewrap could not bind the first).
+  // Factory's own directories on the route are never toolchain, nor anything under them.
+  const route = { HOME: "/home/runner", RUNNER_TEMP: "/home/runner/work/_temp", GITHUB_WORKSPACE: "/home/runner/work/r/r", FACTORY_USAGE_DIR: "/u/usage", TMPDIR: "/f/tmp" };
+  assert.deepEqual(toolchainDirs(layout, "/home/runner/work/_temp/x/bin:/home/runner/work/r/r/node_modules/.bin:/u/usage/bin:/f/tmp/t/bin:/u/bin:/opt/t/bin", route), ["/opt/t"], "Factory's home, temp, workspace and usage directories stay out");
+  // As the agent: a directory it cannot reach, one it owns or can write (it could swap it for a link before bubblewrap
+  // binds it), one under a link it could swap, and a link into its home are left out.
   const { root, runner } = fakeRunner();
   const tc = join(root, "tc", "node", "x64");
   for (const d of [join(tc, "bin"), join(root, "locked", "bin"), join(runner.agentHome, "own", "bin")]) mkdirSync(d, { recursive: true });
   symlinkSync(join(runner.agentHome, "own"), join(root, "linked"));
+  symlinkSync("/usr/local", join(root, "swappable"));
   for (const n of ["node", "npm"]) writeFileSync(join(tc, "bin", n), "#!/bin/sh\n", { mode: 0o755 });
   chmodSync(join(root, "locked"), 0);
-  const path = [join(tc, "bin"), join(root, "locked", "bin"), join(root, "linked", "bin"), "/usr/bin"].join(":");
+  // /usr/local where it is root's all the way up (a runner's, a cloud VM's): the toolchain an agent cannot change.
+  const system = ["/usr/local", "/usr", "/"].every((d) => statSync(d, { throwIfNoEntry: false })?.uid === 0) && process.getuid() !== 0;
+  const path = [join(tc, "bin"), join(root, "locked", "bin"), join(root, "linked", "bin"), join(root, "swappable", "bin"), "/usr/local/bin", "/usr/bin"].join(":");
   try {
-    await resetCopilotState(runner, { ...process.env, PATH: path });
+    await resetCopilotState(runner, { PATH: path, HOME: "/nonexistent-factory-home" });
+    const agentSays = execFileSync("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", tc, join(root, "locked"), join(root, "swappable"), "/tmp", "/usr/local"], { encoding: "utf8", env: { PATH: process.env.PATH } });
+    if (process.getuid() !== 0) assert.deepEqual(agentSays.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]), system ? ["/usr/local"] : [], "not the agent's own, not one it cannot reach, not under a link it could swap, not a directory it can write (/tmp)");
   } finally {
     chmodSync(join(root, "locked"), 0o755);
   }
-  if (process.getuid() !== 0) assert.deepEqual(runner.toolchain, [tc], "the reachable toolchain only");
+  if (process.getuid() !== 0) assert.deepEqual(runner.toolchain, system ? ["/usr/local"] : [], "only a toolchain the agent can reach and cannot change");
   const fs = JSON.parse(readFileSync(join(runner.copilotHome, "settings.json"), "utf8")).sandbox.userPolicy.filesystem;
-  assert.ok(fs.readonlyPaths.includes(tc) && !fs.readwritePaths.includes(tc), "read-only in its commands' sandbox");
+  if (system) assert.ok(fs.readonlyPaths.includes("/usr/local") && !fs.readwritePaths.includes("/usr/local"), "read-only in its commands' sandbox");
+  assert.ok(!fs.readonlyPaths.includes(tc), "never a directory the agent owns");
   assert.deepEqual(stageNode(runner, path), { node: join(tc, "bin", "node"), npm: join(tc, "bin", "npm") });
   assert.equal(stageNode(runner, "/nowhere"), null, "no node on the PATH: nothing to prove");
 });

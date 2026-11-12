@@ -179,14 +179,21 @@ const SYSTEM_BOUND = ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/l
 const NOT_TOOLCHAIN = ["/proc", "/sys", "/dev", "/run", "/var/run"];
 
 /**
- * The directories the stage's toolchain lives in, by the PATH Copilot gets (launchPath), for its commands to read: each
- * entry Copilot's sandbox does not bind itself, as its install prefix where it is a `bin` or `sbin` directory (npm is
- * bin/npm -> ../lib/node_modules/npm, Python's lib is beside its bin). Without them a command finds Copilot's PATH but
- * none of its toolchain (#105). Never `/`, nothing in or above the agent's home, Factory's HOME for Copilot, its TMPDIR
- * or NOT_TOOLCHAIN. Pure: runnerToolchain keeps those the agent can reach.
+ * Factory's own directories on the route (its HOME, the runner's temp directory and workspace, its usage and private
+ * directories, its TMPDIR other than /tmp, which each start has private): never in commands' reach as toolchain.
  */
-export function toolchainDirs(layout, path = "") {
-  const off = [layout.agentHome, layout.home, COPILOT_TMP, ...NOT_TOOLCHAIN];
+export const factoryDirs = (env = process.env) =>
+  [...new Set(["HOME", "RUNNER_TEMP", "GITHUB_WORKSPACE", "FACTORY_USAGE_DIR", "FACTORY_PRIVATE_DIR", "TMPDIR"].map((k) => String(env[k] || "").replace(/\/+$/, "")))].filter((d) => d.startsWith("/") && d !== "/tmp");
+
+/** Where no toolchain directory may be, nor above: the agent's home, Factory's HOME for Copilot, its TMPDIR, the kernel's, Factory's own. */
+const offLimits = (layout, env) => [layout.agentHome, layout.home, COPILOT_TMP, ...NOT_TOOLCHAIN, ...factoryDirs(env)];
+
+/** `dirs` less those under another one of them, which is in commands' reach already. */
+const outermost = (dirs) => dirs.filter((t) => !dirs.some((o) => o !== t && within(t, o)));
+
+/** toolchainDirs before outermost: every candidate, so runnerToolchain can still keep one under a parent it drops. */
+function toolchainCandidates(layout, path, env) {
+  const off = offLimits(layout, env);
   const out = [];
   for (const d of launchPath(layout, path)) {
     if (/[\t\n]/.test(d) || SYSTEM_BOUND.some((s) => within(d, s))) continue;
@@ -194,25 +201,56 @@ export function toolchainDirs(layout, path = "") {
     if (t === "/" || off.some((x) => within(t, x) || within(x, t))) continue;
     if (!out.includes(t)) out.push(t);
   }
-  // A directory under another one kept is in commands' reach already.
-  return out.filter((t) => !out.some((o) => o !== t && within(t, o)));
+  return out;
 }
 
 /**
- * The stage's toolchain directories (toolchainDirs) that the agent can reach, read as the agent and by where each really
- * is (a link into the agent's home or Factory's is dropped): Copilot's sandbox cannot bind one it cannot reach, and would
- * not start. Kept on `runner.toolchain` for its settings (copilotRunnerSettings), once per runner.
+ * The directories the stage's toolchain lives in, by the PATH Copilot gets (launchPath), for its commands to read: each
+ * entry Copilot's sandbox does not bind itself, as its install prefix where it is a `bin` or `sbin` directory (npm is
+ * bin/npm -> ../lib/node_modules/npm, Python's lib is beside its bin). Without them a command finds Copilot's PATH but
+ * none of its toolchain (#105). Never `/`, nothing in or above the agent's home, Factory's HOME for Copilot, its TMPDIR,
+ * NOT_TOOLCHAIN or Factory's own directories (factoryDirs). Pure: runnerToolchain keeps those the agent can neither
+ * change nor fail to reach.
+ */
+export const toolchainDirs = (layout, path = "", env = {}) => outermost(toolchainCandidates(layout, path, env));
+
+/**
+ * Run as the agent with candidate directories as arguments: each one it can reach, and its real path, when neither it
+ * nor any directory above it, by its path and by its real path, is the agent's or writable by it. Copilot's bubblewrap
+ * binds a toolchain directory by its path when each command starts, after this check, following links: a directory the
+ * agent could replace with a link (one it owns, or in a directory it can write) would put whatever the link names
+ * (Factory's HOME for Copilot, Factory's own directories) in commands' reach. A sticky directory (/tmp) it can write
+ * counts only where the entry under it is the agent's. No `${...}`: systemd-run expands that form itself.
+ */
+export const TOOLCHAIN_CHECK = [
+  "safe() {",
+  '  p=$1; c=""',
+  "  while :; do",
+  '    if [ -O "$p" ]; then return 1; fi',
+  '    if [ -w "$p" ] && ! { [ -n "$c" ] && [ -k "$p" ] && ! [ -O "$c" ]; }; then return 1; fi',
+  '    if [ "$p" = / ]; then return 0; fi',
+  '    c=$p; p=$(dirname -- "$p")',
+  "  done",
+  "}",
+  "for d; do r=$(cd -P -- \"$d\" 2>/dev/null && pwd -P) && safe \"$d\" && safe \"$r\" && printf '%s\\t%s\\n' \"$d\" \"$r\"; done; exit 0",
+].join("\n");
+
+/**
+ * The stage's toolchain directories (toolchainDirs) the agent can reach and cannot change (TOOLCHAIN_CHECK, as the agent)
+ * whose real path is not off-limits either (a link into the agent's home or Factory's is dropped): Copilot's sandbox
+ * cannot bind one the agent cannot reach, and would not start. Kept on `runner.toolchain` for its settings
+ * (copilotRunnerSettings), once per runner.
  */
 export async function runnerToolchain(runner, env = process.env) {
   if (runner.toolchain) return runner.toolchain;
-  const dirs = toolchainDirs(runner, env.PATH || "");
-  const r = dirs.length ? await exec("/bin/sh", ["-c", 'for d; do r=$(cd -P -- "$d" 2>/dev/null && pwd -P) && printf \'%s\\t%s\\n\' "$d" "$r"; done; exit 0', "sh", ...dirs], { cwd: runner.agentHome, env }) : { stdout: "" };
-  const off = [runner.agentHome, runner.home, COPILOT_TMP, ...NOT_TOOLCHAIN];
+  const dirs = toolchainCandidates(runner, env.PATH || "", env);
+  const r = dirs.length ? await exec("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", ...dirs], { cwd: runner.agentHome, env }) : { stdout: "" };
+  const off = offLimits(runner, env);
   const reached = String(r.stdout)
     .split("\n")
     .map((l) => l.split("\t"))
     .filter(([d, real]) => dirs.includes(d) && real?.startsWith("/") && real !== "/" && !off.some((x) => within(real, x) || within(x, real)));
-  runner.toolchain = reached.map(([d]) => d);
+  runner.toolchain = outermost(reached.map(([d]) => d));
   return runner.toolchain;
 }
 

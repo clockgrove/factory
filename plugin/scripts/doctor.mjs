@@ -22,7 +22,7 @@ import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin,
 import { agentUser, exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, copilotDroppedHosts, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1159,6 +1159,17 @@ export async function jobChecks({ inputs, repo, token, app, checkout, notice = f
   return out;
 }
 
+/**
+ * Local mode with Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (host:port, an IP address) is a WARN.
+ * serve leaves it out of Copilot's sandbox policy, since Copilot drops its whole network policy for one (#106).
+ */
+export function localDomainChecks({ inputs, env = process.env, local }) {
+  if (!local || inputs.harness !== "copilot") return [];
+  const dropped = copilotDroppedHosts([env.FACTORY_LOCAL_DOMAINS || ""]);
+  if (!dropped.length) return [];
+  return [WARN("FACTORY_LOCAL_DOMAINS", `not host names, so Copilot's sandbox does not allow them (serve leaves them out: Copilot drops its whole network policy for such an entry): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address")];
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
@@ -1182,6 +1193,7 @@ async function main() {
   const local = args.local === "true" || backend().name === "local";
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
+  results.push(...localDomainChecks({ inputs, env, local }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

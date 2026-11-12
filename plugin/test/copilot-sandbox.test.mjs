@@ -284,3 +284,20 @@ test("the probe's last line: a pass line after every rule held; the first proces
   assert.doesNotMatch(CONFINEMENT_PROBE, /cmdline/);
   assert.match(probeDriver({ gitConfig: "", host: "", marker: "m7" }), /\/proc\/1\/cmdline[^\n]*grep -qxF -e 'm7' -e 'FACTORY_PROBE_MARKER=m7'/);
 });
+
+test("Copilot's allowedHosts take host names only: a host:port or IP entry, which switches its network policy off, never reaches it; doctor warns locally (#106)", async () => {
+  const { copilotDroppedHosts, copilotHosts } = await import("../scripts/lib/local.mjs");
+  const { localDomainChecks } = await import("../scripts/doctor.mjs");
+  const given = [...LOCAL_DOMAINS, "ai-gateway.vercel.sh", "*.Example.com", "127.0.0.1:44685", "localhost:8080", "api.example.com:443", "127.0.0.1", "http://x.dev", "localhost"];
+  const hosts = copilotLocalSettings({ domains: given, clone: "/c", addDirs: ["/c"], home: "/h", platform: "linux" }).sandbox.userPolicy.network.allowedHosts;
+  assert.deepEqual(hosts, [...LOCAL_DOMAINS, "ai-gateway.vercel.sh", "*.example.com"]);
+  assert.deepEqual(copilotHosts(given), hosts);
+  assert.deepEqual(copilotDroppedHosts(given), ["127.0.0.1:44685", "localhost:8080", "api.example.com:443", "127.0.0.1", "http://x.dev", "localhost"]);
+  const warn = localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh, 127.0.0.1:44685" }, local: true });
+  assert.deepEqual(warn.map((c) => c.status), ["WARN"]);
+  assert.match(warn[0].detail, /"127\.0\.0\.1:44685"/);
+  assert.ok(!warn[0].detail.includes("ai-gateway.vercel.sh"), "a host name is not named");
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh" }, local: true }), []);
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "claude" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: true }), [], "only Copilot drops them");
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: false }), [], "the runner routes have allowed_domains' own check");
+});

@@ -1050,7 +1050,7 @@ test("outbox: a catch-up merge that conflicts leaves the default branch's media 
   assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over; no time was left in the stage for git lfs checkout; the files stay pointers" });
 });
 
-test("outbox: the hand-over downloads only what the checkout's store lacks by oid and size, within the local media limit, and says when time cut git lfs checkout (#79)", async (t) => {
+test("outbox: the hand-over downloads only what the checkout's store lacks by oid and size, and says when time cut git lfs checkout (#79)", async (t) => {
   if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
   const r = repos();
   const { media } = await lfsCheckout(r);
@@ -1080,16 +1080,63 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   for (const [f, bytes] of [["a", a], ["b", b], ["c", c]]) assert.deepEqual(readFileSync(join(r.work, `assets/${f}.bin`)), bytes);
   // Time runs out before git lfs checkout: said, not skipped silently.
   assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
-  // Locally, what a stage downloads counts against FACTORY_LOCAL_MEDIA_MAX_MB.
-  const d = media("factory/1", "assets/d.bin");
+});
+
+test("outbox: a large working set is handed over whole: FACTORY_LOCAL_MEDIA_MAX_MB caps what a branch pushes, not what a stage downloads (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  await lfsCheckout(r);
+  // main gains 40 media files, far over the local limit set below.
+  const files = [];
+  r.run(r.other, "pull", "-q", "origin", "main");
+  for (let i = 0; i < 40; i += 1) {
+    const bytes = randomBytes(3000);
+    const oid = createHash("sha256").update(bytes).digest("hex");
+    mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
+    writeFileSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
+    r.put(r.other, `assets/m${i}.bin`, `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
+    files.push([`assets/m${i}.bin`, bytes]);
+  }
+  r.run(r.other, "commit", "-q", "--no-verify", "-m", "much media");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
   process.env.FACTORY_LOCAL_MEDIA_MAX_MB = "0.001";
   try {
-    const box3 = await stage({ local: true });
-    const lfs = await box3.lfsSetup(box3.expected());
-    assert.match(lfs.warning, /^the Git LFS media to download is 0\.0 MB \(1 object\(s\)\), over the local limit of 0\.001 MB \(FACTORY_LOCAL_MEDIA_MAX_MB\)/);
-    assert.ok(isPointer(r, "assets/d.bin") && !inStore(r, d));
-    assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), a, "what the store had is still checked out");
+    const box = await open(r, { local: true });
+    await box.feed();
+    assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+    assert.deepEqual(await box.lfsSetup(box.base), { used: true, ok: true, reason: "", warning: "" });
+    for (const [f, bytes] of files) assert.deepEqual(readFileSync(join(r.work, f)), bytes, f);
   } finally {
     delete process.env.FACTORY_LOCAL_MEDIA_MAX_MB;
   }
+});
+
+test("outbox: a tree read the hand-over cannot take whole is said, not dropped silently (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  media("main", "assets/a.bin");
+  const box = await open(r, { readMaxBytes: 64 });
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  const lfs = await box.lfsSetup(box.base);
+  assert.match(lfs.warning, /^the tree of [0-9a-f]{7} could not be read whole \(over 64 bytes\), so some Git LFS files may stay pointers/);
+});
+
+test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's download (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.base)).warning, "");
+  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Factory's mirror reads it from its HEAD.
+  r.put(r.work, ".lfsconfig", "[lfs]\n\tfetchinclude = nothing/**\n");
+  r.run(r.work, "commit", "-q", "-m", "fetch filter");
+  assert.equal(await box.push(), true, box.error);
+  const bytes = media("main", "assets/b.bin");
+  await box.refresh();
+  assert.deepEqual(await box.lfsHandOver(null), { used: true, warning: "" });
+  assert.ok(inStore(r, bytes), "the default branch's media is in the checkout's store");
 });

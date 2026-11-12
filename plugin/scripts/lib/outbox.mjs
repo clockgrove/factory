@@ -195,7 +195,8 @@ async function indexBundle(file, git) {
  * The stage's outbox for factory/<issue>. `remote` is the repository's URL (GitHub's https URL; a path in tests),
  * `token()` the current write token (null for a remote that needs none), `agentEnv` the env the agent's commands run
  * with (its sandbox settings ride in it), `local` whether the local media cap applies, `deadlineAt` the stage's end (epoch
- * ms), which bounds every Git LFS hand-over. The mirror holds only what
+ * ms), which bounds every Git LFS hand-over, `readMaxBytes` the most Factory reads of one listing in its mirror (the
+ * hand-over's tree reads; tests lower it). The mirror holds only what
  * GitHub has and what the agent's bundles brought: nothing of any other clone on the machine.
  */
 export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
@@ -211,7 +212,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, mirror, scratch }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -465,37 +466,54 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The Git LFS pointers in `revs`' trees, by oid: {oid, size, blob} (the pointer's blob in the mirror). Read from the
-   * mirror's own objects: every blob under the pointer size limit, kept when its text is a pointer.
+   * The Git LFS pointers in `revs`' trees: {found: oid to {oid, size, blob} (the pointer's blob in the mirror), warning}.
+   * Read from the mirror's own objects, in three bounded reads: the trees' blobs, their sizes (`--batch-check`), and only
+   * the blobs of at most 1024 bytes, kept when their text is a pointer. A read cut at `readMaxBytes` is said in
+   * `warning`: the pointers it would have named stay pointer files, never silently.
    */
   const pointersOf = async (revs) => {
-    const small = new Set();
+    const cut = [];
+    const blobs = new Set();
     for (const rev of revs) {
-      const ls = await git(["ls-tree", "-r", "-l", "-z", rev]);
-      if (ls.code !== 0) continue;
-      for (const e of ls.stdout.split("\0")) {
-        const m = /^\d+ blob ([0-9a-f]{40,64}) +(\d+)\t/.exec(e);
-        if (m && Number(m[2]) < 1024) small.add(m[1]);
+      const ls = await git(["ls-tree", "-r", "-z", rev], { maxBytes: readMaxBytes });
+      if (ls.truncated) cut.push(`the tree of ${rev.slice(0, 7)}`);
+      if (ls.code !== 0 && !ls.truncated) continue;
+      const entries = ls.stdout.split("\0");
+      // A cut read's last entry may be partial.
+      for (const e of ls.truncated ? entries.slice(0, -1) : entries) {
+        const m = /^\d+ blob ([0-9a-f]{40,64})\t/.exec(e);
+        if (m) blobs.add(m[1]);
       }
     }
     const found = new Map();
-    if (!small.size) return found;
-    const out = await git(["cat-file", "--batch"], { input: `${[...small].join("\n")}\n`, encoding: "buffer" });
+    const said = () => (cut.length ? `${cut.join(", ")} could not be read whole (over ${readMaxBytes} bytes), so some Git LFS files may stay pointers` : "");
+    if (!blobs.size) return { found, warning: said() };
+    const check = await git(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], { input: `${[...blobs].join("\n")}\n`, maxBytes: readMaxBytes });
+    if (check.truncated) cut.push("the sizes of their files");
+    const lines = check.stdout.split("\n");
+    const small = (check.truncated ? lines.slice(0, -1) : lines).map((l) => l.split(" ")).filter(([id, t, n]) => SHA.test(id) && t === "blob" && Number(n) <= 1024).map(([id]) => id);
+    if (!small.length) return { found, warning: said() };
+    const out = await git(["cat-file", "--batch"], { input: `${small.join("\n")}\n`, encoding: "buffer", maxBytes: readMaxBytes });
+    if (out.truncated) cut.push("their pointer files");
     const buf = out.stdout;
+    const head = Buffer.from(`${POINTER_HEAD}\n`);
+    const legacy = Buffer.from(`${LEGACY_POINTER_HEAD}\n`);
     for (let i = 0; i < buf.length; ) {
       const nl = buf.indexOf(10, i);
       if (nl < 0) break;
       const [id, type, size] = buf.subarray(i, nl).toString("utf8").split(" ");
-      if (type === undefined || size === undefined) {
+      if (type !== "blob" || !size) {
         i = nl + 1;
         continue;
       }
       const n = Number(size);
-      const p = type === "blob" ? parsePointer(buf.subarray(nl + 1, nl + 1 + n).toString("utf8")) : null;
+      if (nl + 1 + n > buf.length) break;
+      const body = buf.subarray(nl + 1, nl + 1 + n);
+      const p = body.subarray(0, head.length).equals(head) || body.subarray(0, legacy.length).equals(legacy) ? parsePointer(body.toString("utf8")) : null;
       if (p && !found.has(p.oid)) found.set(p.oid, { ...p, blob: id });
       i = nl + 1 + n + 1;
     }
-    return found;
+    return { found, warning: said() };
   };
 
   /** The objects in the checkout's Git LFS store, oid to size in bytes (read in its sandbox; empty when none). */
@@ -519,15 +537,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
   };
 
-  // What this stage's hand-overs downloaded, in bytes: local mode counts it against FACTORY_LOCAL_MEDIA_MAX_MB.
-  let downloaded = 0;
   const NO_TIME = "no time was left in the stage to hand the Git LFS objects over";
   const NO_CHECKOUT = "no time was left in the stage for git lfs checkout; the files stay pointers";
 
   /**
-   * The media of `revs`' trees for the checkout. Only the objects its store lacks, matched by each pointer's oid and
-   * size, are handled: those the mirror lacks too are downloaded with Factory's token (within the local media limit),
-   * then copied over; and (`checkout`) `git lfs checkout` runs. All within `timeoutMs` and the stage's end
+   * The media of `revs`' trees for the checkout, all of it whatever its size. Only the objects its store lacks, matched
+   * by each pointer's oid and size, are handled: those the mirror lacks too are downloaded with Factory's token, then
+   * copied over; and (`checkout`) `git lfs checkout` runs. All within `timeoutMs` and the stage's end
    * (`deadlineAt`); what did arrive is handed over even when the download failed. A warning, or "".
    */
   const handOver = async (revs, { timeoutMs, checkout: co = true } = {}) => {
@@ -538,21 +554,20 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (over()) return co ? `${NO_TIME}; ${NO_CHECKOUT}` : NO_TIME;
     const warnings = [];
     const wanted = await pointersOf(revs);
+    if (wanted.warning) warnings.push(wanted.warning);
     const have = await checkoutStore(ms());
-    const missing = [...wanted.values()].filter((p) => have.get(p.oid) !== p.size);
+    const missing = [...wanted.found.values()].filter((p) => have.get(p.oid) !== p.size);
     const absent = missing.filter((p) => mirrorSize(p.oid) !== p.size);
-    const bytes = absent.reduce((n, p) => n + p.size, 0);
-    if (absent.length && local && downloaded + bytes > localMediaCapMb() * 1024 * 1024) {
-      warnings.push(`the Git LFS media to download is ${(bytes / 1024 / 1024).toFixed(1)} MB (${absent.length} object(s)), over the local limit of ${localMediaCapMb()} MB (FACTORY_LOCAL_MEDIA_MAX_MB) with ${(downloaded / 1024 / 1024).toFixed(1)} MB already downloaded this stage; those files stay pointers`);
-    } else if (absent.length && over()) warnings.push(NO_TIME);
+    if (absent.length && over()) warnings.push(NO_TIME);
     else if (absent.length) {
       // Exactly the missing pointers, in a tree of Factory's own in the mirror: git-lfs fetches what a tree points to.
       const tree = await git(["mktree"], { input: absent.map((p) => `100644 blob ${p.blob}\t${p.oid}\n`).join("") });
       const { name, email } = box.author;
       const who = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
       const wants = tree.code === 0 ? await git(["commit-tree", tree.stdout.trim(), "-m", "Git LFS objects to fetch"], { env: { ...gitEnv(), ...who } }) : tree;
-      const fetched = wants.code === 0 ? await git([...lfsPinArgs(remote), "lfs", "fetch", "origin", wants.stdout.trim()], { timeoutMs: ms() }) : wants;
-      downloaded += absent.filter((p) => mirrorSize(p.oid) === p.size).reduce((n, p) => n + p.size, 0);
+      // The tree's paths are oids: no path filter of the repository's (lfs.fetchinclude and lfs.fetchexclude, which a
+      // branch's .lfsconfig may set) may drop them. Command-line config outranks .lfsconfig.
+      const fetched = wants.code === 0 ? await git([...lfsPinArgs(remote), "-c", "lfs.fetchinclude=", "-c", "lfs.fetchexclude=", "lfs", "fetch", "origin", wants.stdout.trim()], { timeoutMs: ms() }) : wants;
       if (fetched.code !== 0 || fetched.timedOut) {
         const out = `${fetched.stdout}\n${fetched.stderr}`;
         const quota = lfsQuotaLine(out);

@@ -5,11 +5,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SHELL_SECRET_KEYS, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
+import { COPILOT_PROBE_SCRIPT, SHELL_SECRET_KEYS, copilotLocalCheck, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { dropSessions, holdSession } from "../scripts/lib/claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
-import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
-import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, gitRefusalReason } from "../scripts/lib/local.mjs";
+import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
+import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, copilotPrivateTmp, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
 const AGENT = { user: "factory-agent", uid: 1002, home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
@@ -193,6 +193,57 @@ test("Copilot's sandbox probe runs before every start: its result decides; no re
   assert.equal(calls.length, 2, "no result is tried once more before it Blocks");
   assert.match(gitRefusalReason("sandbox", 1, { harness: "copilot" }), /Copilot's sandbox could not start.*copilot sandbox: bwrap, slirp4netns, apparmor, start/);
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable", harness: "copilot" }), /^Copilot's sandbox started but does not confine here/);
+});
+
+test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; the probe runs in the outer sandbox with Copilot's own TMPDIR, without the token, and Blocks a leak", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cpl-"));
+  const real = join(root, "real-bwrap");
+  writeFileSync(real, '#!/bin/sh\necho "env=$(env | grep -c .)"\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
+  const shim = join(root, "bwrap");
+  writeFileSync(shim, bwrapShim(real, null, "/s/t"), { mode: 0o755 });
+  const argv = ["--clearenv", "--setenv", "HOME", "/home/dev", "--setenv", "TMPDIR", "/s/copilot-tmp", "--", "sh"];
+  const out = execFileSync(shim, argv, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } }).trim().split("\n");
+  assert.ok(Number(out[0].slice(4)) <= 1 && !out.join("\n").includes("github_pat_secret"), "the real bwrap gets no environment");
+  assert.deepEqual(out.slice(1).map((l) => l.slice(4)), argv.map((a) => (a === "/s/copilot-tmp" ? "/s/t" : a)), "Copilot's HOME kept, its commands' TMPDIR the stage's, nothing else changed");
+  const [home, tmp, usage, clone, chome] = ["h", "t", "u", "w", "c"].map((d) => join(root, d));
+  for (const d of [home, tmp, join(usage, "harness"), clone, chome]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(chome, "settings.json"), '{"sandbox":{"enabled":true}}\n');
+  const ctmp = copilotPrivateTmp(usage);
+  mkdirSync(ctmp);
+  writeFileSync(join(ctmp, "planted"), "");
+  const local = { clone, addDirs: [tmp], cacheDirs: [], domains: LOCAL_DOMAINS, bwrapBin: root, copilotTmp: ctmp };
+  const env = { PATH: `${root}:/usr/bin`, TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COPILOT_HOME: chome, COPILOT_GITHUB_TOKEN: "github_pat_secret", MY_SECRET: "s" };
+  const calls = [];
+  const leaving = (result) => async (cmd, args, opts) => {
+    calls.push({ cmd, args, env: opts.env, settings: readFileSync(join(opts.env.COPILOT_HOME, "settings.json"), "utf8") });
+    writeFileSync(join(tmp, PROBE_RESULT), result);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await copilotLocalCheck(local, "/o.json", env, { drop: ["MY_SECRET"], run: leaving(`0\n${PROBE_PASS}\n`), home });
+  const [call] = calls;
+  assert.equal(call.cmd, "srt");
+  assert.deepEqual(call.args.slice(0, 7), ["-s", "/o.json", "--", "env", `TMPDIR=${ctmp}`, process.execPath, COPILOT_PROBE_SCRIPT], "Copilot's own TMPDIR");
+  assert.ok(!existsSync(join(ctmp, "planted")), "made afresh before the start");
+  assert.ok(call.env.FACTORY_COPILOT_PROBE.includes(`'${ctmp}'/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-*`), "its rules checked where Copilot and the commands keep temp files");
+  assert.ok(call.args.includes(COPILOT_DECOY_LAUNCH) && call.args.includes("--sandbox") && call.args.includes(`--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`));
+  assert.ok(!("COPILOT_GITHUB_TOKEN" in call.env) && !("MY_SECRET" in call.env), "never the run's credentials: the marker stands in");
+  assert.match(call.env[PROBE_MARKER], /^[0-9a-f]{32}$/);
+  assert.equal(call.env.PATH, env.PATH, "Factory's bwrap first, as the run has it");
+  assert.equal(call.env.COPILOT_HOME, join(usage, "harness", "copilot-probe"));
+  assert.equal(call.settings, '{"sandbox":{"enabled":true}}\n', "with the stage's policy");
+  assert.ok(!existsSync(call.env.COPILOT_HOME), "removed afterwards");
+  await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("4\nthe credential stand-in is readable in a process environment\n"), home }), (e) => e instanceof GitRefusal && e.rule === "the credential stand-in is readable in a process environment" && e.local);
+  await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("0\n\n"), home }), (e) => e.rule === "the probe ended without its pass line" && e.local, "exit 0 alone is no pass");
+  // The driver as local mode gives it (every path under this test's own directory, never the host's /tmp/factory-copilot):
+  // without Factory's bwrap the commands' $TMPDIR is Copilot's own, denied, so the result goes to the stage's by its path
+  // and names the broken rule (here, unconfined: Copilot's TMPDIR absent, the marker in this shell's parent).
+  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp") }, "m6", "").FACTORY_COPILOT_PROBE;
+  assert.ok(!driver.includes("/tmp/factory-copilot"));
+  execFileSync("/bin/sh", ["-c", driver], { stdio: "ignore", env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(root, "denied"), FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "1", [PROBE_MARKER]: "m6" } });
+  assert.equal(readFileSync(join(tmp, PROBE_RESULT), "utf8"), "4\nthe credential stand-in is readable in a process environment\n");
+  const denied = copilotLocalSettings({ clone, addDirs: [tmp], alsoDenied: [ctmp], platform: "linux" }).sandbox;
+  assert.ok(JSON.stringify(denied).includes(JSON.stringify(ctmp)), "Copilot's own TMPDIR is denied to commands");
+  assert.match(gitRefusalReason("sandbox", 1, { rule: "x", harness: "copilot", local: true }), /The stage log on the local machine/);
 });
 
 test("doctor: Copilot in a job needs bwrap and slirp4netns, AppArmor for unshare on a self-hosted runner, and its sandbox confining", async () => {

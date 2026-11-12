@@ -1440,6 +1440,8 @@ export function readWorkflowEnv(dir) {
  */
 export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }) } = {}) {
   const ok = (r) => (r.status === 0 ? String(r.stdout) : null);
+  // No clone here (doctor run with --repo only): nothing to read the default branch from, which says nothing about serve.
+  if (ok(git(["rev-parse", "--git-dir"])) === null) return { wf: {}, branch: null, error: "no git clone here", noClone: true };
   const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ok(git(["ls-remote", "--symref", "origin", "HEAD"])) || "")?.[1] || (ok(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) || "").trim().replace(/^origin\//, "") || null;
   if (!branch) return { wf: {}, branch: null, error: "origin's default branch could not be read" };
   git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);

@@ -676,7 +676,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  harness:    {ok: boolean, error?: string, budgetExceeded?: boolean, timedOut?: boolean, died?: number, refusal?: object}
  *  pr:         {exists, draft, body} | null
  *  commits:    number of commits on the branch beyond the base
- *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
+ *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
+ *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -733,9 +734,13 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.baseFailure) return { exit: "blocked", reason: validation.baseFailure };
     // A required job GitHub never started (triage.mjs notStartedJobs): infrastructure, Blocked quoting GitHub's annotation.
     if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted };
+    // A wait that ended with no required check failed (triage.mjs checksNotStarted): no red at all, so never "validation red".
+    if (validation.stuck) return { exit: "blocked", reason: validation.stuck };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
     if (validation.scope) return { exit: "blocked", reason: validation.scope };
-    return { exit: "blocked", reason: `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}` };
+    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;
+    // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
+    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red };
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (record?.exit === "blocked") return workerBlocked(record);
@@ -2466,6 +2471,56 @@ export function sweepDecision({ sandbox, issue, state, record, holds, now = Date
   return { keep: `${sandbox.state}, the Objective ${state}`, ...(sandbox.state === "stopped" && Number.isFinite(last) ? { until: last + idleMs, idle: true } : {}) };
 }
 
+/**
+ * Required checks GitHub has not started on a head (triage.mjs checksNotStarted): how long, from the first wait on that
+ * head, Factory waits for them before it Blocks. Locally the stage waits that long itself; on GitHub's routes the work
+ * stage hands the wait to the dispatcher (checksWaitNext) instead of holding a runner.
+ */
+export const CHECKS_WAIT_MS = 3 * 3600_000;
+/** Work stages started for one head's unstarted checks at most, the first included. */
+export const CHECKS_WAIT_TRIES = 4;
+/** The pause before the dispatcher starts the stage again: after the first try, the second, then every later one. */
+export const CHECKS_WAIT_BACKOFF_MS = Object.freeze([10 * 60_000, 20 * 60_000, 30 * 60_000]);
+
+/**
+ * The next step after a work stage's required checks on `head` were found not started (`startedAt`: when this stage's
+ * wait on them began), from the record the last such stage left (`prev`: {head, since, tries}). A record for another
+ * head starts a new streak. Returns {head, since, tries, retryAt} (the dispatcher starts the stage again at retryAt) or
+ * {giveUp: true, head, since, tries, waitedMs} once CHECKS_WAIT_TRIES stages or CHECKS_WAIT_MS have gone by.
+ */
+export function checksWaitNext(prev, { head, startedAt = Date.now(), now = Date.now() }) {
+  const first = Date.parse(prev?.since);
+  const going = !!head && prev?.head === head && Number.isFinite(first) && first <= now;
+  const since = new Date(going ? first : Math.min(startedAt, now)).toISOString();
+  const tries = (going && Number.isSafeInteger(prev.tries) && prev.tries > 0 ? prev.tries : 0) + 1;
+  const waitedMs = now - Date.parse(since);
+  if (tries >= CHECKS_WAIT_TRIES || waitedMs >= CHECKS_WAIT_MS) return { giveUp: true, head, since, tries, waitedMs };
+  const step = CHECKS_WAIT_BACKOFF_MS[Math.min(tries, CHECKS_WAIT_BACKOFF_MS.length) - 1];
+  return { head, since, tries, retryAt: new Date(Math.min(now + step, Date.parse(since) + CHECKS_WAIT_MS)).toISOString() };
+}
+
+const CHECKS_WAIT = /^<!-- factory:checks-wait (\{[^\n]*\}) -->$/m;
+/** The checks-wait record's line in its comment (marker `checks-wait` on the issue): {head, since, tries, retryAt, reason}. */
+export const checksWaitMarker = (rec) => `<!-- factory:checks-wait ${JSON.stringify({ head: rec.head, since: rec.since, tries: rec.tries, retryAt: rec.retryAt })} -->`;
+/**
+ * The checks-wait record on an issue: from Factory's own comment (`self`, its login) carrying the issue's
+ * `checks-wait` marker; null when there is none, or it was cleared (a comment with no record line).
+ */
+export function checksWaitOf(comments, issue, { self = isSelf } = {}) {
+  const head = marker(issue, "checks-wait");
+  const c = (comments || []).find((x) => self(x) && (x.body || "").startsWith(`${head}\n`));
+  const m = CHECKS_WAIT.exec(c?.body || "");
+  if (!m) return null;
+  try {
+    const r = JSON.parse(m[1]);
+    return r && typeof r.head === "string" && /^[0-9a-f]{40,64}$/.test(r.head) && Number.isFinite(Date.parse(r.since)) ? r : null;
+  } catch {
+    return null;
+  }
+}
+/** Whether a checks-wait record holds its Objective back now: its retry time not reached. */
+export const checksWaiting = (rec, now = Date.now()) => Number.isFinite(Date.parse(rec?.retryAt)) && now < Date.parse(rec.retryAt);
+
 /** How long an Objective waits, from the first start the vendor refused for its quota, before it is handed back Blocked. */
 export const QUOTA_WAIT_MS = 90 * 60_000;
 /** The waits between tries after a quota refusal: the first, the second, then every later one. */
@@ -2504,7 +2559,8 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * moment at which only time, not an event, changes what the dispatcher does. A wake job sleeps only to these kinds:
  * - `lease`: a sandbox stage's lease end plus WAKE_SLACK_MS (a stage that died silently frees its Objective then);
  * - `quota`: the retry time of a start the vendor's quota refused (the launcher handed the wait over);
- * - `start-retry`: the next try of a stage whose start failed another way (startRetryAt), three strikes then Blocked;
+ * - `start-retry`: the next try of a stage whose start failed another way (startRetryAt), three strikes then Blocked, or
+ *   of a work stage that handed back its wait on required checks GitHub had not started (checksWaitNext);
  * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so

@@ -519,7 +519,13 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
   for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${await jobLogTail(repo, r.id, { token })}`);
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map((r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null })), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+}
+
+/** The workflow runs GitHub created for a commit, any event and status (needs Actions read). */
+export async function headWorkflowRuns(repo, sha, opts) {
+  return (await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&per_page=100`, opts))?.workflow_runs || [];
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */

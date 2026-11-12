@@ -396,6 +396,61 @@ export async function notStartedJobs({ repo, failedRuns = [], required = [], tok
 export const notStartedReason = (jobs) =>
   jobs.map((j) => `GitHub did not start the required job ${j.name}${j.check !== j.name ? ` (needed by the required check ${j.check})` : ""}: ${j.annotation || "no annotation from GitHub"}`).join("; ");
 
+// ------------------------------------------------------------------ required checks GitHub has not started yet
+
+/** A workflow run or check run GitHub has created but not started: no job of it runs yet. */
+const UNSTARTED = ["queued", "waiting", "requested", "pending"];
+
+/**
+ * Why a wait on the required checks ended with none failed and some not finished (awaitChecks `timedOut` with no
+ * completed failing run), read on structure from the head's check runs and its workflow runs. Returns {deferrable,
+ * reason, runs}. Deferrable is GitHub not starting a required check, which no change can fix: a workflow run for the
+ * head still queued (a check has no check run until its job starts), no workflow run and no required check run at all,
+ * or a required check run still queued after its own workflow run completed. Anything else (a required check still
+ * running, a workflow run that completed without it, workflow runs that could not be read: `workflowRuns` null) is not
+ * GitHub's delay; it is still no red to fix. `now` and `waitedMin` only word the reason.
+ */
+export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, waitedMin = 0, readError = "", now = Date.now() }) {
+  const short = String(sha).slice(0, 7);
+  const latest = (name) => checkRuns.filter((r) => r.name === name).sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id ?? 0) - (a.id ?? 0))[0];
+  const open = names.filter((n) => latest(n)?.status !== "completed");
+  const list = (xs) => xs.join(", ");
+  const mins = (t) => (Number.isFinite(Date.parse(t)) ? Math.max(0, Math.round((now - Date.parse(t)) / 60000)) : null);
+  const label = (w) => `${w.name || "workflow"} (run ${w.id})`;
+  const infra = "infrastructure, not this change";
+  if (!Array.isArray(workflowRuns)) return { deferrable: false, runs: [], reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min, and its workflow runs could not be read${readError ? ` (${readError})` : ""}; no failing run to fix` };
+  const suite = new Map(workflowRuns.map((w) => [w.check_suite_id, w]));
+  // A required check run still queued after its workflow run completed: GitHub never gave it a runner.
+  const stalled = open.map((n) => [n, latest(n)]).filter(([, r]) => r && UNSTARTED.includes(r.status) && suite.get(r.check_suite?.id ?? r.suite)?.status === "completed");
+  if (stalled.length) {
+    const w = suite.get(stalled[0][1].check_suite?.id ?? stalled[0][1].suite);
+    const ago = mins(w.updated_at);
+    return { deferrable: true, runs: [w], reason: `GitHub left the required check ${list(stalled.map(([n]) => n))} queued on ${short} after its workflow run ${label(w)} completed${ago === null ? "" : ` ${ago} min ago`} (${infra})` };
+  }
+  const queued = workflowRuns.filter((w) => UNSTARTED.includes(w.status));
+  if (queued.length) {
+    const each = queued.slice(0, 3).map((w) => `${label(w)} queued ${mins(w.created_at) ?? "?"} min with no job started`);
+    return { deferrable: true, runs: queued, reason: `GitHub has not started the required check(s) ${list(open)} on ${short}: workflow run ${each.join("; ")}${queued.length > 3 ? ` and ${queued.length - 3} more` : ""} (${infra})` };
+  }
+  if (!workflowRuns.length && !open.some(latest)) return { deferrable: true, runs: [], reason: `GitHub created no workflow run for ${short} in ${waitedMin} min, so the required check(s) ${list(open)} never appeared (${infra})` };
+  const running = workflowRuns.filter((w) => w.status === "in_progress");
+  if (running.length) return { deferrable: false, runs: running, reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min: ${running.slice(0, 3).map(label).join(", ")} still in progress; no failing run to fix` };
+  return { deferrable: false, runs: [], reason: `required check(s) ${list(open)} never reported on ${short}: every workflow run for it completed without ${open.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
+}
+
+/**
+ * The Block reason's part for a red whose triage read every failing job as a flake or infrastructure and whose rerun
+ * GitHub refused (`refusal`, from red()): triage's verdicts, the refusal, and what a person does about it. A 403 is the
+ * token's missing Actions write: locally the repository token's, on Actions the workflow's `actions: write`.
+ */
+export function refusedRerunText(refusal) {
+  const jobs = (refusal?.jobs || []).map((j) => `${j.name}: ${j.verdict ?? "no verdict"}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""}`).join(", ");
+  const status = refusal?.status ? String(refusal.status) : "error";
+  const why = refusal?.permission ? `${status}: the token cannot rerun jobs` : refusal?.rateLimited ? `${status}: rate limited` : status;
+  const grant = refusal?.where === "actions" ? "give the workflow's work and review jobs `actions: write`" : "give the token Actions read and write";
+  return `red-check triage read it as a flake or infrastructure (${jobs}), but GitHub refused the rerun (${why}); rerun the failed jobs on GitHub${refusal?.permission ? `, or ${grant},` : ""} then re-apply the label`;
+}
+
 /** The progress line for one triage: each job's verdict, confidence and signature, then what Factory does. */
 export function triageLine({ sha, model, jobs, outcome }) {
   const each = jobs.map((j) => {
@@ -513,7 +568,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         const refused = (e.status === 403 || e.status === 404) && !e.rateLimited;
         const why = refused && e.status === 403 ? ", no permission to rerun jobs (Actions: write)" : "";
         await record(triageLine({ sha, model, jobs, outcome: `fix pass (the rerun was refused: ${e.status || "error"}${why})` }), refused ? { refused: true } : {});
-        return no;
+        // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
+        // verdict and failure line, and the refusal.
+        const refusal = { status: e.status || null, permission: refused && e.status === 403, rateLimited: !!e.rateLimited, where: env.GITHUB_ACTIONS ? "actions" : "local", jobs: jobs.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) };
+        return { rerun: false, refused: refusal };
       }
     }
     await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun" }), { reruns: [sha], sigs: jobs.map((j) => j.sig.id).filter(Boolean) });

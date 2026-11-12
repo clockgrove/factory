@@ -6,7 +6,7 @@
 import { getIssue } from "./github.mjs";
 import { CLAIM_PAUSE_MS, GitRefusal, checkGitState, clearHarnessConfig, gitDirChanged, pinGitState, hasLocalLabel, isLocal, localClaim, localSandbox } from "./local.mjs";
 import { agentUser, asAgent, exec, reapAgent } from "./proc.mjs";
-import { deniedHostsFix } from "./logic.mjs";
+import { CHECKS_WAIT_MS, deniedHostsFix } from "./logic.mjs";
 import { input } from "./inputs.mjs";
 import { runnerDomains } from "./local.mjs";
 
@@ -103,8 +103,11 @@ const ACTIONS = {
      */
     deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
   },
-  /** CI is the gate: the head is pushed and the required checks are awaited. */
-  gate: { commandsFirst: false },
+  /**
+   * CI is the gate: the head is pushed and the required checks are awaited. Checks GitHub has not started are not
+   * waited for past the first wait (`checksWaitMs` 0): the work stage hands that wait to the dispatcher (worker.mjs).
+   */
+  gate: { commandsFirst: false, checksWaitMs: 0, checksDefer: true },
 };
 
 const LOCAL = {
@@ -187,8 +190,11 @@ const LOCAL = {
       // The sandbox cannot reach the box's Postgres, so tests that need one run through factory-db.
       (env.FACTORY_LOCAL_DB === "1" ? "\n\nThis run is on a developer's box in a sandbox with no route to any outside database. Run every command that needs Postgres through `factory-db`, for example `factory-db npm run test:db`: it starts a fresh, empty Postgres for that one command, runs the repository's database init, sets DATABASE_URL and the PG* variables, and removes the database afterwards." : ""),
   },
-  /** The heavy suites run on the box, not in CI: the commands run first (sandboxed), then the required checks. */
-  gate: { commandsFirst: true },
+  /**
+   * The heavy suites run on the box, not in CI: the commands run first (sandboxed), then the required checks. Checks
+   * GitHub has not started are waited for in the stage, up to CHECKS_WAIT_MS (the box's time costs nothing).
+   */
+  gate: { commandsFirst: true, checksWaitMs: CHECKS_WAIT_MS, checksDefer: false },
 };
 
 export const BACKENDS = { actions: ACTIONS, local: LOCAL };

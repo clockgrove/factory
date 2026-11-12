@@ -468,7 +468,7 @@ async function main() {
       return;
     }
     if (!pre.green) {
-      const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
+      const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, triageRefused: pre.triageRefused, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
       await dropLabel();
       await applyExit(repo, { issue, pr, exit: "blocked", reason: d.reason || "validation red before review", detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", d.reason || "validation red before review");
@@ -720,7 +720,7 @@ async function main() {
     harness: validation.harness ?? (answerRun ? { ...answerRun, ok: answerOk } : { ok: true }),
     pr: { exists: true, draft: pr.draft, body: pr.body },
     commits: after.delta.count,
-    validation: validation.died || validation.harness || validation.question || conflict ? undefined : { passes: validation.passes, green: validation.green, baseFailure: validation.baseFailure, notStarted: validation.notStarted, scope: validation.scope },
+    validation: validation.died || validation.harness || validation.question || conflict ? undefined : { passes: validation.passes, green: validation.green, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, triageRefused: validation.triageRefused, scope: validation.scope },
     protectedHits: protectedTouched(after.delta.files, protectedList),
     record: answerRecord,
     question: answerRecord ? answerRecord.exit === "question" : false,

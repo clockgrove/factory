@@ -129,3 +129,42 @@ test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat
   const rows = await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
   assert.deepEqual(rows.filter((r) => /shell credential/.test(r.name)), [], "Claude's commands no longer see its credential on any route");
 });
+
+test("doctor: with local triage on, a dry rerun tells whether the token can rerun CI jobs (#74)", async () => {
+  const { githubChecks, rerunProbeCheck } = await import("../scripts/doctor.mjs");
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const asked = [];
+  let status = 403;
+  globalThis.fetch = async (url, init = {}) => {
+    asked.push(`${init.method || "GET"} ${new URL(url).pathname}`);
+    return new Response(JSON.stringify({ message: "x" }), { status, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const no = await rerunProbeCheck({ repo, token: "t" });
+    assert.equal(no.status, "WARN");
+    assert.match(no.detail, /cannot rerun CI jobs: GitHub refused a dry rerun \(403\)/);
+    assert.match(no.fix, /Actions read and write/);
+    assert.deepEqual(asked, ["POST /repos/o/r/actions/runs/0/rerun-failed-jobs"], "run 0, which no repository has: nothing can rerun");
+    status = 404;
+    assert.equal((await rerunProbeCheck({ repo, token: "t" })).status, "PASS");
+    status = 500;
+    assert.match((await rerunProbeCheck({ repo, token: "t" })).detail, /^not verified/);
+    // Only a local doctor run with triage on probes; a stage's own checks never do. (Each run stops at its next read.)
+    const probed = [];
+    const probeRerun = async () => (probed.push(1), { status: "WARN", name: "triage rerun" });
+    const env = { GITHUB_ACTIONS: "true" };
+    const run = (job, local, inputs = { aiGatewayApiKey: "k" }) => githubChecks({ inputs, repo, token: "t", app: null, env, job, local, probeRerun }).catch(() => null);
+    await run(false, true);
+    assert.equal(probed.length, 1, "doctor --local with a gateway key");
+    await run(true, true);
+    await run(false, false);
+    await run(false, true, {});
+    assert.equal(probed.length, 1, "a stage's job checks, another route, or triage off: no probe");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+});

@@ -534,27 +534,45 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
   throw new GitRefusal("sandbox", `Copilot's sandbox could not start here: ${why}`, { harness: "copilot" });
 }
 
-/** Copilot's flags in local mode: its sandbox, tools and URLs allowed, file tools kept to the clone and the added directories but the caches. */
-export const copilotLocalFlags = (local) => ["--sandbox", "--allow-all-tools", "--allow-all-urls", ...local.addDirs.filter((d) => !(local.cacheDirs || []).includes(d)).flatMap((d) => ["--add-dir", d])];
+/**
+ * Copilot's flags in local mode: its sandbox, tools and URLs allowed, no update of itself, no logs (Copilot binds its logs
+ * directory into every command's sandbox whatever its policy says, copilot-runner.mjs copilotRunnerFlags), file tools
+ * kept to the clone and the added directories but the caches.
+ */
+export const copilotLocalFlags = (local) => ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--log-level", "none", ...local.addDirs.filter((d) => !(local.cacheDirs || []).includes(d)).flatMap((d) => ["--add-dir", d])];
 
 /** Local mode's probe launcher (scripts/copilot-probe.mjs): the probe's model on the outer sandbox's own loopback. */
 export const COPILOT_PROBE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "copilot-probe.mjs");
 
 /**
+ * Local mode on Linux: Copilot's own TMPDIR (lib/local.mjs copilotPrivateTmp) made afresh, a directory of its own (a
+ * link there is removed, never followed). Its path, or null where the stage set none (the probe then Blocks).
+ */
+export function freshCopilotTmp(local) {
+  if (!local?.copilotTmp) return null;
+  rmSync(local.copilotTmp, { recursive: true, force: true });
+  mkdirSync(local.copilotTmp, { mode: 0o700 });
+  return local.copilotTmp;
+}
+
+/**
  * Copilot's sandbox in local mode on Linux, before every start: launched as the run is (`env`: the run's own, with
- * Factory's bwrap first on PATH; the outer sandbox `outer`; its flags), with the stage's policy in a COPILOT_HOME of its
- * own and none of the run's credentials, against the loopback model inside the outer sandbox (scripts/copilot-probe.mjs).
- * As on a runner (copilotSandboxCheck): CONFINEMENT_PROBE beside a decoy, so no environment a command can read, the
- * bubblewrap that is its sandbox's pid 1 above all, may show the marker Copilot holds as it holds the token; nothing it
- * makes in the home directory may be there afterwards; the clone's .git/config refuses a write, the stage's temp
- * directory takes one, a host off the allow-list is refused. A broken rule Blocks; a probe that left no result is tried
- * once more, then Blocks. `drop`: more names to keep out of the probe (the worker's shell secrets).
+ * Factory's bwrap first on PATH; the outer sandbox `outer`; its flags; its own TMPDIR), with the stage's policy in a
+ * COPILOT_HOME of its own and none of the run's credentials, against the loopback model inside the outer sandbox
+ * (scripts/copilot-probe.mjs). As on a runner (copilotSandboxCheck): CONFINEMENT_PROBE beside a decoy, so no environment
+ * a command can read, the bubblewrap that is its sandbox's pid 1 above all, may show the marker Copilot holds as it holds
+ * the token; Copilot's TMPDIR (each command's network rules) is neither listed nor writable, nor are its rules in the
+ * commands' own temp directory; nothing it makes in the home directory, the probe's COPILOT_HOME or Copilot's release may
+ * be there afterwards; the clone's .git/config refuses a write, the stage's temp directory takes one, a host off the
+ * allow-list is refused; a pass is exit 0 with the probe's pass line. A broken rule Blocks; a probe that left no result
+ * is tried once more, then Blocks. `drop`: more names to keep out of the probe (the worker's shell secrets).
  */
 export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run = exec, home = homedir(), script = COPILOT_PROBE_SCRIPT } = {}) {
   const env = { ...runEnv };
   for (const k of [...SHELL_SECRET_KEYS, ...drop]) delete env[k];
   // Under the usage directory's `harness` folder: Copilot (in its outer sandbox) writes it, its commands cannot.
-  const probe = { clone: local.clone, probeHome: join(env.FACTORY_USAGE_DIR, "harness", "copilot-probe"), cacheHome: copilotCacheHome(env, home), agentTmp: env.TMPDIR, agentHome: home };
+  // `home`: Copilot's HOME locally is the developer's, as is the probe's agent home.
+  const probe = { clone: local.clone, probeHome: join(env.FACTORY_USAGE_DIR, "harness", "copilot-probe"), cacheHome: copilotCacheHome(env, home), agentTmp: env.TMPDIR, agentHome: home, home, copilotTmp: local.copilotTmp };
   const flags = [...copilotLocalFlags(local), `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
   let last = null;
   try {
@@ -565,11 +583,14 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
       for (const [f, text] of Object.entries(copilotHomeFiles())) writeFileSync(join(probe.probeHome, f), text, { mode: 0o600 });
       for (const f of [join(probe.agentTmp, PROBE_RESULT), join(home, PROBE_PERSIST)]) rmSync(f, { force: true });
       const marker = probeMarker();
-      const args = ["-s", outer, "--", "env", `TMPDIR=${probe.agentTmp}`, process.execPath, script, "/bin/sh", "-c", COPILOT_DECOY_LAUNCH, "sh", ...flags];
+      const ctmp = freshCopilotTmp(local) || probe.agentTmp;
+      const args = ["-s", outer, "--", "env", `TMPDIR=${ctmp}`, process.execPath, script, "/bin/sh", "-c", COPILOT_DECOY_LAUNCH, "sh", ...flags];
       const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains)) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
       const got = await probeResult(probe, env);
       if (got.code === 4) throw new GitRefusal("sandbox", `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot", local: true });
-      if (got.code === 0) return;
+      // A pass is exit 0 with the probe's own last line, never exit 0 alone.
+      if (got.code === 0 && got.said === PROBE_PASS) return;
+      if (got.code === 0) throw new GitRefusal("sandbox", "Copilot's sandbox probe ended without its pass line", { rule: "the probe ended without its pass line", harness: "copilot", local: true });
       let said = "";
       try {
         said = String(JSON.parse(String(r.stderr).trim().split("\n").at(-1)).said || "");
@@ -664,10 +685,12 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (sandboxed.bwrapBin) childEnv.PATH = `${sandboxed.bwrapBin}:${childEnv.PATH || ""}`;
     await copilotLocalCheck(sandboxed, outer, childEnv, { drop: shellSecrets });
   }
+  // Locally Copilot runs with its own TMPDIR (lib/local.mjs copilotPrivateTmp), made afresh; its commands get the stage's.
+  const outerTmp = (harness === "copilot" && outer && freshCopilotTmp(sandboxed)) || childEnv.TMPDIR || "";
   // Linux: the harness process itself in srt, the stage's TMPDIR put back (srt points it at its shared /tmp/claude).
   // A runner's harness: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home
   // (claude-runner.mjs runnerLaunch; Copilot's with Factory's bwrap first, copilot-runner.mjs copilotLaunch).
-  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner && harness === "copilot" ? copilotLaunch(runner, cmd, args, childEnv.PATH) : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
+  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${outerTmp}`, cmd, ...args]] : runner && harness === "copilot" ? copilotLaunch(runner, cmd, args, childEnv.PATH) : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
   const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), ...shellSecrets, "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];

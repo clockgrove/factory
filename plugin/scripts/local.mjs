@@ -28,7 +28,7 @@ import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findPr
 import { holdSecrets, input, log, redactSecrets, resolveInputs } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -443,10 +443,12 @@ export class Local {
     // its whole environment, the token included, and bubblewrap stays as every command's pid 1, readable to each (#100).
     // Factory's starts the real one with none (lib/copilot-runner.mjs bwrapShim). In the usage directory, which no
     // sandbox may write; harness.mjs copilotLocalCheck proves it before every start.
+    // It also gives each command the stage's temp directory as its TMPDIR: Copilot itself runs with its own
+    // (lib/local.mjs copilotPrivateTmp), where it writes each command's network rules.
     const bwrapBin = outerOn && this.harness === "copilot" ? join(usageDir, "bwrapbin") : null;
     if (bwrapBin) {
       mkdirSync(bwrapBin, { recursive: true });
-      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap"))), { mode: 0o755 });
+      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp), { mode: 0o755 });
     }
     return {
       ...base,
@@ -485,7 +487,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
@@ -505,7 +507,9 @@ export class Local {
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
     mkdirSync(home, { recursive: true });
     // Its policy, config and MCP servers, as Factory's own: whatever an earlier run left there (a link included) is replaced.
-    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir] }), null, 2), ...copilotHomeFiles() };
+    // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
+    const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir)] : [];
+    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {
       // A directory an earlier run left under the name too.
       rmSync(join(home, f), { force: true, recursive: true });

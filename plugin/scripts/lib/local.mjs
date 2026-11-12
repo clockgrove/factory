@@ -767,7 +767,7 @@ export const codexShellExclude = (names) => `shell_environment_policy.exclude=[$
  * limited to `domains`. Copilot reads this policy only from its home directory, so the developer's own
  * ~/.copilot is never touched.
  */
-export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], readable = [], denied = null, platform = osPlatform() } = {}) {
+export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], readable = [], denied = null, alsoDenied = [], platform = osPlatform() } = {}) {
   return {
     sandbox: {
       enabled: true,
@@ -787,8 +787,9 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // mount point cannot be renamed, so no command can move .git aside and put one of its own in its place. Seatbelt
         // (macOS) has no bind mounts, so there this changes nothing and the git guard holds.
         // `readable`: paths outside these that a runner's commands read (copilot-runner.mjs: the agent's read-only GitHub
-        // login); `denied`: a runner's own list (none there: that login is for its commands).
-        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home)) },
+        // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
+        // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
+        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home))), ...alsoDenied] },
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [...new Set(domains)] },
       },
     },
@@ -796,9 +797,21 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
 }
 
 /**
- * The temp directory a local Copilot run must be given. Copilot's sandbox opens the temp directory it is started with
- * (`TMPDIR`, else the host's /tmp) read-write to every command, and gives each command a fresh, empty /tmp otherwise.
- * Only the stage's own temp directory (one of the sandbox's added directories) keeps the host's shared /tmp out of reach.
+ * Linux: Copilot's own TMPDIR in local mode, apart from its commands'. Copilot binds its TMPDIR into every command's
+ * sandbox and writes each command's network rules there before it loads them, so with the commands' own temp directory a
+ * command could rewrite the next command's rules and reach past Copilot's proxy (#99's review; reproduced inside srt:
+ * srt's own proxy, whose list adds Copilot's API hosts). This directory is in the usage directory's `harness` folder,
+ * which only the harness process may write, is made afresh before every start (harness.mjs) and is denied to commands
+ * (copilotLocalSettings `alsoDenied`); Factory's bwrap gives each command the stage's temp directory as its TMPDIR.
+ */
+export const copilotPrivateTmp = (usageDir) => join(usageDir, "harness", "copilot-tmp");
+
+/**
+ * The temp directory a local Copilot run's commands must be given. Copilot's sandbox opens the temp directory it is
+ * started with (`TMPDIR`, else the host's /tmp) read-write to every command, and gives each command a fresh, empty /tmp
+ * otherwise. Only the stage's own temp directory (one of the sandbox's added directories) keeps the host's shared /tmp
+ * out of reach. On Linux Copilot itself starts with copilotPrivateTmp instead, and Factory's bwrap hands its commands
+ * this one.
  */
 export function copilotTmpdir(local, env = {}) {
   const t = env.TMPDIR;
@@ -1328,7 +1341,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
 }
 
 /**

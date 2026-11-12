@@ -63,8 +63,13 @@ export const ROUTES = [
   { method: "POST", path: /^\/v1\/(chat\/completions|responses|embeddings|messages|images\/generations)$/, family: "openai", maxBytes: 64 * 1024 * 1024 },
   { method: "GET", path: /^\/v[1-9]\/ai\/config$|^\/v1\/models$/, family: "free", maxBytes: 0 },
 ];
-/** The request headers passed on (the AI SDK's own `ai-*` headers among them); every other one is dropped. */
-const REQUEST_HEADERS = /^(content-type|accept|user-agent|anthropic-version|anthropic-beta|ai-(gateway-protocol-version|gateway-auth-method|model-id|[a-z]+-model-specification-version|language-model-streaming|o11y-[a-z-]+))$/;
+/**
+ * The request headers passed on; every other one is dropped. The AI SDK's own (ai@7.0.165, @ai-sdk/gateway 4.0.138, as
+ * recorded in plugin/test/fixtures/ai-sdk-7.0.165-requests.json): ai-gateway-protocol-version, ai-gateway-auth-method,
+ * the model in ai-model-id or, for a language model, ai-language-model-id, ai-<kind>-model-specification-version,
+ * ai-language-model-streaming, and ai-o11y-* on Vercel. The gateway refuses a call without its model header (400).
+ */
+export const REQUEST_HEADERS = /^(content-type|accept|accept-language|user-agent|anthropic-version|anthropic-beta|ai-(gateway-protocol-version|gateway-auth-method|model-id|[a-z]+-model-(id|specification-version|streaming)|o11y-[a-z-]+))$/;
 /** The response headers passed back; every other one is dropped. */
 const RESPONSE_HEADERS = /^(content-type|retry-after|x-vercel-id|x-request-id|request-id|x-ratelimit-[a-z-]+)$/;
 

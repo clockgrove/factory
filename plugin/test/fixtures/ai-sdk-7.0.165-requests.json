@@ -1,0 +1,126 @@
+{
+  "_note": "What the AI SDK (ai@7.0.165, @ai-sdk/gateway 4.0.138) sends the AI Gateway for each call kind, recorded offline by a local stand-in (createGateway({ baseURL }) at it, no real key). Authorization, host and length are left out; the relay sets its own.",
+  "requests": {
+    "generateText": {
+      "method": "POST",
+      "path": "/v4/ai/language-model",
+      "headers": {
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-language-model-id": "openai/gpt-5",
+        "ai-language-model-specification-version": "4",
+        "ai-language-model-streaming": "false",
+        "content-type": "application/json",
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"toolChoice\":{\"type\":\"auto\"},\"prompt\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}],\"headers\":{\"user-agent\":\"ai/7.0.165\"}}"
+    },
+    "streamText": {
+      "method": "POST",
+      "path": "/v4/ai/language-model",
+      "headers": {
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-language-model-id": "openai/gpt-5",
+        "ai-language-model-specification-version": "4",
+        "ai-language-model-streaming": "true",
+        "content-type": "application/json",
+        "user-agent": "ai-sdk-gateway/4.0.138 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"toolChoice\":{\"type\":\"auto\"},\"prompt\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}],\"includeRawChunks\":false}"
+    },
+    "generateImage": {
+      "method": "POST",
+      "path": "/v4/ai/image-model",
+      "headers": {
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-image-model-specification-version": "4",
+        "ai-model-id": "recraft/recraft-v4.1-flash",
+        "content-type": "application/json",
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"prompt\":\"dot\",\"n\":1,\"providerOptions\":{}}"
+    },
+    "embed": {
+      "method": "POST",
+      "path": "/v4/ai/embedding-model",
+      "headers": {
+        "ai-embedding-model-specification-version": "4",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "openai/text-embedding-3-small",
+        "content-type": "application/json",
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"values\":[\"hi\"]}"
+    },
+    "decide": {
+      "method": "POST",
+      "path": "/v4/ai/decision-model",
+      "headers": {
+        "ai-decision-model-specification-version": "4",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "perplexity/pplx-decider-v1.2",
+        "content-type": "application/json",
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"stateParts\":[{\"type\":\"text\",\"text\":\"x\"}],\"questions\":{\"answer\":{\"type\":\"boolean\",\"instructions\":\"x\",\"criteria\":{}}},\"providerOptions\":{}}"
+    },
+    "rerank": {
+      "method": "POST",
+      "path": "/v4/ai/reranking-model",
+      "headers": {
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "cohere/rerank-v3.5",
+        "ai-reranking-model-specification-version": "4",
+        "content-type": "application/json",
+        "user-agent": "ai-sdk-gateway/4.0.138 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"documents\":{\"type\":\"text\",\"values\":[\"a\"]},\"query\":\"q\"}"
+    },
+    "video": {
+      "method": "POST",
+      "path": "/v4/ai/video-model",
+      "headers": {
+        "accept": "text/event-stream",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "google/veo-3",
+        "ai-video-model-specification-version": "4",
+        "content-type": "application/json",
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.76 node.js/24",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "{\"prompt\":\"x\",\"n\":1,\"providerOptions\":{}}"
+    }
+  }
+}

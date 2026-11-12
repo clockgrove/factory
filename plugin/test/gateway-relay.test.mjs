@@ -32,6 +32,12 @@ async function fakeGateway(routes) {
     seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, headers: req.headers });
     // Only the routes this test named (a Map: no inherited name is ever looked up).
     const route = table.get(req.url.split("?")[0]);
+    // As the real gateway: a model call without its model header is refused (400), before any route answers.
+    const kind = /^\/v\d+\/ai\/([a-z]+)-model$/.exec(req.url.split("?")[0])?.[1];
+    if (kind && !req.headers[kind === "language" ? "ai-language-model-id" : "ai-model-id"]) {
+      res.writeHead(400, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Missing or empty model identifier", type: "invalid_request_error" } }));
+    }
     const r = typeof route === "function" ? await route(body, req) : route || { status: 404, body: { error: "no route" } };
     res.writeHead(r.status ?? 200, { "content-type": r.type || "application/json", ...(r.headers || {}) });
     res.end(typeof r.body === "string" ? r.body : JSON.stringify(r.body));
@@ -42,8 +48,10 @@ async function fakeGateway(routes) {
 
 /** One request to the relay's socket: {status, text, headers}. */
 function call(socketPath, { method = "POST", path = IMAGE, token, body = "{}", headers = {} } = {}) {
+  // The model header the AI SDK sends with each model call: ai-language-model-id for a language model, else ai-model-id.
+  const model = /\/ai\/language-model$/.test(path) ? { "ai-language-model-id": "openai/gpt-5" } : /\/ai\/[a-z]+-model$/.test(path) ? { "ai-model-id": "recraft/recraft-v4.1-flash" } : {};
   return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath, method, path, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json", ...headers } }, (res) => {
+    const req = http.request({ socketPath, method, path, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json", ...model, ...headers } }, (res) => {
       let text = "";
       res.on("data", (c) => (text += c));
       res.on("end", () => resolve({ status: res.statusCode, text, headers: res.headers }));
@@ -160,7 +168,7 @@ test("relay pricing: the larger of reported and looked up; a forged echo, an unk
     const rh = await openRelay({ key: KEY, dir: join(dir, "c"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
     rh.beginPass(100);
     await new Promise((resolve) => {
-      const req = http.request({ socketPath: rh.socketPath, method: "POST", path: "/v4/ai/reranking-model", headers: { authorization: `Bearer ${rh.token}` } }, () => {});
+      const req = http.request({ socketPath: rh.socketPath, method: "POST", path: "/v4/ai/reranking-model", headers: { authorization: `Bearer ${rh.token}`, "ai-model-id": "cohere/rerank-v3.5" } }, () => {});
       req.on("error", () => resolve());
       req.end("{}");
       setTimeout(() => {
@@ -514,4 +522,40 @@ test("the re-review's minors: unbilled only for known refusals, a stream's cost 
   const { scrubbedEnv } = await import("../scripts/lib/harness.mjs");
   const scrubbed = scrubbedEnv({ FACTORY_GATEWAY_URL: "http://evil", FACTORY_STATE_DIR: "/evil", PATH: "/bin" });
   assert.deepEqual(scrubbed, { PATH: "/bin" });
+});
+
+test("the AI SDK's real requests (ai@7.0.165, fixture) pass through the relay with every header the gateway needs; the model header is never dropped (#126)", async () => {
+  const F = JSON.parse(readFileSync(new URL("./fixtures/ai-sdk-7.0.165-requests.json", import.meta.url), "utf8"));
+  const got = [];
+  const answer = { body: { providerMetadata: { gateway: { cost: "0.001" } } } };
+  const gw = await fakeGateway({ "/v4/ai/language-model": (_b, req) => (got.push(req.headers), answer), "/v4/ai/image-model": (_b, req) => (got.push(req.headers), answer), "/v4/ai/embedding-model": (_b, req) => (got.push(req.headers), answer), "/v4/ai/decision-model": (_b, req) => (got.push(req.headers), answer), "/v4/ai/reranking-model": (_b, req) => (got.push(req.headers), answer) });
+  const dir = mkdtempSync(join(tmpdir(), "relay-sdk-"));
+  try {
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 0, origin: gw.origin, lookupDelaysMs: [1] });
+    relay.beginPass(0);
+    const statuses = {};
+    for (const [kind, r] of Object.entries(F.requests)) {
+      // Exactly what the SDK sent, with the relay's token in the key's place.
+      const res = await new Promise((resolve, reject) => {
+        const req = http.request({ socketPath: relay.socketPath, method: r.method, path: r.path, headers: { ...r.headers, authorization: `Bearer ${relay.token}` } }, (x) => {
+          x.resume();
+          x.on("end", () => resolve(x.statusCode));
+        });
+        req.on("error", reject);
+        req.end(r.body);
+      });
+      statuses[kind] = res;
+    }
+    assert.deepEqual(statuses, { generateText: 200, streamText: 200, generateImage: 200, embed: 200, decide: 200, rerank: 200, video: 403 }, "every model call reaches the gateway with its model header; video is not relayed (its cost comes later)");
+    // Every ai-* header the SDK sent reached the gateway.
+    for (const [i, kind] of ["generateText", "streamText", "generateImage", "embed", "decide", "rerank"].entries()) {
+      const sent = Object.keys(F.requests[kind].headers).filter((h) => h.startsWith("ai-"));
+      assert.deepEqual(sent.filter((h) => got[i][h] !== F.requests[kind].headers[h]), [], `${kind}: an ai-* header was dropped`);
+    }
+    await relay.endPass();
+    await relay.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

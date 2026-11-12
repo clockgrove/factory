@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { codexRollout, codexThreads, localRollouts, withSubAgents } from "../scripts/lib/codex-threads.mjs";
 import { priceCodex, priceStage, CODEX_PRICES } from "../scripts/lib/usage.mjs";
-import { runHarness, subAgentThreads } from "../scripts/lib/harness.mjs";
+import { dropSessionTotals, runHarness, subAgentThreads } from "../scripts/lib/harness.mjs";
 import { capturedSession, captureSession, dropSessions, SESSIONS_HELD } from "../scripts/lib/claude-runner.mjs";
 import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
 import { restoreTranscript, saveTranscript, stageThreads, writeUsage } from "../scripts/lib/session.mjs";
@@ -29,6 +29,7 @@ const CHILD_TOKENS = { input: 1454076, cached: 1404544, written: 0, output: 5122
 const rel = (id, at = "21-48-19") => join("2026", "11", "11", `rollout-2026-11-11T${at}-${id}.jsonl`);
 const named = (thread, id, kind = "started") => `${JSON.stringify({ timestamp: "2026-11-12T05:50:00.000Z", ordinal: 9000, type: "event_msg", payload: { type: "item_completed", thread_id: thread, item: { type: "SubAgentActivity", kind, agent_thread_id: id, agent_path: "/root/x" } } })}\n`;
 /** A child of `parent` with the implementer's real counts, under another id. */
+const SIBLING = "01a1ce4d-0000-7000-8000-0000000000b1";
 const childOf = (parent, id) => childText.replaceAll(CHILD, id).replaceAll(PARENT, parent);
 
 function sessionsDir(files) {
@@ -65,14 +66,14 @@ test("a forked sub-agent's copy of its parent's history is skipped; a total carr
   const [meta, ...rest] = forked.trim().split("\n");
   const copied = [
     JSON.stringify({ ordinal: 5, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 9e6, output_tokens: 9e4 }, last_token_usage: { input_tokens: 1e5 } } } }),
-    JSON.stringify({ ordinal: 6, type: "event_msg", payload: { type: "item_completed", item: { type: "SubAgentActivity", kind: "started", agent_thread_id: "sibling" } } }),
+    JSON.stringify({ ordinal: 6, type: "event_msg", payload: { type: "item_completed", item: { type: "SubAgentActivity", kind: "started", agent_thread_id: SIBLING } } }),
   ];
   const withCopy = codexRollout([meta, ...copied, ...rest].join("\n"));
   assert.deepEqual(withCopy.tokens, own.tokens, "the parent's counts before subagent_history_start_ordinal are not the child's");
-  assert.ok(!withCopy.names.includes("sibling"));
+  assert.ok(!withCopy.names.includes(SIBLING));
   // A thread whose running total starts above its first request's: only what it added is its own.
   const tc = (total, last) => JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: total, cached_input_tokens: 0, output_tokens: 10 }, last_token_usage: { input_tokens: last, cached_input_tokens: 0, output_tokens: 10 } } } });
-  const carried = codexRollout([JSON.stringify({ type: "session_meta", payload: { id: "c1" } }), tc(1500, 500), tc(1800, 300)].join("\n"));
+  const carried = codexRollout([JSON.stringify({ type: "session_meta", payload: { id: "01a1ce4d-0000-7000-8000-0000000000c1" } }), tc(1500, 500), tc(1800, 300)].join("\n"));
   assert.deepEqual(carried.tokens, { input: 800, cached: 0, written: 0, output: 10 });
 });
 
@@ -87,14 +88,22 @@ test("every thread under a run's thread, children of children too; a thread that
     [rel(STRANGER, "21-49-30")]: childOf("01a1ffff-0000-7000-8000-00000000ffff", STRANGER),
   });
   try {
-    const threads = await codexThreads(localRollouts(root), PARENT);
+    const { threads, missed } = await codexThreads(localRollouts(root), PARENT);
     assert.deepEqual(threads.map((t) => [t.id, t.parent]), [[CHILD, PARENT], [GRAND, CHILD]]);
     assert.deepEqual(threads[1].tokens, CHILD_TOKENS);
-    assert.deepEqual(await codexThreads(localRollouts(root), CHILD), [threads[1]], "from the child down only");
-    assert.deepEqual(await codexThreads(localRollouts(root), "../etc"), [], "no path out of the sessions directory");
+    assert.deepEqual(missed, [], "the stranger was read and refused: no miss");
+    assert.deepEqual((await codexThreads(localRollouts(root), CHILD)).threads, [threads[1]], "from the child down only");
+    assert.deepEqual(await codexThreads(localRollouts(root), "../etc"), { threads: [], missed: [] }, "no path out of the sessions directory");
+    // The read limit: what was read is counted, the rest is named as missed.
+    const limited = await codexThreads(localRollouts(root), PARENT, { maxReads: 2 });
+    assert.deepEqual([limited.threads.map((t) => t.id), limited.missed], [[CHILD], [{ id: null, why: "over 2 rollouts" }]]);
     // The #129 worker named its implementer, whose rollout was not kept: nothing to count, nothing invented.
     const gw = sessionsDir({ [rel("01a1ce7d-369e-7983-89dd-9f98e083d64e")]: fixture("codex-0.167-spawn-gateway-parent.jsonl") });
-    assert.deepEqual(await codexThreads(localRollouts(gw), "01a1ce7d-369e-7983-89dd-9f98e083d64e"), []);
+    assert.deepEqual(await codexThreads(localRollouts(gw), "01a1ce7d-369e-7983-89dd-9f98e083d64e"), { threads: [], missed: [{ id: "01a1ce7d-97aa-7ba3-aeb1-688467bcfcdf", why: "no rollout" }] }, "its implementer is named as missed");
+    assert.deepEqual((await codexThreads(localRollouts(gw), PARENT)).missed, [{ id: PARENT, why: "no rollout" }], "no rollout of the run's own: missed");
+    // A rollout over the size cap is not read; a reader that throws is the caller's (subAgentThreads) to catch.
+    const big = await codexThreads((id) => (id === PARENT ? { text: parentText } : { skip: "over 67108864 bytes" }), PARENT);
+    assert.deepEqual(big, { threads: [], missed: [{ id: CHILD, why: "over 67108864 bytes" }] });
     rmSync(gw, { recursive: true, force: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -134,8 +143,11 @@ test("a run's record gains each thread's own share, priced at its own model; a t
   assert.equal(costOf([{ harness: "codex", model: MODEL, runs: 1, tokens: stage.tokens, subAgents: stage.subAgents, basis: "priced" }], CODEX_PRICES).usd, priceStage(CODEX_PRICES, MODEL, stage.tokens, stage.subAgents).usd);
 });
 
-test("a Codex run counts its sub-agents in this pass, on a resume, and in a later stage that restores its thread; the transcript keeps them", async () => {
-  // A fake `codex`: copies the next pass's rollouts into CODEX_HOME/sessions as Codex writes them, prints its stream.
+/**
+ * A fake `codex` on PATH: each pass copies its rollouts into CODEX_HOME/sessions as Codex writes them, then prints its
+ * stream. `run` is runHarness on it (local route: no agent uid); `saved` is the environment to put back.
+ */
+function fakeCodex() {
   const work = mkdtempSync(join(tmpdir(), "codex-spawn-"));
   const next = join(work, "next");
   const bin = join(work, "bin");
@@ -145,14 +157,14 @@ const fs = require("node:fs");
 fs.cpSync(${JSON.stringify(join(next, "sessions"))}, process.env.CODEX_HOME + "/sessions", { recursive: true });
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(next, "stdout.jsonl"))}, "utf8"));
 `, { mode: 0o755 });
-  const stream = (thread, t) => `${JSON.stringify({ type: "thread.started", thread_id: thread })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: t.written, output_tokens: t.output } })}\n`;
+  const stream = (thread, t) => `${JSON.stringify({ type: "thread.started", thread_id: thread })}\n${t ? `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: t.written, output_tokens: t.output } })}\n` : ""}`;
   const pass = (files, out) => {
     rmSync(next, { recursive: true, force: true });
     for (const [r, text] of Object.entries(files)) {
       mkdirSync(join(next, "sessions", r, ".."), { recursive: true });
       writeFileSync(join(next, "sessions", r), text);
     }
-    mkdirSync(next, { recursive: true });
+    mkdirSync(join(next, "sessions"), { recursive: true });
     writeFileSync(join(next, "stdout.jsonl"), out);
   };
   const home = join(work, "codex");
@@ -160,6 +172,15 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(next, "stdout.jsonl")
   process.env.PATH = `${bin}:${saved.PATH}`;
   process.env.CODEX_HOME = home;
   const run = (resume, label) => runHarness({ harness: "codex", model: MODEL, prompt: "p", maxUsd: 0, resume, cwd: work, env: { PATH: process.env.PATH, CODEX_HOME: home }, timeoutMs: 60_000, label });
+  return { work, home, pass, stream, run, saved };
+}
+const putBack = (saved) => {
+  for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+  else process.env[k] = v;
+};
+
+test("a Codex run counts its sub-agents in this pass, on a resume, and in a later stage that restores its thread; the transcript keeps them", async () => {
+  const { work, home, pass, stream, run, saved } = fakeCodex();
   const parentUsd = priceCodex(MODEL, PARENT_TOKENS);
   try {
     pass({ [rel(PARENT, "21-47-43")]: parentText, [rel(CHILD)]: childText }, stream(PARENT, PARENT_TOKENS));
@@ -210,8 +231,7 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(next, "stdout.jsonl")
     assert.deepEqual(review.subAgents[0].tokens, { input: 30000, cached: 20000, written: 0, output: 400 }, "only the implementer's new work");
     assert.equal(review.usd, Math.round((priceCodex(MODEL, { input: 5000, cached: 0, written: 0, output: 50 }) + priceCodex(MODEL, { input: 30000, cached: 20000, written: 0, output: 400 })) * 10000) / 10000);
   } finally {
-    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
-    else process.env[k] = v;
+    putBack(saved);
     rmSync(work, { recursive: true, force: true });
   }
 });
@@ -228,7 +248,8 @@ test("on a runner (Actions, a cloud sandbox) the threads are read from archives 
   }
   try {
     assert.deepEqual(await captureSession(layout, PARENT), [rel(PARENT, "21-47-43")]);
-    const threads = await subAgentThreads(PARENT, layout, process.env);
+    const { threads, missed } = await subAgentThreads(PARENT, layout, process.env);
+    assert.deepEqual(missed, []);
     assert.deepEqual(threads.map((t) => [t.id, t.tokens]), [[CHILD, CHILD_TOKENS], [GRAND, CHILD_TOKENS]]);
     // Captured as the run's own session is: saved with the stage (saveAgentTranscript) and put back on the next reset.
     assert.deepEqual(capturedSession(CHILD).files, [rel(CHILD)]);
@@ -236,9 +257,78 @@ test("on a runner (Actions, a cloud sandbox) the threads are read from archives 
     assert.equal(SESSIONS_HELD().length, 3);
     // The run's own thread is read from Factory's captured copy, not from what the agent's home holds by now.
     appendFileSync(join(layout.sessions, rel(PARENT, "21-47-43")), named(PARENT, "01a1ce4d-0000-7000-8000-000000000009"));
-    assert.equal((await subAgentThreads(PARENT, layout, process.env)).length, 2);
+    assert.equal((await subAgentThreads(PARENT, layout, process.env)).threads.length, 2);
   } finally {
     dropSessions();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a resumed pass that ends without a total keeps the session's and its threads' totals: a later stage counts neither again", async () => {
+  dropSessionTotals();
+  const { work, home, pass, stream, run, saved } = fakeCodex();
+  const files = { [rel(PARENT, "21-47-43")]: parentText, [rel(CHILD)]: childText };
+  try {
+    pass(files, stream(PARENT, PARENT_TOKENS));
+    const first = await run(null, "work-1");
+    // The fix pass resumes the thread and is cut before its turn completes: no total of its own.
+    pass(files, stream(PARENT, null));
+    const cut = await run(PARENT, "validation-fix-1");
+    assert.equal(cut.usd, null);
+    assert.equal(cut.sessionTotal.usd, first.sessionTotal.usd, "the session's last good total is kept");
+    assert.deepEqual(Object.keys(cut.sessionTotal.children), [CHILD]);
+    const usageDir = join(work, "ws", "usage-work-1");
+    mkdirSync(usageDir, { recursive: true });
+    const session = saveTranscript({ harness: "codex", sessionId: PARENT, also: stageThreads([first, cut]), usageDir, checkout: "/c" });
+    const usage = writeUsage(usageDir, { harness: "codex", model: MODEL, records: [first, cut], passes: 1, exit: "blocked", reason: "", credentialBasis: "test", session });
+    assert.equal(usage.sessionTotal.usd, first.sessionTotal.usd);
+    assert.deepEqual(usage.sessionTotal.children[CHILD].tokens, CHILD_TOKENS);
+    // Whatever a cut pass recorded, result.json keeps the last total with dollars and every thread counted.
+    const lost = writeUsage(join(work, "lost"), { harness: "codex", model: MODEL, records: [first, { ...cut, sessionTotal: { usd: null, tokens: null } }], passes: 1, exit: "blocked", reason: "", credentialBasis: "test", session });
+    assert.deepEqual([lost.sessionTotal.usd, Object.keys(lost.sessionTotal.children)], [first.sessionTotal.usd, [CHILD]]);
+    writeFileSync(join(usageDir, "result.json"), JSON.stringify(usage));
+    // A later stage is a fresh process: it knows only what the saved stage recorded. Locally Codex's sessions persist.
+    dropSessionTotals();
+    process.env.FACTORY_LOCAL = "1";
+    assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(work, "ws"), harness: "codex" })).id, PARENT);
+    delete process.env.FACTORY_LOCAL;
+    pass(files, stream(PARENT, PARENT_TOKENS));
+    const later = await run(PARENT, "review-fix-1");
+    assert.equal(later.usd, 0, "neither the thread nor its implementer counted again");
+    assert.ok(!later.usdLowerBound);
+  } finally {
+    putBack(saved);
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("sub-agent spend that could not be read leaves the dollars a lower bound; a failed read never fails the run", async () => {
+  dropSessionTotals();
+  const { work, pass, stream, run, saved } = fakeCodex();
+  const GW = "01a1ce7d-369e-7983-89dd-9f98e083d64e";
+  const wait = `${JSON.stringify({ type: "item.started", item: { id: "item_5", type: "collab_tool_call", tool: "wait", sender_thread_id: GW, receiver_thread_ids: [], prompt: null, agents_states: {}, status: "in_progress" } })}\n`;
+  const tokens = { input: 223348, cached: 199209, written: 24106, output: 2079 };
+  try {
+    // The #129 worker on the gateway: its implementer's rollout is not there.
+    pass({ [rel(GW, "06-41-14")]: fixture("codex-0.167-spawn-gateway-parent.jsonl") }, stream(GW, tokens));
+    const missing = await run(null, "work-1");
+    assert.equal(missing.usd, priceCodex(MODEL, tokens));
+    assert.equal(missing.usdLowerBound, true, "a named thread with no rollout");
+    // Sub-agent work in the stream and no rollout of the run's own to name its threads.
+    const other = "01a1ce7d-0000-7000-8000-0000000000d1";
+    pass({}, `${wait}${stream(other, tokens)}`);
+    assert.equal((await run(null, "work-2")).usdLowerBound, true);
+    // Neither, with no sub-agent work: no flag.
+    const plain = "01a1ce7d-0000-7000-8000-0000000000d2";
+    pass({}, stream(plain, tokens));
+    assert.equal((await run(null, "work-3")).usdLowerBound, undefined);
+  } finally {
+    putBack(saved);
+    rmSync(work, { recursive: true, force: true });
+  }
+  // A sessions directory that cannot be listed: logged and missed, never thrown.
+  const odd = mkdtempSync(join(tmpdir(), "codex-odd-"));
+  writeFileSync(join(odd, "sessions"), "not a directory");
+  assert.deepEqual(await subAgentThreads(PARENT, null, { CODEX_HOME: odd }), { threads: [], missed: [{ id: null, why: "the read failed" }] });
+  rmSync(odd, { recursive: true, force: true });
 });

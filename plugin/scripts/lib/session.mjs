@@ -1086,6 +1086,20 @@ export async function mirrorDiff(mgit, from, to, { mergeBase = false, maxBytes =
   return String(d.stdout);
 }
 
+/**
+ * The saved session's running total for result.json: the last one a run of it reported with dollars (a pass that ended
+ * without a total keeps the one before), with every Codex sub-agent thread any of its runs counted (`children`), so the
+ * stage that restores it counts neither again. Null when there is neither.
+ */
+function lineageTotal(id, records) {
+  if (!id) return null;
+  const runs = records.filter((r) => r?.sessionId === id && r.sessionTotal);
+  const total = runs.filter((r) => typeof r.sessionTotal.usd === "number").at(-1)?.sessionTotal ?? null;
+  const children = Object.assign(Object.create(null), ...runs.map((r) => (r.sessionTotal.children && typeof r.sessionTotal.children === "object" ? r.sessionTotal.children : {})));
+  if (!Object.keys(children).length) return total;
+  return { ...(total ?? { usd: null, tokens: null }), children: { ...children } };
+}
+
 /** Write usage/result.json and return the merged record. */
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false }) {
   mkdirSync(usageDir, { recursive: true });
@@ -1121,7 +1135,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,
     // The saved session's running total as Factory last read it (runHarness), for the stage that restores it (clampTotal).
-    sessionTotal: (session?.id && records.filter((r) => r?.sessionId === session.id && r.sessionTotal).at(-1)?.sessionTotal) || null,
+    sessionTotal: lineageTotal(session?.id, records),
     // Counted by the dispatcher from the progress comment's spend line, not from this record (dispatch.mjs todaysSpend).
     ...(spendInProgress ? { spendInProgress: true } : {}),
   };

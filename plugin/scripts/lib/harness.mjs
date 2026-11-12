@@ -11,7 +11,7 @@ import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
-import { codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
+import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, takeShellSecrets } from "./worker-secrets.mjs";
@@ -560,7 +560,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
-  const threads = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv) : [];
+  const found = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : { threads: [], missed: [] };
   // Only a regular file the harness wrote is read (in the outer sandbox's folder, a link could point anywhere).
   let usagePath = usageFile && outer && !lstatSync(usageFile, { throwIfNoEntry: false })?.isFile() ? undefined : usageFile;
   if (agentUid && usageFile) {
@@ -571,19 +571,36 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
-  const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, threads, (id) => SESSION_TOTALS.get(id) ?? null);
+  const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
   const rec = counted.rec;
   for (const [id, total] of Object.entries(counted.totals)) SESSION_TOTALS.set(id, total);
+  // Threads this run may have spawned that were not read (a rollout absent, too large or unreadable, the read limit),
+  // or sub-agent work in the stream with no thread read at all: the dollars are a lower bound, and the log says why. A
+  // thread already counted whose rollout is gone (a runner restores only the lineage's own) is no miss, nor is the
+  // run's own rollout missing (its stream's sub-agent work with no thread read is caught below).
+  const missed = found.missed.filter((m) => m.id !== ranSession && !(m.id && m.why === "no rollout" && SESSION_TOTALS.has(m.id)));
+  if (harness === "codex" && (missed.length || (reported.subAgentWork && !found.threads.length))) {
+    rec.usdLowerBound = true;
+    log(`${label}: Codex sub-agent spend may be missing, so the dollars are a lower bound (${missed.length ? missed.slice(0, 3).map((m) => `${m.id ? m.id.slice(0, 8) : "threads"}: ${m.why}`).join("; ") : "its stream shows sub-agent work but no sub-agent thread was read"})`);
+  }
   // Every thread this run's lineage has spawned so far, with its running total: kept with the session's total, so a
   // later stage that resumes the session never counts them again (session.mjs restoreTranscript).
-  const children = { ...(prior?.children ?? {}), ...counted.totals };
-  // A pass with no result line (killed, crashed) reports no total; the session's last good one stays.
+  const children = Object.assign(Object.create(null), prior?.children ?? {}, counted.totals);
+  const withChildren = (t) => ({ ...t, ...(Object.keys(children).length ? { children: { ...children } } : {}) });
+  // A pass with no result line (killed, crashed) reports no total; the session's last good one stays, with every
+  // thread counted so far, so a later stage counts neither the session nor its threads again.
   if (RUNNING_TOTALS.has(harness) && reported.sessionId && reported.usd !== null) {
-    const total = { usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime, ...(Object.keys(children).length ? { children } : {}) };
+    const total = withChildren({ usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime });
     SESSION_TOTALS.set(reported.sessionId, total);
     // The session's running total as Factory read it (for Copilot the larger of the usage file and the stream), kept in
     // the usage record so a later stage that restores the session bounds its saved total by it (session.mjs writeUsage).
     rec.sessionTotal = total;
+  } else if (RUNNING_TOTALS.has(harness) && reported.sessionId) {
+    const last = SESSION_TOTALS.get(reported.sessionId) ?? null;
+    const kept = last ? withChildren(last) : Object.keys(children).length ? withChildren({ usd: null, tokens: null }) : null;
+    if (last) SESSION_TOTALS.set(reported.sessionId, kept);
+    if (kept) rec.sessionTotal = kept;
+    else delete rec.sessionTotal;
   }
   rec.label = label;
   rec.resumed = !!resume;
@@ -617,26 +634,41 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
 }
 
 /**
- * The sub-agent threads under a Codex run's thread (codex-threads.mjs codexThreads). Locally (and in a developer's own
- * run) their rollouts are read where Codex wrote them (its CODEX_HOME in `env`). On a runner each named thread's
- * files are archived as the agent and read from the archive; the run's own is the copy just captured. Each counted
- * thread's archive is captured too: put back on the next reset (a resumed parent finds its children) and saved with
- * the stage's transcript (session.mjs saveAgentTranscript).
+ * The sub-agent threads under a Codex run's thread (codex-threads.mjs codexThreads): `{threads, missed}`. Locally (and
+ * in a developer's own run) their rollouts are read where Codex wrote them (its CODEX_HOME in `env`). On a runner each
+ * named thread's files are archived as the agent and read from the archive; the run's own is the copy just captured.
+ * Each counted thread's archive is captured too: put back on the next reset (a resumed parent finds its children) and
+ * saved with the stage's transcript (session.mjs saveAgentTranscript). Never throws: a failure is a miss.
  */
-export async function subAgentThreads(threadId, runner, env) {
-  if (!runner) return codexThreads(localRollouts(codexSessionRoot(env)), threadId);
-  const archives = new Map();
-  const read = async (id) => {
-    const a = id === threadId ? capturedSession(id) : await archiveSession(runner, id, env);
-    archives.set(id, a);
-    if (!a || a.files.length !== 1) return null;
-    const t = await exec("tar", ["-xOf", "-"], { env, input: a.tar });
-    return t.code === 0 ? String(t.stdout) : null;
-  };
-  const threads = await codexThreads(read, threadId);
-  for (const t of threads) if (plainThread(t.id) && archives.get(t.id)) keepSession(t.id, archives.get(t.id));
-  return threads;
+export async function subAgentThreads(threadId, runner, env, { label = "run" } = {}) {
+  try {
+    if (!runner) return await codexThreads(localRollouts(codexSessionRoot(env)), threadId);
+    const archives = new Map();
+    const read = async (id) => {
+      // The archive holds the one file, so its length bounds the text.
+      const cap = MAX_ROLLOUT_BYTES + 1024 * 1024;
+      const a = id === threadId ? capturedSession(id) : await archiveSession(runner, id, env, { timeoutMs: THREAD_READ_MS, maxBytes: cap });
+      if (!a) return null;
+      if (a.truncated || a.tar.length > cap) return { skip: `over ${MAX_ROLLOUT_BYTES} bytes` };
+      if (a.files.length !== 1) return { skip: "more than one rollout" };
+      const t = await exec("tar", ["-xOf", "-"], { env, input: a.tar, timeoutMs: THREAD_READ_MS });
+      if (t.code !== 0 || t.timedOut) return { skip: t.timedOut ? "unpacking timed out" : "unpacking failed" };
+      archives.set(id, a);
+      return { text: String(t.stdout) };
+    };
+    const found = await codexThreads(read, threadId);
+    for (const t of found.threads) if (archives.get(t.id)) keepSession(t.id, archives.get(t.id));
+    return found;
+  } catch (e) {
+    log(`${label}: Codex's sub-agent threads could not be read (${String(e?.message || e).slice(0, 160)})`);
+    return { threads: [], missed: [{ id: null, why: "the read failed" }] };
+  }
 }
+/** How long one sub-agent rollout's archive or unpacking may take. */
+const THREAD_READ_MS = 120_000;
+
+/** Tests: forget every running total this process has seen (a fresh process, as a later stage is). */
+export const dropSessionTotals = () => SESSION_TOTALS.clear();
 
 /** The last text the harness produced (Claude result.result, Codex agent_message items, Copilot stdout). */
 export function finalText(harness, stdout) {

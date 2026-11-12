@@ -276,15 +276,21 @@ export async function captureSession(layout, sessionId, env = process.env) {
   return archive.files;
 }
 
-/** A session's files archived as the agent, from a pipe: `{tar, files}`, or null when there are none. Nothing is held. */
-export async function archiveSession(layout, sessionId, env = process.env) {
+/**
+ * A session's files archived as the agent, from a pipe: `{tar, files}`, or null when there are none (or the listing or
+ * archive failed or timed out); `{truncated: true}` when the archive ran past `maxBytes`. Nothing is held.
+ */
+export async function archiveSession(layout, sessionId, env = process.env, { timeoutMs, maxBytes } = {}) {
   if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
   const root = layout.sessions;
-  const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth "$3" \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId, String(layout.sessionDepth || 2)], { cwd: layout.agentHome, env });
+  const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth "$3" \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId, String(layout.sessionDepth || 2)], { cwd: layout.agentHome, env, timeoutMs });
+  if (listed.timedOut) return null;
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
   if (!files.length) return null;
-  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0` });
-  if (tar.code !== 0) return null;
+  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes } : {}) });
+  // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
+  if (tar.truncated) return { tar: null, files, truncated: true };
+  if (tar.code !== 0 || tar.timedOut) return null;
   return { tar: tar.stdout, files };
 }
 

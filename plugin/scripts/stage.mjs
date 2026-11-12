@@ -360,9 +360,12 @@ export function stageWriter({ issue, claim, launch = null, list, put }) {
 
 /**
  * The usage record of a child the stage ended, from what its harness streamed. A Codex or Copilot stream is priced from
- * its tokens or credits as far as it got, unless the Codex stream shows sub-agent work. A Claude stream reports dollars only in its last result, which a killed run
+ * its tokens or credits as far as it got. A Claude stream reports dollars only in its last result, which a killed run
  * never prints (an earlier pass's result would undercount), and an unpriced stream of any harness is the same: those
- * count the stage's budget (`maxUsd`, the harness's own spend cap) as an upper bound, so daily_usd never misses it.
+ * count the stage's budget (`maxUsd`, the harness's own spend cap) as an upper bound, so daily_usd never misses it. A
+ * Codex stream that shows sub-agent work is missing those threads' spend (codex-threads.mjs reads it after a run, which
+ * a killed run never reaches): it counts the larger of its priced tokens and the budget (an upper bound when the budget
+ * is the larger), or with no budget its priced tokens as a lower bound.
  */
 export function killedUsage({ harness, model, events, maxUsd }) {
   let rec = null;
@@ -372,12 +375,15 @@ export function killedUsage({ harness, model, events, maxUsd }) {
     rec = null;
   }
   const tokens = rec?.tokens ?? { input: null, output: null, cached: null, written: null };
-  // A Codex stream that shows sub-agent work (a `collab_tool_call` item) is missing those threads' spend (codex-threads.mjs
-  // reads it from their rollouts after a run, which a killed run never reaches): counted as unpriced.
-  const subAgents = harness === "codex" && /"type":\s*"collab_tool_call"/.test(String(events || ""));
-  if (harness !== "claude" && !subAgents && typeof rec?.usd === "number" && Number.isFinite(rec.usd)) return { ...rec, ok: false, error: "ended by the stage" };
-  const usd = Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : null;
-  return { ...(rec || {}), harness, model: rec?.model ?? model ?? null, tokens, ok: false, error: "ended by the stage", usd, usdUpperBound: usd !== null, basis: usd === null ? "unmetered: ended by the stage, no budget set" : "upper bound: ended by the stage before the harness reported its cost; counted at max_usd" };
+  const cap = Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : null;
+  const priced = typeof rec?.usd === "number" && Number.isFinite(rec.usd) ? rec.usd : null;
+  if (harness === "codex" && rec?.subAgentWork && priced !== null) {
+    // The basis stays the price table's (result.json reads its date from it); usdLowerBound says the rest.
+    if (cap === null || priced >= cap) return { ...rec, ok: false, error: "ended by the stage", usdLowerBound: true };
+    return { ...rec, ok: false, error: "ended by the stage", usd: cap, usdUpperBound: true, basis: "upper bound: ended by the stage before its sub-agent threads were read; counted at max_usd" };
+  }
+  if (harness !== "claude" && priced !== null) return { ...rec, ok: false, error: "ended by the stage" };
+  return { ...(rec || {}), harness, model: rec?.model ?? model ?? null, tokens, ok: false, error: "ended by the stage", usd: cap, usdUpperBound: cap !== null, basis: cap === null ? "unmetered: ended by the stage, no budget set" : "upper bound: ended by the stage before the harness reported its cost; counted at max_usd" };
 }
 
 /**

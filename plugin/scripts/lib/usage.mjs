@@ -394,6 +394,8 @@ export function parseCodex(stdout, model) {
     }
     if (e.type === "turn.failed" || e.type === "error") failed = e.error?.message || e.message || e.type;
     if (e.type === "item.completed" && e.item?.type === "error") itemError = e.item.message || "item error";
+    // Sub-agent work (spawn, wait, message): its threads' usage is not in this stream (codex-threads.mjs).
+    if ((e.type === "item.started" || e.type === "item.completed") && e.item?.type === "collab_tool_call") rec.subAgentWork = true;
   }
   failed = failed || itemError;
   rec.turns = turns;

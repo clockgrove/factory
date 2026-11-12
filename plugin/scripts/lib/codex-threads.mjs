@@ -19,15 +19,20 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { jsonLines, priceCodex } from "./usage.mjs";
 
-/** A thread id Factory uses as a file name and a `find -name` pattern: plain characters only. */
-export const plainThread = (id) => typeof id === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(id);
+/** A Codex thread id (a UUID, as Codex makes them): safe as a file name, a `find -name` pattern and an object key. */
+export const plainThread = (id) => typeof id === "string" && /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/.test(id);
+
+/** The largest rollout read (the largest real one seen: 13 MB for a 21M-token thread); a larger one is not counted. */
+export const MAX_ROLLOUT_BYTES = 64 * 1024 * 1024;
+/** The most rollouts read for one run (its own, then each thread named): more leaves the run's dollars a lower bound. */
+export const MAX_THREAD_READS = 256;
 
 /** Codex's sessions directory for a process started with `env` (local mode, a developer's own run). */
 export const codexSessionRoot = (env = process.env) => join(env.CODEX_HOME || join(homedir(), ".codex"), "sessions");
 
 /** A thread's rollout files under `root`, relative to it: `YYYY/MM/DD/rollout-<time>-<id>.jsonl`. */
 export function codexRolloutFiles(root, id) {
-  if (!root || !plainThread(id) || !existsSync(root)) return [];
+  if (!root || !/^[A-Za-z0-9._-]+$/.test(String(id || "")) || !existsSync(root)) return [];
   const out = [];
   const walk = (rel, depth) => {
     for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
@@ -40,30 +45,34 @@ export function codexRolloutFiles(root, id) {
   return out;
 }
 
-const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+/** A token count: a finite non-negative number, at most Number.MAX_SAFE_INTEGER (so no price overflows); else 0. */
+const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.min(v, Number.MAX_SAFE_INTEGER) : 0);
 const usageOf = (u) => ({ input: num(u?.input_tokens), cached: num(u?.cached_input_tokens), written: num(u?.cache_write_input_tokens), output: num(u?.output_tokens) });
 const KEYS = ["input", "cached", "written", "output"];
 /** Markers of the only lines read; the rest of a rollout (prompts, tool output) is never parsed. */
 const WANTED = ['"token_count"', '"agent_thread_id"', '"thread_settings_applied"', '"turn_context"'];
+const NAMES_ONLY = ['"agent_thread_id"'];
 
 /**
  * One rollout's own thread: `{id, parent, model, tokens, names}`, or null when its first line is no `session_meta`.
  * `parent` is the thread that spawned it (null for a thread Factory started); `tokens` its own usage in Factory's shape
  * (input includes the cached and written parts, output the reasoning part, as `turn.completed` reports them), null when
- * it recorded none; `names` the other threads it names.
+ * it recorded none; `names` the other threads it names. `namesOnly` reads only the names (a run's own rollout, whose
+ * usage its stream already reported).
  */
-export function codexRollout(text) {
+export function codexRollout(text, { namesOnly = false } = {}) {
   const lines = String(text || "").split("\n");
   const first = jsonLines(lines.find((l) => l.trim()) || "")[0];
   const meta = first?.type === "session_meta" ? first.payload : null;
   if (!meta || !plainThread(meta.id)) return null;
   const start = typeof meta.subagent_history_start_ordinal === "number" ? meta.subagent_history_start_ordinal : null;
+  const wanted = namesOnly ? NAMES_ONLY : WANTED;
   const counts = [];
   const names = [];
   let model = null;
   let turnModel = null;
   for (const line of lines.slice(1)) {
-    if (!WANTED.some((w) => line.includes(w))) continue;
+    if (!wanted.some((w) => line.includes(w))) continue;
     const o = jsonLines(line)[0];
     if (!o) continue;
     // A forked child's copy of its parent's history.
@@ -87,42 +96,59 @@ export function codexRollout(text) {
 }
 
 /**
- * Every thread spawned under `rootId`, children of children included, each `{id, parent, model, tokens, names}`:
- * `read(id)` gives a thread's rollout text (or null). A named thread counts only when its own rollout names the thread
- * that named it as its parent. At most `limit` threads.
+ * Every thread spawned under `rootId`, children of children included: `{threads, missed}`. Each thread is
+ * `{id, parent, model, tokens, names}`; `missed` lists `{id, why}` for each rollout not read (absent, too large,
+ * unreadable; `id` null for the read limit), empty when every named thread was read. `read(id)` gives `{text}`, `{skip: why}`, or
+ * null when the thread has no rollout. A named thread counts only when its own rollout names the thread that named it
+ * as its parent. At most `maxReads` rollouts are read.
  */
-export async function codexThreads(read, rootId, { limit = 64 } = {}) {
-  if (!plainThread(rootId)) return [];
+export async function codexThreads(read, rootId, { maxReads = MAX_THREAD_READS } = {}) {
+  const missed = [];
+  if (!plainThread(rootId)) return { threads: [], missed };
   const parsed = new Map();
-  const get = async (id) => {
-    if (!parsed.has(id)) parsed.set(id, codexRollout(await read(id)));
-    return parsed.get(id);
+  const get = async (id, opts) => {
+    if (parsed.has(id)) return parsed.get(id);
+    if (parsed.size >= maxReads) {
+      if (!missed.some((m) => m.id === null)) missed.push({ id: null, why: `over ${maxReads} rollouts` });
+      return null;
+    }
+    const got = await read(id);
+    const r = got?.text !== undefined ? codexRollout(got.text, opts) : null;
+    if (!got) missed.push({ id, why: "no rollout" });
+    else if (got.skip) missed.push({ id, why: got.skip });
+    else if (!r) missed.push({ id, why: "no thread in its rollout" });
+    parsed.set(id, r);
+    return r;
   };
-  const out = [];
+  const threads = [];
   const counted = new Set([rootId]);
   const queue = [rootId];
-  while (queue.length && out.length < limit) {
+  if (!(await get(rootId, { namesOnly: true }))) return { threads, missed };
+  while (queue.length) {
     const id = queue.shift();
     const r = await get(id);
     if (!r || r.id !== id) continue;
     for (const n of r.names) {
-      if (counted.has(n) || out.length >= limit) continue;
+      if (counted.has(n)) continue;
       const c = await get(n);
       if (!c || c.id !== n || c.parent !== id) continue;
       counted.add(n);
-      out.push(c);
+      threads.push(c);
       queue.push(n);
     }
   }
-  return out;
+  return { threads, missed };
 }
 
-/** A local reader for codexThreads: the one regular rollout file of a thread under `root`, else null. */
+/** A local reader for codexThreads: the one regular rollout file of a thread under `root`; a larger one is skipped. */
 export const localRollouts = (root) => (id) => {
   const files = codexRolloutFiles(root, id);
-  if (files.length !== 1) return null;
-  const p = join(root, files[0]);
-  return lstatSync(p, { throwIfNoEntry: false })?.isFile() ? readFileSync(p, "utf8") : null;
+  if (!files.length) return null;
+  if (files.length > 1) return { skip: "more than one rollout" };
+  const st = lstatSync(join(root, files[0]), { throwIfNoEntry: false });
+  if (!st?.isFile()) return { skip: "not a regular file" };
+  if (st.size > MAX_ROLLOUT_BYTES) return { skip: `over ${MAX_ROLLOUT_BYTES} bytes` };
+  return { text: readFileSync(join(root, files[0]), "utf8") };
 };
 
 const add = (a, b) => (a === null || a === undefined ? b : a + b);
@@ -137,8 +163,8 @@ const less = (a, b) => Math.max(0, (a ?? 0) - (b ?? 0));
  * unknown (no turn completed) gets its threads' dollars as a lower bound, so the caps still count what is known.
  */
 export function withSubAgents(rec, threads, prior = () => null) {
-  if (!threads?.length) return { rec, totals: {} };
-  const totals = {};
+  const totals = Object.create(null);
+  if (!threads?.length) return { rec, totals };
   const shares = [];
   const tokens = { ...rec.tokens };
   let usd = rec.usd;
@@ -157,8 +183,11 @@ export function withSubAgents(rec, threads, prior = () => null) {
     if (price === null) {
       if (KEYS.some((k) => own[k] > 0)) lowerBound = true;
     } else if (usd === null || usd === undefined) {
-      usd = price;
-      lowerBound = true;
+      // Unmetered stays unmetered unless a thread spent something: never a $0 for a run whose spend is unknown.
+      if (price > 0) {
+        usd = price;
+        lowerBound = true;
+      }
     } else usd += price;
   }
   if (!shares.length) return { rec, totals };

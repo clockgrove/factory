@@ -24,6 +24,7 @@ const fs = require("fs"), path = require("path");
 const [dest, keep] = process.argv.slice(1);
 let fd = null;
 const fail = (m) => { if (fd !== null) try { fs.closeSync(fd); } catch {} process.stderr.write("untar: " + m + "\n"); process.exit(1); };
+process.on("uncaughtException", (e) => fail((e.code || "error") + ": " + String(e.path || e.message).slice(0, 200)));
 const st = fs.lstatSync(dest, { throwIfNoEntry: false });
 if (!st || !st.isDirectory()) fail("the destination is not a directory");
 const str = (h, o, n) => { const s = h.subarray(o, o + n); const z = s.indexOf(0); return (z < 0 ? s : s.subarray(0, z)).toString("utf8"); };
@@ -116,13 +117,16 @@ export const untarAsAgent = (tar, dest, { cwd, env, keep = false, timeoutMs = 12
  * Function not implemented"), so Claude Code's `<project>/<id>.jsonl` and Codex's `YYYY/MM/DD/rollout-*.jsonl` could
  * not be captured. GNU tar format (a long name in a GNU `L` entry, a size past 8 GB in base 256), which GNU tar and
  * UNTAR both read. A directory is archived with what is under it; links and other special files are left out. A file
- * is archived at the size it had when its header was written (zeros if it shrank, cut if it grew). Exit 0 when done,
- * 1 with the reason otherwise (a name that is not plain and relative, an entry that is not there).
+ * is archived at the size it had when its header was written (zeros if it shrank, cut if it grew). Below the names
+ * passed in, an entry that cannot be read (a name that is not UTF-8, a file or directory it may not open, a tree past
+ * the path limit) is skipped and named on stderr. Exit 0 when done, 1 with the reason otherwise (a name passed in that
+ * is not plain and relative, not there, or not readable).
  */
 export const TARPACK = String.raw`
 const fs = require("fs"), path = require("path");
 const [root, ...names] = process.argv.slice(1);
 const fail = (m) => { process.stderr.write("tarpack: " + m + "\n"); process.exit(1); };
+process.on("uncaughtException", (e) => fail((e.code || "error") + ": " + String(e.path || e.message).slice(0, 200)));
 const out = (b) => { let w = 0; while (w < b.length) { try { w += fs.writeSync(1, b, w, b.length - w); } catch (e) { if (e.code !== "EAGAIN") throw e; } } };
 const oct = (n, len) => n.toString(8).padStart(len - 1, "0") + "\0";
 const header = (name, type, size, mode, mtime) => {
@@ -153,23 +157,39 @@ const entry = (name, type, size, mode, mtime) => {
   }
   out(header(name, type, size, mode, mtime));
 };
-const add = (rel) => {
+const skip = (rel, why) => process.stderr.write("tarpack: skipped " + JSON.stringify(String(rel).slice(0, 200)) + " (" + why + ")\n");
+const buf = Buffer.alloc(1024 * 1024);
+// A name Factory passed in must be there; below it, what cannot be read is skipped and named (a planted name that is
+// not UTF-8, a file or directory that cannot be opened, a tree past the path limit), never the whole capture.
+const add = (rel, top) => {
   const abs = path.join(root, rel);
-  const st = fs.lstatSync(abs, { throwIfNoEntry: false });
-  if (!st) fail(JSON.stringify(rel) + " is not there");
+  let st;
+  try { st = fs.lstatSync(abs, { throwIfNoEntry: false }); } catch (e) { if (top) fail(JSON.stringify(rel) + ": " + e.code); return skip(rel, e.code); }
+  if (!st) { if (top) fail(JSON.stringify(rel) + " is not there"); return skip(rel, "gone"); }
   if (st.isDirectory()) {
+    let names;
+    try { names = fs.readdirSync(abs, { encoding: "buffer" }); } catch (e) { if (top) fail(JSON.stringify(rel) + ": " + e.code); return skip(rel, e.code); }
     entry(rel + "/", "5", 0, st.mode, st.mtimeMs / 1000);
-    for (const n of fs.readdirSync(abs).sort()) add(rel + "/" + n);
+    for (const b of names.sort(Buffer.compare)) {
+      const n = b.toString("utf8");
+      if (!Buffer.from(n, "utf8").equals(b) || n.includes("/")) { skip(rel + "/" + b.toString("hex"), "a name that is not UTF-8"); continue; }
+      add(rel + "/" + n, false);
+    }
     return;
   }
   if (!st.isFile()) return;
-  const size = st.size;
-  entry(rel, "0", size, st.mode, st.mtimeMs / 1000);
-  const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  const buf = Buffer.alloc(1024 * 1024);
+  // Opened without blocking and checked again: what is there now must still be a regular file (a FIFO swapped in
+  // after the lstat would block a plain open).
+  let fd;
+  try { fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch (e) { if (top) fail(JSON.stringify(rel) + ": " + e.code); return skip(rel, e.code); }
+  const fst = fs.fstatSync(fd);
+  if (!fst.isFile()) { fs.closeSync(fd); if (top) fail(JSON.stringify(rel) + " is not a regular file"); return skip(rel, "not a regular file"); }
+  const size = fst.size;
+  entry(rel, "0", size, fst.mode, fst.mtimeMs / 1000);
   let done = 0;
   while (done < size) {
-    const n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - done), null);
+    let n = 0;
+    try { n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - done), null); } catch (e) { skip(rel, "read " + e.code + "; the rest is zeros"); n = 0; }
     if (n <= 0) { out(Buffer.alloc(size - done)); done = size; break; }
     out(buf.subarray(0, n));
     done += n;
@@ -184,7 +204,7 @@ for (const n of names) {
   if (!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(n) || n.split("/").some((s) => s === "." || s === "..")) fail("refused name " + JSON.stringify(n.slice(0, 200)));
   let p = root;
   for (const s of n.split("/").slice(0, -1)) { p = path.join(p, s); const s2 = fs.lstatSync(p, { throwIfNoEntry: false }); if (!s2 || !s2.isDirectory()) fail(JSON.stringify(n) + " is not under a real directory"); }
-  add(n);
+  add(n, true);
 }
 out(Buffer.alloc(1024));
 process.exit(0);

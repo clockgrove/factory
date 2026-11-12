@@ -166,3 +166,30 @@ test("Factory's packer: GNU tar and the unpacker read it; nested and long names;
   const capped = await tarAsAgent(src, ["s1"], { maxBytes: 600, killPastMax: true });
   assert.equal(capped.truncated, true);
 });
+
+test("the packer skips, and names, what it cannot read below the names passed in: a name not UTF-8, a file it may not open, a tree past the path limit", async () => {
+  const { tarAsAgent } = await import("../scripts/lib/untar.mjs");
+  const root = mkdtempSync(join(tmpdir(), "tarpack-"));
+  const s1 = join(root, "s1");
+  mkdirSync(s1);
+  writeFileSync(join(s1, "ok"), "ok\n");
+  writeFileSync(Buffer.concat([Buffer.from(`${s1}/`), Buffer.from([0x66, 0xff, 0x41])]), "latin\n");
+  writeFileSync(join(s1, "closed"), "secret", { mode: 0o000 });
+  // Made one relative step at a time (a shell's cd keeps the whole path, and stops at the limit).
+  execFileSync(process.execPath, ["-e", 'const fs = require("fs"); process.chdir(process.argv[1]); for (let i = 0; i < 250; i++) { fs.mkdirSync("dddddddddddddddddddd"); process.chdir("dddddddddddddddddddd"); } fs.writeFileSync("f", "deep");', s1]);
+  try {
+    const r = await tarAsAgent(root, ["s1"], {});
+    assert.equal(r.code, 0, String(r.stderr));
+    const err = String(r.stderr);
+    assert.match(err, /skipped "s1\/66ff41" \(a name that is not UTF-8\)/);
+    if (process.getuid() !== 0) assert.match(err, /skipped "s1\/closed" \(EACCES\)/);
+    assert.match(err, /ENAMETOOLONG/);
+    const listed = execFileSync("tar", ["-tf", "-"], { input: r.stdout, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\n");
+    assert.ok(listed.includes("s1/ok"), "the rest is captured");
+    // A name passed in that cannot be read still fails the whole archive.
+    if (process.getuid() !== 0) assert.equal((await tarAsAgent(root, ["s1/closed"], {})).code, 1);
+  } finally {
+    // GNU rm walks a tree past the path limit; the temp root's own removal may not.
+    execFileSync("rm", ["-rf", "--", s1]);
+  }
+});

@@ -58,7 +58,7 @@ import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
 import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
-import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
+import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
@@ -297,7 +297,7 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
       const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, id], { cwd: agent.home });
       files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
       if (!files.length) continue;
-      tar = await tarAsAgent(root, files, { cwd: agent.home });
+      tar = await tarAsAgent(root, files, { cwd: agent.home, timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES, killPastMax: true });
     }
     if (tar.code !== 0) continue;
     mkdirSync(dest, { recursive: true });

@@ -99,3 +99,40 @@ test("nothing systemd-run would expand in the unpacker; doctor's session restore
   assert.equal(names(ok).at(-1), "session restore:PASS");
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "claude" }, env: hosted, local: false, has: async () => true, restore: async () => null })).filter((n) => n.startsWith("session")), [], "before the agent exists, no row");
 });
+
+test("a crafted size refuses the archive, never loops: negative, not octal, or past a safe integer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  mkdirSync(join(root, "from", "s1"), { recursive: true });
+  writeFileSync(join(root, "from", "s1", "a"), "x".repeat(2000));
+  const good = execFileSync("tar", ["-C", join(root, "from"), "--format=gnu", "-cf", "-", "s1/a"]);
+  const crafted = (size) => {
+    const t = Buffer.from(good);
+    t.write(size.padEnd(12, "\0"), 124, "latin1");
+    // The header checksum, recomputed with the field as spaces, as tar does.
+    t.fill(" ", 148, 156);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += t[i];
+    t.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "latin1");
+    return t;
+  };
+  for (const size of ["-0002000", "0000zz", "\x80\x7f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"]) {
+    const to = mkdtempSync(join(root, "to-"));
+    const t0 = Date.now();
+    const r = await untarAsAgent(crafted(size), to, { timeoutMs: 10_000 });
+    assert.equal(r.code, 1, JSON.stringify(size));
+    assert.ok(!r.timedOut && Date.now() - t0 < 10_000, "refused at once, not stopped by the time cap");
+    assert.match(String(r.stderr), /not a whole number of bytes/);
+  }
+});
+
+test("the archive is read as a stream: a file larger than one read lands whole", async () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  mkdirSync(join(root, "from", "ab", "cd"), { recursive: true });
+  const big = Buffer.alloc(5 * 1024 * 1024 + 123, 7);
+  writeFileSync(join(root, "from", "ab", "cd", "oid"), big);
+  const to = join(root, "to");
+  mkdirSync(to);
+  const r = await untarAsAgent(execFileSync("tar", ["-C", join(root, "from"), "-cf", "-", "ab/cd/oid"], { maxBuffer: 64 * 1024 * 1024 }), to, {});
+  assert.equal(r.code, 0, String(r.stderr));
+  assert.ok(readFileSync(join(to, "ab", "cd", "oid")).equals(big));
+});

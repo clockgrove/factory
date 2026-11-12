@@ -86,6 +86,37 @@ export const DEFAULTS = {
 };
 
 export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
+/**
+ * Local mode's own settings a repository's workflow env block may set (docs/LOCAL.md, Configuration); the developer's
+ * shell wins over each.
+ */
+export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB"];
+/** DEFAULTS keys that are no input of the Action (action.yml): Factory's own, or a run's argument. */
+const NOT_INPUTS = ["action", "objective_label", "repo"];
+/** Inputs each run gives (a dispatch's or a stage's own), never a setting. */
+const PER_RUN_INPUTS = ["mode", "issue", "pr"];
+/**
+ * The FACTORY_* names a workflow's env block may set (#119): the Action's inputs (DEFAULTS, which test/inputs checks
+ * against action.yml) under their env names, but secrets and a run's own, and local mode's settings. Local mode takes
+ * only these from the repository's workflow file, which is repository content: any other FACTORY_* name is Factory's
+ * own control (a stage's identity, a sandbox's settings file, the bot it is), never the repository's to set.
+ */
+export const WORKFLOW_SETTINGS = new Set([
+  ...Object.keys(DEFAULTS)
+    .filter((n) => !NOT_INPUTS.includes(n) && !PER_RUN_INPUTS.includes(n) && !SECRET_INPUTS.has(n))
+    .map((n) => `FACTORY_${n.toUpperCase()}`),
+  ...LOCAL_WORKFLOW_SETTINGS,
+]);
+/** A workflow env block (local.mjs workflowEnv) split into the settings Factory takes and the names it drops. */
+export function workflowSettings(wf = {}) {
+  const kept = {};
+  const dropped = [];
+  for (const [k, v] of Object.entries(wf)) {
+    if (WORKFLOW_SETTINGS.has(k)) kept[k] = v;
+    else dropped.push(k);
+  }
+  return { kept, dropped };
+}
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];
 /**

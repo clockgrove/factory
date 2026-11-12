@@ -17,7 +17,7 @@ import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
-import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
+import { input, mask, parseArgs, resolveInputs, workflowSettings } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { agentUser, exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -1160,6 +1160,17 @@ export async function jobChecks({ inputs, repo, token, app, checkout, notice = f
 }
 
 /**
+ * Local mode: each FACTORY_* name the workflow's env block sets that is no setting (inputs.mjs WORKFLOW_SETTINGS) is a
+ * WARN. Local mode leaves it out of every stage: the workflow file is repository content, and such a name is Factory's
+ * own control (#119).
+ */
+export function workflowEnvChecks(wf = {}) {
+  const { dropped } = workflowSettings(wf);
+  if (!dropped.length) return [];
+  return [WARN("workflow env", `.github/workflows/factory.yml sets ${dropped.join(", ")}, which ${dropped.length === 1 ? "is" : "are"} no Factory setting: local mode ignores ${dropped.length === 1 ? "it" : "them"}`, "remove them from the workflow's env block; the settings are the Action's inputs as FACTORY_<INPUT> and the FACTORY_LOCAL_* ones in docs/LOCAL.md")];
+}
+
+/**
  * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
  * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
  * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
@@ -1176,7 +1187,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   // Outside Actions the workflow's env block is not in this process: read it from the checkout (this shell still wins).
-  const env = process.env.GITHUB_ACTIONS ? process.env : { ...readWorkflowEnv(checkout), ...process.env };
+  // Only its settings, as local mode takes them (#119): any other FACTORY_* name there is repository content.
+  const env = process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(readWorkflowEnv(checkout)).kept, ...process.env };
   const inputs = resolveInputs({ args, env });
   if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
   const repo = repoOf(inputs.repo);
@@ -1196,6 +1208,7 @@ async function main() {
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
+  if (local) results.push(...workflowEnvChecks(readWorkflowEnv(checkout)));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

@@ -350,8 +350,9 @@ export const START = [
   // Codex runs its commands in its own sandbox here too (harness.mjs codexRunner), on the system's bwrap; socat for the
   // gateway relay's forwarder in each command's sandbox (lib/relay-shim.mjs).
   'if [ "$4" = codex ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v socat >/dev/null || need="$need socat"; fi',
-  // Copilot too (harness.mjs copilotRunner): bwrap, and slirp4netns, iptables and ip for its sandbox's network.
-  'if [ "$4" = copilot ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v slirp4netns >/dev/null || need="$need slirp4netns"; command -v ip6tables-restore >/dev/null || need="$need iptables"; command -v ip >/dev/null || need="$need iproute2"; fi',
+  // Copilot too (harness.mjs copilotRunner): bwrap, socat for the gateway relay's forwarder, and slirp4netns, iptables
+  // and ip for its sandbox's network.
+  'if [ "$4" = copilot ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v slirp4netns >/dev/null || need="$need slirp4netns"; command -v socat >/dev/null || need="$need socat"; command -v ip6tables-restore >/dev/null || need="$need iptables"; command -v ip >/dev/null || need="$need iproute2"; fi',
   // System installs are for every uid (the agent runs the harness): umask 022 for them, whatever the stage's own is.
   'if [ -n "$need" ]; then bare sudo -n apt-get update -qq >&2 && bare sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need >&2; bare git lfs install --skip-repo >&2 || true; fi',
   // Copilot's sandbox network as the agent makes it (copilot-runner.mjs): the VM's /dev/net/tun is root's alone, and its

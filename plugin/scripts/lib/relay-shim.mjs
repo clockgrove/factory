@@ -22,7 +22,7 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
  * separator by these, so an option's value that reads `--` or `--unshare-net` is never taken for one. An option it does
  * not know (a newer bubblewrap's) leaves the call as given: no forwarder, which the probes catch.
  */
-const BWRAP_ARITY = {
+export const BWRAP_ARITY = {
   0: ["--help", "--version", "--unshare-all", "--share-net", "--unshare-user", "--unshare-user-try", "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts", "--unshare-cgroup", "--unshare-cgroup-try", "--clearenv", "--new-session", "--die-with-parent", "--as-pid-1", "--disable-userns", "--assert-userns-disabled", "--level-prefix"],
   1: ["--args", "--argv0", "--userns", "--userns2", "--pidns", "--uid", "--gid", "--hostname", "--chdir", "--unsetenv", "--lock-file", "--sync-fd", "--remount-ro", "--overlay-src", "--tmp-overlay", "--ro-overlay", "--exec-label", "--file-label", "--proc", "--dev", "--tmpfs", "--mqueue", "--dir", "--seccomp", "--add-seccomp-fd", "--block-fd", "--userns-block-fd", "--info-fd", "--json-status-fd", "--cap-add", "--cap-drop", "--perms", "--size"],
   2: ["--setenv", "--bind", "--bind-try", "--dev-bind", "--dev-bind-try", "--ro-bind", "--ro-bind-try", "--bind-fd", "--ro-bind-fd", "--file", "--bind-data", "--ro-bind-data", "--symlink", "--chmod"],
@@ -45,9 +45,11 @@ export const RELAY_FORWARDER = [
 
 /**
  * The shim's text. `bwrap`, `socat`: absolute paths of the real ones. `socket`: the relay's socket. `port`: the
- * forwarder's port in each command namespace. bash with `-p` (no BASH_ENV or ENV is read), builtins only.
+ * forwarder's port in each command namespace. `extra`: more bubblewrap options for a command sandbox, before its
+ * separator (Copilot's: the socket's directory read-only, loopback off its proxy; copilotRelayExtra). bash with `-p`
+ * (no BASH_ENV or ENV is read), builtins only.
  */
-export function relayShimScript({ bwrap, socat, socket, port }) {
+export function relayShimScript({ bwrap, socat, socket, port, extra = [] }) {
   if (![bwrap, socat, socket].every((p) => typeof p === "string" && p.startsWith("/"))) throw new Error("the relay shim needs absolute paths");
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("the relay shim needs a port");
   const arity = Object.entries(BWRAP_ARITY).map(([n, opts]) => `    ${opts.join("|")}) n=${n} ;;`).join("\n");
@@ -70,9 +72,27 @@ ${arity}
 done
 # A command sandbox (its own network namespace, by an option before the separator) gets the forwarder; nothing else.
 if [ -z "$net" ] || [ "$sep" -lt 0 ]; then exec "$real" "$@"; fi
-exec "$real" "\${args[@]:0:$sep}" -- /bin/bash -p -c ${sq(RELAY_FORWARDER)} bash ${sq(socket)} ${port} ${sq(socat)} "$a0" "\${args[@]:$((sep + 1))}"
+exec "$real" "\${args[@]:0:$sep}"${extra.map((o) => ` ${sq(o)}`).join("")} -- /bin/bash -p -c ${sq(RELAY_FORWARDER)} bash ${sq(socket)} ${port} ${sq(socat)} "$a0" "\${args[@]:$((sep + 1))}"
 `;
 }
+
+/**
+ * Copilot's command sandboxes: the relay socket's directory bound read-only (Copilot binds only what its policy names),
+ * and loopback kept off Copilot's proxy (NO_PROXY, no_proxy), so a command's 127.0.0.1 reaches the forwarder in its own
+ * namespace. Copilot's host policy and allowLocalNetwork (false) are untouched. Copilot's seccomp filter lets commands
+ * open a Unix socket, so a command can reach the relay's socket directly too: the same relay behind the same token.
+ */
+export const copilotRelayExtra = (socketDir) => ["--ro-bind", socketDir, socketDir, "--setenv", "NO_PROXY", "127.0.0.1", "--setenv", "no_proxy", "127.0.0.1"];
+
+/**
+ * Where a stage's relay shim for Copilot goes: in the stage's own relay directory (worker-relay.mjs), which only
+ * Factory's user writes and which goes when the stage ends. Its path is baked into Copilot's own shim for the stage
+ * (copilot-runner.mjs bwrapShim), never read from an environment.
+ */
+export const copilotRelayShimIn = (relayDir) => `${relayDir}/copilot/bwrap`;
+/** Local mode's name for it (serve bakes it into Copilot's shim before the stage starts). */
+export const localCopilotRelayShim = copilotRelayShimIn;
+
 
 /** Write the shim as `<dir>/bwrap` (the directory made 755: the agent reads and runs it, never writes it). Returns `dir`. */
 export function writeRelayShim(dir, opts) {

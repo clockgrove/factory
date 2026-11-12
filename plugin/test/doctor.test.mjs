@@ -125,7 +125,7 @@ test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"]);
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: {}, local: false, has: none }), [], "a person's machine checking an Actions repository");
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: true, has: none }), [], "local mode checks its own sandboxes");
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "copilot" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["copilot sandbox: bwrap:FAIL", "copilot sandbox: slirp4netns:FAIL"], "Copilot runs its commands in its own sandbox there too");
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "copilot" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["copilot sandbox: bwrap:FAIL", "copilot sandbox: slirp4netns:FAIL", "copilot sandbox: socat:FAIL"], "Copilot runs its commands in its own sandbox there too");
   const rows = await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
   assert.deepEqual(rows.filter((r) => /shell credential/.test(r.name)), [], "Claude's commands no longer see its credential on any route");
 });

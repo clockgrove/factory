@@ -246,23 +246,23 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   assert.match(gitRefusalReason("sandbox", 1, { rule: "x", harness: "copilot", local: true }), /The stage log on the local machine/);
 });
 
-test("doctor: Copilot in a job needs bwrap and slirp4netns, AppArmor for unshare on a self-hosted runner, and its sandbox confining", async () => {
+test("doctor: Copilot in a job needs bwrap, slirp4netns and socat, AppArmor for unshare on a self-hosted runner, and its sandbox confining", async () => {
   const names = (rows) => rows.map((r) => `${r.name}:${r.status}`);
   const copilot = { harness: "copilot" };
   const hosted = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async () => true, start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: start:PASS"]);
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async (b) => b !== "slirp4netns", start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:FAIL"], "no start without its tools");
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async () => true, start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: socat:PASS", "copilot sandbox: start:PASS"]);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async (b) => b !== "slirp4netns", start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:FAIL", "copilot sandbox: socat:PASS"], "no start without its tools");
   const self = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-bwrap (unconfined)\n", start: async () => ({ ok: false, reason: "Copilot's sandbox does not confine: the decoy outside the sandbox is readable" }) });
-  assert.deepEqual(names(self), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: apparmor:FAIL", "copilot sandbox: start:FAIL"], "the bwrap profile is not the one: Copilot's namespaces come from unshare");
-  assert.match(self[2].fix, /factory-unshare/);
-  assert.match(self[3].detail, /decoy/);
+  assert.deepEqual(names(self), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: socat:PASS", "copilot sandbox: apparmor:FAIL", "copilot sandbox: start:FAIL"], "the bwrap profile is not the one: Copilot's namespaces come from unshare");
+  assert.match(self[3].fix, /factory-unshare/);
+  assert.match(self[4].detail, /decoy/);
   const both = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-bwrap (unconfined)\nfactory-unshare (unconfined)\n", start: async () => ({ ok: true }) });
-  assert.equal(both[2].status, "PASS");
+  assert.equal(both[3].status, "PASS");
   const unshareOnly = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-unshare (unconfined)\n", start: async () => ({ ok: true }) });
-  assert.equal(unshareOnly[2].status, "PASS", "Copilot's bwrap joins unshare's namespaces: the unshare grant is the one it needs");
+  assert.equal(unshareOnly[3].status, "PASS", "Copilot's bwrap joins unshare's namespaces: the unshare grant is the one it needs");
   const restricted = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-unshare (unconfined)\nunpriv_unshare (enforce)\n", start: async () => ({ ok: true }) });
-  assert.equal(restricted[2].status, "FAIL", "Ubuntu's unshare-userns-restrict loaded (25.04 and later)");
-  assert.match(restricted[2].fix, /unshare-userns-restrict/);
+  assert.equal(restricted[3].status, "FAIL", "Ubuntu's unshare-userns-restrict loaded (25.04 and later)");
+  assert.match(restricted[3].fix, /unshare-userns-restrict/);
   assert.deepEqual(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: true, has: async () => false }), [], "local mode checks its own sandboxes");
 });
 

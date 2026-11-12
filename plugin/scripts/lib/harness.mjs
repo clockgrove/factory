@@ -12,7 +12,7 @@ import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
-import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
+import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -454,7 +454,7 @@ export function seedSessionTotal(sessionId, total) {
  * clearHarnessConfig), and the harness's state made afresh, and the sandbox's writable roots made real directories; all
  * as the agent. Codex's and Copilot's sandboxes then run the confinement probe. A failure refuses the start.
  */
-export async function runnerClear(harness, runner, env) {
+export async function runnerClear(harness, runner, env, { relay = null } = {}) {
   await restoreRunnerGit(runner.clone, env);
   const cleared = await clearHarnessConfig(runner.clone, (inner) => exec(...backend(env).sandbox.git(inner, env), { env })).catch((e) => {
     throw new GitRefusal("git-clear", e.message);
@@ -469,7 +469,7 @@ export async function runnerClear(harness, runner, env) {
   if (harness === "copilot") {
     await resetCopilotState(runner, env);
     await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [runner.clone] }, runner.agentHome, env);
-    await copilotSandboxCheck(runner, env);
+    await copilotSandboxCheck(runner, env, { relay });
     return cleared;
   }
   await resetClaudeState(runner, env);
@@ -496,7 +496,7 @@ const SERVICES_SAID = new Set();
  * entry point (docs/PLAN.md names this).
  */
 /** The probe's own rule texts, the only ones a Blocked comment repeats (a host is named by its kind, not by the probe). */
-const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line", "Copilot's logs are readable by commands", TOOLCHAIN_RULE]);
+const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line", "Copilot's logs are readable by commands", TOOLCHAIN_RULE, RELAY_RULE]);
 const ruleOf = (said) => (RULES.has(said) ? said : /^[a-z0-9.-]+, off the allow-list, is reachable$/.test(said) ? "a host off the allow-list is reachable" : "an unknown rule");
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
   let last = null;
@@ -532,7 +532,7 @@ export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
  * once more, then Blocks. The probe runs offline: settings or experiments Copilot
  * receives only online are not what it checks (docs/PLAN.md names this).
  */
-export async function copilotSandboxCheck(runner, env, { run = exec, model = probeModel } = {}) {
+export async function copilotSandboxCheck(runner, env, { run = exec, model = probeModel, relay = null } = {}) {
   let last = null;
   const node = stageNode(runner, env.PATH);
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -541,7 +541,9 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     const mock = await model();
     const flags = [...copilotRunnerFlags(runner), `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
     const [cmd, args] = copilotLaunch(runner, "/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", ...flags], env.PATH);
-    const childEnv = { ...env, ...HARNESS_GIT_ENV, ...mock.env, ...probeEnv(runner, marker, offListHost(runner.domains), node) };
+    // With the gateway relay: Copilot's shim hands its calls to the relay's, as the run's does, and the probe checks a
+    // command reaches the relay.
+    const childEnv = { ...env, ...HARNESS_GIT_ENV, ...mock.env, ...probeEnv(runner, marker, offListHost(runner.domains), node, relay) };
     const extra = [...Object.keys(mock.env), ...Object.keys(probeEnv(runner, marker, "")), ...Object.keys(HARNESS_GIT_ENV)];
     // As a run's Copilot: in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
     const [c, a, e] = agentUser() ? asClaudeAgent(cmd, args, childEnv, extra, runner.clone) : [cmd, args, childEnv];
@@ -549,6 +551,7 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     const said = mock.toolOutput?.() || "";
     await mock.close();
     const got = await probeResult(runner, env);
+    if (got.code === 4 && got.said === RELAY_RULE) throw new GitRefusal("relay", "the gateway relay's forwarder did not come up in Copilot's sandbox", { harness: "copilot" });
     if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? toolchainRefused(node) : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
     // A pass is exit 0 with the probe's own last line, never exit 0 alone.
     if (got.code === 0 && got.said === PROBE_PASS) return;
@@ -597,7 +600,7 @@ export function freshCopilotTmp(local) {
  * allow-list is refused; a pass is exit 0 with the probe's pass line. A broken rule Blocks; a probe that left no result
  * is tried once more, then Blocks. `drop`: more names to keep out of the probe (the worker's shell secrets).
  */
-export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run = exec, home = homedir(), script = COPILOT_PROBE_SCRIPT } = {}) {
+export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run = exec, home = homedir(), script = COPILOT_PROBE_SCRIPT, relay = null } = {}) {
   const env = { ...runEnv };
   for (const k of [...SHELL_SECRET_KEYS, ...drop]) delete env[k];
   // Under the usage directory's `harness` folder: Copilot (in its outer sandbox) writes it, its commands cannot.
@@ -615,8 +618,9 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
       const marker = probeMarker();
       const ctmp = freshCopilotTmp(local) || probe.agentTmp;
       const args = ["-s", outer, "--", "env", `TMPDIR=${ctmp}`, process.execPath, script, "/bin/sh", "-c", COPILOT_DECOY_LAUNCH, "sh", ...flags];
-      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains), local.toolchain || null) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains), local.toolchain || null, relay) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
       const got = await probeResult(probe, env);
+      if (got.code === 4 && got.said === RELAY_RULE) throw new GitRefusal("relay", "the gateway relay's forwarder did not come up in Copilot's sandbox", { harness: "copilot", local: true });
       if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? toolchainRefused(local.toolchain) : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot", local: true });
       // A pass is exit 0 with the probe's own last line, never exit 0 alone.
       if (got.code === 0 && got.said === PROBE_PASS) return;
@@ -680,7 +684,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // A runner's Codex and Copilot: their own sandboxes, and the same clear before each start (lib/codex-runner.mjs,
   // lib/copilot-runner.mjs).
   const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env }) || codexRunner({ harness, agent: agentUid, clone: cwd, env }) || copilotRunner({ harness, agent: agentUid, clone: cwd, env });
-  const cleared = runner ? await runnerClear(harness, runner, scrubbedEnv(env)) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
+  const cleared = runner ? await runnerClear(harness, runner, scrubbedEnv(env), { relay: harness === "copilot" ? relay : null }) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
   const cacheTtl = promptCacheTtl(harness, env);
   const creditUsd = copilotCreditUsd();
   // Copilot takes no cap under 30 AI credits: with less than that left, no Copilot run starts (the caller Blocks on the
@@ -731,7 +735,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // sandbox is probed for that and the other rules before every start.
   if (harness === "copilot" && outer && sandboxed) {
     if (sandboxed.bwrapBin) childEnv.PATH = `${sandboxed.bwrapBin}:${childEnv.PATH || ""}`;
-    await copilotLocalCheck(sandboxed, outer, childEnv, { drop: shellSecrets });
+    await copilotLocalCheck(sandboxed, outer, childEnv, { drop: shellSecrets, relay });
   }
   // Locally Copilot runs with its own TMPDIR (lib/local.mjs copilotPrivateTmp), made afresh; its commands get the stage's.
   const outerTmp = (harness === "copilot" && outer && freshCopilotTmp(sandboxed)) || childEnv.TMPDIR || "";

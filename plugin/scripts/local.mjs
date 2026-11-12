@@ -28,6 +28,7 @@ import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findPr
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { localRelayDir } from "./lib/worker-relay.mjs";
+import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
@@ -467,7 +468,7 @@ export class Local {
       mkdirSync(bwrapBin, { recursive: true });
       // Each command's PATH led by the stage's node where it is bound (after Factory's git): a version manager's shim
       // before it on PATH is outside the sandbox.
-      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp, toolchain?.dirs.length ? `${gitBin}:${toolchain.bin}` : null), { mode: 0o755 });
+      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp, toolchain?.dirs.length ? `${gitBin}:${toolchain.bin}` : null, localCopilotRelayShim(localRelayDir(usageDir))), { mode: 0o755 });
     }
     return {
       ...base,

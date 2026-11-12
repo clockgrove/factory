@@ -283,15 +283,15 @@ runs:
           *) echo "unknown harness $HARNESS" >&2; exit 1 ;;
         esac
         # Every harness runs its commands in its own bubblewrap sandbox here (docs/PLAN.md, Credentials and billing):
-        # bubblewrap for all three, socat and ripgrep for Claude Code, socat for Codex (the gateway relay's forwarder,
-        # docs/PLAN.md), slirp4netns for Copilot (its sandbox's network).
+        # bubblewrap for all three, socat for all three (the gateway relay's forwarder,
+        # docs/PLAN.md), ripgrep for Claude Code, slirp4netns for Copilot (its sandbox's network).
         # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap: a profile grants them to /usr/bin/bwrap alone
         # (not the sysctl, which lifts it for every program), and Ubuntu 26.04's bwrap-userns-restrict profile, which
         # takes the capabilities its sandbox needs, is unloaded when loaded. Copilot's sandbox makes its namespaces with
         # util-linux unshare, which bubblewrap then joins: for Copilot the profile is for /usr/bin/unshare instead. Only on
         # GitHub's hosted runners, which are thrown away after the job: on a self-hosted runner these would outlast it
         # and change the whole host, so doctor names the one-time admin step instead.
-        case "$HARNESS" in claude) PKGS="bubblewrap socat ripgrep" ;; codex) PKGS="bubblewrap socat" ;; copilot) PKGS="bubblewrap slirp4netns" ;; *) PKGS="" ;; esac
+        case "$HARNESS" in claude) PKGS="bubblewrap socat ripgrep" ;; codex) PKGS="bubblewrap socat" ;; copilot) PKGS="bubblewrap slirp4netns socat" ;; *) PKGS="" ;; esac
         if [ -n "$PKGS" ] && [ "$RUNNER_OS" = Linux ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && command -v apt-get >/dev/null && sudo -n true 2>/dev/null; then
           sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null || { sudo -n apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null; } || echo "::warning::$PKGS did not install; doctor names what is missing"
           if [ -d /sys/kernel/security/apparmor ]; then

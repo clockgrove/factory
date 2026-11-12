@@ -4,17 +4,30 @@
 // relay cannot reach the harness's commands, the stage Blocks before the run.
 import { randomBytes } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { backend } from "./backend.mjs";
 import { prepareFactoryHome } from "./claude-runner.mjs";
 import { GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
 import { nameLabel } from "./worker-secrets.mjs";
 import { holdSecrets, log } from "./inputs.mjs";
 import { SAFE_PATH, agentUser, exec, whichSync } from "./proc.mjs";
-import { writeRelayShim } from "./relay-shim.mjs";
+import { copilotRelayExtra, copilotRelayShimIn, localCopilotRelayShim, writeRelayShim } from "./relay-shim.mjs";
+import { COPILOT_RUNNER_HOME, bakeCopilotRelay, copilotRunnerLayout } from "./copilot-runner.mjs";
 
 /** The relay's directory on a runner and in a cloud sandbox: Factory's user owns it, the agent may only pass through. */
 export const RELAY_RUNNER_DIR = "/var/lib/factory-relay";
+
+/**
+ * A Copilot stage's start on a runner: the shared relay shim an earlier Factory left in `runnerDir` (one per host, which
+ * concurrent stages overwrote and a crashed one left behind) is removed; each stage's own is in its relay directory.
+ */
+export function dropSharedCopilotRelay(runnerDir = RELAY_RUNNER_DIR) {
+  try {
+    rmSync(join(runnerDir, "copilot"), { recursive: true, force: true });
+  } catch (e) {
+    log(`gateway relay: the shared Copilot shim in ${runnerDir} could not be removed (${String(e?.code || e?.message || e).slice(0, 60)})`);
+  }
+}
 
 /** Local mode's relay directory: in the stage's usage directory, which no sandbox may write. */
 export const localRelayDir = (usageDir) => join(usageDir, "relay");
@@ -33,7 +46,8 @@ export const unrelayedGatewayKeys = (shell = {}) => Object.entries(shell).filter
  * caller Blocks before any run); `masked` the values the stage masks in what it saves (the key, which `shell` no longer
  * holds).
  */
-export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR }) {
+export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR, copilotHome = COPILOT_RUNNER_HOME }) {
+  if (inputs.harness === "copilot" && agentUser() && backend(env).name !== "local") dropSharedCopilotRelay(runnerDir);
   const withheld = unrelayedGatewayKeys(shell || {});
   const masked = withheld.map((n) => shell[n]);
   if (withheld.length) log(`gateway relay: ${withheld.map(nameLabel).join(", ")} withheld: an AI Gateway key reaches the worker only relayed, as ${RELAYED_NAME}`);
@@ -44,7 +58,6 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   const rest = { ...kept };
   delete rest[RELAYED_NAME];
   const out = (o) => ({ masked, ...o });
-  if (inputs.harness === "copilot") return out({ shell: rest, relay: null, blocked: `${RELAYED_NAME} is opted in to the worker's shell, and Factory relays that key instead of handing it over (docs/PLAN.md, Worker secrets), but its relay does not reach Copilot's sandbox yet; run this Objective on Claude Code or Codex, or leave ${RELAYED_NAME} out of worker_secrets` });
   const local = backend(env).name === "local";
   const agent = agentUser();
   // No sandbox (a developer's own session): the commands share this machine's loopback, so the relay listens there.
@@ -76,7 +89,17 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   } catch (e) {
     return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 200)}` });
   }
-  if (sandboxed) relay.shimDir = writeRelayShim(join(dir, "bin"), { bwrap, socat, socket: relay.socketPath, port: relay.port });
+  // Claude Code and Codex: the relay's shim first on their PATH. Copilot: its own shim (copilot-runner.mjs bwrapShim),
+  // already first on its PATH, hands each call to the relay's, which adds Copilot's extra options (copilotRelayExtra).
+  if (sandboxed && inputs.harness === "copilot") {
+    // In the stage's own relay directory, gone when the stage ends. Locally serve baked that path into Copilot's shim;
+    // on a runner Copilot's shim for this stage is written again with it (one host's concurrent stages each their own).
+    const at = agent && !local ? copilotRelayShimIn(dir) : localCopilotRelayShim(localRelayDir(usageDir));
+    writeRelayShim(dirname(at), { bwrap, socat, socket: relay.socketPath, port: relay.port, extra: copilotRelayExtra(dirname(relay.socketPath)) });
+    if (agent && !local) bakeCopilotRelay(copilotRunnerLayout(agent, copilotHome), bwrap, at);
+    relay.copilotShim = at;
+  }
+  else if (sandboxed) relay.shimDir = writeRelayShim(join(dir, "bin"), { bwrap, socat, socket: relay.socketPath, port: relay.port });
   holdSecrets([relay.token]);
   setActiveRelay(relay);
   log(`gateway relay: ${RELAYED_NAME} stays in Factory's process; the worker's shell gets a relay token in its place and the relay's address in FACTORY_GATEWAY_URL, and each call counts against max_usd`);
@@ -89,4 +112,5 @@ export async function closeWorkerRelay(relay) {
   setActiveRelay(null);
   await relay.close().catch(() => {});
   rmSync(relay.dir, { recursive: true, force: true });
+  if (relay.copilotShim) rmSync(dirname(relay.copilotShim), { recursive: true, force: true });
 }

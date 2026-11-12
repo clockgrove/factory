@@ -196,6 +196,19 @@ export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
   }
 }
 
+/**
+ * A runner's writable roots made real, as the agent, before a harness start (harness.mjs runnerClear): each of `fix` (the
+ * temp directory, the package caches) that is a link is removed and made a directory, and each of `fix` and `check` (the
+ * checkout) must then resolve to itself. A link planted there by the repository's install or validation (`~/.yarn` ->
+ * `~`) would otherwise widen what the sandbox lets commands write; one that cannot be put right (a link higher up the
+ * path) refuses the start.
+ */
+export async function realRoots({ fix = [], check = [] }, cwd, env = process.env, { run = exec } = {}) {
+  const r = await run("/bin/sh", ["-c", 'fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$c" ]; then printf "%s\n" "$c"; exit 3; fi; done', "sh", ...fix, "--", ...check], { cwd, env });
+  if (r.code === 3) throw new GitRefusal("git-clear", `${String(r.stdout).trim()} is not a real directory of its own (a link on its path)`);
+  if (r.code !== 0) throw new GitRefusal("git-clear", `the sandbox's writable directories could not be checked: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
+}
+
 // ------------------------------------------------------------- sessions
 
 /** Session archives Factory holds (restored from an earlier stage, or captured after a run), by session id, put back on every reset in that order. */
@@ -227,7 +240,8 @@ export const RUNNER_SESSION_ROOT = ".factory-claude/config/projects";
  */
 export async function resetClaudeState(layout, env = process.env) {
   // The edit-diff directory is made too, so the sandbox's write denial holds a real directory.
-  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"; shift 2; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.editDiffs || "", ...layout.caches], { cwd: layout.agentHome, env });
+  // The caches are made by realRoots, which replaces a link with a real directory.
+  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"', "sh", layout.state, layout.editDiffs || ""], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Claude Code's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS.values()) {
     const put = await exec("tar", ["-xf", "-", "-C", join(layout.config, "projects")], { cwd: layout.agentHome, env, input: tar });

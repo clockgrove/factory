@@ -1,13 +1,13 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GATEWAY_HOST, SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, dropSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
-import { captureSession, dropSessions, holdSession, prepareFactoryHome, runnerLaunch } from "../scripts/lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, codexRunnerLayout, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
+import { GATEWAY_HOST, SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
+import { captureSession, dropSessions, holdSession, prepareFactoryHome, realRoots, runnerLaunch } from "../scripts/lib/claude-runner.mjs";
+import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, codexLocalConfig, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
@@ -29,7 +29,7 @@ test("Codex on a runner: its own sandbox with local mode's profile fitted to the
   const runner = codexRunner({ harness: "codex", agent: AGENT, clone: CLONE, env: { FACTORY_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
   assert.deepEqual(runner.domains, [...LOCAL_DOMAINS, "pypi.org"]);
   assert.equal(runner.home, CODEX_RUNNER_HOME);
-  runner.present = new Set([`${CLONE}/.codex`, `${CLONE}/.git/commondir`]);
+  runner.present = new Set([`${CLONE}/.codex`, `${CLONE}/.git/commondir`, `${CLONE}/.git/info`]);
   const { args, env } = harnessCommand({ harness: "codex", model: "m", prompt: "p", runner });
   assert.ok(!args.includes("--dangerously-bypass-approvals-and-sandbox"));
   assert.ok(args.includes("--ignore-user-config"));
@@ -43,6 +43,7 @@ test("Codex on a runner: its own sandbox with local mode's profile fitted to the
   assert.ok(profile.includes('"/proc"="deny"'));
   assert.ok(profile.includes('".git/config"="read"') && profile.includes('".git/hooks"="read"'));
   assert.ok(profile.includes(`"${CLONE}/.codex"="read"`) && profile.includes(`"${CLONE}/.git/commondir"="read"`));
+  assert.ok(profile.includes(`"${CLONE}/.git/info"="read"`), "no command renames .git/info to put an attributes file of its own there");
   assert.ok(!profile.includes(`"${CLONE}/.claude"`), "an absent path is left out: Codex's sandbox refuses one");
   assert.ok(!profile.includes(".config/gh"), "no credential store is hidden: the agent's read-only gh login is for its commands");
   assert.ok(profile.includes('"pypi.org"="allow"'));
@@ -98,6 +99,7 @@ test("a ~/.bashrc planted in the agent's home never runs at the next Codex start
   await resetCodexState(layout);
   assert.ok(!existsSync(join(layout.codexHome, "config.toml")));
   assert.equal(readFileSync(join(day, "rollout-2026-11-12T00-00-00-t1.jsonl"), "utf8"), '{"turn":1}\n', "Factory's captured copy, not the planted one");
+  await realRoots({ fix: [agent.tmp, ...layout.caches] }, agent.home);
   for (const c of layout.caches) assert.ok(existsSync(c), `${c} made: a writable root must exist`);
   assert.equal(layout.sessions, join(agent.home, CODEX_RUNNER_SESSION_ROOT));
   dropSessions();
@@ -107,38 +109,87 @@ test("a ~/.bashrc planted in the agent's home never runs at the next Codex start
   dropSessions();
 });
 
-test("only the checkout's read-only paths that exist go into Codex's profile", async () => {
+test("only the checkout's read-only paths that exist go into Codex's profile; the listing fails closed", async () => {
   const { root } = fakeAgent();
   const clone = join(root, "repo");
   execFileSync("git", ["init", "-q", clone]);
   mkdirSync(join(clone, ".codex"));
+  await assert.rejects(presentPaths(clone), (e) => e instanceof GitRefusal && e.code === "git-clear" && /commondir/.test(e.message), "the pre-start clear makes .git/commondir: absent, no start");
+  writeFileSync(join(clone, ".git", "commondir"), ".\n");
+  mkdirSync(join(clone, ".git", "info"), { recursive: true });
+  writeFileSync(join(clone, ".git", "info", "attributes"), "");
   const present = await presentPaths(clone);
-  assert.ok(present.has(join(clone, ".codex")));
-  assert.ok(!present.has(join(clone, ".claude")) && !present.has(join(clone, ".git", "commondir")));
+  assert.ok(present.has(join(clone, ".codex")) && present.has(join(clone, ".git", "info")));
+  assert.ok(!present.has(join(clone, ".claude")));
+  await assert.rejects(presentPaths(clone, {}, { run: async () => ({ code: 1, stdout: "", stderr: "boom" }) }), (e) => e instanceof GitRefusal && e.code === "git-clear", "a failed listing never leaves the paths writable");
+  symlinkSync(join(root, "nowhere"), join(clone, ".mcp.json"));
+  await assert.rejects(presentPaths(clone), (e) => e instanceof GitRefusal && e.code === "sandbox" && e.path === ".mcp.json");
+  assert.match(gitRefusalReason("sandbox", 1, { path: ".mcp.json" }), /`\.mcp\.json`, a link to nothing/);
 });
 
-test("Codex's sandbox is started once before the first run: where it cannot start, the stage Blocks before any command runs", async () => {
-  dropSandboxCheck();
+test("a link planted at a writable root is replaced by a real directory; one higher up the path refuses the start", async () => {
+  const { root, agent, layout } = fakeAgent();
+  // The repository's install plants ~/.yarn -> ~: the sandbox would let commands write the whole home.
+  symlinkSync(agent.home, join(agent.home, ".yarn"));
+  await realRoots({ fix: [agent.tmp, ...layout.caches], check: [agent.home] }, agent.home);
+  assert.ok(lstatSync(join(agent.home, ".yarn")).isDirectory() && !lstatSync(join(agent.home, ".yarn")).isSymbolicLink());
+  const elsewhere = join(root, "elsewhere");
+  mkdirSync(elsewhere);
+  execFileSync("rm", ["-rf", join(agent.home, ".local")]);
+  symlinkSync(elsewhere, join(agent.home, ".local"));
+  await assert.rejects(realRoots({ fix: layout.caches }, agent.home), (e) => e instanceof GitRefusal && e.code === "git-clear" && /\.local\/share\/pnpm/.test(e.message));
+  const clone = join(root, "repo-link");
+  symlinkSync(elsewhere, clone);
+  await assert.rejects(realRoots({ check: [clone] }, agent.home), (e) => e instanceof GitRefusal, "a checkout that is a link refuses too");
+});
+
+test("the confinement probe: the agent's home and .git/config refuse a write, the temp directory takes one", () => {
+  const { root, agent } = fakeAgent();
+  const run = (home, git, tmp, host = "") => {
+    try {
+      return { code: 0, out: execFileSync("/bin/sh", ["-c", CONFINEMENT_PROBE, "sh", home, git, tmp, host], { encoding: "utf8" }) };
+    } catch (e) {
+      return { code: e.status, out: String(e.stdout) };
+    }
+  };
+  // Unconfined here (no sandbox): the probe says which rule breaks first.
+  assert.deepEqual(run(agent.home, "", agent.tmp), { code: 4, out: "the agent home is writable\n" });
+  const ro = join(root, "ro");
+  mkdirSync(ro, { mode: 0o555 });
+  const git = join(agent.tmp, "config");
+  writeFileSync(git, "x");
+  assert.deepEqual(run(ro, git, agent.tmp), { code: 4, out: `${git} is writable\n` });
+  assert.equal(readFileSync(git, "utf8"), "x", "the probe writes nothing into a writable file");
+  assert.deepEqual(run(ro, "", ro), { code: 4, out: "the agent temp directory is not writable\n" });
+  assert.equal(run(ro, "", agent.tmp).code, 0);
+  assert.equal(offListHost(["github.com"]), "example.com");
+  assert.equal(offListHost(["example.com"]), "", "an allow-list that names it: no network rule");
+});
+
+test("Codex's sandbox probe runs before every start: where it cannot start or does not confine, the stage Blocks", async () => {
   const runner = { ...codexRunner({ harness: "codex", agent: AGENT, clone: CLONE }), present: new Set() };
   const calls = [];
-  const fail = async (cmd, args) => {
+  const reply = (r) => async (cmd, args) => {
     calls.push([cmd, ...args]);
-    return { code: 1, stderr: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n" };
+    return r;
   };
-  await assert.rejects(codexSandboxCheck(runner, { PATH: "/usr/bin" }, { run: fail }), (e) => e instanceof GitRefusal && e.code === "sandbox" && /RTM_NEWADDR/.test(e.message));
+  await assert.rejects(codexSandboxCheck(runner, { PATH: "/usr/bin" }, { run: reply({ code: 1, stdout: "", stderr: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n" }) }), (e) => e instanceof GitRefusal && e.code === "sandbox" && /RTM_NEWADDR/.test(e.message) && !e.rule);
   const call = calls[0];
   assert.equal(call[0], "/usr/bin/env");
-  assert.ok(call.includes("sandbox") && call.at(-1) === "/bin/true" && call.includes(`HOME=${CODEX_RUNNER_HOME}`));
-  assert.match(gitRefusalReason("sandbox", 1), /Codex's sandbox could not start.*no command ran unsandboxed/);
+  assert.ok(call.includes("sandbox") && call.includes(CONFINEMENT_PROBE) && call.includes(`HOME=${CODEX_RUNNER_HOME}`));
+  assert.deepEqual(call.slice(-4), [AGENT.home, `${CLONE}/.git/config`, AGENT.tmp, "example.com"]);
+  assert.match(gitRefusalReason("sandbox", 1), /could not start.*no command ran unsandboxed.*doctor lines/);
+  await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "the agent home is writable\n", stderr: "" }) }), (e) => e.code === "sandbox" && e.rule === "the agent home is writable");
+  await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "<b>planted</b>\n", stderr: "" }) }), (e) => e.rule === "an unknown rule", "only Factory's own rule texts reach the Blocked comment");
+  assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable" }), /does not confine here \(the agent home is writable\)/);
   let n = 0;
   const ok = async () => {
     n++;
-    return { code: 0, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
   };
   await codexSandboxCheck(runner, {}, { run: ok });
   await codexSandboxCheck(runner, {}, { run: ok });
-  assert.equal(n, 1, "checked once per process");
-  dropSandboxCheck();
+  assert.equal(n, 2, "probed at every start");
 });
 
 test("Codex's task card on a runner: the sandbox notes, and setup's services out of its commands' reach", () => {

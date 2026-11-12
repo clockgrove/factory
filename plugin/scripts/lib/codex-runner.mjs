@@ -20,7 +20,7 @@
 //   checkout's harness configuration is restored to the commit (local.mjs clearHarnessConfig).
 // - Its commands get the agent's own HOME and TMPDIR back (`shell_environment_policy.set`), so package caches and the
 //   agent's read-only gh login work as before.
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { exec } from "./proc.mjs";
 import { GitRefusal, codexLocalConfig, codexReadOnly } from "./local.mjs";
 import { RUNNER_CACHES, SESSIONS_HELD } from "./claude-runner.mjs";
@@ -48,11 +48,11 @@ export function codexRunnerLayout(agent, home = CODEX_RUNNER_HOME) {
 
 /**
  * Codex's state made afresh before a start, as the agent: its state directory removed (a link is removed, never
- * followed) and made empty, the package caches made where absent (the sandbox's writable roots must exist), then every
- * session archive Factory holds unpacked into its sessions directory.
+ * followed) and made empty, then every session archive Factory holds unpacked into its sessions directory.
  */
 export async function resetCodexState(layout, env = process.env) {
-  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$2" "$3"; shift 3; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.codexHome, layout.sessions, ...layout.caches], { cwd: layout.agentHome, env });
+  // The caches are made by realRoots (claude-runner.mjs), which replaces a link with a real directory.
+  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$2" "$3"', "sh", layout.state, layout.codexHome, layout.sessions], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Codex's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS_HELD()) {
     const put = await exec("tar", ["-xf", "-", "-C", layout.sessions], { cwd: layout.agentHome, env, input: tar });
@@ -62,13 +62,39 @@ export async function resetCodexState(layout, env = process.env) {
 
 /**
  * Which of the checkout's read-only paths are there, listed as the agent (the checkout is the agent's, 700): Codex's
- * sandbox refuses to start on an absent one, so only those present go in its profile.
+ * sandbox refuses to start on an absent one, so only those present go in its profile. Fails closed: a listing that
+ * fails, a `.git/commondir` or `.git/info/attributes` missing (the pre-start clear makes both), or a path that is a link
+ * to nothing (which the sandbox cannot protect, and which it refuses) refuses the start, naming the path.
  */
-export async function presentPaths(clone, env = process.env) {
+export async function presentPaths(clone, env = process.env, { run = exec } = {}) {
   const paths = codexReadOnly(clone);
-  const r = await exec("/bin/sh", ["-c", 'for p; do if [ -e "$p" ] || [ -L "$p" ]; then printf "%s\\n" "$p"; fi; done', "sh", ...paths], { cwd: clone, env });
-  return new Set(String(r.stdout).split("\n").filter((p) => paths.includes(p)));
+  const r = await run("/bin/sh", ["-c", 'for p; do if [ -L "$p" ] && [ ! -e "$p" ]; then printf "dangling\t%s\n" "$p"; elif [ -e "$p" ]; then printf "here\t%s\n" "$p"; fi; done', "sh", ...paths], { cwd: clone, env });
+  if (r.code !== 0) throw new GitRefusal("git-clear", `the checkout's protected paths could not be listed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
+  const rows = String(r.stdout).split("\n").map((l) => l.split("\t")).filter(([k, p]) => (k === "here" || k === "dangling") && paths.includes(p));
+  const dangling = rows.find(([k]) => k === "dangling");
+  if (dangling) throw new GitRefusal("sandbox", `${dangling[1]} is a link to nothing`, { path: relative(clone, dangling[1]) });
+  const present = new Set(rows.map(([, p]) => p));
+  for (const need of [join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")]) if (!present.has(need)) throw new GitRefusal("git-clear", `${need} is missing after the pre-start clear`);
+  return present;
 }
+
+/**
+ * The confinement probe Codex's sandbox must pass before a start (harness.mjs codexSandboxCheck, doctor): run inside the
+ * sandbox with the agent's home, a file that must stay read-only (or ""), a directory that must be writable and a host
+ * off the allow-list (or "") as arguments. Exit 0 when it confines; exit 4 with the broken rule on stdout; anything
+ * else means the sandbox did not start. `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is for `:`), so a writable file is left as it was.
+ */
+export const CONFINEMENT_PROBE = [
+  'h=$1; g=$2; t=$3; host=$4; f=".factory-sandbox-probe-$$"',
+  'if true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
+  'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "$g is writable"; exit 4; fi',
+  'if ! true > "$t/$f" 2>/dev/null; then echo "the agent temp directory is not writable"; exit 4; fi; rm -f -- "$t/$f"',
+  'if [ -n "$host" ] && command -v curl >/dev/null 2>&1 && curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null; then echo "$host, off the allow-list, is reachable"; exit 4; fi',
+  "exit 0",
+].join("\n");
+
+/** A host the probe tries that the allow-list does not name (none when `domains` names it or a wildcard covers it). */
+export const offListHost = (domains = []) => (domains.some((d) => d === "example.com" || d === "*.com") ? "" : "example.com");
 
 /**
  * Codex's `-c` flags on a runner: local mode's profile (codexLocalConfig) fitted to the agent. Commands may write the

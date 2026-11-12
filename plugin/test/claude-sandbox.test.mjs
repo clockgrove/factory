@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand } from "../scripts/lib/harness.mjs";
-import { CLAUDE_HOME, uidOf, asClaudeAgent, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
+import { CLAUDE_HOME, realRoots, uidOf, asClaudeAgent, captureSession, dropGitPins, dropSessions, envFileText, holdSession, pinRunnerGit, prepareClaudeHome, resetClaudeState, restoreRunnerGit, runnerLaunch, runnerLayout } from "../scripts/lib/claude-runner.mjs";
 import { CLAUDE_SECRET_ENV, GitRefusal, LOCAL_DOMAINS, claudeLocalSettings, claudeRunnerSettings, droppedDomains, runnerDomains } from "../scripts/lib/local.mjs";
 import { asAgent, setAgent } from "../scripts/lib/proc.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
@@ -126,6 +126,7 @@ test("Claude's state is made afresh before every start: what was planted is gone
   await resetClaudeState(layout);
   assert.ok(!existsSync(join(layout.config, "settings.json")) && !existsSync(join(layout.config, ".claude.json")));
   assert.equal(readFileSync(join(projects, "-repo", "s1.jsonl"), "utf8"), '{"turn":1}\n', "Factory's captured copy, not the planted one");
+  await realRoots({ fix: [layout.agentTmp, ...layout.caches] }, layout.agentHome);
   for (const c of layout.caches) assert.ok(existsSync(c), `${c} made for the sandbox to write`);
   assert.ok(existsSync(layout.editDiffs), "the edit-diff directory is a real one, for the write denial to hold");
   dropSessions();

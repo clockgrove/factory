@@ -8,8 +8,8 @@ import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
-import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
-import { codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, presentPaths, resetCodexState } from "./codex-runner.mjs";
+import { asClaudeAgent, agentServicePorts, captureSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
+import { CONFINEMENT_PROBE, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -411,8 +411,8 @@ export function seedSessionTotal(sessionId, total) {
 /**
  * Before a runner's Claude Code or Codex start (lib/claude-runner.mjs, lib/codex-runner.mjs): the checkout's git state put
  * back as Factory pinned it, then local mode's pre-start clear of the checkout (local.mjs clearHarnessConfig), and the
- * harness's state made afresh; all as the agent. Codex's sandbox is then started once as a check. A failure refuses
- * the start.
+ * harness's state made afresh, and the sandbox's writable roots made real directories; all as the agent. Codex's
+ * sandbox then runs the confinement probe. A failure refuses the start.
  */
 export async function runnerClear(harness, runner, env) {
   await restoreRunnerGit(runner.clone, env);
@@ -421,11 +421,13 @@ export async function runnerClear(harness, runner, env) {
   });
   if (harness === "codex") {
     await resetCodexState(runner, env);
+    await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [runner.clone] }, runner.agentHome, env);
     runner.present = await presentPaths(runner.clone, env);
     await codexSandboxCheck(runner, env);
     return cleared;
   }
   await resetClaudeState(runner, env);
+  await realRoots({ fix: [runner.agentTmp, runner.cmdTmp, ...runner.caches], check: [runner.clone] }, runner.agentHome, env);
   // Its commands' env file, with a relay for each service the setup started (claude-runner.mjs envFileText).
   writeEnvFile(runner, runner.services);
   if (runner.services.length && !SERVICES_SAID.has(runner.services.join(","))) {
@@ -437,22 +439,23 @@ export async function runnerClear(harness, runner, env) {
 const SERVICES_SAID = new Set();
 
 /**
- * Codex's sandbox started once, as the agent and launched as Codex is, with the profile its run gets (`codex sandbox`,
- * no model): where it cannot start (no bubblewrap, user namespaces refused), the stage Blocks before any command runs
- * unsandboxed. Codex itself would only fail each command. Checked once per process.
+ * Codex's sandbox, before every start, as the agent and launched as Codex is, with the profile its run gets (`codex
+ * sandbox`, no model), running CONFINEMENT_PROBE (codex-runner.mjs): the agent's home and the checkout's .git/config must
+ * refuse a write, the agent's temp directory must take one, and a host off the allow-list must be refused. Where the
+ * sandbox cannot start (no bubblewrap, user namespaces refused) or does not confine (a Codex release that changed its
+ * profile), the stage Blocks before any command runs. Codex itself would only fail each command.
  */
-let SANDBOX_OK = false;
+const RULES = [/^the agent home is writable$/, /^the agent temp directory is not writable$/, /^\/[\w./-]+\/\.git\/config is writable$/, /^[a-z0-9.-]+, off the allow-list, is reachable$/];
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
-  if (SANDBOX_OK) return;
-  const [cmd, args] = runnerLaunch(runner, "codex", ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/true"], env.PATH);
+  const probe = ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", runner.agentHome, join(runner.clone, ".git", "config"), runner.agentTmp, offListHost(runner.domains)];
+  const [cmd, args] = runnerLaunch(runner, "codex", probe, env.PATH);
   const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner) }, agentExtra: ["CODEX_HOME"], timeoutMs: 120_000 });
+  if (r.code === 4) {
+    const said = String(r.stdout).trim().split("\n").at(-1) || "";
+    throw new GitRefusal("sandbox", `Codex's sandbox does not confine: ${said.slice(0, 200)}`, { rule: RULES.some((x) => x.test(said)) ? said : "an unknown rule" });
+  }
   if (r.code !== 0) throw new GitRefusal("sandbox", `Codex's sandbox could not start here: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 300) || `exit ${r.code}`}`);
-  SANDBOX_OK = true;
 }
-/** Tests: check again. */
-export const dropSandboxCheck = () => {
-  SANDBOX_OK = false;
-};
 
 /**
  * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another

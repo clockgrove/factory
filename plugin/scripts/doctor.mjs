@@ -10,7 +10,9 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { CLI, GATEWAY_CODEX_URL, codexGatewayOf, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
+import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
+import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
+import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, resetCodexState } from "./lib/codex-runner.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
@@ -183,9 +185,13 @@ export async function probeHarness({ inputs, env = process.env }) {
   } catch (e) {
     return FAIL(`${h} probe`, e.message, "see the credential line above");
   }
-  const { cmd, args, stdin, env: extra } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5, gateway: codexGatewayOf(h, cred.env) });
+  // Codex where the agent uid exists (a runner, a cloud sandbox): as the agent, in its own sandbox, as a run gets it.
+  const runner = h === "codex" ? await probeRunner(env) : null;
+  const { cmd, args, stdin, env: extra } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5, gateway: codexGatewayOf(h, cred.env), runner });
   // The job's env with every secret removed, then the one credential the harness runs on (as the worker's run gets it).
-  const r = await exec(cmd, args, { env: { ...scrubbedEnv(env), ...cred.env, ...extra }, input: stdin, timeoutMs: 180_000 });
+  const childEnv = { ...scrubbedEnv(env), ...cred.env, ...extra };
+  const [runCmd, runArgs] = runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
+  const r = await exec(runCmd, runArgs, { env: childEnv, input: stdin, timeoutMs: 180_000, ...(runner ? { cwd: runner.clone, agentExtra: [...MODEL_SECRET_KEYS, ...Object.keys(extra)] } : {}) });
   const rec = parseUsage(h, r.stdout, inputs.model || null, r.code ?? 1);
   if (rec.refusal) return FAIL(`${h} probe`, refusalReason(rec.refusal), "an Objective would Block on the same refusal: fix the credential's account or the model setting first");
   if (r.code !== 0 && !rec.ok) return FAIL(`${h} probe`, `exit ${r.code}: ${String(r.stderr).slice(-200).trim()}`, "check the credential and the CLI version");
@@ -893,17 +899,36 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
 }
 
 /**
- * `codex sandbox` with local mode's profile around /bin/true, as the agent in its temp directory (on Actions the CLI is
- * the agent's to run, never the runner's): {ok, reason}, or null before the agent exists.
+ * Codex's sandbox where the job runs, as the agent in its temp directory (on Actions the CLI is the agent's to run, never
+ * the runner's), with local mode's profile around a throwaway directory, running the confinement probe the stage runs
+ * before every start: the agent's home must refuse a write, its temp directory take one, and a host off the allow-list
+ * be refused. {ok, reason}, or null before the agent exists.
  */
 async function codexSandboxStart(env = process.env) {
   const agent = agentUser();
   if (!agent) return null;
   const home = `${agent.tmp}/codex-sandbox-check`;
-  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [] }), "--", "/bin/true"];
+  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", agent.home, "", agent.tmp, "example.com"];
   const r = await exec("/bin/sh", ["-c", 'mkdir -p "$1" && CODEX_HOME="$1" && export CODEX_HOME && shift && exec codex "$@"', "sh", home, ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin" }, timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
   await exec("/bin/rm", ["-rf", "--", home], { cwd: agent.tmp }).catch(() => {});
+  if (r.code === 4) return { ok: false, reason: `it starts but does not confine: ${String(r.stdout).trim().split("\n").at(-1)?.slice(0, 200)}` };
   return r.code === 0 ? { ok: true } : { ok: false, reason: String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}` };
+}
+
+/**
+ * The runner `doctor --probe` runs Codex with where the agent uid exists: the run's own sandbox and start-up (a fresh
+ * CODEX_HOME, Factory's HOME), around a throwaway directory in the agent's temp directory. Null elsewhere.
+ */
+async function probeRunner(env = process.env) {
+  const agent = agentUser();
+  if (!agent || backend(env).name === "local") return null;
+  const clone = `${agent.tmp}/codex-probe`;
+  await exec("/bin/mkdir", ["-p", clone], { cwd: agent.tmp });
+  const runner = { ...codexRunner({ harness: "codex", agent, clone, env }), present: new Set() };
+  await prepareFactoryHome(CODEX_RUNNER_HOME, "Codex");
+  await resetCodexState(runner, scrubbedEnv(env));
+  await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [clone] }, runner.agentHome, scrubbedEnv(env));
+  return runner;
 }
 
 /** The AppArmor profiles loaded (root's to read), or "" when they cannot be read. */

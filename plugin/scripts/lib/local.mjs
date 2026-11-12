@@ -233,13 +233,17 @@ export const gitIdentityReason = (issue) => `local mode: the clone's .git is not
  * The Blocked reason for a harness start Factory refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
  */
-export const gitRefusalReason = (code, issue) =>
+export const gitRefusalReason = (code, issue, { path = null, rule = null } = {}) =>
   code === "git-identity"
     ? gitIdentityReason(issue)
     : code === "git-state"
       ? "local mode: the clone's .git config, hooks, commondir or info/attributes changed during the stage (git-state); the harness was not started"
       : code === "sandbox"
-        ? "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. Run doctor in the job: it names what is missing (bubblewrap, or AppArmor's user-namespace restriction on a self-hosted runner)"
+        ? path
+          ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
+          : rule
+            ? `Codex's sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. The work job's log has the probe's output`
+            : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
         : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
@@ -248,9 +252,12 @@ export const gitRefusalReason = (code, issue) =>
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
 /** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear or sandbox; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
-  constructor(code, detail) {
+  /** `path` (checkout-relative) or `rule` (a fixed confinement rule): named in the Blocked reason (gitRefusalReason). */
+  constructor(code, detail, { path = null, rule = null } = {}) {
     super(`refusing to start the harness: ${detail}`);
     this.code = code;
+    this.path = path;
+    this.rule = rule;
   }
 }
 /**
@@ -265,7 +272,7 @@ export function refusalExit(e, { stage, issue, env = process.env }) {
   } catch {
     // no pin to name: one key for the stage
   }
-  return { reason: gitRefusalReason(e.code, issue), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
+  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
 }
 
 /**
@@ -700,7 +707,8 @@ const tq = JSON.stringify;
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
 export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null } = {}) {
-  // /proc: Codex's sandbox has its own pid namespace already; the deny says the same thing in the profile.
+  // /proc: each command runs in a PID namespace of its own, so /proc shows only the sandbox's own processes; the profile
+  // denies it as well (enforced where the sandbox can mount over it, as under a systemd unit).
   const deny = [...secrets.map((p) => `${tq(p)}="deny"`), `${tq("/proc")}="deny"`];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
   // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes
@@ -732,7 +740,8 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
 }
 
 /** The checkout's paths Codex's sandbox keeps read-only where they exist: its harness configuration and git's own. */
-export const codexReadOnly = (clone) => [...harnessConfigPaths(clone), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
+// .git/info itself too: a command that could rename it would put an attributes file of its own in its place.
+export const codexReadOnly = (clone) => [...harnessConfigPaths(clone), join(clone, ".git", "commondir"), join(clone, ".git", "info"), join(clone, ".git", "info", "attributes")];
 
 /**
  * Codex's `-c` value that drops `names` from the environment of every command its model runs, on every route. Codex's

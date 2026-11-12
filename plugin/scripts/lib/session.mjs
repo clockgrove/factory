@@ -307,10 +307,11 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
     const archive = join(work, `t${saved.length}.tar`);
     writeNew(archive, tar.stdout);
     await exec("tar", ["-xf", archive, "-C", dest, "--no-same-owner", "--no-same-permissions"]);
+    // Links out after each archive: the next one is never unpacked through a link an earlier one left.
+    await exec("find", [dest, "-type", "l", "-delete"]);
     saved.push({ id, files });
   }
   if (!saved.length) return null;
-  await exec("find", [dest, "-type", "l", "-delete"]);
   const mask = (p) => {
     for (const name of readdirSync(p, { withFileTypes: true })) {
       const f = join(p, name.name);

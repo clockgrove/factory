@@ -36,6 +36,8 @@ import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnl
 import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
+import { RUNNER_COPILOT_RELAY_SHIM } from "./relay-shim.mjs";
+import { RELAY_PING } from "./gateway-relay.mjs";
 
 export { TOOLCHAIN_RULE };
 
@@ -76,10 +78,17 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
  * read; this starts the real one with none (bubblewrap sets every command's environment itself: `--clearenv`, then
  * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's
  * (`home`, `tmp`; null leaves Copilot's), and `pathFirst` (local mode: the stage's node, localToolchain) leads each
- * command's PATH. Nothing else changes. Lives in Factory's HOME for Copilot, which the agent cannot write. Local mode runs
+ * command's PATH. With the gateway relay (lib/gateway-relay.mjs), `relayShim` is where the relay's own shim for Copilot
+ * goes (relay-shim.mjs RUNNER_COPILOT_RELAY_SHIM, localCopilotRelayShim: a path in a directory the agent cannot write,
+ * written into this script, never taken from an environment, which repository content can reach in local mode); while
+ * a stage relays a key it is there, and each call is handed to it instead of the real bubblewrap, still with no
+ * environment: it adds the relay's forwarder, the socket's
+ * directory read-only and loopback off Copilot's proxy to a command's sandbox, and runs every other call as given.
+ * Copilot's commands can open the relay's socket directly too (its filter allows Unix sockets): the same relay, behind
+ * the same token check. Nothing else changes. Lives in Factory's HOME for Copilot, which the agent cannot write. Local mode runs
  * it without `home` (local.mjs stageEnv), in the stage's usage directory.
  */
-export const bwrapShim = (realBwrap, home = null, tmp = null, pathFirst = null) => `#!/bin/sh
+export const bwrapShim = (realBwrap, home = null, tmp = null, pathFirst = null, relayShim = null) => `#!/bin/sh
 # Factory: Copilot's bubblewrap (lib/copilot-runner.mjs). Started with no environment, so the token Copilot holds is
 # not in the sandbox's pid 1${home || tmp ? "; each command's HOME and TMPDIR are the agent's" : ""}${pathFirst ? "; the stage's node leads each command's PATH" : ""}.
 first=1; p1=""; p2=""; done=""
@@ -89,7 +98,9 @@ ${home ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = HOME ]; then 
   set -- "$@" "$a"
   p2=$p1; p1=$a
 done
-exec /usr/bin/env -i ${sq(realBwrap)} "$@"
+next=${sq(realBwrap)}
+${relayShim ? `if [ -f ${sq(relayShim)} ] && [ -x ${sq(relayShim)} ]; then next=${sq(relayShim)}; fi
+` : ""}exec /usr/bin/env -i "$next" "$@"
 `;
 
 /**
@@ -104,7 +115,7 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
   const real = String(bwrap.stdout).trim();
   // Without bwrap there is no shim, so Copilot's sandbox cannot start: the pre-start probe Blocks (doctor names it).
   const shim = bwrap.code === 0 && real.startsWith("/") ? 'cat > "$1/bwrap"; chmod 755 "$1/bwrap"' : "true";
-  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH }, cwd: "/" });
+  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp, null, RUNNER_COPILOT_RELAY_SHIM), env: { PATH: SAFE_PATH }, cwd: "/" });
   if (made.code !== 0) throw new Error(`Copilot's home ${layout.home} could not be filled: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   // umask 022: the agent reads what Copilot unpacks (a cloud sandbox's stage runs with 077).
   const unpacked = await run("/bin/sh", ["-c", "umask 022; exec copilot --version"], { env: { PATH: absolutePath(env.PATH || SAFE_PATH), HOME: layout.home, COPILOT_CACHE_HOME: layout.cacheHome }, cwd: "/", timeoutMs: 120_000 });
@@ -379,7 +390,7 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
  * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
  * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105); null: no rule.
  */
-export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null }) => {
+export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null, relay = null }) => {
   const T = tmp ? sq(tmp) : '"$TMPDIR"';
   return [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > ${T}/${PROBE_RESULT}; exit 0; }`,
@@ -395,6 +406,8 @@ export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", 
     `if tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e ${sq(marker)} -e ${sq(`${PROBE_MARKER}=${marker}`)}; then out 4 "the credential stand-in is in the first process's command line"; fi`,
     // The stage's toolchain, as a command finds it: the same node first on its PATH, and it and npm run.
     ...(toolchain?.node ? [`if [ "$(command -v node)" != ${sq(toolchain.node)} ] || ! node --version >/dev/null 2>&1${toolchain.npm ? " || ! npm --version >/dev/null 2>&1" : ""}; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
+    // The gateway relay (gateway-relay.mjs), when the run relays a key: this relay's ping through the forwarder.
+    ...(relay ? [`got=$( (curl -sS --max-time 5 ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)} || node -e 'fetch(process.argv[1]).then((r) => r.text()).then((t) => process.stdout.write(t), () => {})' ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)}) 2>/dev/null)`, `case "$got" in *${sq(`factory-relay ${relay.probeId}`)}*) ;; *) out 4 ${sq(RELAY_RULE)} ;; esac`] : []),
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
     `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${T} ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
     `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
@@ -465,13 +478,16 @@ export async function probeModel() {
  * release, the marker Copilot and the decoy hold (as Copilot holds the token), and the scripts; `toolchain` for its
  * toolchain rule (probeDriver).
  */
-export function probeEnv(runner, marker, host, toolchain = null) {
+/** The probe's rule for the gateway relay: a command in Copilot's sandbox does not reach it. */
+export const RELAY_RULE = "the gateway relay is out of the commands' reach";
+
+export function probeEnv(runner, marker, host, toolchain = null, relay = null) {
   return {
     COPILOT_HOME: runner.probeHome,
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
     FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}) }),
+    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, relay, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}) }),
   };
 }
 

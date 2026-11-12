@@ -559,3 +559,41 @@ test("the AI SDK's real requests (ai@7.0.165, fixture) pass through the relay wi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Copilot: its own shim hands each call to the relay's, which adds the socket's directory read-only, loopback off the proxy and the forwarder to a command sandbox", async () => {
+  const { bwrapShim, probeDriver, RELAY_RULE } = await import("../scripts/lib/copilot-runner.mjs");
+  const { copilotRelayExtra } = await import("../scripts/lib/relay-shim.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "relay-copilot-"));
+  try {
+    const fake = join(dir, "real-bwrap");
+    writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+    const relayShim = join(writeRelayShim(join(dir, "relay", "bin"), { bwrap: fake, socat: "/usr/bin/socat", socket: "/var/lib/factory-relay/s/relay.sock", port: 41234, extra: copilotRelayExtra("/var/lib/factory-relay/s") }), "bwrap");
+    // Copilot's own shim, with the relay's shim path baked in (never read from the environment).
+    const shim = join(dir, "bwrap");
+    writeFileSync(shim, bwrapShim(fake, null, "/agent/tmp", null, relayShim), { mode: 0o755 });
+    const absent = join(dir, "bwrap-absent");
+    writeFileSync(absent, bwrapShim(fake, null, "/agent/tmp", null, join(dir, "missing", "bwrap")), { mode: 0o755 });
+    const run = (args, env = {}, which = shim) => execFileSync(which, args, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", ...env } }).trim().split("\n");
+    const cmd = ["--unshare-net", "--setenv", "TMPDIR", "/x", "--seccomp", "60", "--", "sh", "-c", "curl x"];
+    const plain = run(cmd, {}, absent);
+    assert.deepEqual(plain, ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--", "sh", "-c", "curl x"], "no relay shim at the baked path: as before");
+    const relayed = run(cmd);
+    const sep = relayed.indexOf("--", 6);
+    assert.deepEqual(relayed.slice(0, sep), ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--ro-bind", "/var/lib/factory-relay/s", "/var/lib/factory-relay/s", "--setenv", "NO_PROXY", "127.0.0.1", "--setenv", "no_proxy", "127.0.0.1"], "Copilot's own rewrite, then the relay's options");
+    assert.deepEqual(relayed.slice(sep + 1, sep + 4), ["/bin/bash", "-p", "-c"]);
+    assert.deepEqual(relayed.slice(-8), ["bash", "/var/lib/factory-relay/s/relay.sock", "41234", "/usr/bin/socat", "", "sh", "-c", "curl x"]);
+    assert.deepEqual(run(["--version"]), ["--version"], "no network namespace: as given");
+    // Repository content can reach Copilot's environment in local mode: a variable naming another bubblewrap is ignored.
+    assert.deepEqual(run(cmd, { FACTORY_RELAY_BWRAP: fake }, absent), plain, "the environment never picks the bubblewrap");
+    assert.ok(!bwrapShim(fake, "/h", "/t", "/n").includes("${"), "nothing systemd-run would expand");
+    // The probe's rule: this relay's ping through the forwarder.
+    const driver = probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m", relay: { port: 41234, probeId: "abc123" } });
+    assert.match(driver, /http:\/\/127\.0\.0\.1:41234\/\.factory-relay\/ping/);
+    assert.match(driver, /factory-relay abc123/);
+    assert.ok(driver.includes("the gateway relay is out of the commands") && RELAY_RULE.startsWith("the gateway relay is out of the commands"));
+    assert.ok(!driver.includes("${"));
+    assert.ok(!probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m" }).includes("gateway relay"), "no relay, no rule");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

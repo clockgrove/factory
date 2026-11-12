@@ -108,7 +108,6 @@ export function gatewayRelayChecks({ inputs, env = process.env, which = whichSyn
   const odd = unrelayedGatewayKeys(ws.env);
   const out = odd.length ? [WARN("gateway relay", `${odd.map(nameLabel).join(", ")}: an AI Gateway key under a name other than ${RELAYED_NAME}, so the worker never gets it (a gateway key is only ever relayed)`, `opt the key in as ${RELAYED_NAME}=SOURCE, the one name Factory relays`)] : [];
   if (!parseWorkerSecrets(inputs.workerSecrets).entries.some((e) => e.name === RELAYED_NAME)) return out;
-  if (inputs.harness === "copilot") return [...out, WARN("gateway relay", `${RELAYED_NAME} is relayed, never handed over, and the relay does not reach Copilot's sandbox yet: every stage Blocks before its run`, `run on Claude Code or Codex, or leave ${RELAYED_NAME} out of worker_secrets`)];
   const missing = ["bwrap", "socat"].filter((b) => !which(b, { PATH: SAFE_PATH }) && !(env.GITHUB_ACTIONS ? null : which(b, env)));
   return [...out, missing.length ? WARN("gateway relay", `${RELAYED_NAME} is relayed through a forwarder in each command's sandbox, which needs ${missing.join(" and ")} here: every stage Blocks before its run`, `install ${missing.map((b) => (b === "bwrap" ? "bubblewrap" : b)).join(" ")} (the Action does on GitHub's hosted runners)`) : PASS("gateway relay", `${RELAYED_NAME} stays in Factory's process; the worker's shell gets a relay token and FACTORY_GATEWAY_URL, and each call counts against max_usd`)];
 }

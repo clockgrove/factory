@@ -2,7 +2,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1047,5 +1047,49 @@ test("outbox: a catch-up merge that conflicts leaves the default branch's media 
   assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
   // A stage past its end hands nothing over and says so.
   const late = await open(r, { deadlineAt: Date.now() - 1 });
-  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over" });
+  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over; no time was left in the stage for git lfs checkout; the files stay pointers" });
+});
+
+test("outbox: the hand-over downloads only what the checkout's store lacks by oid and size, within the local media limit, and says when time cut git lfs checkout (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  await firstStage(r);
+  const a = media("factory/1", "assets/a.bin");
+  const b = media("factory/1", "assets/b.bin");
+  const stage = async (extra = {}) => {
+    const box = await open(r, extra);
+    await box.feed();
+    assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+    return box;
+  };
+  const box1 = await stage();
+  assert.equal((await box1.lfsSetup(box1.expected())).warning, "");
+  assert.ok(inStore(r, a) && inStore(r, b));
+  // The next stage in the same clone. a.bin's object is gone from LFS storage: a stage that downloaded it again would
+  // fail. The branch gains c.bin, whose oid the checkout's store holds with the wrong size: it is downloaded and
+  // replaced, not taken by its name.
+  const oid = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  rmSync(join(r.origin, "lfs", "objects", oid(a).slice(0, 2), oid(a).slice(2, 4), oid(a)));
+  const c = media("factory/1", "assets/c.bin");
+  mkdirSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4)), { recursive: true });
+  writeFileSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4), oid(c)), c.subarray(0, 100));
+  const box2 = await stage();
+  assert.deepEqual(await box2.lfsSetup(box2.expected()), { used: true, ok: true, reason: "", warning: "" });
+  assert.ok(inStore(r, a) && inStore(r, b) && inStore(r, c));
+  for (const [f, bytes] of [["a", a], ["b", b], ["c", c]]) assert.deepEqual(readFileSync(join(r.work, `assets/${f}.bin`)), bytes);
+  // Time runs out before git lfs checkout: said, not skipped silently.
+  assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
+  // Locally, what a stage downloads counts against FACTORY_LOCAL_MEDIA_MAX_MB.
+  const d = media("factory/1", "assets/d.bin");
+  process.env.FACTORY_LOCAL_MEDIA_MAX_MB = "0.001";
+  try {
+    const box3 = await stage({ local: true });
+    const lfs = await box3.lfsSetup(box3.expected());
+    assert.match(lfs.warning, /^the Git LFS media to download is 0\.0 MB \(1 object\(s\)\), over the local limit of 0\.001 MB \(FACTORY_LOCAL_MEDIA_MAX_MB\)/);
+    assert.ok(isPointer(r, "assets/d.bin") && !inStore(r, d));
+    assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), a, "what the store had is still checked out");
+  } finally {
+    delete process.env.FACTORY_LOCAL_MEDIA_MAX_MB;
+  }
 });

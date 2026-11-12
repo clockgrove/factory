@@ -1433,6 +1433,21 @@ export function readWorkflowEnv(dir) {
 }
 
 /**
+ * The workflow's env block as committed on the default branch (#122), which local mode reads its settings from: never
+ * the working tree, whatever branch is checked out there, as the Action runs the reviewed workflow. The default branch is
+ * origin's HEAD (else the remote's last known one), fetched first; offline, the last fetched commit. {wf, branch, error}:
+ * `error` says why there is none (no default branch, no workflow file there), with `wf` empty.
+ */
+export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }) } = {}) {
+  const ok = (r) => (r.status === 0 ? String(r.stdout) : null);
+  const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ok(git(["ls-remote", "--symref", "origin", "HEAD"])) || "")?.[1] || (ok(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) || "").trim().replace(/^origin\//, "") || null;
+  if (!branch) return { wf: {}, branch: null, error: "origin's default branch could not be read" };
+  git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  const text = ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`]));
+  return text === null ? { wf: {}, branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), branch, error: null };
+}
+
+/**
  * Why serve holds an Objective whose stage here returned `result` (#2667): a Question or a Block waits for a human, so
  * no tick re-claims it on a read from before its exit labels landed. Null for any other end.
  */

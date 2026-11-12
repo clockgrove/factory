@@ -60,6 +60,7 @@ import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
+import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
 import { checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
@@ -188,18 +189,7 @@ export function sessionFiles(harness, root, id) {
     const dir = readdirSync(root).find((d) => existsSync(join(root, d, `${id}.jsonl`)));
     return dir ? [join(dir, `${id}.jsonl`), ...(existsSync(join(root, dir, id)) ? [join(dir, id)] : [])] : [];
   }
-  if (harness === "codex") {
-    const out = [];
-    const walk = (rel, depth) => {
-      for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
-        const r = join(rel, e.name);
-        if (e.isDirectory() && depth < 3) walk(r, depth + 1);
-        else if (e.isFile() && e.name.endsWith(`-${id}.jsonl`)) out.push(r);
-      }
-    };
-    walk("", 0);
-    return out;
-  }
+  if (harness === "codex") return codexRolloutFiles(root, id);
   if (harness === "copilot") return existsSync(join(root, id)) ? [id] : [];
   return [];
 }
@@ -236,6 +226,12 @@ export function saveTranscript({ harness, sessionId, also = [], usageDir, checko
   mask(dest);
   return savedRecord({ harness, sessionId, saved, checkout });
 }
+
+/**
+ * Every session a stage's runs used, for saveTranscript's `also`: each run's own, and each Codex sub-agent thread it
+ * spawned (codex-threads.mjs), so the saved transcript covers the spend the record counts.
+ */
+export const stageThreads = (records) => (records || []).flatMap((r) => [r?.sessionId, ...(r?.subAgents || []).map((t) => t.id)]);
 
 /** The stage's session ids, the lineage's first, each once; only plain names (they are matched as file names). */
 function stageSessions(sessionId, also) {
@@ -369,6 +365,9 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     }
     // Codex too (its thread's token totals): the prior total is the one Factory recorded for the stage.
     if (harness === "codex" && typeof recorded.sessionTotal?.usd === "number") seedSessionTotal(s.id, recorded.sessionTotal);
+    // And each sub-agent thread the session had spawned, at the total that stage counted: a resumed parent's rollout
+    // still names them, and they are never counted twice.
+    if (harness === "codex" && recorded.sessionTotal?.children && typeof recorded.sessionTotal.children === "object") for (const [id, t] of Object.entries(recorded.sessionTotal.children)) if (plainThread(id) && t?.tokens) seedSessionTotal(id, t);
     const agent = agentUser();
     if (agent) {
       // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
@@ -1118,6 +1117,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The dollars are an upper bound: the stage ended the harness before it reported its cost (stage.mjs killedUsage).
     ...(merged.usdUpperBound ? { usdUpperBound: true } : {}),
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
+    // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
+    ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,
     // The saved session's running total as Factory last read it (runHarness), for the stage that restores it (clampTotal).
     sessionTotal: (session?.id && records.filter((r) => r?.sessionId === session.id && r.sessionTotal).at(-1)?.sessionTotal) || null,

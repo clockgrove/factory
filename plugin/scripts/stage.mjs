@@ -360,7 +360,7 @@ export function stageWriter({ issue, claim, launch = null, list, put }) {
 
 /**
  * The usage record of a child the stage ended, from what its harness streamed. A Codex or Copilot stream is priced from
- * its tokens or credits as far as it got. A Claude stream reports dollars only in its last result, which a killed run
+ * its tokens or credits as far as it got, unless the Codex stream shows sub-agent work. A Claude stream reports dollars only in its last result, which a killed run
  * never prints (an earlier pass's result would undercount), and an unpriced stream of any harness is the same: those
  * count the stage's budget (`maxUsd`, the harness's own spend cap) as an upper bound, so daily_usd never misses it.
  */
@@ -372,7 +372,10 @@ export function killedUsage({ harness, model, events, maxUsd }) {
     rec = null;
   }
   const tokens = rec?.tokens ?? { input: null, output: null, cached: null, written: null };
-  if (harness !== "claude" && typeof rec?.usd === "number" && Number.isFinite(rec.usd)) return { ...rec, ok: false, error: "ended by the stage" };
+  // A Codex stream that shows sub-agent work (a `collab_tool_call` item) is missing those threads' spend (codex-threads.mjs
+  // reads it from their rollouts after a run, which a killed run never reaches): counted as unpriced.
+  const subAgents = harness === "codex" && /"type":\s*"collab_tool_call"/.test(String(events || ""));
+  if (harness !== "claude" && !subAgents && typeof rec?.usd === "number" && Number.isFinite(rec.usd)) return { ...rec, ok: false, error: "ended by the stage" };
   const usd = Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : null;
   return { ...(rec || {}), harness, model: rec?.model ?? model ?? null, tokens, ok: false, error: "ended by the stage", usd, usdUpperBound: usd !== null, basis: usd === null ? "unmetered: ended by the stage, no budget set" : "upper bound: ended by the stage before the harness reported its cost; counted at max_usd" };
 }

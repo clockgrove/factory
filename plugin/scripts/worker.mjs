@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, remov
 import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -92,7 +92,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: records.map((r) => r?.sessionId), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);

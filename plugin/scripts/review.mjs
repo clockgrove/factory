@@ -49,6 +49,7 @@ import {
   restoreTranscript,
   saveTranscript,
   saveAgentTranscript,
+  stageThreads,
   answerFreshAfter,
   crashed,
   holdScope,
@@ -237,7 +238,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: records.map((r) => r?.sessionId), usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);

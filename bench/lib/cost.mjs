@@ -18,7 +18,7 @@
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CODEX_NO_TOKENS, priceTokens } from "../../plugin/scripts/lib/usage.mjs";
+import { CODEX_NO_TOKENS, priceStage, priceTokens } from "../../plugin/scripts/lib/usage.mjs";
 
 /** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
 export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
@@ -266,7 +266,10 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.basis = rec.basis && /harness-reported/.test(rec.basis) ? rec.basis : part.usd === null ? "unmetered: no total_cost_usd" : "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
     } else if (rec.harness === "codex") {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
-      part.usd = priceTokens(prices, rec.model, rec.tokens);
+      // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's.
+      const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents);
+      part.usd = priced.usd;
+      if (priced.lowerBound || (rec.subAgents?.length && rec.usdLowerBound)) out.usdLowerBound = true;
       // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
       const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
       part.basis = part.usd === null ? (noTokens ? CODEX_NO_TOKENS : `unmetered: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}`) : `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
@@ -311,7 +314,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // Dollars priced from the table are the measure (PLAN.md); tokens stay the unit only while unpriced.
       out.unit = priced.length ? "usd" : "tokens";
       out.priceTableDate = prices.date;
-      out.basis = priced.length ? `${partial}tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unmetered[0].basis;
+      out.basis = priced.length ? `${partial}tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}${out.usdLowerBound ? "; a lower bound (a sub-agent thread's model has no price)" : ""}` : unmetered[0].basis;
       out.note = prices.status === "placeholder" ? `${PRICES_NAME} carries placeholder rates; replace them before reading this as dollars` : null;
       break;
     case "copilot":

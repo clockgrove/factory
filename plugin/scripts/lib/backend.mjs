@@ -49,6 +49,9 @@ const servicesNote = (ports = []) =>
     ? `\n\nThe services the repository's setup started on this machine are reachable from your commands at ${ports.map((p) => `\`localhost:${p}\``).join(", ")}. Any other service on this machine is outside your sandbox: a refused connection there is no denied host. Factory runs the validation commands after you exit, and a failure comes back to you with its output.`
     : "";
 
+// A runner's Codex: its sandbox has a network namespace of its own, and no relay reaches the host's loopback from it.
+const CODEX_SERVICES_NOTE = "\n\nA service the repository's setup started on this machine (a database, a server) is outside your sandbox: your commands cannot reach it, and a refused connection there is no denied host. Leave the commands that need one to Factory's validation, which runs after you exit; a failure comes back to you with its output.";
+
 const ACTIONS = {
   name: "actions",
   trigger: {
@@ -93,15 +96,16 @@ const ACTIONS = {
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
     /**
-     * Claude Code runs its commands in its own sandbox here (harness.mjs claudeRunner): the same notes as local mode's,
-     * and the ports of setup's services it reaches (`services`, claude-runner.mjs agentServicePorts).
+     * Claude Code and Codex run their commands in their own sandboxes here (harness.mjs claudeRunner, codexRunner): the
+     * same notes as local mode's, the ports of setup's services Claude Code reaches (`services`, claude-runner.mjs
+     * agentServicePorts), and for Codex that those services are out of its commands' reach.
      */
-    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : ""),
+    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : harness === "codex" ? SCRATCH_NOTE + DENIED_NOTE + CODEX_SERVICES_NOTE : ""),
     /**
-     * Only Claude Code's sandbox keeps a host list here: a host it denied is allowed in the `allowed_domains` input.
-     * Codex and Copilot skip their sandboxes here, so their Block keeps its own fix.
+     * Claude Code's and Codex's sandboxes keep a host list here: a host one denied is allowed in the `allowed_domains`
+     * input. Copilot skips its sandbox here, so its Block keeps its own fix.
      */
-    deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
+    deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" || harness === "codex" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },

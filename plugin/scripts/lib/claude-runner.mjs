@@ -55,6 +55,8 @@ export function runnerLayout(agent, claudeHome = CLAUDE_HOME) {
     agentTmp: agent.tmp,
     state,
     config: join(state, "config"),
+    sessions: join(state, "config", "projects"),
+    sessionDepth: 2,
     cmdTmp: join(state, "cmd"),
     caches: RUNNER_CACHES.map((c) => join(agent.home, c)),
   };
@@ -176,13 +178,35 @@ export function writeEnvFile(layout, ports = []) {
  * env file. `sudo` false (tests): the directory is made by this process.
  */
 export async function prepareClaudeHome(layout, { sudo = true } = {}) {
-  if (sudo) {
-    const r = await exec("/usr/bin/sudo", ["-n", "/bin/sh", "-c", 'rm -rf -- "$1" && install -d -m 755 -o "$2" -g "$3" -- "$1"', "sh", layout.home, String(process.getuid()), String(process.getgid())], { env: { PATH: SAFE_PATH } });
-    if (r.code !== 0) throw new Error(`Claude Code's home ${layout.home} could not be made: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
-  } else {
-    await exec("/bin/sh", ["-c", 'rm -rf -- "$1" && mkdir -m 755 -- "$1"', "sh", layout.home]);
-  }
+  await prepareFactoryHome(layout.home, "Claude Code", { sudo });
   writeEnvFile(layout);
+}
+
+/**
+ * A harness's HOME on a runner (Claude Code's, Codex's), made afresh and empty: owned by Factory's own user and 755, so
+ * the agent reads it and never writes it, and the unit (or NAMESPACE_WRAP) sees it read-only. `sudo` false (tests): the
+ * directory is made by this process.
+ */
+export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
+  if (sudo) {
+    const r = await exec("/usr/bin/sudo", ["-n", "/bin/sh", "-c", 'rm -rf -- "$1" && install -d -m 755 -o "$2" -g "$3" -- "$1"', "sh", dir, String(process.getuid()), String(process.getgid())], { env: { PATH: SAFE_PATH } });
+    if (r.code !== 0) throw new Error(`${name}'s home ${dir} could not be made: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
+  } else {
+    await exec("/bin/sh", ["-c", 'rm -rf -- "$1" && mkdir -m 755 -- "$1"', "sh", dir]);
+  }
+}
+
+/**
+ * A runner's writable roots made real, as the agent, before a harness start (harness.mjs runnerClear): each of `fix` (the
+ * temp directory, the package caches) that is a link is removed and made a directory, and each of `fix` and `check` (the
+ * checkout) must then resolve to itself. A link planted there by the repository's install or validation (`~/.yarn` ->
+ * `~`) would otherwise widen what the sandbox lets commands write; one that cannot be put right (a link higher up the
+ * path) refuses the start.
+ */
+export async function realRoots({ fix = [], check = [] }, cwd, env = process.env, { run = exec } = {}) {
+  const r = await run("/bin/sh", ["-c", 'fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$c" ]; then printf "%s\n" "$c"; exit 3; fi; done', "sh", ...fix, "--", ...check], { cwd, env });
+  if (r.code === 3) throw new GitRefusal("git-clear", `${String(r.stdout).trim()} is not a real directory of its own (a link on its path)`);
+  if (r.code !== 0) throw new GitRefusal("git-clear", `the sandbox's writable directories could not be checked: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
 }
 
 // ------------------------------------------------------------- sessions
@@ -195,6 +219,8 @@ export const holdSession = (id, tar) => {
   SESSIONS.delete(id);
   SESSIONS.set(id, tar);
 };
+/** The held archives, in the order a reset puts them back (codex-runner.mjs resetCodexState). */
+export const SESSIONS_HELD = () => [...SESSIONS.values()];
 /** The newest archive Factory captured for a session id, or null. */
 const CAPTURED = new Map();
 export const capturedSession = (id) => CAPTURED.get(id) || null;
@@ -214,7 +240,8 @@ export const RUNNER_SESSION_ROOT = ".factory-claude/config/projects";
  */
 export async function resetClaudeState(layout, env = process.env) {
   // The edit-diff directory is made too, so the sandbox's write denial holds a real directory.
-  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"; shift 2; for c in "$@"; do [ -L "$c" ] || mkdir -p -- "$c"; done', "sh", layout.state, layout.editDiffs || "", ...layout.caches], { cwd: layout.agentHome, env });
+  // The caches are made by realRoots, which replaces a link with a real directory.
+  const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"', "sh", layout.state, layout.editDiffs || ""], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Claude Code's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS.values()) {
     const put = await exec("tar", ["-xf", "-", "-C", join(layout.config, "projects")], { cwd: layout.agentHome, env, input: tar });
@@ -224,12 +251,13 @@ export async function resetClaudeState(layout, env = process.env) {
 
 /**
  * Right after a run, before anything else runs as the agent: the session's files archived (as the agent, from a pipe),
- * held for the next reset and for the end of the stage (session.mjs saveAgentTranscript).
+ * held for the next reset and for the end of the stage (session.mjs saveAgentTranscript). `layout.sessions` is the
+ * harness's session root: Claude Code's `<project>/<id>.jsonl` and `<id>/`, Codex's `YYYY/MM/DD/rollout-<time>-<id>.jsonl`.
  */
 export async function captureSession(layout, sessionId, env = process.env) {
   if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
-  const root = join(layout.config, "projects");
-  const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 2 \\( -name "$2.jsonl" -o -name "$2" \\) -print0', "sh", root, sessionId], { cwd: layout.agentHome, env });
+  const root = layout.sessions;
+  const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth "$3" \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId, String(layout.sessionDepth || 2)], { cwd: layout.agentHome, env });
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
   if (!files.length) return null;
   const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0` });

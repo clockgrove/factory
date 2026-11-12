@@ -59,6 +59,7 @@ import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
+import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
 import { checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
@@ -268,8 +269,11 @@ function savedEntries(root, names) {
 }
 
 /** Where each harness keeps its sessions, relative to the agent's home (the agent uid runs with its own HOME). */
-// Claude Code's is its runner state's (lib/claude-runner.mjs), which Factory makes afresh before every start.
-const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: ".codex/sessions", copilot: ".copilot/session-state" };
+// Claude Code's and Codex's are their runner state's (lib/claude-runner.mjs, lib/codex-runner.mjs), which Factory makes
+// afresh before every start.
+const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: CODEX_RUNNER_SESSION_ROOT, copilot: ".copilot/session-state" };
+/** The harnesses whose runner state Factory resets before every start, putting back only the sessions it holds. */
+const HELD = new Set(["claude", "codex"]);
 
 /**
  * saveTranscript for the agent uid (Actions): each session's files are listed and archived by the agent, the archive
@@ -286,9 +290,9 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   const saved = [];
   for (const id of ids) {
     // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
-    // Claude Code's session as Factory captured it right after its run (claude-runner.mjs captureSession), never what
-    // the agent's home holds by now; the other harnesses' are read from the agent's home.
-    const held = harness === "claude" ? capturedSession(id) : null;
+    // Claude Code's or Codex's session as Factory captured it right after its run (claude-runner.mjs captureSession),
+    // never what the agent's home holds by now; Copilot's is read from the agent's home.
+    const held = HELD.has(harness) ? capturedSession(id) : null;
     let files = held?.files || [];
     let tar = held ? { code: 0, stdout: held.tar } : null;
     if (!held) {
@@ -303,10 +307,11 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
     const archive = join(work, `t${saved.length}.tar`);
     writeNew(archive, tar.stdout);
     await exec("tar", ["-xf", archive, "-C", dest, "--no-same-owner", "--no-same-permissions"]);
+    // Links out after each archive: the next one is never unpacked through a link an earlier one left.
+    await exec("find", [dest, "-type", "l", "-delete"]);
     saved.push({ id, files });
   }
   if (!saved.length) return null;
-  await exec("find", [dest, "-type", "l", "-delete"]);
   const mask = (p) => {
     for (const name of readdirSync(p, { withFileTypes: true })) {
       const f = join(p, name.name);
@@ -369,8 +374,8 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
       // the agent's home by the agent, from a pipe; a file already there is kept.
       const tar = await exec("tar", ["-C", join(dir, "transcript"), "--null", "--no-recursion", "-T", "-", "-cf", "-"], { encoding: "buffer", input: `${savedEntries(join(dir, "transcript"), s.files).join("\0")}\0` });
-      // Claude Code's state is made afresh before every start, which puts Factory's held copy back (claude-runner.mjs).
-      if (harness === "claude" && tar.code === 0) {
+      // Claude Code's and Codex's state is made afresh before every start, which puts Factory's held copy back.
+      if (HELD.has(harness) && tar.code === 0) {
         holdSession(s.id, tar.stdout);
         return { id: s.id, from: src.name, reason: "" };
       }

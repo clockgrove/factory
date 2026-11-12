@@ -695,6 +695,16 @@ export function runnerDomains(value = "") {
 /** The `allowed_domains` entries runnerDomains drops (doctor names each). */
 export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !DOMAIN_ENTRY.test(d));
 
+/**
+ * Copilot's `allowedHosts` from `domains`: host names and `*.` ones only (DOMAIN_ENTRY, as runnerDomains keeps). Copilot
+ * 1.0.109's sandbox drops its proxy, and with it every host rule, when an entry is `host:port` (#106): its commands then
+ * reach any host. Local mode's FACTORY_LOCAL_DOMAINS can come from the workflow file, so no such entry reaches Copilot;
+ * serve logs and doctor names each one dropped (copilotDroppedHosts).
+ */
+export const copilotHosts = (domains = []) => [...new Set(domainEntries(domains.join(" ")).filter((d) => DOMAIN_ENTRY.test(d)))];
+/** The `domains` entries copilotHosts drops. */
+export const copilotDroppedHosts = (domains = []) => droppedDomains(domains.join(" "));
+
 const isDir = (p) => {
   try {
     return statSync(p).isDirectory();
@@ -790,7 +800,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
         // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
         filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home))), ...alsoDenied] },
-        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [...new Set(domains)] },
+        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: copilotHosts(domains) },
       },
     },
   };

@@ -29,7 +29,7 @@ Then the model credential, by the user (`gh secret set`): `ANTHROPIC_API_KEY` (n
 
 ## 4. Skills in the repository
 
-Offer to commit the Factory skills and agent definitions, which the vendors' cloud sessions need and the Action does not: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say a committed Factory skill then overrides the plugin's, pinned at that version until updated.
+Offer to commit the Factory skills and agent definitions (the vendors' cloud sessions need them): copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say a committed Factory skill then overrides the plugin's, pinned at that version until updated.
 
 ## Local mode, instead of or beside the Action
 

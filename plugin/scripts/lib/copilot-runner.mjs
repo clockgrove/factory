@@ -96,8 +96,9 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
   await prepareFactoryHome(layout.home, "Copilot", { sudo });
   const bwrap = await run("/bin/sh", ["-c", "command -v bwrap"], { env: { PATH: env.PATH || SAFE_PATH } });
   const real = String(bwrap.stdout).trim();
-  if (bwrap.code !== 0 || !real.startsWith("/")) throw new Error("bwrap is not on PATH: Copilot's sandbox needs it on this runner");
-  const made = await run("/bin/sh", ["-c", 'set -e; mkdir -m 755 -- "$1" "$2"; cat > "$1/bwrap"; chmod 755 "$1/bwrap"', "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH } });
+  // Without bwrap there is no shim, so Copilot's sandbox cannot start: the pre-start probe Blocks (doctor names it).
+  const shim = bwrap.code === 0 && real.startsWith("/") ? 'cat > "$1/bwrap"; chmod 755 "$1/bwrap"' : "true";
+  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH } });
   if (made.code !== 0) throw new Error(`Copilot's home ${layout.home} could not be filled: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   // umask 022: the agent reads what Copilot unpacks (a cloud sandbox's stage runs with 077).
   const unpacked = await run("/bin/sh", ["-c", 'umask 022; exec copilot --version'], { env: { PATH: env.PATH || SAFE_PATH, HOME: layout.home, COPILOT_CACHE_HOME: layout.cacheHome }, timeoutMs: 120_000 });

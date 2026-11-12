@@ -361,7 +361,9 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
  * share). `input_tokens` already includes the cached and the written parts and `output_tokens` the reasoning
  * part, so neither is added again. Sub-agent threads (`spawn_agent`) are threads of their own, in
  * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
- * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure.
+ * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure. A stream `error` or
+ * `turn.failed` event (a dropped stream Codex reconnects, a failed request) may be a request the provider billed whose
+ * tokens Codex never reports: the dollars are then a lower bound (usdLowerBound).
  */
 export function parseCodex(stdout, model) {
   const rec = empty("codex", model);
@@ -392,7 +394,10 @@ export function parseCodex(stdout, model) {
       cached = add(cached, num(u.cached_input_tokens));
       written = add(written, num(u.cache_write_input_tokens));
     }
-    if (e.type === "turn.failed" || e.type === "error") failed = e.error?.message || e.message || e.type;
+    if (e.type === "turn.failed" || e.type === "error") {
+      failed = e.error?.message || e.message || e.type;
+      rec.usdLowerBound = true;
+    }
     if (e.type === "item.completed" && e.item?.type === "error") itemError = e.item.message || "item error";
     // Sub-agent work (spawn, wait, message): its threads' usage is not in this stream (codex-threads.mjs).
     if ((e.type === "item.started" || e.type === "item.completed") && e.item?.type === "collab_tool_call") rec.subAgentWork = true;

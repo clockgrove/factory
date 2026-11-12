@@ -216,8 +216,8 @@ test("a session file that never ends is not read on: the archive stops at its ca
   const { runner } = fakeRunner();
   const { archiveSession } = await import("../scripts/lib/claude-runner.mjs");
   mkdirSync(join(runner.sessions, "s1", "files"), { recursive: true });
-  // What a sandboxed command can leave in Copilot's session-state/<id>/files: a sparse file of 16 TB.
-  execFileSync("truncate", ["-s", "16T", join(runner.sessions, "s1", "files", "big")]);
+  // What a sandboxed command can leave in Copilot's session-state/<id>/files: a sparse file of 1 TB (16 TB is past ext4's limit).
+  execFileSync("truncate", ["-s", "1T", join(runner.sessions, "s1", "files", "big")]);
   const t0 = Date.now();
   const a = await archiveSession(runner, "s1", process.env, { timeoutMs: 60_000, maxBytes: 1024 * 1024 });
   assert.equal(a.truncated, true);

@@ -296,12 +296,19 @@ test("the review's answer pass runs at most twice: no second fresh run after run
 test("doctor --probe runs the harness on a scrubbed env plus its one credential: no Factory key, no unused CODEX_API_KEY", async () => {
   const { probeHarness } = await import("../scripts/doctor.mjs");
   const { bin, calls } = fakeCodex();
-  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: bin, AI_GATEWAY_API_KEY: "vck_factory", CODEX_API_KEY: "sk-unused", FACTORY_INPUT_AI_GATEWAY_API_KEY: "vck_factory", GH_TOKEN: "ghs_x" };
-  const out = await probeHarness({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g" }, env });
-  assert.equal(out.status, "PASS", out.detail);
-  const [call] = calls();
-  for (const k of ["AI_GATEWAY_API_KEY", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "CODEX_API_KEY", "GH_TOKEN"]) assert.ok(!call.env.includes(k), `${k} kept out`);
-  for (const k of ["FACTORY_CODEX_GATEWAY_KEY", "FACTORY_GATEWAY_SESSION", "PATH"]) assert.ok(call.env.includes(k), `${k} given`);
+  // The CLI is found on this process's PATH (proc.mjs onPath), as on a runner.
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    const env = { PATH: process.env.PATH, HOME: bin, AI_GATEWAY_API_KEY: "vck_factory", CODEX_API_KEY: "sk-unused", FACTORY_INPUT_AI_GATEWAY_API_KEY: "vck_factory", GH_TOKEN: "ghs_x" };
+    const out = await probeHarness({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g" }, env });
+    assert.equal(out.status, "PASS", out.detail);
+    const [call] = calls();
+    for (const k of ["AI_GATEWAY_API_KEY", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "CODEX_API_KEY", "GH_TOKEN"]) assert.ok(!call.env.includes(k), `${k} kept out`);
+    for (const k of ["FACTORY_CODEX_GATEWAY_KEY", "FACTORY_GATEWAY_SESSION", "PATH"]) assert.ok(call.env.includes(k), `${k} given`);
+  } finally {
+    process.env.PATH = saved;
+  }
 });
 
 test("doctor: a job-level CODEX_API_KEY is warned beside the gateway key; an unpriced Codex model says max_usd cannot stop it", async () => {

@@ -230,6 +230,7 @@ jobs:
           codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
+          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the fix and answer passes only, never the reviewer
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       - uses: actions/upload-artifact@v7
@@ -269,7 +270,7 @@ jobs:
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: a work stage's harness only
+          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
@@ -327,7 +328,7 @@ jobs:
           copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
-          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: a work stage's harness only
+          worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs

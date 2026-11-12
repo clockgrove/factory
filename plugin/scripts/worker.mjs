@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
-import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
@@ -31,7 +31,7 @@ import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
-import { REFUSAL_TEXT, nameLabel, optedValues, refusedEntry, secretLabel, missingSecretsFix, packShellSecrets, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
+import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -309,7 +309,7 @@ async function main() {
   // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
-  const shellSecrets = openWorkerSecrets(inputs);
+  const shellSecrets = openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) });
   shellSecretValues = Object.values(shellSecrets);
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
@@ -662,29 +662,6 @@ async function main() {
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix }, token);
   await finish(decision.exit, decision.reason);
   }
-}
-
-/**
- * The worker secrets of this run (lib/worker-secrets.mjs): {NAME: value} for the harness's shell, each value masked in
- * the job log. The log names what reaches the shell and what was refused, never a value. Values come from
- * `worker_secret_values` (on Actions and in a cloud sandbox the workflow's, in local mode the one `serve` packed from its
- * shell); one equal to Factory's own AI Gateway key is withheld.
- */
-export function openWorkerSecrets(inputs, { factoryKey = () => triageKey({ inputs }) } = {}) {
-  if (!String(inputs.workerSecrets || "").trim()) return {};
-  const values = parseSecretValues(inputs.workerSecretValues);
-  // The opted-in values this process holds (withheld ones too): never posted to GitHub, stored in the usage record, sent
-  // to the gateway or pushed. A line no entry names is no secret of the worker's.
-  const opted = optedValues(inputs.workerSecrets, inputs.workerSecretValues);
-  holdSecrets(opted);
-  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
-  for (const v of opted) mask(v);
-  for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
-  for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
-  for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
-  const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
-  if (given.length) log(`worker secrets: ${given.map(secretLabel).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
-  return ws.env;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

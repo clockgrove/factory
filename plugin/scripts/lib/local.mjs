@@ -1349,7 +1349,7 @@ export function localSandbox(env = {}) {
  * and the like never reach the harness. `extra` names more variables the adopter's commands need
  * (FACTORY_LOCAL_ENV, such as DATABASE_URL); Factory's own service keys (inputs.mjs FACTORY_SECRET_KEYS) are never
  * among them, since the workflow file that can name them is repository content. Nor is a worker secret's NAME or SOURCE
- * (`workerSecrets`, the worker_secrets setting): that reaches the work stage's harness alone (lib/worker-secrets.mjs),
+ * (`workerSecrets`, the worker_secrets setting): that reaches the work lineage's harness alone (lib/worker-secrets.mjs),
  * never every stage's every command; doctor warns when FACTORY_LOCAL_ENV names one.
  */
 export function localBaseEnv(env = process.env, extra = [], { workerSecrets = "" } = {}) {

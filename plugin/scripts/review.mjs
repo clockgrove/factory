@@ -30,7 +30,8 @@ import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate } from "./lib/objective-trust.mjs";
 import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry } from "./lib/handoff.mjs";
-import { openTriage } from "./lib/triage.mjs";
+import { openTriage, triageKey } from "./lib/triage.mjs";
+import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -226,6 +227,8 @@ async function main() {
   const defaultBranch = pr.base?.ref || "main";
 
   let cred = { env: {} };
+  // The worker secrets' values, once the fix and answer passes have them: masked in the saved stream and transcript.
+  let shellSecretValues = [];
   const progress = progressReporter(repo, issue, token, { stage: "review", harness: inputs.harness, model: inputs.reviewerModel });
   if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
   // The work lineage's session (a restored worker session, a fix pass, the answer pass): what a later stage resumes.
@@ -234,11 +237,11 @@ async function main() {
   let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
-    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -417,6 +420,12 @@ async function main() {
   const drift = openDrift({ inputs, progress });
   io.set({ decisions, prNumber: pr.number });
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
+  // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): the fix and answer passes
+  // continue the worker's session, so they get them as the work stage's passes do (passEnv). The reviewer never does: it
+  // runs on harnessEnv, and its calls are marked `reviewer` (runHarness strips them there too).
+  const shellSecrets = openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) });
+  shellSecretValues = Object.values(shellSecrets);
+  const passEnv = { ...harnessEnv, ...packShellSecrets(shellSecrets) };
   // A split part's PR keeps `Refs #N` whatever pr.md the answer pass writes.
   const splitPart = isSplitPart(await partsRecord(repo, issue, token).catch(() => null), pr.number);
   // A PR GitHub would read as closing anything but this Objective's issue Blocks the stage (handoff.mjs closingChecked).
@@ -440,6 +449,7 @@ async function main() {
     ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
+    shellSecrets: Object.keys(shellSecrets),
   });
   // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer
   // passes; the reviewer always runs in its own fresh session.
@@ -464,7 +474,7 @@ async function main() {
   // pass runs first and a red result is Blocked before any review.
   if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
-    const pre = await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift });
+    const pre = await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift });
     records.push(...pre.usage);
     passes = pre.passes;
     if (pre.usage.length) {
@@ -513,6 +523,7 @@ async function main() {
     prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
     maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
+    reviewer: true,
     cwd: checkout,
     env: harnessEnv,
     timeoutMs: reviewTimeout,
@@ -547,6 +558,7 @@ async function main() {
       prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
+      reviewer: true,
       cwd: checkout,
       env: harnessEnv,
       timeoutMs: retryTimeout,
@@ -630,7 +642,7 @@ async function main() {
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
-        env: harnessEnv,
+        env: passEnv,
         timeoutMs: remainingMs(deadlineAt),
         eventsFile,
         label: "answer",
@@ -662,7 +674,7 @@ async function main() {
     let out = await io.collect();
     // Toolchain files the answer changed outside its scope: one turn to put them back, else the push below is refused.
     if (!crashed(rec) && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) {
-      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), label: "answer-scope", progress, io });
+      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), label: "answer-scope", progress, io });
       for (const r of held.usage) mark(r, r);
       records.push(...held.usage);
       if (held.usage.length) out = io.files();
@@ -685,7 +697,7 @@ async function main() {
     if (toAnswer.length) log(`${replied} of ${toAnswer.length} reviewer comment(s) answered`);
     // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
     // A provider's refusal is not asked again: the answer Blocks with it.
-    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
+    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
     records.push(...asked.usage);
     for (const r of asked.usage) mark(r);
     answerRecord = asked.record;
@@ -703,7 +715,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: harnessEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

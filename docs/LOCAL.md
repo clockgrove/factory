@@ -64,7 +64,7 @@ factory post-review <pr> <findings.json>         # post a /factory:review pass m
 
 ## Configuration
 
-Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: harness, models, validation, protected paths, budgets. Your own environment wins for these:
+Local mode reads the repository's `.github/workflows/factory.yml` `env:` block: harness, models, validation, protected paths, budgets. It takes only the settings there: the Action's inputs as `FACTORY_<INPUT>` (not a secret's, nor `FACTORY_MODE`, `FACTORY_ISSUE` or `FACTORY_PR`, which each run gives) and the `FACTORY_LOCAL_*` and `FACTORY_PG_BIN` settings below. The file is repository content, and any other `FACTORY_*` name is one Factory reads as its own control, so local mode leaves it out of every stage, names it in the log, and doctor warns. Your own environment wins for these:
 
 | Variable | Effect |
 | --- | --- |

@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, redactSecrets, resolveInputs } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
@@ -246,7 +246,11 @@ export class Local {
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
     if (!this.repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
     this.repo = repoOf(this.repoFull);
-    this.wf = readWorkflowEnv(this.dev);
+    // The workflow file is repository content: only its settings reach a stage, never a name Factory reads as its own
+    // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
+    const wf = workflowSettings(readWorkflowEnv(this.dev));
+    if (wf.dropped.length) log(`.github/workflows/factory.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`);
+    this.wf = wf.kept;
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
     this.copilotToken = this.harness === "copilot" ? copilotToken() : "";
@@ -975,7 +979,7 @@ function sessionClone(flags) {
 async function sessionInputs({ dir, repoFull, repo, opts }) {
   const defaultBranch = (await rest(`repos/${repo.full}`, opts)).default_branch;
   await gitIn(dir, ["fetch", "-q", "origin", defaultBranch]);
-  const committed = await gitIn(dir, ["show", `origin/${defaultBranch}:.github/workflows/factory.yml`]).then((r) => workflowEnv(r.stdout), () => ({}));
+  const committed = await gitIn(dir, ["show", `origin/${defaultBranch}:.github/workflows/factory.yml`]).then((r) => workflowSettings(workflowEnv(r.stdout)).kept, () => ({}));
   const inputs = resolveInputs({ args: { repo: repoFull }, env: { ...process.env, ...committed } });
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   return { defaultBranch, inputs };

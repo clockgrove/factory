@@ -49,14 +49,33 @@ export const SHELL_SECRET_KEYS = [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, .
 export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((k) => !(FACTORY_SECRET_KEYS.includes(k) && shellSecrets.includes(k)));
 
 /**
+ * Factory's own control variables (#119): a stage's identity and launcher plumbing (launch.mjs, stage.mjs), the bot it
+ * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
+ * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
+ */
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
+
+/**
+ * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
+ * FACTORY_ISSUE, FACTORY_BRANCH); what Factory's own helpers in a child read (the git guard's FACTORY_GIT_DIR and
+ * FACTORY_GIT_ID, factory-db's FACTORY_DB_*, the install check, the probes', Codex's gateway session header, a process's
+ * run tag); and the sandbox plumbing Factory's own code reads from the env it hands down (runHarness and checkout.mjs
+ * pick the sandbox from it: FACTORY_LOCAL*, FACTORY_PLUGIN_ROOT, FACTORY_PRIVATE_DIR, FACTORY_USAGE_DIR,
+ * FACTORY_STAGE_SANDBOX). None is a setting a workflow may set (inputs.mjs WORKFLOW_SETTINGS); every FACTORY_* name
+ * Factory reads is a setting, a secret, one of these or a FACTORY_CONTROL_KEYS one (test/inputs.test.mjs).
+ */
+export const FACTORY_CHILD_KEYS = ["FACTORY_IN", "FACTORY_OUT", "FACTORY_ISSUE", "FACTORY_BRANCH", "FACTORY_GIT_DIR", "FACTORY_GIT_ID", "FACTORY_DB_WRAP", "FACTORY_DB_NAME", "FACTORY_DB_USER", "FACTORY_INSTALL_CHECK", "FACTORY_COPILOT_PROBE", "FACTORY_PROBE_DECOY", "FACTORY_PROBE_MARKER", "FACTORY_PROBE_SCRIPT", "FACTORY_GATEWAY_SESSION", "FACTORY_RUN_TAG", "FACTORY_SHELL_SECRETS", "FACTORY_LFS_PIN", "FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "FACTORY_LOCAL_SANDBOX", "FACTORY_LOCAL_SRT", "FACTORY_LOCAL_SRT_GIT", "FACTORY_LOCAL_SRT_HARNESS", "FACTORY_PLUGIN_ROOT", "FACTORY_PRIVATE_DIR", "FACTORY_USAGE_DIR", "FACTORY_STAGE_SANDBOX"];
+
+/**
  * Env for a non-harness child (and the harness itself, before its own credential is added): the
- * job's env with every secret removed. An `extra` value of undefined or null removes that key.
+ * job's env with every secret and Factory control variable (FACTORY_CONTROL_KEYS) removed. An `extra` value of undefined
+ * or null removes that key.
  */
 export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
   // The worker's shell secrets (lib/worker-secrets.mjs) are for its harness alone (runHarness unpacks them there).
   delete e[SHELL_SECRETS_ENV];
-  for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS]) delete e[k];
+  for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS, ...FACTORY_CONTROL_KEYS]) delete e[k];
   for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
   for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
   // Every secret input under both names inputs.mjs input() reads it by: FACTORY_INPUT_<NAME> and FACTORY_<NAME>.

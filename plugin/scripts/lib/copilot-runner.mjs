@@ -28,7 +28,7 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { accessSync, constants, existsSync, lstatSync, realpathSync, rmSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
@@ -36,7 +36,7 @@ import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnl
 import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
-import { RUNNER_COPILOT_RELAY_SHIM } from "./relay-shim.mjs";
+
 import { RELAY_PING } from "./gateway-relay.mjs";
 
 export { TOOLCHAIN_RULE };
@@ -79,9 +79,10 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
  * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's
  * (`home`, `tmp`; null leaves Copilot's), and `pathFirst` (local mode: the stage's node, localToolchain) leads each
  * command's PATH. With the gateway relay (lib/gateway-relay.mjs), `relayShim` is where the relay's own shim for Copilot
- * goes (relay-shim.mjs RUNNER_COPILOT_RELAY_SHIM, localCopilotRelayShim: a path in a directory the agent cannot write,
- * written into this script, never taken from an environment, which repository content can reach in local mode); while
- * a stage relays a key it is there, and each call is handed to it instead of the real bubblewrap, still with no
+ * goes (relay-shim.mjs copilotRelayShimIn: a path in the stage's own relay directory, which the agent cannot write,
+ * written into this script, never taken from an environment, which repository content can reach in local mode; on a
+ * runner bakeCopilotRelay writes the stage's script again once its relay is open); while the stage relays a key it is
+ * there, and each call is handed to it instead of the real bubblewrap, still with no
  * environment: it adds the relay's forwarder, the socket's
  * directory read-only and loopback off Copilot's proxy to a command's sandbox, and runs every other call as given.
  * Copilot's commands can open the relay's socket directly too (its filter allows Unix sockets): the same relay, behind
@@ -115,11 +116,20 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
   const real = String(bwrap.stdout).trim();
   // Without bwrap there is no shim, so Copilot's sandbox cannot start: the pre-start probe Blocks (doctor names it).
   const shim = bwrap.code === 0 && real.startsWith("/") ? 'cat > "$1/bwrap"; chmod 755 "$1/bwrap"' : "true";
-  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp, null, RUNNER_COPILOT_RELAY_SHIM), env: { PATH: SAFE_PATH }, cwd: "/" });
+  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH }, cwd: "/" });
   if (made.code !== 0) throw new Error(`Copilot's home ${layout.home} could not be filled: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   // umask 022: the agent reads what Copilot unpacks (a cloud sandbox's stage runs with 077).
   const unpacked = await run("/bin/sh", ["-c", "umask 022; exec copilot --version"], { env: { PATH: absolutePath(env.PATH || SAFE_PATH), HOME: layout.home, COPILOT_CACHE_HOME: layout.cacheHome }, cwd: "/", timeoutMs: 120_000 });
   if (unpacked.code !== 0) throw new Error(`Copilot could not unpack its release into ${layout.cacheHome}: ${String(unpacked.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${unpacked.code}`}`);
+}
+
+/**
+ * A runner's Copilot shim for this stage, written again with its relay's shim baked in (`relayShim`, in the stage's own
+ * relay directory): by Factory's user, in Factory's HOME for Copilot, which the agent reads and never writes.
+ */
+export function bakeCopilotRelay(layout, realBwrap, relayShim) {
+  writeFileSync(join(layout.bin, "bwrap"), bwrapShim(realBwrap, layout.agentHome, layout.agentTmp, null, relayShim), { mode: 0o755 });
+  chmodSync(join(layout.bin, "bwrap"), 0o755);
 }
 
 /**

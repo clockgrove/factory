@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -313,11 +313,8 @@ test("a gateway-shaped key under another name, or AI_GATEWAY_API_KEY in another 
   assert.ok(!JSON.stringify(warn).includes("vck_other"));
 });
 
-test("worker relay: Copilot and a machine without socat Block with the key out of the shell; no relayed key, no relay", async () => {
+test("worker relay: a machine without socat Blocks with the key out of the shell; no relayed key, no relay", async () => {
   const shell = { [RELAYED_NAME]: KEY, FAL_KEY: "fal-0123456789" };
-  const copilot = await openWorkerRelay({ inputs: { harness: "copilot", maxUsd: 5 }, shell, usageDir: "/nope" });
-  assert.match(copilot.blocked, /does not reach Copilot's sandbox yet/);
-  assert.deepEqual(copilot.shell, { FAL_KEY: "fal-0123456789" }, "never handed over");
   const none = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell: { FAL_KEY: "f" }, usageDir: "/nope" });
   assert.deepEqual([none.relay, none.blocked, none.shell], [null, null, { FAL_KEY: "f" }]);
   const noSocat = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: "/nope", env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? "/usr/bin/bwrap" : null) });
@@ -339,12 +336,12 @@ test("a relay probe that finds no forwarder Blocks with a fixed reason: no key h
   assert.match(gitRefusalReason("relay", 7, { harness: "claude" }), /Claude Code's sandbox[^]*work job's log/);
 });
 
-test("doctor: the relayed key on Copilot, or without bwrap or socat, is a WARN that every stage Blocks; else a PASS", async () => {
+test("doctor: the relayed key without bwrap or socat is a WARN that every stage Blocks; else a PASS", async () => {
   const { gatewayRelayChecks } = await import("../scripts/doctor.mjs");
   const spec = { workerSecrets: "AI_GATEWAY_API_KEY=W FAL_KEY" };
   assert.deepEqual(gatewayRelayChecks({ inputs: { ...spec, harness: "claude" }, env: {}, which: () => "/usr/bin/x" }).map((c) => c.status), ["PASS"]);
   assert.match(gatewayRelayChecks({ inputs: { ...spec, harness: "codex" }, env: { GITHUB_ACTIONS: "true" }, which: (b) => (b === "socat" ? null : "/usr/bin/bwrap") })[0].detail, /needs socat/);
-  assert.match(gatewayRelayChecks({ inputs: { ...spec, harness: "copilot" }, env: {} })[0].detail, /Copilot's sandbox yet/);
+  assert.deepEqual(gatewayRelayChecks({ inputs: { ...spec, harness: "copilot" }, env: {}, which: () => "/usr/bin/x" }).map((c) => c.status), ["PASS"], "Copilot is relayed through its own shim");
   assert.deepEqual(gatewayRelayChecks({ inputs: { workerSecrets: "FAL_KEY", harness: "copilot" } }), [], "no relayed key, no check");
 });
 
@@ -593,6 +590,44 @@ test("Copilot: its own shim hands each call to the relay's, which adds the socke
     assert.ok(driver.includes("the gateway relay is out of the commands") && RELAY_RULE.startsWith("the gateway relay is out of the commands"));
     assert.ok(!driver.includes("${"));
     assert.ok(!probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m" }).includes("gateway relay"), "no relay, no rule");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Copilot on a runner: each stage's relay shim is its own, in its relay directory, baked into that stage's Copilot shim; a shared one is removed at start", async () => {
+  const { bakeCopilotRelay } = await import("../scripts/lib/copilot-runner.mjs");
+  const { copilotRelayShimIn, copilotRelayExtra } = await import("../scripts/lib/relay-shim.mjs");
+  const { dropSharedCopilotRelay } = await import("../scripts/lib/worker-relay.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "relay-copilot-stage-"));
+  try {
+    const fake = join(dir, "real-bwrap");
+    writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+    // Two stages: each relay directory holds its own shim, and each stage's Copilot shim names its own.
+    const stage = (name) => {
+      const relayDir = join(dir, "factory-relay", `stage-${name}`);
+      const at = copilotRelayShimIn(relayDir);
+      writeRelayShim(join(relayDir, "copilot"), { bwrap: fake, socat: "/usr/bin/socat", socket: join(relayDir, `${name}.sock`), port: 41234, extra: copilotRelayExtra(relayDir) });
+      const layout = { bin: join(dir, `copilot-home-${name}`, "bin"), agentHome: "/home/agent", agentTmp: "/home/agent/tmp" };
+      mkdirSync(layout.bin, { recursive: true });
+      bakeCopilotRelay(layout, fake, at);
+      return { relayDir, shim: join(layout.bin, "bwrap") };
+    };
+    const a = stage("a");
+    const b = stage("b");
+    const run = (shim) => execFileSync(shim, ["--unshare-net", "--", "sh", "-c", "x"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim().split("\n");
+    assert.ok(run(a.shim).includes(join(a.relayDir, "a.sock")) && !run(a.shim).includes(join(b.relayDir, "b.sock")), "stage a hands to its own relay");
+    assert.ok(run(b.shim).includes(join(b.relayDir, "b.sock")), "stage b to its own");
+    // Stage a ends: its relay directory goes; stage b is unaffected, and a's Copilot shim falls back to the real one.
+    rmSync(a.relayDir, { recursive: true, force: true });
+    assert.ok(run(b.shim).includes(join(b.relayDir, "b.sock")));
+    assert.deepEqual(run(a.shim), ["--unshare-net", "--", "sh", "-c", "x"], "nothing left to hand to: the real bubblewrap, as given");
+    // A shared shim from an older Factory: removed when a Copilot stage starts.
+    const shared = join(dir, "factory-relay", "copilot");
+    mkdirSync(shared, { recursive: true });
+    writeFileSync(join(shared, "bwrap"), "#!/bin/sh\n", { mode: 0o755 });
+    dropSharedCopilotRelay(join(dir, "factory-relay"));
+    assert.equal(existsSync(shared), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -85,12 +85,14 @@ exec "$real" "\${args[@]:0:$sep}"${extra.map((o) => ` ${sq(o)}`).join("")} -- /b
 export const copilotRelayExtra = (socketDir) => ["--ro-bind", socketDir, socketDir, "--setenv", "NO_PROXY", "127.0.0.1", "--setenv", "no_proxy", "127.0.0.1"];
 
 /**
- * Where the relay's shim for Copilot goes, baked into Copilot's own shim (copilot-runner.mjs bwrapShim) when that is
- * written, never read from an environment: on a runner and in a cloud sandbox a fixed path in Factory's relay
- * directory, which only Factory's user writes; locally the stage's relay directory, in its usage directory.
+ * Where a stage's relay shim for Copilot goes: in the stage's own relay directory (worker-relay.mjs), which only
+ * Factory's user writes and which goes when the stage ends. Its path is baked into Copilot's own shim for the stage
+ * (copilot-runner.mjs bwrapShim), never read from an environment.
  */
-export const RUNNER_COPILOT_RELAY_SHIM = "/var/lib/factory-relay/copilot/bwrap";
-export const localCopilotRelayShim = (relayDir) => `${relayDir}/copilot/bwrap`;
+export const copilotRelayShimIn = (relayDir) => `${relayDir}/copilot/bwrap`;
+/** Local mode's name for it (serve bakes it into Copilot's shim before the stage starts). */
+export const localCopilotRelayShim = copilotRelayShimIn;
+
 
 /** Write the shim as `<dir>/bwrap` (the directory made 755: the agent reads and runs it, never writes it). Returns `dir`. */
 export function writeRelayShim(dir, opts) {

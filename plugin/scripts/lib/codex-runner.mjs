@@ -106,8 +106,6 @@ export const CONFINEMENT_PROBE = [
   `seen() { tr '\\0' '\\n' < "$1/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; }`,
   'if [ -n "$d" ] && seen "/proc/$d"; then echo "the decoy outside the sandbox is readable"; exit 4; fi',
   'if [ -n "$m" ]; then for p in /proc/[0-9]*; do if seen "$p"; then echo "the credential stand-in is readable in a process environment"; exit 4; fi; done; fi',
-  // The sandbox's first process (bubblewrap where it has a PID namespace of its own) never holds it as an argument.
-  `if [ -n "$m" ] && tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e "$m" -e "${PROBE_MARKER}=$m"; then echo "the credential stand-in is in the first process's command line"; exit 4; fi`,
   'if [ -n "$host" ]; then',
   '  if command -v curl >/dev/null 2>&1; then curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
   '  elif command -v node >/dev/null 2>&1; then node -e \'fetch("https://" + process.argv[1], { signal: AbortSignal.timeout(5000) }).then(() => process.exit(0), () => process.exit(1))\' "$host" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',

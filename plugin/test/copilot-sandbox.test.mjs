@@ -122,7 +122,8 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   const home = join(root, "h");
   mkdirSync(tmp);
   mkdirSync(home);
-  const driver = probeDriver({ gitConfig: "", host: "", marker: "m5", persist: [home] });
+  // Copilot's TMPDIR: a path that is not there (this machine's own /tmp/factory-copilot is no business of the test's).
+  const driver = probeDriver({ gitConfig: "", host: "", marker: "m5", persist: [home], copilotTmp: join(root, "no-copilot-tmp") });
   const drive = (extra) => {
     execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m5", ...extra } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
@@ -133,7 +134,9 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   assert.equal(drive({ FACTORY_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n", "and an empty decoy would skip its rule");
   assert.equal(drive({ FACTORY_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
   assert.match(driver, /mxc-bwrap-proxy-\*/, "Copilot's network rules must not be listable");
-  assert.ok(driver.includes(`true >> '${COPILOT_TMP}/`), "nor its TMPDIR writable");
+  assert.ok(probeDriver({ gitConfig: "", host: "", marker: "m" }).includes(`true >> '${COPILOT_TMP}/`), "nor its TMPDIR writable");
+  const withLogs = probeDriver({ gitConfig: "", host: "", marker: "m", logs: "/p/logs" });
+  assert.ok(withLogs.includes("find '/p/logs'") && !withLogs.includes("$COPILOT_HOME"), "the logs by their path, never a variable a command may lack");
   // The loopback model: a shell call first, then the end.
   const model = await probeModel();
   try {
@@ -224,7 +227,9 @@ test("a session file that never ends is not read on: the archive stops at its ca
   assert.ok(Date.now() - t0 < 30_000, "stopped at the cap, not read to the end");
 });
 
-test("the probe's last line: a pass line after every rule held, the first process's command line checked", () => {
+test("the probe's last line: a pass line after every rule held; the first process's command line is Copilot's rule only", () => {
   assert.equal(CONFINEMENT_PROBE.split("\n").at(-2), `echo "${PROBE_PASS}"`);
-  assert.match(CONFINEMENT_PROBE, /\/proc\/1\/cmdline/);
+  // Codex's probe gets the marker as an argument, and its sandbox's first process holds the whole command line.
+  assert.doesNotMatch(CONFINEMENT_PROBE, /cmdline/);
+  assert.match(probeDriver({ gitConfig: "", host: "", marker: "m7" }), /\/proc\/1\/cmdline[^\n]*grep -qxF -e 'm7' -e 'FACTORY_PROBE_MARKER=m7'/);
 });

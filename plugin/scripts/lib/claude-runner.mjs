@@ -276,9 +276,11 @@ export const SESSION_CAPTURE_BYTES = 512 * 1024 * 1024;
 export async function captureSession(layout, sessionId, env = process.env) {
   // Bounded: the harness's sandboxed commands can write parts of a session (Copilot's session-state/<id>/files), so a
   // file that never ends (a sparse 16 TB one) must not hold the stage; such a session is not captured.
-  const archive = await archiveSession(layout, sessionId, env, { timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES });
+  const { archive, why } = await archiveSessionWhy(layout, sessionId, env, { timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES });
+  // A run that left no session files has nothing to capture, and says nothing.
+  if (why === "none") return null;
   if (!archive?.tar) {
-    log(`session ${String(sessionId).slice(0, 8)}: ${archive?.truncated ? `its files are over ${SESSION_CAPTURE_BYTES} bytes` : "its files could not be archived in time"}; not captured, so the next pass starts a fresh one`);
+    log(`session ${String(sessionId).slice(0, 8)}: ${why === "truncated" ? `its files are over ${SESSION_CAPTURE_BYTES} bytes` : why === "timed out" ? "its files could not be archived in time" : "its files could not be archived"}; not captured, so the next pass starts a fresh one`);
     return null;
   }
   keepSession(sessionId, archive);
@@ -289,18 +291,21 @@ export async function captureSession(layout, sessionId, env = process.env) {
  * A session's files archived as the agent, from a pipe: `{tar, files}`, or null when there are none (or the listing or
  * archive failed or timed out); `{truncated: true}` when the archive ran past `maxBytes`. Nothing is held.
  */
-export async function archiveSession(layout, sessionId, env = process.env, { timeoutMs, maxBytes } = {}) {
-  if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
+export const archiveSession = async (layout, sessionId, env = process.env, opts = {}) => (await archiveSessionWhy(layout, sessionId, env, opts)).archive;
+
+/** archiveSession with why there is no archive: `none` (no files), `timed out`, `failed` or `truncated`; null when there is one. */
+async function archiveSessionWhy(layout, sessionId, env = process.env, { timeoutMs, maxBytes } = {}) {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return { archive: null, why: "none" };
   const root = layout.sessions;
   const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth "$3" \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId, String(layout.sessionDepth || 2)], { cwd: layout.agentHome, env, timeoutMs });
-  if (listed.timedOut) return null;
+  if (listed.timedOut) return { archive: null, why: "timed out" };
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
-  if (!files.length) return null;
+  if (!files.length) return { archive: null, why: "none" };
   const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes, killPastMax: true } : {}) });
   // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
-  if (tar.truncated) return { tar: null, files, truncated: true };
-  if (tar.code !== 0 || tar.timedOut) return null;
-  return { tar: tar.stdout, files };
+  if (tar.truncated) return { archive: { tar: null, files, truncated: true }, why: "truncated" };
+  if (tar.code !== 0 || tar.timedOut) return { archive: null, why: tar.timedOut ? "timed out" : "failed" };
+  return { archive: { tar: tar.stdout, files }, why: null };
 }
 
 /** An archived session captured: held for the next reset and kept for the end of the stage's saved transcript. */

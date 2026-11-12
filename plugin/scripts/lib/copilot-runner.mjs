@@ -210,15 +210,19 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
  * throwaway); then runs CONFINEMENT_PROBE (FACTORY_PROBE_SCRIPT) with no home rule. It writes an exit code and a last
  * line to PROBE_RESULT: a pass is 0 and PROBE_PASS, nothing else.
  */
-export const probeDriver = ({ gitConfig, host, marker, persist = [] }) =>
+export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP }) =>
   [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > "$TMPDIR/${PROBE_RESULT}"; exit 0; }`,
     `[ -n "$FACTORY_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
     `[ -n "$FACTORY_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
     // Where Copilot's TMPDIR is, and where it would be had it the default /tmp.
-    `for p in ${sq(COPILOT_TMP)}/mxc-bwrap-proxy-* /tmp/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
-    `if true >> ${sq(`${COPILOT_TMP}/${PROBE_PERSIST}`)} 2>/dev/null; then out 4 "Copilot's temp directory is writable"; fi`,
-    `if [ -n "$(find "$COPILOT_HOME/logs" -type f -size +0 2>/dev/null | head -n 1)" ]; then out 4 "Copilot's logs are readable by commands"; fi`,
+    `for p in ${sq(copilotTmp)}/mxc-bwrap-proxy-* /tmp/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
+    `if true >> ${sq(`${copilotTmp}/${PROBE_PERSIST}`)} 2>/dev/null; then out 4 "Copilot's temp directory is writable"; fi`,
+    // The logs directory by its path (the probe's COPILOT_HOME's), never by a variable a command may not have.
+    ...(logs ? [`if [ -n "$(find ${sq(logs)} -type f -size +0 2>/dev/null | head -n 1)" ]; then out 4 "Copilot's logs are readable by commands"; fi`] : []),
+    // Bubblewrap is the sandbox's first process: its arguments must not hold the marker. (Copilot's own: Codex's probe
+    // gets the marker as an argument, which its sandbox's first process then holds.)
+    `if tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e ${sq(marker)} -e ${sq(`${PROBE_MARKER}=${marker}`)}; then out 4 "the credential stand-in is in the first process's command line"; fi`,
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
     `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} "$TMPDIR" ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
     `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
@@ -293,7 +297,7 @@ export function probeEnv(runner, marker, host) {
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
     FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner) }),
+    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs") }),
   };
 }
 

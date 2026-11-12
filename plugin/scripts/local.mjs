@@ -28,7 +28,7 @@ import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findPr
 import { holdSecrets, input, log, redactSecrets, resolveInputs } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotDroppedHosts, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -418,6 +418,10 @@ export class Local {
     // same way). Said once when it does not.
     const outer = outerProbe(this.harness, { domains: this.domains(), env: { ...process.env, ...extra } });
     const outerOn = outer.on;
+    // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
+    // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
+    const dropped = ["codex", "copilot"].includes(this.harness) ? sandboxDroppedHosts(this.domains()) : [];
+    if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${this.harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
     // Copilot never runs without it (preflight refuses such a host): here it stopped starting after serve began, for
     // example a new Copilot, bubblewrap or slirp4netns version probed again. The stage refuses; stage() Blocks.
     if (!outerOn && this.harness === "copilot") throw Object.assign(new Error(`${COPILOT_OUTER_OFF}: ${outer.why}${outer.cacheFile ? ` (probe cache: ${outer.cacheFile})` : ""}`), { code: "outer-sandbox" });
@@ -515,9 +519,6 @@ export class Local {
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
     // The stage's node (localToolchain) read-only, its global npmrc denied.
     const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(toolchain?.denied || [])] : [];
-    // Entries Copilot's sandbox cannot enforce (host:port, an IP address) are left out of its policy (#106).
-    const dropped = copilotDroppedHosts(this.domains());
-    if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} not host names; left out of Copilot's sandbox, which drops its whole network policy for such an entry`);
     const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir], readable: toolchain?.dirs || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {
       // A directory an earlier run left under the name too.

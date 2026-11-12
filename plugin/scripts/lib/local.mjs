@@ -692,22 +692,29 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable,
  */
 const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
+/**
+ * A host entry a harness's sandbox enforces as written: a host name or `*.` and one, never a loopback name (`localhost`,
+ * `*.localhost`, which Codex's proxy resolves to loopback itself), an IP address or `host:port` (Codex's proxy ignores
+ * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
+ */
+const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
 export function runnerDomains(value = "") {
-  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter((d) => DOMAIN_ENTRY.test(d))])];
+  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry)])];
 }
 
 /** The `allowed_domains` entries runnerDomains drops (doctor names each). */
-export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !DOMAIN_ENTRY.test(d));
+export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !hostEntry(d));
 
 /**
- * Copilot's `allowedHosts` from `domains`: host names and `*.` ones only (DOMAIN_ENTRY, as runnerDomains keeps). Copilot
- * 1.0.109's sandbox drops its proxy, and with it every host rule, when an entry is `host:port` (#106): its commands then
- * reach any host. Local mode's FACTORY_LOCAL_DOMAINS can come from the workflow file, so no such entry reaches Copilot;
- * serve logs and doctor names each one dropped (copilotDroppedHosts).
+ * Codex's `domains` and Copilot's `allowedHosts` from `domains`: the entries their sandboxes enforce as written (hostEntry,
+ * as runnerDomains keeps). Copilot 1.0.109's sandbox drops its proxy, and with it every host rule, for a `host:port`
+ * entry (#106); Codex 0.167's proxy ignores the port and admits every port of a loopback name or address (#108). Local
+ * mode's FACTORY_LOCAL_DOMAINS can come from the workflow file, so no such entry reaches either; serve logs and doctor
+ * names each one dropped (sandboxDroppedHosts).
  */
-export const copilotHosts = (domains = []) => [...new Set(domainEntries(domains.join(" ")).filter((d) => DOMAIN_ENTRY.test(d)))];
-/** The `domains` entries copilotHosts drops. */
-export const copilotDroppedHosts = (domains = []) => droppedDomains(domains.join(" "));
+export const sandboxHosts = (domains = []) => [...new Set(domainEntries(domains.join(" ")).filter(hostEntry))];
+/** The `domains` entries sandboxHosts drops. */
+export const sandboxDroppedHosts = (domains = []) => droppedDomains(domains.join(" "));
 
 const isDir = (p) => {
   try {
@@ -743,7 +750,8 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
   // `exists`: on a runner the checkout is the agent's (700), so what is there is listed as the agent (codex-runner.mjs).
   const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly].map((p) => `${tq(p)}="read"`);
   const roots = addDirs.map((d) => `${tq(d)}=true`);
-  const net = [...new Set(domains)].map((d) => `${tq(d)}="allow"`);
+  // Host names only (sandboxHosts): Codex's proxy ignores an entry's port, so `127.0.0.1:N` would admit every port (#108).
+  const net = sandboxHosts(domains).map((d) => `${tq(d)}="allow"`);
   const profile = `{extends=":read-only",workspace_roots={${roots.join(",")}},filesystem={${[...deny, ...ro, `":workspace_roots"={"."="write",".git"="write",".git/hooks"="read",".git/config"="read"}`].join(",")}},network={enabled=true,mode="full",allow_local_binding=true,domains={${net.join(",")}}}}`;
   // allow_local_binding: the repository's own test servers on 127.0.0.1 (a loopback Postgres). Codex's sandbox has its own
   // network namespace, so the host's loopback services stay out of reach (checked: a host server refused).
@@ -804,7 +812,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
         // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
         filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home))), ...alsoDenied] },
-        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: copilotHosts(domains) },
+        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: sandboxHosts(domains) },
       },
     },
   };

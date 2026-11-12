@@ -22,7 +22,7 @@ import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin,
 import { agentUser, exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, copilotDroppedHosts, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, droppedDomains, sandboxDroppedHosts, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1160,14 +1160,16 @@ export async function jobChecks({ inputs, repo, token, app, checkout, notice = f
 }
 
 /**
- * Local mode with Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (host:port, an IP address) is a WARN.
- * serve leaves it out of Copilot's sandbox policy, since Copilot drops its whole network policy for one (#106).
+ * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
+ * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
+ * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
  */
 export function localDomainChecks({ inputs, env = process.env, local }) {
-  if (!local || inputs.harness !== "copilot") return [];
-  const dropped = copilotDroppedHosts([env.FACTORY_LOCAL_DOMAINS || ""]);
+  if (!local || !["codex", "copilot"].includes(inputs.harness)) return [];
+  const dropped = sandboxDroppedHosts([env.FACTORY_LOCAL_DOMAINS || ""]);
   if (!dropped.length) return [];
-  return [WARN("FACTORY_LOCAL_DOMAINS", `not host names, so Copilot's sandbox does not allow them (serve leaves them out: Copilot drops its whole network policy for such an entry): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address")];
+  const why = inputs.harness === "copilot" ? "Copilot drops its whole network policy for such an entry" : "Codex's proxy ignores the port and would admit every port of the host";
+  return [WARN("FACTORY_LOCAL_DOMAINS", `not host names, so ${inputs.harness === "copilot" ? "Copilot's" : "Codex's"} sandbox does not allow them (serve leaves them out: ${why}): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path, IP address or localhost")];
 }
 
 async function main() {

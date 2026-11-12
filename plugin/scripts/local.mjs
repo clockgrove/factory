@@ -36,6 +36,7 @@ import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
+import { bwrapShim } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
@@ -438,6 +439,15 @@ export class Local {
     const gitBin = join(usageDir, "gitbin");
     mkdirSync(gitBin, { recursive: true });
     writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(whichSync("git"))), { mode: 0o755 });
+    // Linux: Copilot's own `bwrap`, first on its PATH only (lib/harness.mjs): Copilot starts its sandbox's bubblewrap with
+    // its whole environment, the token included, and bubblewrap stays as every command's pid 1, readable to each (#100).
+    // Factory's starts the real one with none (lib/copilot-runner.mjs bwrapShim). In the usage directory, which no
+    // sandbox may write; harness.mjs copilotLocalCheck proves it before every start.
+    const bwrapBin = outerOn && this.harness === "copilot" ? join(usageDir, "bwrapbin") : null;
+    if (bwrapBin) {
+      mkdirSync(bwrapBin, { recursive: true });
+      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap"))), { mode: 0o755 });
+    }
     return {
       ...base,
       FACTORY_CREDENTIAL: "login",
@@ -475,7 +485,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's

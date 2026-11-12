@@ -233,7 +233,7 @@ export const gitIdentityReason = (issue) => `local mode: the clone's .git is not
  * The Blocked reason for a harness start Factory refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
  */
-export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex" } = {}) =>
+export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex", local = false } = {}) =>
   code === "git-identity"
     ? gitIdentityReason(issue)
     : code === "git-state"
@@ -244,10 +244,12 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
           : rule
-            ? `${harness === "copilot" ? "Copilot" : "Codex"}'s sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. The work job's log has the probe's output`
-            : harness === "copilot"
-              ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
-              : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
+            ? `${harness === "copilot" ? "Copilot" : "Codex"}'s sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
+            : local
+              ? "Copilot's sandbox could not start in local mode (sandbox); the harness was not started, so no command ran unsandboxed. The stage log on the local machine has the probe's output"
+              : harness === "copilot"
+                ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
+                : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
         : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
@@ -256,13 +258,14 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
 /** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear, roots or sandbox; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
-  /** `path` (checkout-relative), `rule` (a fixed confinement rule) and `harness` (whose sandbox): named in the Blocked reason (gitRefusalReason). */
-  constructor(code, detail, { path = null, rule = null, harness = null } = {}) {
+  /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox) and `local` (local mode's probe): named in the Blocked reason (gitRefusalReason). */
+  constructor(code, detail, { path = null, rule = null, harness = null, local = false } = {}) {
     super(`refusing to start the harness: ${detail}`);
     this.code = code;
     this.path = path;
     this.rule = rule;
     this.harness = harness;
+    this.local = local;
   }
 }
 /**
@@ -277,7 +280,7 @@ export function refusalExit(e, { stage, issue, env = process.env }) {
   } catch {
     // no pin to name: one key for the stage
   }
-  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule, ...(e.harness ? { harness: e.harness } : {}) }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
+  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule, local: !!e.local, ...(e.harness ? { harness: e.harness } : {}) }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
 }
 
 /**
@@ -1325,7 +1328,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
 }
 
 /**

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SHELL_SECRET_KEYS, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
+import { COPILOT_PROBE_SCRIPT, SHELL_SECRET_KEYS, copilotLocalCheck, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { dropSessions, holdSession } from "../scripts/lib/claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
@@ -193,6 +193,42 @@ test("Copilot's sandbox probe runs before every start: its result decides; no re
   assert.equal(calls.length, 2, "no result is tried once more before it Blocks");
   assert.match(gitRefusalReason("sandbox", 1, { harness: "copilot" }), /Copilot's sandbox could not start.*copilot sandbox: bwrap, slirp4netns, apparmor, start/);
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable", harness: "copilot" }), /^Copilot's sandbox started but does not confine here/);
+});
+
+test("local Copilot (#100): Factory's bwrap leaves Copilot's HOME and TMPDIR; the probe runs in the outer sandbox without the token and Blocks a leak", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cpl-"));
+  const real = join(root, "real-bwrap");
+  writeFileSync(real, '#!/bin/sh\necho "env=$(env | grep -c .)"\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
+  const shim = join(root, "bwrap");
+  writeFileSync(shim, bwrapShim(real), { mode: 0o755 });
+  const argv = ["--clearenv", "--setenv", "HOME", "/home/dev", "--setenv", "TMPDIR", "/s/t", "--", "sh"];
+  const out = execFileSync(shim, argv, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } }).trim().split("\n");
+  assert.ok(Number(out[0].slice(4)) <= 1 && !out.join("\n").includes("github_pat_secret"), "the real bwrap gets no environment");
+  assert.deepEqual(out.slice(1).map((l) => l.slice(4)), argv, "and every argument as Copilot gave it");
+  const [home, tmp, usage, clone, chome] = ["h", "t", "u", "w", "c"].map((d) => join(root, d));
+  for (const d of [home, tmp, join(usage, "harness"), clone, chome]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(chome, "settings.json"), '{"sandbox":{"enabled":true}}\n');
+  const local = { clone, addDirs: [tmp], cacheDirs: [], domains: LOCAL_DOMAINS, bwrapBin: root };
+  const env = { PATH: `${root}:/usr/bin`, TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COPILOT_HOME: chome, COPILOT_GITHUB_TOKEN: "github_pat_secret", MY_SECRET: "s" };
+  const calls = [];
+  const leaving = (result) => async (cmd, args, opts) => {
+    calls.push({ cmd, args, env: opts.env, settings: readFileSync(join(opts.env.COPILOT_HOME, "settings.json"), "utf8") });
+    writeFileSync(join(tmp, PROBE_RESULT), result);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await copilotLocalCheck(local, "/o.json", env, { drop: ["MY_SECRET"], run: leaving("0\n\n"), home });
+  const [call] = calls;
+  assert.equal(call.cmd, "srt");
+  assert.deepEqual(call.args.slice(0, 7), ["-s", "/o.json", "--", "env", `TMPDIR=${tmp}`, process.execPath, COPILOT_PROBE_SCRIPT]);
+  assert.ok(call.args.includes(COPILOT_DECOY_LAUNCH) && call.args.includes("--sandbox") && call.args.includes(`--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`));
+  assert.ok(!("COPILOT_GITHUB_TOKEN" in call.env) && !("MY_SECRET" in call.env), "never the run's credentials: the marker stands in");
+  assert.match(call.env[PROBE_MARKER], /^[0-9a-f]{32}$/);
+  assert.equal(call.env.PATH, env.PATH, "Factory's bwrap first, as the run has it");
+  assert.equal(call.env.COPILOT_HOME, join(usage, "harness", "copilot-probe"));
+  assert.equal(call.settings, '{"sandbox":{"enabled":true}}\n', "with the stage's policy");
+  assert.ok(!existsSync(call.env.COPILOT_HOME), "removed afterwards");
+  await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("4\nthe credential stand-in is readable in a process environment\n"), home }), (e) => e instanceof GitRefusal && e.rule === "the credential stand-in is readable in a process environment" && e.local);
+  assert.match(gitRefusalReason("sandbox", 1, { rule: "x", harness: "copilot", local: true }), /The stage log on the local machine/);
 });
 
 test("doctor: Copilot in a job needs bwrap and slirp4netns, AppArmor for unshare on a self-hosted runner, and its sandbox confining", async () => {

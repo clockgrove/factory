@@ -70,18 +70,17 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
  * Factory's `bwrap` for Copilot's sandbox on a runner. Copilot (MXC) starts bubblewrap with Copilot's whole environment,
  * the token included, and bubblewrap stays in every command's sandbox as its pid 1, whose environment each command can
  * read; this starts the real one with none (bubblewrap sets every command's environment itself: `--clearenv`, then
- * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's.
- * Nothing else changes. Lives in Factory's HOME for Copilot, which the agent cannot write.
+ * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's
+ * (`home`, `tmp`; null leaves Copilot's). Nothing else changes. Lives in Factory's HOME for Copilot, which the agent
+ * cannot write. Local mode runs it with neither (local.mjs stageEnv), in the stage's usage directory.
  */
-export const bwrapShim = (realBwrap, home, tmp) => `#!/bin/sh
-# Factory: Copilot's bubblewrap on a runner (lib/copilot-runner.mjs). Started with no environment, so the token Copilot
-# holds is not in the sandbox's pid 1; each command's HOME and TMPDIR are the agent's.
+export const bwrapShim = (realBwrap, home = null, tmp = null) => `#!/bin/sh
+# Factory: Copilot's bubblewrap (lib/copilot-runner.mjs). Started with no environment, so the token Copilot holds is
+# not in the sandbox's pid 1${home || tmp ? "; each command's HOME and TMPDIR are the agent's" : ""}.
 first=1; p1=""; p2=""; done=""
 for a do
   if [ "$first" = 1 ]; then set --; first=0; fi
-  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = HOME ]; then a=${sq(home)}; fi
-  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = TMPDIR ]; then a=${sq(tmp)}; fi
-  [ "$a" = "--" ] && done=1
+${home ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = HOME ]; then a=${sq(home)}; fi\n` : ""}${tmp ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = TMPDIR ]; then a=${sq(tmp)}; fi\n` : ""}  [ "$a" = "--" ] && done=1
   set -- "$@" "$a"
   p2=$p1; p1=$a
 done

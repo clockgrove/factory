@@ -199,14 +199,18 @@ export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
 /**
  * A runner's writable roots made real, as the agent, before a harness start (harness.mjs runnerClear): each of `fix` (the
  * temp directory, the package caches) that is a link is removed and made a directory, and each of `fix` and `check` (the
- * checkout) must then resolve to itself. A link planted there by the repository's install or validation (`~/.yarn` ->
- * `~`) would otherwise widen what the sandbox lets commands write; one that cannot be put right (a link higher up the
- * path) refuses the start.
+ * checkout) must then resolve to where it sits under the agent's home (`home`, itself resolved: a home under a linked
+ * ancestor, as `/home -> /var/home`, is no planted link). A link planted there by the repository's install or
+ * validation (`~/.yarn` -> `~`) would otherwise widen what the sandbox lets commands write; one that cannot be put right
+ * (a link higher up the path) refuses the start (code `roots`), naming the path under the home.
  */
-export async function realRoots({ fix = [], check = [] }, cwd, env = process.env, { run = exec } = {}) {
-  const r = await run("/bin/sh", ["-c", 'fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$c" ]; then printf "%s\n" "$c"; exit 3; fi; done', "sh", ...fix, "--", ...check], { cwd, env });
-  if (r.code === 3) throw new GitRefusal("git-clear", `${String(r.stdout).trim()} is not a real directory of its own (a link on its path)`);
-  if (r.code !== 0) throw new GitRefusal("git-clear", `the sandbox's writable directories could not be checked: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
+export async function realRoots({ fix = [], check = [] }, home, env = process.env, { run = exec } = {}) {
+  const r = await run("/bin/sh", ["-c", 'home=$1; shift; base=$(realpath -e -- "$home") || exit 4; fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; case "$c" in "$home"/*) want="$base${c#"$home"}" ;; *) want="$c" ;; esac; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$want" ]; then printf "%s\n" "$c"; exit 3; fi; done', "sh", home, ...fix, "--", ...check], { cwd: home, env });
+  if (r.code === 3) {
+    const path = String(r.stdout).trim();
+    throw new GitRefusal("roots", `${path} is not a real directory of its own (a link on its path)`, { path: path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : null });
+  }
+  if (r.code !== 0) throw new GitRefusal("roots", `the sandbox's writable directories could not be checked: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
 }
 
 // ------------------------------------------------------------- sessions

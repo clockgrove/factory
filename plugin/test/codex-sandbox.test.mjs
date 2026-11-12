@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { GATEWAY_HOST, SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { captureSession, dropSessions, holdSession, prepareFactoryHome, realRoots, runnerLaunch } from "../scripts/lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, PROBE_MARKER, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
+import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, codexLocalConfig, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
@@ -137,10 +137,20 @@ test("a link planted at a writable root is replaced by a real directory; one hig
   mkdirSync(elsewhere);
   execFileSync("rm", ["-rf", join(agent.home, ".local")]);
   symlinkSync(elsewhere, join(agent.home, ".local"));
-  await assert.rejects(realRoots({ fix: layout.caches }, agent.home), (e) => e instanceof GitRefusal && e.code === "git-clear" && /\.local\/share\/pnpm/.test(e.message));
+  await assert.rejects(realRoots({ fix: layout.caches }, agent.home), (e) => e instanceof GitRefusal && e.code === "roots" && e.path === "~/.local/share/pnpm");
+  assert.match(gitRefusalReason("roots", 1, { path: "~/.local/share/pnpm" }), /`~\/\.local\/share\/pnpm`.*\(roots\).*not started/);
+  assert.doesNotMatch(gitRefusalReason("roots", 1, {}), /git/, "the Block does not blame git");
   const clone = join(root, "repo-link");
   symlinkSync(elsewhere, clone);
   await assert.rejects(realRoots({ check: [clone] }, agent.home), (e) => e instanceof GitRefusal, "a checkout that is a link refuses too");
+  // A home reached through a linked ancestor (/home -> /var/home) is no planted link.
+  const real = join(root, "var-home");
+  mkdirSync(join(real, "agent", "tmp"), { recursive: true });
+  symlinkSync(real, join(root, "home"));
+  const linked = join(root, "home", "agent");
+  mkdirSync(join(linked, "repo"));
+  await realRoots({ fix: [join(linked, "tmp"), join(linked, ".npm")], check: [join(linked, "repo")] }, linked);
+  assert.ok(existsSync(join(real, "agent", ".npm")));
 });
 
 test("the confinement probe: the agent's home and .git/config refuse a write, the temp directory takes one", () => {
@@ -158,7 +168,7 @@ test("the confinement probe: the agent's home and .git/config refuse a write, th
   mkdirSync(ro, { mode: 0o555 });
   const git = join(agent.tmp, "config");
   writeFileSync(git, "x");
-  assert.deepEqual(run(ro, git, agent.tmp), { code: 4, out: `${git} is writable\n` });
+  assert.deepEqual(run(ro, git, agent.tmp), { code: 4, out: "the checkout's .git/config is writable\n" }, "a fixed text: no local path reaches a Blocked comment");
   assert.equal(readFileSync(git, "utf8"), "x", "the probe writes nothing into a writable file");
   assert.deepEqual(run(ro, "", ro), { code: 4, out: "the agent temp directory is not writable\n" });
   assert.equal(run(ro, "", agent.tmp).code, 0);
@@ -169,6 +179,33 @@ test("the confinement probe: the agent's home and .git/config refuse a write, th
   assert.equal(offListHost(["example.com"]), "", "an allow-list that names it: no network rule");
 });
 
+test("the decoy: a readable process outside the sandbox that holds the marker fails the probe; the launch checks the decoy is there", () => {
+  const { root, agent } = fakeAgent();
+  const ro = join(root, "ro2");
+  mkdirSync(ro, { mode: 0o555 });
+  // No sandbox here: the decoy, a plain sleep holding the marker, is readable, as it would be if a sandbox let it be.
+  const out = execFileSync("/bin/sh", ["-c", `${PROBE_MARKER}=m77 sleep 30 & d=$!; sleep 0.2; env -u ${PROBE_MARKER} /bin/sh -c "$1" sh ${ro} "" ${agent.tmp} "" m77 "$d"; echo "exit $?"; kill "$d"`, "sh", CONFINEMENT_PROBE], { encoding: "utf8" });
+  assert.equal(out, "the decoy outside the sandbox is readable\nexit 4\n");
+  // DECOY_LAUNCH runs `codex "$@" <decoy pid>`: a stand-in codex reports what it got and whether the decoy holds the marker.
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "codex"), `#!/bin/sh\nfor d; do :; done\necho "args=$*"\ntr '\\0' '\\n' < /proc/$d/environ | grep -c '^${PROBE_MARKER}=m88$'\n`, { mode: 0o755 });
+  const got = execFileSync("/bin/sh", ["-c", DECOY_LAUNCH, "sh", "sandbox", "x"], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m88" } }).split("\n");
+  assert.match(got[0], /^args=sandbox x \d+$/);
+  assert.equal(got[1], "1", "the decoy holds the marker while codex runs");
+});
+
+test("the network rule fails without curl or node, rather than passing unchecked", () => {
+  const { root, agent } = fakeAgent();
+  const ro = join(root, "ro3");
+  mkdirSync(ro, { mode: 0o555 });
+  const bin = join(root, "bin3");
+  mkdirSync(bin);
+  for (const b of ["tr", "grep", "rm"]) symlinkSync(execFileSync("/bin/sh", ["-c", `command -v ${b}`], { encoding: "utf8" }).trim(), join(bin, b));
+  const out = execFileSync("/bin/sh", ["-c", '/bin/sh -c "$1" sh "$2" "" "$3" example.com "" ""; echo "exit $?"', "sh", CONFINEMENT_PROBE, ro, agent.tmp], { encoding: "utf8", env: { PATH: bin } });
+  assert.equal(out, "no curl or node to check the network rule\nexit 4\n");
+});
+
 test("Codex's sandbox probe runs before every start: where it cannot start or does not confine, the stage Blocks", async () => {
   const runner = { ...codexRunner({ harness: "codex", agent: AGENT, clone: CLONE }), present: new Set() };
   const calls = [];
@@ -177,13 +214,27 @@ test("Codex's sandbox probe runs before every start: where it cannot start or do
     return r;
   };
   await assert.rejects(codexSandboxCheck(runner, { PATH: "/usr/bin" }, { run: reply({ code: 1, stdout: "", stderr: "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n" }) }), (e) => e instanceof GitRefusal && e.code === "sandbox" && /RTM_NEWADDR/.test(e.message) && !e.rule);
+  assert.equal(calls.length, 2, "a start that failed is tried once more before it Blocks");
   const call = calls[0];
   assert.equal(call[0], "/usr/bin/env");
-  assert.ok(call.includes("sandbox") && call.includes(CONFINEMENT_PROBE) && call.includes(`HOME=${CODEX_RUNNER_HOME}`));
+  assert.ok(call.includes(DECOY_LAUNCH) && call.includes("sandbox") && call.includes(CONFINEMENT_PROBE) && call.includes(`HOME=${CODEX_RUNNER_HOME}`));
   assert.deepEqual(call.slice(-5, -1), [AGENT.home, `${CLONE}/.git/config`, AGENT.tmp, "example.com"]);
   assert.match(call.at(-1), /^[0-9a-f]{32}$/, "a fresh marker each time");
   assert.match(gitRefusalReason("sandbox", 1), /could not start.*no command ran unsandboxed.*doctor lines/);
+  calls.length = 0;
   await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "the agent home is writable\n", stderr: "" }) }), (e) => e.code === "sandbox" && e.rule === "the agent home is writable");
+  assert.equal(calls.length, 1, "a probe that ran and found a broken rule is never retried");
+  await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "example.com, off the allow-list, is reachable\n", stderr: "" }) }), (e) => e.rule === "a host off the allow-list is reachable");
+  let flaky = 0;
+  await codexSandboxCheck(runner, {}, {
+    run: async () => {
+      flaky++;
+      if (flaky === 1) throw new Error("spawn EAGAIN");
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(flaky, 2, "a spawn failure is retried once");
+  await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 0, timedOut: true, stdout: "", stderr: "" }) }), (e) => e.code === "sandbox", "a timeout twice Blocks");
   await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "<b>planted</b>\n", stderr: "" }) }), (e) => e.rule === "an unknown rule", "only Factory's own rule texts reach the Blocked comment");
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable" }), /does not confine here \(the agent home is writable\)/);
   let n = 0;

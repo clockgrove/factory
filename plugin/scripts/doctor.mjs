@@ -12,7 +12,7 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, PROBE_MARKER, resetCodexState } from "./lib/codex-runner.mjs";
+import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
@@ -20,7 +20,7 @@ import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin,
 import { agentUser, exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { codexLocalConfig, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -187,7 +187,12 @@ export async function probeHarness({ inputs, env = process.env }) {
     return FAIL(`${h} probe`, e.message, "see the credential line above");
   }
   // Codex where the agent uid exists (a runner, a cloud sandbox): as the agent, in its own sandbox, as a run gets it.
-  const runner = h === "codex" ? await probeRunner(env) : null;
+  let runner = null;
+  try {
+    runner = h === "codex" ? await probeRunner(env) : null;
+  } catch (e) {
+    return FAIL(`${h} probe`, `Codex's run sandbox could not be prepared: ${String(e.message).slice(0, 200)}`, "see the codex sandbox lines above");
+  }
   const { cmd, args, stdin, env: extra } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5, gateway: codexGatewayOf(h, cred.env), runner });
   // The job's env with every secret removed, then the one credential the harness runs on (as the worker's run gets it).
   const childEnv = { ...scrubbedEnv(env), ...cred.env, ...extra };
@@ -910,8 +915,9 @@ async function codexSandboxStart(env = process.env) {
   if (!agent) return null;
   const home = `${agent.tmp}/codex-sandbox-check`;
   const marker = randomBytes(16).toString("hex");
-  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [], secretEnv: [PROBE_MARKER], denyProc: false }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", agent.home, "", agent.tmp, "example.com", marker];
-  const r = await exec("/bin/sh", ["-c", 'mkdir -p "$1" && CODEX_HOME="$1" && export CODEX_HOME && shift && exec codex "$@"', "sh", home, ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin", [PROBE_MARKER]: marker }, agentExtra: [PROBE_MARKER], timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
+  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [], secretEnv: [PROBE_MARKER], denyProc: false }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", agent.home, "", agent.tmp, offListHost(LOCAL_DOMAINS), marker];
+  await exec("/bin/mkdir", ["-p", home], { cwd: agent.tmp });
+  const r = await exec("/bin/sh", ["-c", DECOY_LAUNCH, "sh", ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin", CODEX_HOME: home, [PROBE_MARKER]: marker }, agentExtra: [PROBE_MARKER, "CODEX_HOME"], timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
   await exec("/bin/rm", ["-rf", "--", home], { cwd: agent.tmp }).catch(() => {});
   if (r.code === 4) return { ok: false, reason: `it starts but does not confine: ${String(r.stdout).trim().split("\n").at(-1)?.slice(0, 200)}` };
   return r.code === 0 ? { ok: true } : { ok: false, reason: String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}` };

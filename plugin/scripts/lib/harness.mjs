@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, captureSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
-import { CONFINEMENT_PROBE, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
+import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -440,24 +440,34 @@ const SERVICES_SAID = new Set();
 
 /**
  * Codex's sandbox, before every start, as the agent and launched as Codex is, with the profile its run gets (`codex
- * sandbox`, no model), running CONFINEMENT_PROBE (codex-runner.mjs): no process the probe sees may show the marker Codex's
- * process holds in its environment (as a run's Codex holds its credential), the agent's home and the checkout's
- * .git/config must refuse a write, the agent's temp directory must take one, and a host off the allow-list must be
- * refused. Where the
- * sandbox cannot start (no bubblewrap, user namespaces refused) or does not confine (a Codex release that changed its
- * profile), the stage Blocks before any command runs. Codex itself would only fail each command.
+ * sandbox`, no model), running CONFINEMENT_PROBE beside a decoy (codex-runner.mjs DECOY_LAUNCH): no environment the probe
+ * can read may show the marker Codex's process and the decoy hold (as a run's Codex and its git processes hold the
+ * credential), the agent's home and the checkout's .git/config must refuse a write, the agent's temp directory must
+ * take one, and a host off the allow-list must be refused. Where the sandbox does not confine (a Codex release that
+ * changed its profile or its namespaces), the stage Blocks before any command runs. Where it does not start, it is
+ * tried once more (a start that failed once, a timeout); a second failure Blocks. Codex itself would only fail each
+ * command. The probe uses `codex sandbox`, the run `codex exec`: the same profile and sandbox code, but not the same
+ * entry point (docs/PLAN.md names this).
  */
-const RULES = [/^the credential stand-in is readable in a process environment$/, /^the agent home is writable$/, /^the agent temp directory is not writable$/, /^\/[\w./-]+\/\.git\/config is writable$/, /^[a-z0-9.-]+, off the allow-list, is reachable$/];
+/** The probe's own rule texts, the only ones a Blocked comment repeats (a host is named by its kind, not by the probe). */
+const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule"]);
+const ruleOf = (said) => (RULES.has(said) ? said : /^[a-z0-9.-]+, off the allow-list, is reachable$/.test(said) ? "a host off the allow-list is reachable" : "an unknown rule");
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
-  const marker = randomBytes(16).toString("hex");
-  const probe = ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", runner.agentHome, join(runner.clone, ".git", "config"), runner.agentTmp, offListHost(runner.domains), marker];
-  const [cmd, args] = runnerLaunch(runner, "codex", probe, env.PATH);
-  const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner), [PROBE_MARKER]: marker }, agentExtra: ["CODEX_HOME", PROBE_MARKER], timeoutMs: 120_000 });
-  if (r.code === 4) {
-    const said = String(r.stdout).trim().split("\n").at(-1) || "";
-    throw new GitRefusal("sandbox", `Codex's sandbox does not confine: ${said.slice(0, 200)}`, { rule: RULES.some((x) => x.test(said)) ? said : "an unknown rule" });
+  let last = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const marker = randomBytes(16).toString("hex");
+    const probe = ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", runner.agentHome, join(runner.clone, ".git", "config"), runner.agentTmp, offListHost(runner.domains), marker];
+    const [cmd, args] = runnerLaunch(runner, "/bin/sh", ["-c", DECOY_LAUNCH, "sh", ...probe], env.PATH);
+    const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner), [PROBE_MARKER]: marker }, agentExtra: ["CODEX_HOME", PROBE_MARKER], timeoutMs: 120_000 }).catch((e) => ({ code: null, stdout: "", stderr: e.message }));
+    if (r.code === 4) {
+      const said = String(r.stdout).trim().split("\n").at(-1) || "";
+      throw new GitRefusal("sandbox", `Codex's sandbox does not confine: ${said.slice(0, 200)}`, { rule: ruleOf(said) });
+    }
+    if (r.code === 0 && !r.timedOut) return;
+    last = r;
+    if (attempt === 1) log(`Codex's sandbox probe did not run (${r.timedOut ? "timed out" : `exit ${r.code}`}); trying once more`);
   }
-  if (r.code !== 0) throw new GitRefusal("sandbox", `Codex's sandbox could not start here: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 300) || `exit ${r.code}`}`);
+  throw new GitRefusal("sandbox", `Codex's sandbox could not start here: ${String(last.stderr).trim().split("\n").at(-1)?.slice(0, 300) || (last.timedOut ? "timed out" : `exit ${last.code}`)}`);
 }
 
 /**

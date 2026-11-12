@@ -6,7 +6,7 @@ Every third-party service Factory uses sits behind an adapter contract: one modu
 
 Contract: `plugin/scripts/lib/adapters/sandbox.mjs`. Vendors: `vercel` (`sandbox-vercel.mjs`, on `@vercel/sandbox`, pinned in `plugin/package.json`). Proof: `bench/sandbox-conformance.mjs` against the real vendor; no fake vendor exists.
 
-What this route supports: a stage runs in one sandbox session of `timeout_minutes` plus about 16 minutes, up to the plan's session cap (24 hours on Vercel Pro; Fresh session per stage, under Stage in the sandbox), proven end to end with Claude Code and Copilot. Codex in the sandbox is unproven.
+What this route supports: a stage runs in one sandbox session of `timeout_minutes` plus about 16 minutes, up to the plan's session cap (24 hours on Vercel Pro; Fresh session per stage, under Stage in the sandbox), proven end to end with Claude Code and Copilot. Codex in the sandbox runs through the Vercel AI Gateway (Codex model provider, below) and is not yet proven end to end there.
 
 | Operation | Does |
 | --- | --- |
@@ -54,6 +54,23 @@ Rules:
 - **No vendor-side state.** Each question is one stateless call.
 - **Errors are codes** from `DECIDER_ERRORS` (`auth`, `rate_limited`, `unavailable`, `invalid`, `refused`, `no_answer`, `vendor`), with no verdict. Callers decide on the verdict and the code, never a message.
 - **The key never leaves Factory's process.** On Actions it is the `ai_gateway_api_key` input; locally only the file `~/.config/factory/ai-gateway-key`. `scrubbedEnv` keeps it out of every child.
+
+## Codex model provider
+
+Contract: Codex's own model-provider configuration, set by flags (`lib/harness.mjs` `codexGatewayArgs`), so no Factory module talks to the vendor. Vendors: the direct OpenAI API (`CODEX_API_KEY`) and the Vercel AI Gateway (`FACTORY_CODEX_GATEWAY_KEY`, the `codex_gateway_key` input; it wins when both are set). A second gateway is another provider block and key name beside these.
+
+| Part | The gateway's |
+| --- | --- |
+| Endpoint and wire | `-c model_provider="vercel"` with `model_providers.vercel.{name, base_url="https://ai-gateway.vercel.sh/codex/v1", env_key="FACTORY_CODEX_GATEWAY_KEY", wire_api="responses"}` ([Vercel's Codex guide](https://vercel.com/docs/ai-gateway/coding-agents/openai-codex); keys checked against the Codex config reference and codex-cli 0.167.0). |
+| Model ids | `openai/<id>` unless the model setting already has a provider prefix, on fresh runs and resumes alike: a resume without it falls back to the configured default and changes the thread's model. Prices strip the prefix (`usage.mjs` `codexRate`). |
+| Session affinity | `env_http_headers={ "x-session-id" = "FACTORY_GATEWAY_SESSION" }`, one opaque id per Objective per Running stint, so a resume goes back to the provider credential that wrote its encrypted reasoning (the gateway's pin lasts about 10 minutes for OpenAI). A resume refused anyway (HTTP 400 or no status, `invalid_encrypted_content` or `organization_mismatch`) runs fresh once where the pass gives a fresh prompt; the exit-record ask gives none, so there it Blocks. |
+| Usage | `turn.completed.usage` with `cache_write_input_tokens` beside the cached and uncached input; priced from `codex-prices.json` (OpenAI's list price, which the gateway charges unmarked), writes at the model's write rate. |
+| Refusals | The gateway's `{error: {type, message}}` body, with the HTTP status when Codex wraps it and without: `quota_for_entity_exceeded` (a budget, 402) and `customer_verification_required` (403) Block; `rate_limit_exceeded` (429) does not (`usage.mjs` `providerRefusal`). |
+| Doctor | `--probe` asks the gateway's `/codex/v1/models` with the key: free; 401 or 403 fails. |
+
+Rules:
+
+- **The key reaches the Codex child only**, as `CODEX_API_KEY` does: `MODEL_SECRET_KEYS`, so `scrubbedEnv`, every harness's shell-exclusion list and the worker-secret refusals cover it; in a cloud sandbox only the key Codex runs on enters the VM. It is never `AI_GATEWAY_API_KEY`, Factory's own decision-model key above.
 
 ## Launcher (`mode: launch`)
 
@@ -124,7 +141,7 @@ The bench sums `vendor.usd` beside the model's dollars, one booking per stage cl
 Not counted, and why:
 
 - **The stretch after a stage no later stage follows.** A sandbox stopped after an Objective's last stage is destroyed when the Objective closes (the sweep on the close or the merge, else its own wake or the hourly backstop), or after `sandbox_idle_days` stopped. No progress comment is still open to book it on, and editing an old one would count its whole spend again on the day of the edit. Bound: its stop snapshot's storage for that stretch (at Vercel's rate, a 2 GB snapshot for seven idle days is about $0.04).
-- **A start that failed after its sandbox was running.** That session runs until the next start stops it, or until the vendor ends it; nothing books it. Bound: one session's ceiling, the stage's `timeout_minutes` plus 16 minutes (about $0.26 for a 45-minute session at 2 vCPUs), and three failed starts Block the Objective.
+- **A start that failed after its sandbox was running.** That session runs until the next start stops it, or until the vendor ends it; nothing books it. Bound: one session's ceiling, the stage's `timeout_minutes` plus 16 minutes (about $0.35 for a 45-minute stage at 2 vCPUs: 61 minutes of CPU and provisioned memory), and three failed starts Block the Objective.
 - **The image's storage.** It is the repository's, not an Objective's: the image record carries its size and monthly cost.
 - **Data transfer.** Included on Vercel Pro; downloads are free.
 

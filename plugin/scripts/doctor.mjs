@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { CLI, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
+import { CLI, GATEWAY_CODEX_URL, codexGatewayOf, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
@@ -20,7 +20,7 @@ import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
-import { parseUsage } from "./lib/usage.mjs";
+import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
@@ -65,8 +65,19 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
+    for (const m of new Set([inputs.model, inputs.reviewerModel].filter(Boolean))) {
+      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey });
+      if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
+    }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
-    if (!key) out.push(FAIL("codex credential", "CODEX_API_KEY absent", "gh secret set CODEX_API_KEY; the action passes it to the harness step only"));
+    const gateway = inputs.codexGatewayKey;
+    if (gateway) {
+      if (env.FACTORY_CODEX_GATEWAY_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_GATEWAY_KEY) out.push(WARN("codex credential", "FACTORY_CODEX_GATEWAY_KEY is a job-level variable", "pass it as the codex_gateway_key input so only the harness child sees it"));
+      else out.push(PASS("codex credential", `FACTORY_CODEX_GATEWAY_KEY present, step-scoped: Codex runs through the Vercel AI Gateway${key ? "; CODEX_API_KEY is set too and goes unused (the gateway key wins)" : ""}`));
+      // Unused, but a job-level CODEX_API_KEY is still in the job's environment for every step.
+      if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable (unused: the gateway key wins)", "remove it from the job's env, or pass it as the codex_api_key input"));
+      if (probe) out.push(await gatewayKeyProbe(gateway));
+    } else if (!key) out.push(FAIL("codex credential", "no Codex credential: FACTORY_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set FACTORY_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
     else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
     else out.push(PASS("codex credential", "CODEX_API_KEY present, step-scoped"));
   }
@@ -130,6 +141,22 @@ export async function copilotWriteProbe({ repo, token }) {
   return PASS("copilot token", `cannot write issues, pull requests or contents in ${repo}`);
 }
 
+/**
+ * The Codex gateway key, checked for free: the gateway's Codex model list (`GET /codex/v1/models`, which Codex itself
+ * reads at start) with the key bills nothing. 401 or 403 FAIL (the key is rejected); any other non-200 or no answer WARN.
+ */
+export async function gatewayKeyProbe(key, { fetchFn = fetch } = {}) {
+  let status = 0;
+  try {
+    status = (await fetchFn(`${GATEWAY_CODEX_URL}/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) })).status;
+  } catch {
+    status = 0;
+  }
+  if (status === 200) return PASS("codex gateway key", "the Vercel AI Gateway accepts FACTORY_CODEX_GATEWAY_KEY (its Codex model list, no charge)");
+  if (status === 401 || status === 403) return FAIL("codex gateway key", `the Vercel AI Gateway refused FACTORY_CODEX_GATEWAY_KEY (HTTP ${status})`, "make a new AI Gateway key in the Vercel team that holds the credits, then gh secret set FACTORY_CODEX_GATEWAY_KEY");
+  return WARN("codex gateway key", status ? `the gateway's model list answered HTTP ${status}` : "the gateway did not answer", "run doctor --probe again; an Objective would fail the same way if it persists");
+}
+
 /** One-call probe: the resolved model and whether usage output is present. */
 export async function probeHarness({ inputs, env = process.env }) {
   const h = inputs.harness;
@@ -141,8 +168,9 @@ export async function probeHarness({ inputs, env = process.env }) {
   } catch (e) {
     return FAIL(`${h} probe`, e.message, "see the credential line above");
   }
-  const { cmd, args, stdin } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5 });
-  const r = await exec(cmd, args, { env: { ...env, ...cred.env }, input: stdin, timeoutMs: 180_000 });
+  const { cmd, args, stdin, env: extra } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5, gateway: codexGatewayOf(h, cred.env) });
+  // The job's env with every secret removed, then the one credential the harness runs on (as the worker's run gets it).
+  const r = await exec(cmd, args, { env: { ...scrubbedEnv(env), ...cred.env, ...extra }, input: stdin, timeoutMs: 180_000 });
   const rec = parseUsage(h, r.stdout, inputs.model || null, r.code ?? 1);
   if (rec.refusal) return FAIL(`${h} probe`, refusalReason(rec.refusal), "an Objective would Block on the same refusal: fix the credential's account or the model setting first");
   if (r.code !== 0 && !rec.ok) return FAIL(`${h} probe`, `exit ${r.code}: ${String(r.stderr).slice(-200).trim()}`, "check the credential and the CLI version");
@@ -152,11 +180,15 @@ export async function probeHarness({ inputs, env = process.env }) {
 
 // ----------------------------------------------------------------- github
 
-/** The secrets a job needs, by name: the App's two and the harness credential the workflow names. */
+/**
+ * The secrets a job needs, by name: the App's two and the harness credential the workflow names. An entry that is a list
+ * is met by any one of its names (Codex: the gateway key or CODEX_API_KEY).
+ */
 export function neededSecrets(inputs) {
-  const cred = { claude: inputs.credential === "plan" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : ["ANTHROPIC_API_KEY"], codex: ["CODEX_API_KEY"], copilot: ["COPILOT_GITHUB_TOKEN"] }[inputs.harness] || [];
+  const cred = { claude: inputs.credential === "plan" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : ["ANTHROPIC_API_KEY"], codex: [["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]], copilot: ["COPILOT_GITHUB_TOKEN"] }[inputs.harness] || [];
   return ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ...cred];
 }
+const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
 async function secretChecks({ inputs, repo }) {
   const names = new Set();
@@ -167,8 +199,9 @@ async function secretChecks({ inputs, repo }) {
   } catch (e) {
     return [WARN("secrets", `could not list secret names (${String(e.message).slice(0, 100)})`, "run doctor with a gh login that administers the repository")];
   }
-  const missing = neededSecrets(inputs).filter((n) => !names.has(n));
-  return [missing.length ? FAIL("secrets", `missing ${missing.join(", ")} (repository, or organization secrets visible to it)`, "add them: gh secret set NAME, or at the organization with --repos") : PASS("secrets", `${neededSecrets(inputs).join(", ")} exist; the job mints the App token`)];
+  const missing = neededSecrets(inputs).filter((n) => ![].concat(n).some((x) => names.has(x)));
+  const present = neededSecrets(inputs).map((n) => [].concat(n).filter((x) => names.has(x)).join(", "));
+  return [missing.length ? FAIL("secrets", `missing ${missing.map(secretName).join(", ")} (repository, or organization secrets visible to it)`, "add them: gh secret set NAME, or at the organization with --repos") : PASS("secrets", `${present.join(", ")} exist; the job mints the App token`)];
 }
 
 /**

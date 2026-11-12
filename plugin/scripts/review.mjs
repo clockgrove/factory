@@ -18,9 +18,10 @@ import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, setDraft, transientError } from "./lib/github.mjs";
+import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
+import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { unpricedCodex } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
@@ -48,6 +49,7 @@ import {
   restoreTranscript,
   saveTranscript,
   saveAgentTranscript,
+  answerFreshAfter,
   crashed,
   holdScope,
   observe,
@@ -404,7 +406,9 @@ async function main() {
     await finish("question", reason);
     return;
   }
-  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+  // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
+  const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
+  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch });
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: off without an AI Gateway key; advice only.
@@ -445,6 +449,13 @@ async function main() {
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: "resume policy is fresh" };
   await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  for (const m of new Set([inputs.reviewerModel, inputs.model].filter(Boolean))) {
+    const unpriced = unpricedCodex(inputs.harness, m, { gateway: !!inputs.codexGatewayKey });
+    if (unpriced) {
+      log(`warning: ${unpriced}`);
+      await progress(`unpriced: ${unpriced}`);
+    }
+  }
 
   // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
   // carries the marker; a head a human pushed or marked ready does not, so Factory's own
@@ -602,15 +613,19 @@ async function main() {
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: io.tick, drift: drift?.watch({ stage: "answer", goal: GOALS.answer, root: checkout, plan: io.plan }) });
     const resumeAnswer = inputs.resumePolicy === "fix-passes" && session.id ? session.id : null;
     let fed = [];
+    const comments = toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body }));
+    const listedFor = (resume) => (afterPush.length ? afterPush : resume ? decisions : []);
     const answerArgs = (resume) => {
-      const listed = afterPush.length ? afterPush : resume ? decisions : [];
+      const listed = listedFor(resume);
       fed = answerFed({ fresh: !resume, decisions, listed, afterPush: afterPush.length > 0 });
       return {
         onLine: answerLive.onLine,
         onResume: answerLive.onResume,
         ...workerRun(inputs),
         resume,
-        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments: toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body })), decisions: listed, afterPush: afterPush.length > 0 }),
+        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0 }),
+        // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
+        ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
         env: harnessEnv,
@@ -623,8 +638,13 @@ async function main() {
     const scope = io.scope();
     await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`)] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     let rec = await runHarness(answerArgs(resumeAnswer));
+    // It ran fresh: the decisions it read are a fresh pass's.
+    if (rec.resumeRefused) {
+      fed = answerFed({ fresh: true, decisions, listed: listedFor(null), afterPush: afterPush.length > 0 });
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
+    }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
-    if (resumeAnswer && crashed(rec) && !mark(rec, rec).budgetExceeded) {
+    if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
       await progress("re-entry: resume failed; answering fresh");

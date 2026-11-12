@@ -2,15 +2,16 @@
 // and turn what it printed into one usage record. The CLI flags are each vendor's
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync } from "node:fs";
 import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
-import { COPILOT_CREDIT_USD, parseUsage, sinceSession } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
-import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
+import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, takeShellSecrets } from "./worker-secrets.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
@@ -52,7 +53,7 @@ export function scrubbedEnv(base = process.env, extra = {}) {
   delete e[SHELL_SECRETS_ENV];
   for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS]) delete e[k];
   for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
-  for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
+  for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
   // Every secret input under both names inputs.mjs input() reads it by: FACTORY_INPUT_<NAME> and FACTORY_<NAME>.
   for (const name of SECRET_INPUTS) {
     delete e[`FACTORY_INPUT_${name.toUpperCase()}`];
@@ -69,7 +70,10 @@ export function scrubbedEnv(base = process.env, extra = {}) {
  * or throws when the configured credential is absent.
  *   claude  api : ANTHROPIC_API_KEY, or a federated short-lived token (see federate())
  *           plan: CLAUDE_CODE_OAUTH_TOKEN (a developer's own repository only)
- *   codex   api : CODEX_API_KEY, set on this child only
+ *   codex   api : FACTORY_CODEX_GATEWAY_KEY (the codex_gateway_key input) when set: Codex through the Vercel AI
+ *                 Gateway (codexGatewayArgs), with FACTORY_GATEWAY_SESSION, the stint's session id (gatewaySession);
+ *                 else CODEX_API_KEY. Either is set on this child only; with both set the gateway key wins and
+ *                 CODEX_API_KEY stays out of the child.
  *   copilot     : COPILOT_GITHUB_TOKEN = the copilot_github_token input (a Copilot Requests token
  *                 that bills its owner's seat); never the job's token, which can write
  *   any   login : the CLI's own login on this machine (PLAN.md's development fallback:
@@ -80,17 +84,19 @@ export function scrubbedEnv(base = process.env, extra = {}) {
  */
 export function hasApiCredential({ harness, inputs, env = process.env }) {
   if (harness === "claude") return !!(inputs.anthropicApiKey || env.ANTHROPIC_API_KEY || (env.ACTIONS_ID_TOKEN_REQUEST_URL && inputs.anthropicOidcExchangeUrl));
-  if (harness === "codex") return !!(inputs.codexApiKey || env.CODEX_API_KEY);
+  if (harness === "codex") return !!(inputs.codexGatewayKey || inputs.codexApiKey || env.CODEX_API_KEY);
   if (harness === "copilot") return !!(inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN);
   return false;
 }
 
-export async function credentialEnv({ harness, credential, inputs, env = process.env }) {
+export async function credentialEnv({ harness, credential, inputs, env = process.env, session = null }) {
   const out = {};
   const local = !env.GITHUB_ACTIONS;
   if (credential === "login" || (local && credential === "api" && !hasApiCredential({ harness, inputs, env }))) {
     if (!local) throw new Error("credential: login is for a developer's machine; unattended runs use api (or plan on your own repository)");
-    for (const k of MODEL_SECRET_KEYS) if (env[k]) out[k] = env[k]; // whatever the developer's shell already carries
+    // Whatever the developer's shell already carries for the CLI's own sign-in; not the gateway key, which would turn
+    // the run onto the gateway (codexGatewayOf).
+    for (const k of MODEL_SECRET_KEYS) if (env[k] && k !== CODEX_GATEWAY_ENV) out[k] = env[k];
     return { env: out, basis: `${harness} CLI login on this machine${credential === "api" ? " (no API credential present; local fallback)" : ""}` };
   }
   if (harness === "claude") {
@@ -113,6 +119,12 @@ export async function credentialEnv({ harness, credential, inputs, env = process
     throw new Error("no Claude credential: set ANTHROPIC_API_KEY, or id-token: write with anthropic_oidc_exchange_url for federation");
   }
   if (harness === "codex") {
+    // The gateway key wins when both are set: one credential per child, and the rule needs no setting.
+    if (inputs.codexGatewayKey) {
+      out[CODEX_GATEWAY_ENV] = inputs.codexGatewayKey;
+      out.FACTORY_GATEWAY_SESSION = session || gatewaySession({});
+      return { env: out, basis: `${CODEX_GATEWAY_ENV} (Vercel AI Gateway, step-scoped)` };
+    }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     if (!key) throw new Error("no Codex credential: set CODEX_API_KEY on the worker step");
     out.CODEX_API_KEY = key;
@@ -126,6 +138,46 @@ export async function credentialEnv({ harness, credential, inputs, env = process
     return { env: out, basis: inputs.copilotGithubToken ? "copilot_github_token (step-scoped)" : "COPILOT_GITHUB_TOKEN" };
   }
   throw new Error(`unknown harness ${harness}`);
+}
+
+/** The Vercel AI Gateway's Codex endpoint (its `/codex/v1/models` answers in the shape Codex reads at start). */
+export const GATEWAY_CODEX_URL = "https://ai-gateway.vercel.sh/codex/v1";
+
+/**
+ * The gateway session id for one Objective's Running stint (`since`: when it last became Running), so every pass and
+ * every resume of the stint sends the same `x-session-id` and the gateway keeps it on the provider credential that
+ * wrote the thread. Opaque (a hash: the gateway asks for no personal data in it); a stage that cannot read the stint
+ * gets one of its own.
+ */
+export function gatewaySession({ repo = null, issue = null, since = null }) {
+  const t = Date.parse(since ?? "");
+  const stint = repo && issue && Number.isFinite(t) ? `${repo}#${issue}@${t}` : `stage-${randomUUID()}`;
+  return `factory-${createHash("sha256").update(stint).digest("hex").slice(0, 32)}`;
+}
+
+/** The gateway route of a Codex child whose env carries the gateway key ({session}), else null. */
+export const codexGatewayOf = (harness, env = {}) => (harness === "codex" && env[CODEX_GATEWAY_ENV] ? { session: env.FACTORY_GATEWAY_SESSION || null } : null);
+
+/** A model id as the gateway names it: `openai/<id>`, unless it already has a provider prefix. */
+export const gatewayModel = (model) => (String(model).includes("/") ? String(model) : `openai/${model}`);
+
+/**
+ * Codex's flags for the Vercel AI Gateway (vercel.com/docs/ai-gateway/coding-agents/openai-codex; keys checked against
+ * the Codex config reference and codex-cli 0.167.0): a `vercel` provider on the gateway's Codex endpoint, its key from
+ * FACTORY_CODEX_GATEWAY_KEY, the Responses wire API, and the stint's session id as `x-session-id` from
+ * FACTORY_GATEWAY_SESSION (session affinity: the pin names the provider credential, so a resume's encrypted reasoning
+ * goes back to the account that wrote it).
+ */
+export function codexGatewayArgs({ session = null } = {}) {
+  const p = "model_providers.vercel";
+  return [
+    'model_provider="vercel"',
+    `${p}.name="Vercel AI Gateway"`,
+    `${p}.base_url=${JSON.stringify(GATEWAY_CODEX_URL)}`,
+    `${p}.env_key=${JSON.stringify(CODEX_GATEWAY_ENV)}`,
+    `${p}.wire_api="responses"`,
+    ...(session ? [`${p}.env_http_headers={ "x-session-id" = "FACTORY_GATEWAY_SESSION" }`] : []),
+  ].flatMap((c) => ["-c", c]);
 }
 
 /**
@@ -188,7 +240,7 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
  * so the prompt names the file). `usageFile` is where Copilot writes its final usage.
  */
-export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, runner = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD, shellSecrets = [] }) {
+export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction = null, local = null, runner = null, cacheTtl = null, creditUsd = COPILOT_CREDIT_USD, shellSecrets = [], gateway = null }) {
   // The credentials kept from the model's commands: every one, less the worker secrets opted in to its shell.
   const hidden = hiddenFromShell(shellSecrets);
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
@@ -231,10 +283,16 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included.
       const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
       args.push("--json", ...perms, "--skip-git-repo-check");
-      if (model && !resume) args.push("-m", model);
+      // Through the Vercel AI Gateway (`gateway`, codexGatewayOf): its provider, and the model as `openai/<id>` on a
+      // resume too, which otherwise falls back to the configured default (a bare id) and changes the thread's model
+      // (codex-cli 0.167.0 warns "recorded with model openai/... but is resuming with ...").
+      if (gateway) args.push(...codexGatewayArgs(gateway));
+      if (model && (!resume || gateway)) args.push("-m", gateway ? gatewayModel(model) : model);
       if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
       if (compaction) args.push("-c", `model_auto_compact_token_limit=${Number(compaction)}`);
-      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV } : {} };
+      // The session id travels as an extra variable, so a runner's agent uid gets it with the key (runHarness agentExtra).
+      const gw = gateway?.session ? { FACTORY_GATEWAY_SESSION: gateway.session } : {};
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV, ...gw } : gw };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
@@ -351,7 +409,22 @@ async function runnerClear(runner, env) {
 }
 const SERVICES_SAID = new Set();
 
-export async function runHarness({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
+/**
+ * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
+ * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
+ * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
+ * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
+ * stands and the stage Blocks with it.
+ */
+export async function runHarness(opts) {
+  const rec = await runOnce(opts);
+  if (!opts.resume || !rec.pinRotated || typeof opts.freshPrompt !== "string" || !opts.freshPrompt) return rec;
+  log(`${opts.label || "run"}: the provider refused to resume ${opts.resume.slice(0, 8)} (${rec.refusal ? refusalFields(rec.refusal) : "rotated credential"}): its thread was written through another credential; running a fresh thread once`);
+  const fresh = await runOnce({ ...opts, resume: null, prompt: opts.freshPrompt });
+  return { ...fresh, resumeRefused: { session: opts.resume, ...(rec.refusal ? { status: rec.refusal.status, type: rec.refusal.type, code: rec.refusal.code } : {}) } };
+}
+
+async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
   // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own.
   const { shell, env } = takeShellSecrets(given);
   const shellSecrets = Object.keys(shell);
@@ -381,7 +454,7 @@ export async function runHarness({ harness, model, prompt, maxUsd, resume, agent
     log(`${label}: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap; not starting the run`);
     return { ...parseUsage(harness, "", model || null, 0, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
-  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets });
+  const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets, gateway: codexGatewayOf(harness, env) });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {

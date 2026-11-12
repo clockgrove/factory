@@ -804,7 +804,7 @@ exec ${JSON.stringify(realGit)} "$@"
 /** The hosts each harness CLI itself reaches for its model, sign-in and token refresh, beside the commands' LOCAL_DOMAINS. */
 export const HARNESS_API_DOMAINS = {
   claude: ["api.anthropic.com", "statsig.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"],
-  codex: ["api.openai.com", "chatgpt.com", "auth.openai.com"],
+  codex: ["api.openai.com", "chatgpt.com", "auth.openai.com", "ai-gateway.vercel.sh"],
   copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com", "telemetry.individual.githubcopilot.com"],
 };
 

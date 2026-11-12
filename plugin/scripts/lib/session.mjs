@@ -589,6 +589,12 @@ const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
  * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. A
  * provider's refusal (usage.mjs providerRefusal) is no death: the harness answered, and the same request is refused again.
  */
+/**
+ * Whether the review's answer pass, resumed and dead, runs once more fresh: not after runHarness already ran it fresh for
+ * a refused resume (`resumeRefused`), so an answer pass runs at most twice.
+ */
+export const answerFreshAfter = (resumed, rec) => !!resumed && !rec.resumeRefused && crashed(rec);
+
 export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
 
 /**
@@ -627,7 +633,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     const resume = session?.canResume ? session.id : null;
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
     const exitBefore = io?.files?.()?.["exit.json"];
-    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
+    const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, freshPrompt: `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
     live.finish();
     if (io) await io.collect();
     usage.push(rec);
@@ -982,8 +988,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     ].join("\n");
     const resume = session.canResume ? session.id : null;
     const prompt = resume ? fix : `${taskCard}\n\n---\n\n${fix}`;
+    const freshPrompt = `${taskCard}\n\n---\n\n${fix}`;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage: `${label}-fix-${passes}`, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
-    const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine, onResume: live.onResume });
+    const rec = await runHarness({ harness, model, effort, prompt, freshPrompt, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: `${label}-fix-${passes}`, onLine: live.onLine, onResume: live.onResume });
     live.finish();
     if (io) await io.collect();
     usage.push(rec);

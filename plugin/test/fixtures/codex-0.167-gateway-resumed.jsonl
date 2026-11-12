@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000002"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"This session was recorded with model `openai/gpt-6.1-sol` but is resuming with `gpt-6.1-sol`. Consider switching back to `openai/gpt-6.1-sol` as it may affect Codex performance."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run `pwd`."}}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc pwd","aggregated_output":"/tmp/tmp.0000000000\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"/tmp/tmp.0000000000"}}
+{"type":"turn.completed","usage":{"input_tokens":43800,"cached_input_tokens":32637,"cache_write_input_tokens":11151,"output_tokens":122,"reasoning_output_tokens":0}}

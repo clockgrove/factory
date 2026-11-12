@@ -782,7 +782,7 @@ export function costByPhase(records) {
  * reported, so the line shows the pass's own share (as runHarness counts it).
  */
 export function harnessActivity(now = () => Date.now()) {
-  const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0 }, usd: null, ended: false, lastText: "" };
+  const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0, written: 0 }, usd: null, ended: false, lastText: "" };
   // Each resumed session's prior total; for Codex, the one the current pass's first turn.completed is counted from.
   const priors = new Map();
   let base = null;
@@ -811,6 +811,7 @@ export function harnessActivity(now = () => Date.now()) {
       if (u) {
         s.tokens.input += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
         s.tokens.output += u.output_tokens || 0;
+        s.tokens.written += u.cache_creation_input_tokens || 0;
       }
     } else if (e.type === "system" && e.subtype === "task_started" && e.task_id) {
       s.subagents.set(e.task_id, { description: brief(e.description), type: e.subagent_type || e.task_type || "agent", kind: e.task_type === "local_bash" ? "command" : "agent", startedAt: now(), done: false });
@@ -827,12 +828,13 @@ export function harnessActivity(now = () => Date.now()) {
       const prior = priors.get(e.session_id)?.usd;
       if (typeof e.total_cost_usd === "number") s.usd = typeof prior === "number" && e.total_cost_usd >= prior ? e.total_cost_usd - prior : e.total_cost_usd;
     }
-    // Codex: input_tokens already includes the cached part and output_tokens the reasoning part.
+    // Codex: input_tokens already includes the cached and written parts and output_tokens the reasoning part.
     else if (e.type === "thread.started") base = priors.get(e.thread_id) ?? null;
     else if (e.type === "turn.started") s.turns += 1;
     else if (e.type === "turn.completed" && e.usage) {
       s.tokens.input += Math.max(0, (e.usage.input_tokens || 0) - (base?.input ?? 0));
       s.tokens.output += Math.max(0, (e.usage.output_tokens || 0) - (base?.output ?? 0));
+      s.tokens.written += Math.max(0, (e.usage.cache_write_input_tokens || 0) - (base?.written ?? 0));
       base = null;
     } else if (e.type === "item.started" && e.item) {
       s.toolCalls += 1;
@@ -848,7 +850,7 @@ export function harnessActivity(now = () => Date.now()) {
     return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended };
   };
   const since = (thread, prior) => {
-    if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, usd: prior.usd ?? null });
+    if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
   };
   return { feed, snapshot, since };
 }

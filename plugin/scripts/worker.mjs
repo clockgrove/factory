@@ -16,9 +16,10 @@ import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
+import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -299,7 +300,9 @@ async function main() {
   }
 
   // 5. The prompt, the hand-off and the harness.
-  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+  // Codex through the AI Gateway: one session id for the Objective's Running stint, so its resumes keep their credential.
+  const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
+  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   credentialBasis = cred.basis;
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch });
@@ -352,6 +355,11 @@ async function main() {
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
   await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  const unpriced = unpricedCodex(inputs.harness, inputs.model, { gateway: !!inputs.codexGatewayKey });
+  if (unpriced) {
+    log(`warning: ${unpriced}`);
+    await progress(`unpriced: ${unpriced}`);
+  }
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;
@@ -392,6 +400,8 @@ async function main() {
       model: inputs.model,
       effort: inputs.effort,
       prompt: attempt === 1 && restored?.id ? conflictPrompt.split("\n\n---\n\n").at(-1) : full ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
+      // A resume the provider refuses for a rotated credential runs fresh with the whole card (harness.mjs runHarness).
+      freshPrompt: (attempt === 1 && restored?.id) || rebaseConflict ? conflictPrompt : prompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
       cwd: checkout,
@@ -404,6 +414,11 @@ async function main() {
     live.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
+    // The restored session ran fresh instead (harness.mjs runHarness: the provider refused it for a rotated credential).
+    if (rec.resumeRefused && attempt === 1 && restored?.id) {
+      restored = { ...restored, id: null, reason: "resume refused by the provider (another credential)" };
+      reentry = { resumed: false, from: restored.from ?? null, reason: restored.reason };
+    }
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported
     // no priced credits leaves the cap unenforceable, so nothing more runs.
     if (inputs.maxUsd > 0 && sumSpend(records) >= inputs.maxUsd) rec.budgetExceeded = true;
@@ -454,7 +469,7 @@ async function main() {
     const catchPrompt = conflictPassPrompt({ prompt, branch, defaultBranch, cause: `because ${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run` });
     const resume = session.canResume ? session.id : null;
     const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: () => io.tick() });
-    const pass = await runHarness({ onLine: live.onLine, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
+    const pass = await runHarness({ onLine: live.onLine, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, freshPrompt: catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
     live.finish();
     records.push(pass);
     if (pass.sessionId) session.id = pass.sessionId;

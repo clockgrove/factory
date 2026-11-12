@@ -65,6 +65,7 @@ export const DEFAULTS = {
   anthropic_oidc_exchange_url: "",
   claude_code_oauth_token: "",
   codex_api_key: "",
+  codex_gateway_key: "", // Codex through the Vercel AI Gateway (harness.mjs credentialEnv); wins over codex_api_key when set
   copilot_github_token: "",
   ai_gateway_api_key: "", // red-check triage (triage.mjs) and the drift advisory (drift.mjs); empty turns both off
   worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
@@ -84,11 +85,16 @@ export const DEFAULTS = {
   sweep_max_destroys: "5",
 };
 
-export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
+export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];
+/**
+ * The env name Codex reads its AI Gateway key from (its provider's `env_key`): the `codex_gateway_key` input's own
+ * workflow-level name, and the repository secret's. Never AI_GATEWAY_API_KEY, which is Factory's own (FACTORY_SECRET_KEYS).
+ */
+export const CODEX_GATEWAY_ENV = "FACTORY_CODEX_GATEWAY_KEY";
 /** Keys that must never reach a child that is not the harness (validation commands, git hooks). */
-export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
+export const MODEL_SECRET_KEYS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", CODEX_GATEWAY_ENV, "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN"];
 /** Runner credentials a child could turn into a model or App credential; the harness gets its own credential instead. */
 export const RUNNER_SECRET_KEYS = ["ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_RUNTIME_TOKEN", "FACTORY_APP_TOKEN", "FACTORY_APP_PRIVATE_KEY", "FACTORY_APP_ID", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN"];
 /** GitHub tokens a child must never get from the job: the job's own, gh's, and Factory's write token. */
@@ -189,6 +195,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     anthropicOidcExchangeUrl: get("anthropic_oidc_exchange_url"),
     claudeCodeOauthToken: get("claude_code_oauth_token"),
     codexApiKey: get("codex_api_key"),
+    codexGatewayKey: get("codex_gateway_key"),
     copilotGithubToken: get("copilot_github_token"),
     aiGatewayApiKey: get("ai_gateway_api_key"),
     // The secrets the worker's shell gets (lib/worker-secrets.mjs): the opt-in, and their values where a runner has them.

@@ -15,7 +15,7 @@
 //   refuses the start.
 // - Its commands get the agent's own HOME and TMPDIR back through CLAUDE_ENV_FILE, which Claude Code sources inside the
 //   sandbox before each command, so package caches and the agent's read-only gh login work as before.
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
@@ -205,10 +205,21 @@ export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
  * (a link higher up the path) refuses the start (code `roots`), naming the path under the home.
  */
 export async function realRoots({ fix = [], check = [] }, home, env = process.env, { run = exec } = {}) {
-  const r = await run("/bin/sh", ["-c", 'home=$1; shift; base=$(realpath -e -- "$home") || exit 4; fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; case "$c" in "$home"/*) rest=${c#"$home"}; want=$base$rest ;; *) want=$c ;; esac; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$want" ]; then printf "%s\t%s\t%s\t%s\t%s\n" "$c" "$want" "$r" "$home" "$base"; exit 3; fi; done', "sh", home, ...fix, "--", ...check], { cwd: home, env });
+  // Where each root must resolve: its place under the home as the system resolves it (the runner can resolve the home's
+  // own path, which needs no access inside it). Computed here, so the script needs no `${...}`: systemd-run expands that
+  // form in a unit's arguments itself, before the shell sees it.
+  let base = home;
+  try {
+    base = realpathSync(home);
+  } catch {
+    // unresolvable here: the agent's check below compares with the home as given
+  }
+  const want = (c) => (c.startsWith(`${home}/`) ? base + c.slice(home.length) : c);
+  const triples = [...fix.map((c) => ["fix", c, want(c)]), ...check.map((c) => ["check", c, want(c)])].flat();
+  const r = await run("/bin/sh", ["-c", 'while [ "$#" -ge 3 ]; do mode=$1; c=$2; want=$3; shift 3; if [ "$mode" = fix ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$want" ]; then printf "%s\t%s\t%s\n" "$c" "$want" "$r"; exit 3; fi; done', "sh", ...triples], { cwd: home, env });
   if (r.code === 3) {
-    const [path, want, got, h, b] = String(r.stdout).trim().split("\t");
-    throw new GitRefusal("roots", `${path} is not a real directory of its own (a link on its path): it resolves to ${got || "nothing"}, not ${want} (home ${h}, resolved ${b})`, { path: path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : null });
+    const [path, wanted, got] = String(r.stdout).trim().split("\t");
+    throw new GitRefusal("roots", `${path} is not a real directory of its own (a link on its path): it resolves to ${got || "nothing"}, not ${wanted}`, { path: path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : null });
   }
   if (r.code !== 0) throw new GitRefusal("roots", `the sandbox's writable directories could not be checked: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}`}`);
 }

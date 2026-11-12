@@ -115,12 +115,13 @@ export const CONFINEMENT_PROBE = [
 /**
  * How the probe is launched, as the agent outside the sandbox: a decoy `sleep` holding the marker (its environment is
  * this shell's) is started first and checked to hold it, so the probe's decoy rule cannot pass because the decoy is
- * not there; then `codex "$@" <decoy pid>`, and the decoy is stopped. Exit 5: the decoy did not come up.
+ * not there; then `codex "$@" <decoy pid>`, and the decoy is stopped. Exit 5: the decoy did not come up. Neither this
+ * nor the probe holds a `${...}`: systemd-run expands that form in a unit's arguments before the shell sees them.
  */
 export const DECOY_LAUNCH = [
   "sleep 300 & d=$!",
   "i=0",
-  `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=\${${PROBE_MARKER}:-x}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
+  `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
   'codex "$@" "$d"; r=$?',
   'kill "$d" 2>/dev/null',
   'exit "$r"',

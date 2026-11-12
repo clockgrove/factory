@@ -271,3 +271,8 @@ test("doctor: Codex in a job needs bwrap, AppArmor on a self-hosted runner, and 
   assert.deepEqual(await claudeSandboxChecks({ inputs: codex, env: hosted, local: true, has: async () => false }), [], "local mode checks its own sandboxes");
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: codex, env: hosted, local: false, has: async () => true, start: async () => null })), ["codex sandbox: bwrap:PASS"], "before the agent exists, no start check");
 });
+
+test("no script the agent runs through a unit holds a ${...}: systemd-run expands that form in a unit's arguments itself", () => {
+  for (const [name, script] of Object.entries({ CONFINEMENT_PROBE, DECOY_LAUNCH })) assert.ok(!script.includes("${"), name);
+  assert.match(DECOY_LAUNCH, /grep -qxF "FACTORY_PROBE_MARKER=\$FACTORY_PROBE_MARKER"/);
+});

@@ -229,6 +229,8 @@ export function gitDirChanged(clone, id, pinFile = null) {
 }
 /** The Blocked reason a stage posts when the clone's .git is not the one Factory cloned: fixed text, no local path. */
 export const gitIdentityReason = (issue) => `local mode: the clone's .git is not the directory Factory cloned (git-identity); remove .factory/${issue} in the local clone to start the Objective afresh`;
+/** The rule Copilot's runner probe names when a command does not find or run the stage's toolchain (copilot-runner.mjs probeDriver). */
+export const TOOLCHAIN_RULE = "the stage's toolchain does not run in a command";
 /**
  * The Blocked reason for a harness start Factory refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
@@ -243,7 +245,9 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
       : code === "sandbox"
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
-          : rule
+          : rule === TOOLCHAIN_RULE
+            ? `Copilot's sandbox started but its commands do not find or cannot run the stage's toolchain (node on the stage's PATH, and the npm beside it) (sandbox); the harness was not started. The work job's log names the node`
+            : rule
             ? `${harness === "copilot" ? "Copilot" : "Codex"}'s sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
             : local
               ? "Copilot's sandbox could not start in local mode (sandbox); the harness was not started, so no command ran unsandboxed. The stage log on the local machine has the probe's output"

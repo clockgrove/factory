@@ -1,14 +1,14 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { COPILOT_PROBE_SCRIPT, SHELL_SECRET_KEYS, copilotLocalCheck, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { dropSessions, holdSession } from "../scripts/lib/claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
-import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
+import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_CHECK, TOOLCHAIN_RULE, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState, stageNode, toolchainDirs } from "../scripts/lib/copilot-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, copilotPrivateTmp, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
@@ -300,4 +300,71 @@ test("Copilot's allowedHosts take host names only: a host:port or IP entry, whic
   assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh" }, local: true }), []);
   assert.deepEqual(localDomainChecks({ inputs: { harness: "claude" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: true }), [], "only Copilot drops them");
   assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: false }), [], "the runner routes have allowed_domains' own check");
+});
+
+test("Copilot's commands get the stage's toolchain (#105): each PATH directory its sandbox does not bind, as its install prefix, read-only", async () => {
+  const layout = copilotRunnerLayout(AGENT, COPILOT_RUNNER_HOME);
+  const actions = ["/opt/hostedtoolcache/node/22.23.4/x64/bin", "/home/factory-agent/.local/bin", "/opt/pipx_bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/games", "/snap/bin", `${COPILOT_RUNNER_HOME}/bin`, "/tmp/bin", "/home/bin", "/run/x/bin", "/opt/hostedtoolcache/node/22.23.4/x64/lib", "/bin2", "/", "rel/bin"].join(":");
+  assert.deepEqual(toolchainDirs(layout, actions), ["/opt/hostedtoolcache/node/22.23.4/x64", "/opt/pipx_bin", "/usr/local", "/usr/games", "/snap", "/bin2"], "npm's prefix, not only its bin; nothing the sandbox binds itself; never the agent's home, Factory's, Copilot's TMPDIR, /run or a directory above one");
+  // Factory's own directories on the route are never toolchain, nor anything under them.
+  const route = { HOME: "/home/runner", RUNNER_TEMP: "/home/runner/work/_temp", GITHUB_WORKSPACE: "/home/runner/work/r/r", FACTORY_USAGE_DIR: "/u/usage", TMPDIR: "/f/tmp" };
+  assert.deepEqual(toolchainDirs(layout, "/home/runner/work/_temp/x/bin:/home/runner/work/r/r/node_modules/.bin:/u/usage/bin:/f/tmp/t/bin:/u/bin:/opt/t/bin", route), ["/opt/t"], "Factory's home, temp, workspace and usage directories stay out");
+  // As the agent: a directory it cannot reach, one it owns or can write (it could swap it for a link before bubblewrap
+  // binds it), one under a link it could swap, and a link into its home are left out.
+  const { root, runner } = fakeRunner();
+  const tc = join(root, "tc", "node", "x64");
+  for (const d of [join(tc, "bin"), join(root, "locked", "bin"), join(runner.agentHome, "own", "bin")]) mkdirSync(d, { recursive: true });
+  symlinkSync(join(runner.agentHome, "own"), join(root, "linked"));
+  symlinkSync("/usr/local", join(root, "swappable"));
+  for (const n of ["node", "npm"]) writeFileSync(join(tc, "bin", n), "#!/bin/sh\n", { mode: 0o755 });
+  chmodSync(join(root, "locked"), 0);
+  // /usr/local where it is root's all the way up (a runner's, a cloud VM's): the toolchain an agent cannot change.
+  const system = ["/usr/local", "/usr", "/"].every((d) => statSync(d, { throwIfNoEntry: false })?.uid === 0) && process.getuid() !== 0;
+  const path = [join(tc, "bin"), join(root, "locked", "bin"), join(root, "linked", "bin"), join(root, "swappable", "bin"), "/usr/local/bin", "/usr/bin"].join(":");
+  try {
+    await resetCopilotState(runner, { PATH: path, HOME: "/nonexistent-factory-home" });
+    const agentSays = execFileSync("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", tc, join(root, "locked"), join(root, "swappable"), "/tmp", "/usr/local"], { encoding: "utf8", env: { PATH: process.env.PATH } });
+    if (process.getuid() !== 0) assert.deepEqual(agentSays.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]), system ? ["/usr/local"] : [], "not the agent's own, not one it cannot reach, not under a link it could swap, not a directory it can write (/tmp)");
+  } finally {
+    chmodSync(join(root, "locked"), 0o755);
+  }
+  if (process.getuid() !== 0) assert.deepEqual(runner.toolchain, system ? ["/usr/local"] : [], "only a toolchain the agent can reach and cannot change");
+  const fs = JSON.parse(readFileSync(join(runner.copilotHome, "settings.json"), "utf8")).sandbox.userPolicy.filesystem;
+  if (system) assert.ok(fs.readonlyPaths.includes("/usr/local") && !fs.readwritePaths.includes("/usr/local"), "read-only in its commands' sandbox");
+  assert.ok(!fs.readonlyPaths.includes(tc), "never a directory the agent owns");
+  assert.deepEqual(stageNode(runner, path), { node: join(tc, "bin", "node"), npm: join(tc, "bin", "npm") });
+  assert.equal(stageNode(runner, "/nowhere"), null, "no node on the PATH: nothing to prove");
+});
+
+test("Copilot's probe proves the stage's toolchain runs in a command; a toolchain that does not Blocks before the run (#105)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cpt-"));
+  const [tmp, bin] = [join(root, "t"), join(root, "bin")];
+  mkdirSync(tmp);
+  mkdirSync(bin);
+  const node = join(bin, "node");
+  writeFileSync(node, "#!/bin/sh\necho v0\n", { mode: 0o755 });
+  writeFileSync(join(bin, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const drive = (toolchain) => {
+    const driver = probeDriver({ gitConfig: "", host: "", marker: "m7", toolchain, copilotTmp: join(root, "no-copilot-tmp") });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
+    return readFileSync(join(tmp, PROBE_RESULT), "utf8");
+  };
+  // Unconfined here, so a toolchain that runs goes on to the confinement probe, which names the marker.
+  assert.equal(drive({ node, npm: "" }), "4\nthe credential stand-in is readable in a process environment\n", "the stage's node found and run: the rule passes");
+  assert.equal(drive({ node, npm: join(bin, "npm") }), `4\n${TOOLCHAIN_RULE}\n`, "npm beside it must run too");
+  assert.equal(drive({ node: "/opt/hostedtoolcache/node/22/x64/bin/node", npm: "" }), `4\n${TOOLCHAIN_RULE}\n`, "another node on the command's PATH is not the stage's");
+  assert.ok(!probeDriver({ gitConfig: "", host: "", marker: "m" }).includes("command -v node"), "no node on the stage's PATH: no rule");
+  // The pre-start check hands the probe the stage's node and Blocks with the rule.
+  const { runner } = fakeRunner();
+  const model = async () => ({ env: { COPILOT_OFFLINE: "true" }, close: async () => {} });
+  let seen = null;
+  const leaving = (result) => async (cmd, args, opts) => {
+    seen = opts.env.FACTORY_COPILOT_PROBE;
+    writeFileSync(join(runner.agentTmp, PROBE_RESULT), result);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await copilotSandboxCheck(runner, { PATH: `${bin}:/usr/bin` }, { run: leaving(`0\n${PROBE_PASS}\n`), model });
+  assert.ok(seen.includes(`!= '${node}'`) && seen.includes("npm --version"));
+  await assert.rejects(copilotSandboxCheck(runner, { PATH: `${bin}:/usr/bin` }, { run: leaving(`4\n${TOOLCHAIN_RULE}\n`), model }), (e) => e instanceof GitRefusal && e.rule === TOOLCHAIN_RULE && e.message.includes(node));
+  assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "copilot" }), /do not find or cannot run the stage's toolchain/);
 });

@@ -707,10 +707,10 @@ const tq = JSON.stringify;
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
 export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
-  // /proc: each command runs in a PID namespace of its own, so /proc shows only the sandbox's own processes. Locally the
-  // profile denies it as well. On a runner it does not (`denyProc` false): under a systemd unit that deny holds, and
-  // takes /dev/fd with it (bash's process substitution, /dev/stdin), while the PID namespace already keeps every process
-  // outside the sandbox out of sight, which the runner's confinement probe checks before every start (codex-runner.mjs).
+  // /proc: no command reads a process outside Codex's sandbox (a PID namespace of its own where bubblewrap can mount one;
+  // under a systemd unit the kernel refuses the read). Locally the profile denies /proc as well. On a runner it does not
+  // (`denyProc` false): under a systemd unit that deny holds and takes /dev/fd with it (bash's process substitution,
+  // /dev/stdin); the runner's confinement probe checks that no environment outside is readable (codex-runner.mjs).
   const deny = [...secrets.map((p) => `${tq(p)}="deny"`), ...(denyProc ? [`${tq("/proc")}="deny"`] : [])];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
   // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes

@@ -6,7 +6,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RELAYED_NAME, RELAY_PING, addKeySpend, costOf, keyCutter, openRelay, routeOf, tokenMatches } from "../scripts/lib/gateway-relay.mjs";
+import { EDITS_MAX_BYTES, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, keyCutter, openRelay, routeOf, tokenMatches } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, writeUsage } from "../scripts/lib/session.mjs";
@@ -737,7 +737,7 @@ test("image edits (#129): the recorded multipart and JSON requests pass byte for
   assert.equal(routeOf("GET", "/v1/credits"), null, "/v1/credits stays refused");
 });
 
-test("image edits (#129): 32 MB at most, refused before waiting when declared; a call waiting its turn keeps no body deadline, a stalled body is dropped and frees the turn", async () => {
+test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), refused before waiting when declared; a call waiting its turn keeps no body deadline, a stalled body is dropped and frees the turn", async () => {
   const EDITS = "/v1/images/edits";
   const F = JSON.parse(readFileSync(new URL("./fixtures/image-edits-requests.json", import.meta.url), "utf8"));
   const m = F.requests.fetchMultipart;
@@ -753,7 +753,7 @@ test("image edits (#129): 32 MB at most, refused before waiting when declared; a
     relay.beginPass(100);
     // Declared over the cap: 413 at once, nothing read or sent.
     const declared = await new Promise((resolve, reject) => {
-      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": 32 * 1024 * 1024 + 1 } }, (res) => {
+      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": EDITS_MAX_BYTES + 1 } }, (res) => {
         resolve(res.statusCode);
         req.destroy();
       });
@@ -762,9 +762,13 @@ test("image edits (#129): 32 MB at most, refused before waiting when declared; a
       setTimeout(() => reject(new Error("no answer before the body")), 2000).unref();
     });
     assert.equal(declared, 413);
-    // Sent chunked, with no length: refused once it passes 32 MB.
-    assert.equal((await send(relay.socketPath, { path: EDITS, headers: { ...auth, "transfer-encoding": "chunked" }, body: big(32 * 1024 * 1024) })).status, 413);
+    // Sent chunked, with no length: refused once it passes the cap.
+    assert.equal((await send(relay.socketPath, { path: EDITS, headers: { ...auth, "transfer-encoding": "chunked" }, body: big(EDITS_MAX_BYTES) })).status, 413);
     assert.equal(gw.seen.length, 0, "neither reached the gateway");
+    // A real turnaround's size (four base64 photo references, 38.5 MiB) passes whole.
+    const turnaround = big(Math.ceil(38.5 * 1024 * 1024));
+    assert.equal((await send(relay.socketPath, { path: EDITS, headers: auth, body: turnaround })).status, 200);
+    assert.ok(gw.seen.at(-1).raw.equals(turnaround), "the turnaround-sized body arrived whole");
     // Two edits at once under the cap: the second waits 600 ms behind the first, past its 300 ms body deadline, and passes.
     const [a, b] = await Promise.all([send(relay.socketPath, { path: EDITS, headers: auth, body: big(4 * 1024 * 1024) }), send(relay.socketPath, { path: EDITS, headers: auth, body: big(8 * 1024 * 1024) })]);
     assert.deepEqual([a.status, b.status], [200, 200], b.text);
@@ -778,7 +782,7 @@ test("image edits (#129): 32 MB at most, refused before waiting when declared; a
     assert.equal(stalled, "dropped");
     assert.equal((await send(relay.socketPath, { path: EDITS, headers: auth, body: big(10) })).status, 200, "the turn was freed");
     const pass = await relay.endPass();
-    assert.deepEqual([pass.calls, pass.unpriced], [3, 0]);
+    assert.deepEqual([pass.calls, pass.unpriced], [4, 0]);
   } finally {
     await relay.close();
     await gw.close();

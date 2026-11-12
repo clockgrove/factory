@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { GATEWAY_HOST, SHELL_SECRET_KEYS, codexRunner, codexSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { captureSession, dropSessions, holdSession, prepareFactoryHome, realRoots, runnerLaunch } from "../scripts/lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
+import { CODEX_RUNNER_HOME, CODEX_RUNNER_SESSION_ROOT, CONFINEMENT_PROBE, PROBE_MARKER, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "../scripts/lib/codex-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, codexLocalConfig, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
@@ -40,14 +40,14 @@ test("Codex on a runner: its own sandbox with local mode's profile fitted to the
   const profile = c["permissions.factory"];
   for (const root of [CLONE, AGENT.tmp, ...["/.npm", "/.cache", "/.local/share/pnpm", "/.bun", "/.yarn"].map((p) => AGENT.home + p)]) assert.ok(profile.includes(`"${root}"=true`), `${root}: a writable root`);
   assert.ok(!profile.includes(`"${AGENT.home}"=true`), "never the agent's home: its start-up files and Codex's own state stay unwritable");
-  assert.ok(profile.includes('"/proc"="deny"'));
+  assert.ok(!profile.includes('"/proc"'), "no /proc deny on a runner: the PID namespace hides every process outside the sandbox, and the probe checks it");
   assert.ok(profile.includes('".git/config"="read"') && profile.includes('".git/hooks"="read"'));
   assert.ok(profile.includes(`"${CLONE}/.codex"="read"`) && profile.includes(`"${CLONE}/.git/commondir"="read"`));
   assert.ok(profile.includes(`"${CLONE}/.git/info"="read"`), "no command renames .git/info to put an attributes file of its own there");
   assert.ok(!profile.includes(`"${CLONE}/.claude"`), "an absent path is left out: Codex's sandbox refuses one");
   assert.ok(!profile.includes(".config/gh"), "no credential store is hidden: the agent's read-only gh login is for its commands");
   assert.ok(profile.includes('"pypi.org"="allow"'));
-  assert.equal(c["shell_environment_policy.exclude"], `[${SHELL_SECRET_KEYS.map((k) => JSON.stringify(k)).join(",")}]`, "every credential the harness could hold");
+  assert.equal(c["shell_environment_policy.exclude"], `[${[...SHELL_SECRET_KEYS, PROBE_MARKER].map((k) => JSON.stringify(k)).join(",")}]`, "every credential the harness could hold, and the probe's stand-in for one");
   assert.equal(c["shell_environment_policy.set"], `{HOME=${JSON.stringify(AGENT.home)},TMPDIR=${JSON.stringify(AGENT.tmp)}}`, "its commands get the agent's HOME and TMPDIR back");
   assert.equal(c.projects, `{${JSON.stringify(CLONE)}={trust_level="untrusted"}}`);
   assert.equal(env.CODEX_HOME, `${AGENT.home}/.factory-codex/home`);
@@ -162,6 +162,9 @@ test("the confinement probe: the agent's home and .git/config refuse a write, th
   assert.equal(readFileSync(git, "utf8"), "x", "the probe writes nothing into a writable file");
   assert.deepEqual(run(ro, "", ro), { code: 4, out: "the agent temp directory is not writable\n" });
   assert.equal(run(ro, "", agent.tmp).code, 0);
+  // The marker check: here (no sandbox, no PID namespace) the parent's environment shows it.
+  const marked = execFileSync("/bin/sh", ["-c", `${PROBE_MARKER}=m42 /bin/sh -c "$1" sh ${ro} "" ${agent.tmp} "" m42 || echo "exit $?"`, "sh", CONFINEMENT_PROBE], { encoding: "utf8" });
+  assert.equal(marked, "the credential stand-in is readable in a process environment\nexit 4\n");
   assert.equal(offListHost(["github.com"]), "example.com");
   assert.equal(offListHost(["example.com"]), "", "an allow-list that names it: no network rule");
 });
@@ -177,7 +180,8 @@ test("Codex's sandbox probe runs before every start: where it cannot start or do
   const call = calls[0];
   assert.equal(call[0], "/usr/bin/env");
   assert.ok(call.includes("sandbox") && call.includes(CONFINEMENT_PROBE) && call.includes(`HOME=${CODEX_RUNNER_HOME}`));
-  assert.deepEqual(call.slice(-4), [AGENT.home, `${CLONE}/.git/config`, AGENT.tmp, "example.com"]);
+  assert.deepEqual(call.slice(-5, -1), [AGENT.home, `${CLONE}/.git/config`, AGENT.tmp, "example.com"]);
+  assert.match(call.at(-1), /^[0-9a-f]{32}$/, "a fresh marker each time");
   assert.match(gitRefusalReason("sandbox", 1), /could not start.*no command ran unsandboxed.*doctor lines/);
   await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "the agent home is writable\n", stderr: "" }) }), (e) => e.code === "sandbox" && e.rule === "the agent home is writable");
   await assert.rejects(codexSandboxCheck(runner, {}, { run: reply({ code: 4, stdout: "<b>planted</b>\n", stderr: "" }) }), (e) => e.rule === "an unknown rule", "only Factory's own rule texts reach the Blocked comment");

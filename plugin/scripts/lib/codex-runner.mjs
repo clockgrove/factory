@@ -81,14 +81,21 @@ export async function presentPaths(clone, env = process.env, { run = exec } = {}
 /**
  * The confinement probe Codex's sandbox must pass before a start (harness.mjs codexSandboxCheck, doctor): run inside the
  * sandbox with the agent's home, a file that must stay read-only (or ""), a directory that must be writable and a host
- * off the allow-list (or "") as arguments. Exit 0 when it confines; exit 4 with the broken rule on stdout; anything
- * else means the sandbox did not start. `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is for `:`), so a writable file is left as it was.
+ * off the allow-list (or "") as arguments, then a random value (or ""). Codex's own process (`codex sandbox`, the
+ * harness's stand-in) is started with PROBE_MARKER set to that value in its environment, as a run's Codex holds its
+ * credential, and the profile keeps PROBE_MARKER out of commands as it keeps the credential: no process the probe can
+ * see may show it in its environment, which is what keeps the credential out of every command's reach (#87). Exit 0 when it
+ * confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start. `true >>` opens for
+ * append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is for `:`), so a
+ * writable file is left as it was.
  */
+export const PROBE_MARKER = "FACTORY_PROBE_MARKER";
 export const CONFINEMENT_PROBE = [
-  'h=$1; g=$2; t=$3; host=$4; f=".factory-sandbox-probe-$$"',
+  'h=$1; g=$2; t=$3; host=$4; m=$5; f=".factory-sandbox-probe-$$"',
   'if true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
   'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "$g is writable"; exit 4; fi',
   'if ! true > "$t/$f" 2>/dev/null; then echo "the agent temp directory is not writable"; exit 4; fi; rm -f -- "$t/$f"',
+  `if [ -n "$m" ]; then for d in /proc/[0-9]*; do if tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; then echo "the credential stand-in is readable in a process environment"; exit 4; fi; done; fi`,
   'if [ -n "$host" ] && command -v curl >/dev/null 2>&1 && curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null; then echo "$host, off the allow-list, is reachable"; exit 4; fi',
   "exit 0",
 ].join("\n");
@@ -110,8 +117,9 @@ export function codexRunnerConfig({ runner, secretEnv }) {
     home: runner.agentHome,
     secrets: [],
     exists: (p) => !!runner.present?.has(p),
-    secretEnv,
+    secretEnv: [...new Set([...secretEnv, PROBE_MARKER])],
     commandEnv: { HOME: runner.agentHome, TMPDIR: runner.agentTmp },
+    denyProc: false,
   });
 }
 

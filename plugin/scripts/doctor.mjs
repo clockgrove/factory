@@ -12,7 +12,8 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
-import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, resetCodexState } from "./lib/codex-runner.mjs";
+import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, PROBE_MARKER, resetCodexState } from "./lib/codex-runner.mjs";
+import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
@@ -900,16 +901,17 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
 
 /**
  * Codex's sandbox where the job runs, as the agent in its temp directory (on Actions the CLI is the agent's to run, never
- * the runner's), with local mode's profile around a throwaway directory, running the confinement probe the stage runs
- * before every start: the agent's home must refuse a write, its temp directory take one, and a host off the allow-list
- * be refused. {ok, reason}, or null before the agent exists.
+ * the runner's), with the runner's profile around a throwaway directory, running the confinement probe the stage runs
+ * before every start: no process may show the marker Codex's process holds, the agent's home must refuse a write, its
+ * temp directory take one, and a host off the allow-list be refused. {ok, reason}, or null before the agent exists.
  */
 async function codexSandboxStart(env = process.env) {
   const agent = agentUser();
   if (!agent) return null;
   const home = `${agent.tmp}/codex-sandbox-check`;
-  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", agent.home, "", agent.tmp, "example.com"];
-  const r = await exec("/bin/sh", ["-c", 'mkdir -p "$1" && CODEX_HOME="$1" && export CODEX_HOME && shift && exec codex "$@"', "sh", home, ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin" }, timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
+  const marker = randomBytes(16).toString("hex");
+  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [], secretEnv: [PROBE_MARKER], denyProc: false }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", agent.home, "", agent.tmp, "example.com", marker];
+  const r = await exec("/bin/sh", ["-c", 'mkdir -p "$1" && CODEX_HOME="$1" && export CODEX_HOME && shift && exec codex "$@"', "sh", home, ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin", [PROBE_MARKER]: marker }, agentExtra: [PROBE_MARKER], timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
   await exec("/bin/rm", ["-rf", "--", home], { cwd: agent.tmp }).catch(() => {});
   if (r.code === 4) return { ok: false, reason: `it starts but does not confine: ${String(r.stdout).trim().split("\n").at(-1)?.slice(0, 200)}` };
   return r.code === 0 ? { ok: true } : { ok: false, reason: String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}` };

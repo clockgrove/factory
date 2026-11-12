@@ -706,10 +706,12 @@ const tq = JSON.stringify;
  * own login stays readable to Codex itself, which runs outside the sandbox: the profile denies the login file,
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
-export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null } = {}) {
-  // /proc: each command runs in a PID namespace of its own, so /proc shows only the sandbox's own processes; the profile
-  // denies it as well (enforced where the sandbox can mount over it, as under a systemd unit).
-  const deny = [...secrets.map((p) => `${tq(p)}="deny"`), `${tq("/proc")}="deny"`];
+export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
+  // /proc: each command runs in a PID namespace of its own, so /proc shows only the sandbox's own processes. Locally the
+  // profile denies it as well. On a runner it does not (`denyProc` false): under a systemd unit that deny holds, and
+  // takes /dev/fd with it (bash's process substitution, /dev/stdin), while the PID namespace already keeps every process
+  // outside the sandbox out of sight, which the runner's confinement probe checks before every start (codex-runner.mjs).
+  const deny = [...secrets.map((p) => `${tq(p)}="deny"`), ...(denyProc ? [`${tq("/proc")}="deny"`] : [])];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
   // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes
   // them all before a harness starts (prepareClone).

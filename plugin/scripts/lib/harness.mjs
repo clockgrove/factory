@@ -2,14 +2,14 @@
 // and turn what it printed into one usage record. The CLI flags are each vendor's
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync } from "node:fs";
 import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, captureSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
-import { CONFINEMENT_PROBE, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
+import { CONFINEMENT_PROBE, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -440,16 +440,19 @@ const SERVICES_SAID = new Set();
 
 /**
  * Codex's sandbox, before every start, as the agent and launched as Codex is, with the profile its run gets (`codex
- * sandbox`, no model), running CONFINEMENT_PROBE (codex-runner.mjs): the agent's home and the checkout's .git/config must
- * refuse a write, the agent's temp directory must take one, and a host off the allow-list must be refused. Where the
+ * sandbox`, no model), running CONFINEMENT_PROBE (codex-runner.mjs): no process the probe sees may show the marker Codex's
+ * process holds in its environment (as a run's Codex holds its credential), the agent's home and the checkout's
+ * .git/config must refuse a write, the agent's temp directory must take one, and a host off the allow-list must be
+ * refused. Where the
  * sandbox cannot start (no bubblewrap, user namespaces refused) or does not confine (a Codex release that changed its
  * profile), the stage Blocks before any command runs. Codex itself would only fail each command.
  */
-const RULES = [/^the agent home is writable$/, /^the agent temp directory is not writable$/, /^\/[\w./-]+\/\.git\/config is writable$/, /^[a-z0-9.-]+, off the allow-list, is reachable$/];
+const RULES = [/^the credential stand-in is readable in a process environment$/, /^the agent home is writable$/, /^the agent temp directory is not writable$/, /^\/[\w./-]+\/\.git\/config is writable$/, /^[a-z0-9.-]+, off the allow-list, is reachable$/];
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
-  const probe = ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", runner.agentHome, join(runner.clone, ".git", "config"), runner.agentTmp, offListHost(runner.domains)];
+  const marker = randomBytes(16).toString("hex");
+  const probe = ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/sh", "-c", CONFINEMENT_PROBE, "sh", runner.agentHome, join(runner.clone, ".git", "config"), runner.agentTmp, offListHost(runner.domains), marker];
   const [cmd, args] = runnerLaunch(runner, "codex", probe, env.PATH);
-  const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner) }, agentExtra: ["CODEX_HOME"], timeoutMs: 120_000 });
+  const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner), [PROBE_MARKER]: marker }, agentExtra: ["CODEX_HOME", PROBE_MARKER], timeoutMs: 120_000 });
   if (r.code === 4) {
     const said = String(r.stdout).trim().split("\n").at(-1) || "";
     throw new GitRefusal("sandbox", `Codex's sandbox does not confine: ${said.slice(0, 200)}`, { rule: RULES.some((x) => x.test(said)) ? said : "an unknown rule" });

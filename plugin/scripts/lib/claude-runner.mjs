@@ -264,14 +264,25 @@ export async function resetClaudeState(layout, env = process.env) {
   }
 }
 
+/** A session capture's bounds: its time and its archive's size. */
+export const SESSION_CAPTURE_MS = 120_000;
+export const SESSION_CAPTURE_BYTES = 512 * 1024 * 1024;
+
 /**
  * Right after a run, before anything else runs as the agent: the session's files archived (as the agent, from a pipe),
  * held for the next reset and for the end of the stage (session.mjs saveAgentTranscript). `layout.sessions` is the
  * harness's session root: Claude Code's `<project>/<id>.jsonl` and `<id>/`, Codex's `YYYY/MM/DD/rollout-<time>-<id>.jsonl`.
  */
 export async function captureSession(layout, sessionId, env = process.env) {
-  const archive = await archiveSession(layout, sessionId, env);
-  if (!archive) return null;
+  // Bounded: the harness's sandboxed commands can write parts of a session (Copilot's session-state/<id>/files), so a
+  // file that never ends (a sparse 16 TB one) must not hold the stage; such a session is not captured.
+  const { archive, why } = await archiveSessionWhy(layout, sessionId, env, { timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES });
+  // A run that left no session files has nothing to capture, and says nothing.
+  if (why === "none") return null;
+  if (!archive?.tar) {
+    log(`session ${String(sessionId).slice(0, 8)}: ${why === "truncated" ? `its files are over ${SESSION_CAPTURE_BYTES} bytes` : why === "timed out" ? "its files could not be archived in time" : "its files could not be archived"}; not captured, so the next pass starts a fresh one`);
+    return null;
+  }
   keepSession(sessionId, archive);
   return archive.files;
 }
@@ -280,18 +291,21 @@ export async function captureSession(layout, sessionId, env = process.env) {
  * A session's files archived as the agent, from a pipe: `{tar, files}`, or null when there are none (or the listing or
  * archive failed or timed out); `{truncated: true}` when the archive ran past `maxBytes`. Nothing is held.
  */
-export async function archiveSession(layout, sessionId, env = process.env, { timeoutMs, maxBytes } = {}) {
-  if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
+export const archiveSession = async (layout, sessionId, env = process.env, opts = {}) => (await archiveSessionWhy(layout, sessionId, env, opts)).archive;
+
+/** archiveSession with why there is no archive: `none` (no files), `timed out`, `failed` or `truncated`; null when there is one. */
+async function archiveSessionWhy(layout, sessionId, env = process.env, { timeoutMs, maxBytes } = {}) {
+  if (!/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return { archive: null, why: "none" };
   const root = layout.sessions;
   const listed = await exec("/bin/sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth "$3" \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId, String(layout.sessionDepth || 2)], { cwd: layout.agentHome, env, timeoutMs });
-  if (listed.timedOut) return null;
+  if (listed.timedOut) return { archive: null, why: "timed out" };
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
-  if (!files.length) return null;
-  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes } : {}) });
+  if (!files.length) return { archive: null, why: "none" };
+  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes, killPastMax: true } : {}) });
   // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
-  if (tar.truncated) return { tar: null, files, truncated: true };
-  if (tar.code !== 0 || tar.timedOut) return null;
-  return { tar: tar.stdout, files };
+  if (tar.truncated) return { archive: { tar: null, files, truncated: true }, why: "truncated" };
+  if (tar.code !== 0 || tar.timedOut) return { archive: null, why: tar.timedOut ? "timed out" : "failed" };
+  return { archive: { tar: tar.stdout, files }, why: null };
 }
 
 /** An archived session captured: held for the next reset and kept for the end of the stage's saved transcript. */
@@ -367,7 +381,8 @@ export const dropGitPins = () => GIT_PINS.clear();
  * PATH under it are never read at its start.
  */
 export function runnerLaunch(layout, cmd, args, path = process.env.PATH || "") {
-  const safe = path.split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
+  // Absolute entries only: a relative one would resolve against the working directory, the agent's checkout.
+  const safe = path.split(":").filter((d) => d.startsWith("/") && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
   return ["/usr/bin/env", [`HOME=${layout.home}`, `TMPDIR=${CLAUDE_TMPDIR}`, `PATH=${safe.join(":")}`, cmd, ...args]];
 }
 
@@ -383,7 +398,7 @@ export const CLAUDE_TMPDIR = "/tmp";
 export const runnerEnv = (layout) => ({ CLAUDE_CONFIG_DIR: layout.config, CLAUDE_CODE_TMPDIR: layout.cmdTmp, CLAUDE_ENV_FILE: layout.envFile, NODE_USE_ENV_PROXY: "1" });
 
 /**
- * Claude Code's command as the agent (proc.mjs asAgent), its unit without ProtectKernelTunables: that setting's
+ * Claude Code's (and Copilot's) command as the agent (proc.mjs asAgent), its unit without ProtectKernelTunables: that setting's
  * read-only mounts over parts of /proc keep a user namespace from mounting a fresh /proc, so bubblewrap cannot start
  * under it ("Can't mount proc on /newroot/proc"). The agent stays unprivileged with no new privileges and no
  * capabilities, so /proc/sys and /sys stay root's to write; every other command the agent runs keeps the setting.

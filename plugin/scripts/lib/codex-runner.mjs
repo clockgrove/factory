@@ -91,14 +91,16 @@ export async function presentPaths(clone, env = process.env, { run = exec } = {}
  * profile keeps PROBE_MARKER out of commands as it keeps the credential. No environment the probe can read under /proc
  * may show the marker, the decoy's above all: the decoy is readable by its uid unless the sandbox itself stops the read,
  * so a Codex release that only made its own process unreadable (non-dumpable) while loosening the sandbox fails here.
- * Exit 0 when it confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start.
+ * Exit 0 and PROBE_PASS when it confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start.
  * `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is
  * for `:`), so a writable file is left as it was. The network rule needs curl or node; with neither it fails.
  */
 export const PROBE_MARKER = "FACTORY_PROBE_MARKER";
+/** The probe's last line when every rule held: Copilot's check passes only on it (an empty script would exit 0 too). */
+export const PROBE_PASS = "factory: confined";
 export const CONFINEMENT_PROBE = [
   'h=$1; g=$2; t=$3; host=$4; m=$5; d=$6; f=".factory-sandbox-probe-$$"',
-  'if true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
+  'if [ -n "$h" ] && true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
   'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "the checkout\'s .git/config is writable"; exit 4; fi',
   'if ! true > "$t/$f" 2>/dev/null; then echo "the agent temp directory is not writable"; exit 4; fi; rm -f -- "$t/$f"',
   `seen() { tr '\\0' '\\n' < "$1/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; }`,
@@ -109,23 +111,27 @@ export const CONFINEMENT_PROBE = [
   '  elif command -v node >/dev/null 2>&1; then node -e \'fetch("https://" + process.argv[1], { signal: AbortSignal.timeout(5000) }).then(() => process.exit(0), () => process.exit(1))\' "$host" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
   '  else echo "no curl or node to check the network rule"; exit 4; fi',
   "fi",
+  `echo "${PROBE_PASS}"`,
   "exit 0",
 ].join("\n");
 
 /**
  * How the probe is launched, as the agent outside the sandbox: a decoy `sleep` holding the marker (its environment is
  * this shell's) is started first and checked to hold it, so the probe's decoy rule cannot pass because the decoy is
- * not there; then `codex "$@" <decoy pid>`, and the decoy is stopped. Exit 5: the decoy did not come up. Neither this
- * nor the probe holds a `${...}`: systemd-run expands that form in a unit's arguments before the shell sees them.
+ * not there; then the harness (`start`: Codex's `codex "$@" <decoy pid>`, copilot-runner.mjs COPILOT_DECOY_LAUNCH), and
+ * the decoy is stopped. Exit 5: the decoy did not come up. Neither this nor the probe holds a `${...}`: systemd-run
+ * expands that form in a unit's arguments before the shell sees them.
  */
-export const DECOY_LAUNCH = [
-  "sleep 300 & d=$!",
-  "i=0",
-  `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
-  'codex "$@" "$d"; r=$?',
-  'kill "$d" 2>/dev/null',
-  'exit "$r"',
-].join("\n");
+export const decoyLaunch = (start) =>
+  [
+    "sleep 300 & d=$!",
+    "i=0",
+    `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
+    `${start}; r=$?`,
+    'kill "$d" 2>/dev/null',
+    'exit "$r"',
+  ].join("\n");
+export const DECOY_LAUNCH = decoyLaunch('codex "$@" "$d"');
 
 /** A host the probe tries that the allow-list does not name (none when `domains` names it or a wildcard covers it). */
 export const offListHost = (domains = []) => (domains.some((d) => d === "example.com" || d === "*.com") ? "" : "example.com");

@@ -13,6 +13,7 @@ import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
 import { CODEX_RUNNER_HOME } from "./codex-runner.mjs";
+import { copilotRunnerLayout, prepareCopilotHome } from "./copilot-runner.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -78,6 +79,8 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
   }
   // Codex's HOME on a runner: Factory's own, empty, made afresh (lib/codex-runner.mjs).
   else if (harness === "codex" && agentUser() && backend(env).name !== "local") await prepareFactoryHome(CODEX_RUNNER_HOME, "Codex");
+  // Copilot's: Factory's own, with its bwrap and the release its binary runs, unpacked by Factory (lib/copilot-runner.mjs).
+  else if (harness === "copilot" && agentUser() && backend(env).name !== "local") await prepareCopilotHome(copilotRunnerLayout(agentUser()), { env });
   return written;
 }
 

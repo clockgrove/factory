@@ -50,7 +50,7 @@ const servicesNote = (ports = []) =>
     : "";
 
 // A runner's Codex: its sandbox has a network namespace of its own, and no relay reaches the host's loopback from it.
-const CODEX_SERVICES_NOTE = "\n\nA service the repository's setup started on this machine (a database, a server) is outside your sandbox: your commands cannot reach it, and a refused connection there is no denied host. Leave the commands that need one to Factory's validation, which runs after you exit; a failure comes back to you with its output.";
+const SERVICES_OUT_NOTE = "\n\nA service the repository's setup started on this machine (a database, a server) is outside your sandbox: your commands cannot reach it, and a refused connection there is no denied host. Leave the commands that need one to Factory's validation, which runs after you exit; a failure comes back to you with its output.";
 
 const ACTIONS = {
   name: "actions",
@@ -86,7 +86,7 @@ const ACTIONS = {
     },
     /** After an agent run, every process the agent uid left behind is killed. */
     reap: () => reapAgent(),
-    /** No harness flags: on a disposable runner the harness skips its permissions. */
+    /** No local sandbox settings: on a runner each harness's own sandbox comes from its runner (harness.mjs claudeRunner, codexRunner, copilotRunner). */
     harness: () => null,
     /** A hook the agent planted runs as the agent uid, as the harness itself does: nothing to clear. */
     beforeHarness: async () => null,
@@ -96,16 +96,13 @@ const ACTIONS = {
     /** A later stage's session comes from the usage artifact of an earlier job. */
     sessions: "artifacts",
     /**
-     * Claude Code and Codex run their commands in their own sandboxes here (harness.mjs claudeRunner, codexRunner): the
-     * same notes as local mode's, the ports of setup's services Claude Code reaches (`services`, claude-runner.mjs
-     * agentServicePorts), and for Codex that those services are out of its commands' reach.
+     * Every harness runs its commands in its own sandbox here (harness.mjs claudeRunner, codexRunner, copilotRunner):
+     * the same notes as local mode's, the ports of setup's services Claude Code reaches (`services`, claude-runner.mjs
+     * agentServicePorts), and for Codex and Copilot that those services are out of their commands' reach.
      */
-    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : harness === "codex" ? SCRATCH_NOTE + DENIED_NOTE + CODEX_SERVICES_NOTE : ""),
-    /**
-     * Claude Code's and Codex's sandboxes keep a host list here: a host one denied is allowed in the `allowed_domains`
-     * input. Copilot skips its sandbox here, so its Block keeps its own fix.
-     */
-    deniedFix: (hosts, env = process.env, harness = null) => (harness === "claude" || harness === "codex" ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
+    cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : harness === "codex" || harness === "copilot" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_OUT_NOTE : ""),
+    /** Each harness's sandbox keeps a host list here: a host one denied is allowed in the `allowed_domains` input. */
+    deniedFix: (hosts, env = process.env, harness = null) => (["claude", "codex", "copilot"].includes(harness) ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },

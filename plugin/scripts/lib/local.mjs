@@ -233,7 +233,7 @@ export const gitIdentityReason = (issue) => `local mode: the clone's .git is not
  * The Blocked reason for a harness start Factory refused (GitRefusal): fixed text per code, no local path and no command
  * output (both go to the stage log).
  */
-export const gitRefusalReason = (code, issue, { path = null, rule = null } = {}) =>
+export const gitRefusalReason = (code, issue, { path = null, rule = null, harness = "codex" } = {}) =>
   code === "git-identity"
     ? gitIdentityReason(issue)
     : code === "git-state"
@@ -244,8 +244,10 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null } = {})
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
           : rule
-            ? `Codex's sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. The work job's log has the probe's output`
-            : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
+            ? `${harness === "copilot" ? "Copilot" : "Codex"}'s sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. The work job's log has the probe's output`
+            : harness === "copilot"
+              ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
+              : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
         : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
@@ -254,12 +256,13 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null } = {})
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
 /** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear, roots or sandbox; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
-  /** `path` (checkout-relative) or `rule` (a fixed confinement rule): named in the Blocked reason (gitRefusalReason). */
-  constructor(code, detail, { path = null, rule = null } = {}) {
+  /** `path` (checkout-relative), `rule` (a fixed confinement rule) and `harness` (whose sandbox): named in the Blocked reason (gitRefusalReason). */
+  constructor(code, detail, { path = null, rule = null, harness = null } = {}) {
     super(`refusing to start the harness: ${detail}`);
     this.code = code;
     this.path = path;
     this.rule = rule;
+    this.harness = harness;
   }
 }
 /**
@@ -274,7 +277,7 @@ export function refusalExit(e, { stage, issue, env = process.env }) {
   } catch {
     // no pin to name: one key for the stage
   }
-  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
+  return { reason: gitRefusalReason(e.code, issue, { path: e.path, rule: e.rule, ...(e.harness ? { harness: e.harness } : {}) }), ...(e.code === "git-identity" ? { key: gitIdentityKey(stage, id) } : {}) };
 }
 
 /**
@@ -761,7 +764,7 @@ export const codexShellExclude = (names) => `shell_environment_policy.exclude=[$
  * limited to `domains`. Copilot reads this policy only from its home directory, so the developer's own
  * ~/.copilot is never touched.
  */
-export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], platform = osPlatform() } = {}) {
+export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], readable = [], denied = null, platform = osPlatform() } = {}) {
   return {
     sandbox: {
       enabled: true,
@@ -780,7 +783,9 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // The clone's .git as a path of its own: on Linux Copilot's sandbox binds it apart from the working directory, and a
         // mount point cannot be renamed, so no command can move .git aside and put one of its own in its place. Seatbelt
         // (macOS) has no bind mounts, so there this changes nothing and the git guard holds.
-        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly], deniedPaths: platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home) },
+        // `readable`: paths outside these that a runner's commands read (copilot-runner.mjs: the agent's read-only GitHub
+        // login); `denied`: a runner's own list (none there: that login is for its commands).
+        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home)) },
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [...new Set(domains)] },
       },
     },

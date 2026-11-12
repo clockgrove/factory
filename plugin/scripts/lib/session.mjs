@@ -60,6 +60,7 @@ import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
+import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
 import { checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
@@ -265,11 +266,11 @@ function savedEntries(root, names) {
 }
 
 /** Where each harness keeps its sessions, relative to the agent's home (the agent uid runs with its own HOME). */
-// Claude Code's and Codex's are their runner state's (lib/claude-runner.mjs, lib/codex-runner.mjs), which Factory makes
+// Each is its runner state's (lib/claude-runner.mjs, lib/codex-runner.mjs, lib/copilot-runner.mjs), which Factory makes
 // afresh before every start.
-const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: CODEX_RUNNER_SESSION_ROOT, copilot: ".copilot/session-state" };
+const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: CODEX_RUNNER_SESSION_ROOT, copilot: COPILOT_RUNNER_SESSION_ROOT };
 /** The harnesses whose runner state Factory resets before every start, putting back only the sessions it holds. */
-const HELD = new Set(["claude", "codex"]);
+const HELD = new Set(["claude", "codex", "copilot"]);
 
 /**
  * saveTranscript for the agent uid (Actions): each session's files are listed and archived by the agent, the archive
@@ -286,8 +287,8 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   const saved = [];
   for (const id of ids) {
     // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
-    // Claude Code's or Codex's session as Factory captured it right after its run (claude-runner.mjs captureSession),
-    // never what the agent's home holds by now; Copilot's is read from the agent's home.
+    // The session as Factory captured it right after its run (claude-runner.mjs captureSession), never what the agent's
+    // home holds by now.
     const held = HELD.has(harness) ? capturedSession(id) : null;
     let files = held?.files || [];
     let tar = held ? { code: 0, stdout: held.tar } : null;
@@ -373,7 +374,7 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
       // the agent's home by the agent, from a pipe; a file already there is kept.
       const tar = await exec("tar", ["-C", join(dir, "transcript"), "--null", "--no-recursion", "-T", "-", "-cf", "-"], { encoding: "buffer", input: `${savedEntries(join(dir, "transcript"), s.files).join("\0")}\0` });
-      // Claude Code's and Codex's state is made afresh before every start, which puts Factory's held copy back.
+      // The harness's state is made afresh before every start, which puts Factory's held copy back.
       if (HELD.has(harness) && tar.code === 0) {
         holdSession(s.id, tar.stdout);
         return { id: s.id, from: src.name, reason: "" };

@@ -331,9 +331,9 @@ async function main() {
   const lfs = await outbox.lfsSetup(outbox.expected(), { timeoutMs: remainingMs(deadlineAt) });
   // Factory's own git work on the checkout is done: locally its git state is recorded, and checked before each harness start.
   backend(childBase).sandbox.pinGitState(childBase);
-  // A runner's Claude Code or Codex: the same state, put back before each start (lib/claude-runner.mjs), since the
-  // repository's install and validation run as the agent outside the harness's sandbox.
-  if ((inputs.harness === "claude" || inputs.harness === "codex") && access.agent) await pinRunnerGit(checkout, childBase);
+  // A runner's harness: the same state, put back before each start (lib/claude-runner.mjs), since the repository's
+  // install and validation run as the agent outside the harness's sandbox.
+  if (access.agent) await pinRunnerGit(checkout, childBase);
   if (lfs.used) log(!lfs.ok ? lfs.reason : lfs.warning ? `warning: ${lfs.warning}; the run goes on with pointer files` : "Git LFS: filters set up in the checkout, objects handed over");
   if (!lfs.ok) {
     await dropLabel();

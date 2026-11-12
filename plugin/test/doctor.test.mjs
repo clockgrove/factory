@@ -125,18 +125,18 @@ test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"]);
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: {}, local: false, has: none }), [], "a person's machine checking an Actions repository");
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: true, has: none }), [], "local mode checks its own sandboxes");
-  assert.deepEqual(await claudeSandboxChecks({ inputs: { harness: "copilot" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none }), []);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "copilot" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["copilot sandbox: bwrap:FAIL", "copilot sandbox: slirp4netns:FAIL"], "Copilot runs its commands in its own sandbox there too");
   const rows = await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
   assert.deepEqual(rows.filter((r) => /shell credential/.test(r.name)), [], "Claude's commands no longer see its credential on any route");
 });
 
-test("doctor: Copilot off local mode warns that its commands can read the credential from /proc; Codex no longer (#87, #90)", async () => {
+test("doctor: no harness's commands can read its credential off local mode, so no shell-credential row (#87)", async () => {
   const shell = (rows) => rows.filter((r) => /shell credential/.test(r.name)).map((r) => `${r.name}:${r.status}`);
   const codex = { harness: "codex", credential: "api", codexApiKey: "k", model: "m" };
   const copilot = { harness: "copilot", credential: "api", copilotGithubToken: "" };
-  assert.deepEqual(shell(await credentialChecks({ inputs: codex, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_API_KEY: "k" }, local: false })), [], "Codex runs its commands in its own sandbox there");
-  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false })), ["copilot shell credential:WARN"]);
-  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: {}, local: true })), [], "local mode runs their commands in their own sandboxes");
+  assert.deepEqual(shell(await credentialChecks({ inputs: codex, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_API_KEY: "k" }, local: false })), []);
+  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false })), [], "Copilot runs its commands in its own sandbox there");
+  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: {}, local: true })), []);
   assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" }, local: false })), []);
 });
 

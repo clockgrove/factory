@@ -403,47 +403,115 @@ export const notStartedReason = (jobs) =>
 const UNSTARTED = ["queued", "requested", "pending"];
 /** The newest check run of `name` among `checkRuns`. */
 const latestRun = (checkRuns, name) => (checkRuns || []).filter((r) => r.name === name).sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id ?? 0) - (a.id ?? 0))[0];
-/** The check names a workflow file's jobs report: a job's literal `name`, else its id. A matrix job reports `name (…)`. */
-export function workflowChecks(text) {
+/** A template's literal parts, escaped for a RegExp. */
+const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * The check names a workflow file's jobs report, as templates (`${{ … }}` stands for any text): a job's `name`, else
+ * its id; a job that calls a reusable workflow reports `<caller> / <callee's job>`, the callee read with `readLocal`
+ * (a path in this repository at the head) and, for one in another repository, any name under the caller. Returns
+ * {checks, filters}: `filters` the `paths` or `paths-ignore` of its `pull_request` trigger, else null.
+ */
+export async function workflowChecks(text, readLocal = async () => "", depth = 0) {
+  let doc;
   try {
-    return Object.entries(parseYaml(String(text || ""))?.jobs || {}).map(([id, job]) => (typeof job?.name === "string" && !job.name.includes("${{") ? job.name : id));
+    doc = parseYaml(String(text || ""));
   } catch {
-    return [];
+    return { checks: [], filters: null };
   }
+  const checks = [];
+  for (const [id, job] of Object.entries(doc?.jobs || {})) {
+    const own = typeof job?.name === "string" ? job.name : id;
+    const uses = typeof job?.uses === "string" ? job.uses.trim() : "";
+    if (!uses) checks.push(own);
+    else if (uses.startsWith("./") && depth < 3) for (const c of (await workflowChecks(await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => ""), readLocal, depth + 1)).checks) checks.push(`${own} / ${c}`);
+    else checks.push(`${own} / \${{ callee }}`);
+  }
+  const on = doc?.on && typeof doc.on === "object" && !Array.isArray(doc.on) ? doc.on : null;
+  const pr = on?.pull_request;
+  const key = pr && typeof pr === "object" ? ["paths", "paths-ignore"].find((k) => Array.isArray(pr[k])) : null;
+  // The filter decides alone only when pull_request is the one trigger that can start the workflow on the head:
+  // another (push, pull_request_target, workflow_dispatch…) may run it anyway (`sole` false).
+  const sole = !!on && Object.keys(on).every((t) => t === "pull_request" || NOT_ON_HEAD.includes(t));
+  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null };
 }
-const reports = (check, name) => name === check || name.startsWith(`${check} (`);
+/** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
+export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
+/** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
+const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
+/**
+ * A GitHub path filter pattern as a RegExp: `**` any path, `*` within one segment. Only those: a pattern with GitHub's
+ * other operators (`?` and `+` repeat the character before, `[…]` a set) is not read here (filterSkips: unknown).
+ */
+const globRe = (p) => new RegExp(`^${p.replace(/\*\*\/?|\*|[.^${}()|\\]/g, (m) => (m.startsWith("**") ? ".*" : m === "*" ? "[^/]*" : `\\${m}`))}$`);
+const OTHER_OPERATORS = /[?+[\]]/;
+/**
+ * Whether a `pull_request` path filter skips a change that touches `files`: `paths` runs when a file matches (patterns in
+ * order, a `!` one excluding again), `paths-ignore` runs unless every file matches. Null (unknown) unless that is
+ * certain: pull_request is the workflow's only trigger on the head (`sole`), the files are read and not empty, and every
+ * pattern uses only `*`, `**` and `!`.
+ */
+export function filterSkips(filters, files) {
+  // Unknown (null), never a skip: no filter, another trigger, no changed files read, or an operator not read here.
+  if (!filters || !filters.sole || !Array.isArray(files) || !files.length || filters.patterns.some((p) => OTHER_OPERATORS.test(p.replace(/^!/, "")))) return null;
+  const match = (f) => {
+    let hit = false;
+    for (const p of filters.patterns) {
+      if (p.startsWith("!")) {
+        if (globRe(p.slice(1)).test(f)) hit = false;
+      } else if (globRe(p).test(f)) hit = true;
+    }
+    return hit;
+  };
+  return filters.ignore ? files.every(match) : !files.some(match);
+}
 
 /**
  * What checksNotStarted reads, on structure: the head's workflow runs; the Actions job of each required check run not
  * started yet (whether a runner took it); and, for a required check with no check run on the head, the workflows that
- * produce it (`producers`: name → workflow ids): a head workflow run whose file (at the head) has a job reporting that
- * name, else the workflow of that check's run on an older commit (`history()`: commit ids, newest first, read only
- * when needed), found through its check suite. `workflowRuns` null: they could not be read (`readError`).
+ * produce it (`producers`: name → workflow ids): a workflow of the repository (or one that ran on the head) whose file
+ * at the head has a job reporting that name (workflowChecks), else the workflow of that check's run on an older commit
+ * (`history()`: commit ids, newest first, read only when needed), found through its check suite. `skips`: workflow id
+ * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `workflowRuns` null: they
+ * could not be read (`readError`).
  */
-export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [] }) {
+export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null, cache = new Map() }) {
   const actions = { token: actionsToken };
   let workflowRuns;
   try {
     workflowRuns = (await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&per_page=100`, actions))?.workflow_runs || [];
   } catch (e) {
-    return { workflowRuns: null, readError: String(e?.status || "error"), jobs: new Map(), producers: new Map() };
+    return { workflowRuns: null, readError: String(e?.status || "error"), jobs: new Map(), producers: new Map(), skips: new Map() };
   }
   const jobs = new Map();
   for (const n of names) {
     const r = latestRun(checkRuns, n);
-    if (r && UNSTARTED.includes(r.status)) jobs.set(r.id, await rest(`repos/${repo.full}/actions/jobs/${r.id}`, actions).catch(() => null));
+    if (r && UNSTARTED.includes(r.status) && (!r.app || r.app === ACTIONS_APP)) jobs.set(r.id, await rest(`repos/${repo.full}/actions/jobs/${r.id}`, actions).catch(() => null));
   }
   const producers = new Map();
+  const skips = new Map();
   const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
   const missing = names.filter((n) => !latestRun(checkRuns, n));
   if (missing.length) {
-    const seen = new Set();
-    for (const w of workflowRuns) {
-      if (seen.has(w.workflow_id) || !w.path) continue;
-      seen.add(w.workflow_id);
-      const path = String(w.path).replace(/@.*$/, "");
-      const text = await rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).catch(() => "");
-      for (const check of workflowChecks(text)) for (const n of missing) if (reports(check, n)) add(n, w.workflow_id);
+    // A workflow file at the head is read once per stage (`cache`, the caller's), however often the wait is classified.
+    const read = (path) => {
+      const key = `${sha}:${path}`;
+      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => ""));
+      return cache.get(key);
+    };
+    // Every workflow of the repository, a path-filtered one that never ran on the head included, and those that ran.
+    const listed = ((await rest(`repos/${repo.full}/actions/workflows?per_page=100`, actions).catch(() => null))?.workflows || []).filter((w) => w.state === "active").map((w) => ({ id: w.id, path: w.path }));
+    const all = new Map([...listed, ...workflowRuns.map((w) => ({ id: w.workflow_id, path: w.path }))].filter((w) => w.id && w.path).map((w) => [w.id, String(w.path).replace(/@.*$/, "")]));
+    let changed;
+    for (const [id, path] of all) {
+      if (/(^|\/)factory\.ya?ml$/.test(path)) continue;
+      const { checks, filters } = await workflowChecks(await read(path), read);
+      const its = missing.filter((n) => checks.some((c) => reports(c, n)));
+      for (const n of its) add(n, id);
+      // Every producer is recorded, filtered or not: a check is filtered out only when each of them skips the change.
+      if (its.length) {
+        if (filters) changed ??= await files().catch(() => null);
+        skips.set(id, filters ? { key: filters.key, skips: filterSkips(filters, changed) } : { key: null, skips: false });
+      }
     }
     const left = missing.filter((n) => !producers.has(n));
     const older = left.length ? await history().catch(() => []) : [];
@@ -459,55 +527,77 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
       }
     }
   }
-  return { workflowRuns, readError: "", jobs, producers };
+  return { workflowRuns, readError: "", jobs, producers, skips };
 }
+
+/** GitHub Actions' own app: a check run from any other app is that service's, not Actions'. */
+const ACTIONS_APP = "github-actions";
 
 /**
  * Why a wait on the required checks ended with none failed and some not finished (awaitChecks `timedOut` with no
- * completed failing run), from checkSources's reads. Returns {githubDelay, reason, runs}. githubDelay is GitHub not
- * starting a required check, which no change can fix, each tied to that check: its check run still queued with no
- * runner (in a workflow run still going, or one that completed: #72's two shapes), or, with no check run, the workflow
- * that produces it queued on the head, or never created (as when the head has no workflow run at all). A check waiting
- * for an approval (`waiting`), still running, or that no workflow on the head produces (a wrong check name) is none of
- * GitHub's delay; a queued run of another workflow is not this check's. `now` and `waitedMin` only word the reason.
+ * completed failing run), from checkSources's reads. Returns {waits, kind, reason, runs}. `waits` (kind `not-started`):
+ * a required check not started yet, which no change can fix, each tied to that check: its check run still queued with
+ * no runner (in a workflow run still going, or one that completed: #72's two shapes), or, with no check run, the
+ * workflow that produces it queued on the head, or never created (as when the head has no workflow run at all). The
+ * reason names who has not started it: GitHub, a run `pending` behind the repository's own concurrency group, or the
+ * service whose app owns the check run. Kinds that do not wait: `running` (a check still running), `approval` (a
+ * deployment approval), `filtered` (its workflow's path filter skips this change), `unreported` (no workflow on the head
+ * produces it: a wrong check name) and `unread`. A queued run of another workflow is not this check's. `now` and
+ * `waitedMin` only word the reason.
  */
-export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), waitedMin = 0, readError = "", now = Date.now() }) {
+export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), skips = new Map(), waitedMin = 0, readError = "", now = Date.now() }) {
   const short = String(sha).slice(0, 7);
   const list = (xs) => xs.join(", ");
   const mins = (t) => (Number.isFinite(Date.parse(t)) ? Math.max(0, Math.round((now - Date.parse(t)) / 60000)) : null);
   const label = (w) => `${w.name || "workflow"} (run ${w.id})`;
+  const held = (w) => `workflow run ${label(w)} pending ${mins(w.created_at) ?? "?"} min behind its concurrency group (the repository's own workflow setting)`;
   const open = names.filter((n) => latestRun(checkRuns, n)?.status !== "completed");
-  if (!Array.isArray(workflowRuns)) return { githubDelay: false, runs: [], reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min, and its workflow runs could not be read${readError ? ` (${readError})` : ""}; no failing run to fix` };
+  if (!Array.isArray(workflowRuns)) return { waits: false, kind: "unread", runs: [], reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min, and its workflow runs could not be read${readError ? ` (${readError})` : ""}; no failing run to fix` };
   const bySuite = new Map(workflowRuns.map((w) => [w.check_suite_id, w]));
   const started = [];
   const approval = [];
   const running = [];
   const unreported = [];
+  const filtered = [];
   for (const n of open) {
     const r = latestRun(checkRuns, n);
     if (r) {
       const w = bySuite.get(r.check_suite?.id ?? r.suite) || null;
       const job = jobs.get(r.id);
       if (r.status === "waiting") approval.push(n);
+      else if (r.app && r.app !== ACTIONS_APP && UNSTARTED.includes(r.status)) started.push({ n, w: null, by: r.app, text: `${n} ${r.status} at ${r.app}, which has not started it` });
       else if (UNSTARTED.includes(r.status) && !job?.runner_id && !job?.runner_name) {
-        const how = !w ? "with no runner" : w.status === "completed" ? `after its workflow run ${label(w)} completed${mins(w.updated_at) === null ? "" : ` ${mins(w.updated_at)} min ago`}` : `with no runner in workflow run ${label(w)}`;
-        started.push({ n, w, text: `${n} queued ${how}` });
+        if (w?.status === "pending" || r.status === "pending") started.push({ n, w, by: "concurrency", text: w ? held(w) : `${n} pending behind its concurrency group (the repository's own workflow setting)` });
+        else started.push({ n, w, text: `${n} queued ${!w ? "with no runner" : w.status === "completed" ? `after its workflow run ${label(w)} completed${mins(w.updated_at) === null ? "" : ` ${mins(w.updated_at)} min ago`}` : `with no runner in workflow run ${label(w)}`}` });
       } else running.push({ n, w });
       continue;
     }
     const ids = producers.get(n);
     const mine = ids ? workflowRuns.filter((w) => ids.has(w.workflow_id)) : [];
     const queued = mine.filter((w) => UNSTARTED.includes(w.status));
-    if (queued.length) started.push({ n, w: queued[0], text: `workflow run ${label(queued[0])} queued ${mins(queued[0].created_at) ?? "?"} min with no job started` });
+    // Filtered out only when every workflow that produces it skips this change for certain; a filter that may, a hint.
+    const filters = ids ? [...ids].map((id) => skips.get(id)) : [];
+    const allSkip = filters.length > 0 && filters.every((f) => f?.skips === true);
+    const filter = allSkip ? filters[0] : filters.find((f) => f?.key && f.skips !== false) || null;
+    if (queued.length) started.push({ n, w: queued[0], ...(queued[0].status === "pending" ? { by: "concurrency", text: held(queued[0]) } : { text: `workflow run ${label(queued[0])} queued ${mins(queued[0].created_at) ?? "?"} min with no job started` }) });
     else if (mine.some((w) => w.status === "waiting")) approval.push(n);
     else if (mine.some((w) => w.status !== "completed")) running.push({ n, w: mine.find((w) => w.status !== "completed") });
-    else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min` });
+    else if (ids && !mine.length && allSkip) filtered.push({ n, key: filter.key });
+    else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min${filter ? ` (its workflow's path filter, ${filter.key}, may skip this change)` : ""}` });
     else unreported.push(n);
   }
-  if (unreported.length) return { githubDelay: false, runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
-  if (approval.length) return { githubDelay: false, runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then re-apply the label; no failing run to fix` };
-  if (started.length) return { githubDelay: true, runs: started.map((x) => x.w).filter(Boolean), reason: `GitHub has not started the required check(s) ${list(started.map((x) => x.n))} on ${short}: ${started.map((x) => x.text).join("; ")} (infrastructure, not this change)` };
-  return { githubDelay: false, runs: running.map((x) => x.w).filter(Boolean), reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min: ${list([...new Set(running.map((x) => (x.w ? label(x.w) : x.n)))])} still in progress; no failing run to fix` };
+  if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
+  if (filtered.length) return { waits: false, kind: "filtered", runs: [], reason: `required check(s) ${list(filtered.map((x) => x.n))} never run on ${short}: ${list([...new Set(filtered.map((x) => x.key))])} of ${filtered.length > 1 ? "their workflows skips" : "its workflow skips"} this change, so GitHub starts no run for it; run the check on every change, or stop requiring it; no failing run to fix` };
+  if (approval.length) return { waits: false, kind: "approval", runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then re-apply the label; no failing run to fix` };
+  if (started.length) {
+    // Who has not started them: GitHub, the service whose app owns the check, or the repository's own concurrency group.
+    const who = [...new Set(started.map((x) => x.by || "GitHub"))];
+    const checksText = `the required check(s) ${list(started.map((x) => x.n))} on ${short}`;
+    const head = who.length > 1 ? `${checksText[0].toUpperCase()}${checksText.slice(1)} have not started` : who[0] === "GitHub" ? `GitHub has not started ${checksText}` : who[0] === "concurrency" ? `The repository's concurrency group holds ${checksText}` : `${who[0]} has not started ${checksText}`;
+    const infra = who.every((x) => x === "concurrency") ? "not this change" : "infrastructure, not this change";
+    return { waits: true, kind: "not-started", runs: started.map((x) => x.w).filter(Boolean), reason: `${head}: ${started.map((x) => x.text).join("; ")} (${infra})` };
+  }
+  return { waits: false, kind: "running", runs: running.map((x) => x.w).filter(Boolean), reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min: ${list([...new Set(running.map((x) => (x.w ? label(x.w) : x.n)))])} still in progress; no failing run to fix` };
 }
 
 /**

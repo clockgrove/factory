@@ -50,6 +50,18 @@ test("claude: no result on stdout is an error record, not a crash", () => {
   assert.match(rec.error, /no JSON result/);
 });
 
+test("codex: a stream error (a dropped stream it reconnected) leaves the dollars a lower bound (#116)", () => {
+  const turn = { type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 100 } };
+  const clean = parseCodex([{ type: "thread.started", thread_id: "t1" }, turn].map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
+  assert.equal(clean.usdLowerBound, undefined, "a clean stream is exact");
+  const lines = [{ type: "thread.started", thread_id: "t1" }, { type: "error", message: "Reconnecting... 1/5 (stream disconnected before completion: idle timeout waiting for SSE)" }, turn];
+  const rec = parseCodex(lines.map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
+  assert.equal(rec.usdLowerBound, true, "the dropped attempt may be billed without reported tokens");
+  assert.equal(rec.usd, clean.usd, "the reported tokens are still priced");
+  const failed = parseCodex([{ type: "thread.started", thread_id: "t1" }, { type: "turn.failed", error: { message: "boom" } }].map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
+  assert.equal(failed.usdLowerBound, true);
+});
+
 test("codex: JSONL turn.completed usage summed and priced from the table", () => {
   const rec = parseCodex(fixture("codex-events.jsonl"), "gpt-6.1-sol");
   assert.equal(rec.ok, true);

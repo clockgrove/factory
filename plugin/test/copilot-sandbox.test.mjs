@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { COPILOT_PROBE_SCRIPT, SHELL_SECRET_KEYS, copilotLocalCheck, copilotRunner, copilotSandboxCheck, harnessCommand } from "../scripts/lib/harness.mjs";
 import { dropSessions, holdSession } from "../scripts/lib/claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, PROBE_PASS } from "../scripts/lib/codex-runner.mjs";
-import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
+import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT, COPILOT_TMP, COPILOT_TMP_LAUNCH, PROBE_PERSIST, PROBE_RESULT, bwrapShim, copilotLaunch, copilotRunnerLayout, probeDriver, probeEnv, probeModel, resetCopilotState } from "../scripts/lib/copilot-runner.mjs";
 import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, copilotPrivateTmp, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
@@ -234,6 +234,13 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   assert.ok(!existsSync(call.env.COPILOT_HOME), "removed afterwards");
   await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("4\nthe credential stand-in is readable in a process environment\n"), home }), (e) => e instanceof GitRefusal && e.rule === "the credential stand-in is readable in a process environment" && e.local);
   await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("0\n\n"), home }), (e) => e.rule === "the probe ended without its pass line" && e.local, "exit 0 alone is no pass");
+  // The driver as local mode gives it (every path under this test's own directory, never the host's /tmp/factory-copilot):
+  // without Factory's bwrap the commands' $TMPDIR is Copilot's own, denied, so the result goes to the stage's by its path
+  // and names the broken rule (here, unconfined: Copilot's TMPDIR absent, the marker in this shell's parent).
+  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp") }, "m6", "").FACTORY_COPILOT_PROBE;
+  assert.ok(!driver.includes("/tmp/factory-copilot"));
+  execFileSync("/bin/sh", ["-c", driver], { stdio: "ignore", env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(root, "denied"), FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "1", [PROBE_MARKER]: "m6" } });
+  assert.equal(readFileSync(join(tmp, PROBE_RESULT), "utf8"), "4\nthe credential stand-in is readable in a process environment\n");
   const denied = copilotLocalSettings({ clone, addDirs: [tmp], alsoDenied: [ctmp], platform: "linux" }).sandbox;
   assert.ok(JSON.stringify(denied).includes(JSON.stringify(ctmp)), "Copilot's own TMPDIR is denied to commands");
   assert.match(gitRefusalReason("sandbox", 1, { rule: "x", harness: "copilot", local: true }), /The stage log on the local machine/);

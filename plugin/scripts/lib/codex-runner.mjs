@@ -3,7 +3,11 @@
 //
 // Why: the agent uid holds the model credential in Codex's environment, and Linux lets any process of a uid read the
 // environment of every other process of that uid (/proc/<pid>/environ), Codex's own and the git processes it starts
-// with it (#87). Codex's sandbox gives each command its own PID namespace and denies /proc, so no command reaches them.
+// with it (#87). Codex's sandbox (bubblewrap and seccomp) runs each command in a user namespace of its own, without
+// CAP_SYS_PTRACE, so the kernel refuses its read of any process outside (cap_ptrace_access_check); where bubblewrap can
+// mount a fresh /proc (NAMESPACE_WRAP) the command also has its own PID namespace and sees none of them. Under the
+// systemd unit (ProtectKernelTunables) it cannot, Codex retries without one, and the host's world-readable /proc entries
+// (cmdline, status, net) stay visible. The confinement probe checks the read refusal before every start.
 //
 // The invariant, as for Claude Code: nothing the agent uid can write, inside or outside Codex's sandbox, is read or run
 // by Codex's own start-up outside the sandbox. Validation, install and setup run the repository's code as the agent
@@ -79,25 +83,48 @@ export async function presentPaths(clone, env = process.env, { run = exec } = {}
 }
 
 /**
- * The confinement probe Codex's sandbox must pass before a start (harness.mjs codexSandboxCheck, doctor): run inside the
- * sandbox with the agent's home, a file that must stay read-only (or ""), a directory that must be writable and a host
- * off the allow-list (or "") as arguments, then a random value (or ""). Codex's own process (`codex sandbox`, the
- * harness's stand-in) is started with PROBE_MARKER set to that value in its environment, as a run's Codex holds its
- * credential, and the profile keeps PROBE_MARKER out of commands as it keeps the credential: no process the probe can
- * see may show it in its environment, which is what keeps the credential out of every command's reach (#87). Exit 0 when it
- * confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start. `true >>` opens for
- * append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is for `:`), so a
- * writable file is left as it was.
+ * The confinement probe Codex's sandbox must pass before a start (harness.mjs codexSandboxCheck, doctor), run inside the
+ * sandbox by DECOY_LAUNCH with, as arguments: the agent's home, a file that must stay read-only (or ""), a directory that
+ * must be writable, a host off the allow-list (or ""), a random marker, and the pid of a decoy outside the sandbox.
+ * Codex's own process (`codex sandbox`, the harness's stand-in) and the decoy, a plain dumpable `sleep` of the agent's
+ * uid, hold PROBE_MARKER=<marker> in their environment, as a run's Codex and its git processes hold the credential; the
+ * profile keeps PROBE_MARKER out of commands as it keeps the credential. No environment the probe can read under /proc
+ * may show the marker, the decoy's above all: the decoy is readable by its uid unless the sandbox itself stops the read,
+ * so a Codex release that only made its own process unreadable (non-dumpable) while loosening the sandbox fails here.
+ * Exit 0 when it confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start.
+ * `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is
+ * for `:`), so a writable file is left as it was. The network rule needs curl or node; with neither it fails.
  */
 export const PROBE_MARKER = "FACTORY_PROBE_MARKER";
 export const CONFINEMENT_PROBE = [
-  'h=$1; g=$2; t=$3; host=$4; m=$5; f=".factory-sandbox-probe-$$"',
+  'h=$1; g=$2; t=$3; host=$4; m=$5; d=$6; f=".factory-sandbox-probe-$$"',
   'if true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
-  'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "$g is writable"; exit 4; fi',
+  'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "the checkout\'s .git/config is writable"; exit 4; fi',
   'if ! true > "$t/$f" 2>/dev/null; then echo "the agent temp directory is not writable"; exit 4; fi; rm -f -- "$t/$f"',
-  `if [ -n "$m" ]; then for d in /proc/[0-9]*; do if tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; then echo "the credential stand-in is readable in a process environment"; exit 4; fi; done; fi`,
-  'if [ -n "$host" ] && command -v curl >/dev/null 2>&1 && curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null; then echo "$host, off the allow-list, is reachable"; exit 4; fi',
+  `seen() { tr '\\0' '\\n' < "$1/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; }`,
+  'if [ -n "$d" ] && seen "/proc/$d"; then echo "the decoy outside the sandbox is readable"; exit 4; fi',
+  'if [ -n "$m" ]; then for p in /proc/[0-9]*; do if seen "$p"; then echo "the credential stand-in is readable in a process environment"; exit 4; fi; done; fi',
+  'if [ -n "$host" ]; then',
+  '  if command -v curl >/dev/null 2>&1; then curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
+  '  elif command -v node >/dev/null 2>&1; then node -e \'fetch("https://" + process.argv[1], { signal: AbortSignal.timeout(5000) }).then(() => process.exit(0), () => process.exit(1))\' "$host" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
+  '  else echo "no curl or node to check the network rule"; exit 4; fi',
+  "fi",
   "exit 0",
+].join("\n");
+
+/**
+ * How the probe is launched, as the agent outside the sandbox: a decoy `sleep` holding the marker (its environment is
+ * this shell's) is started first and checked to hold it, so the probe's decoy rule cannot pass because the decoy is
+ * not there; then `codex "$@" <decoy pid>`, and the decoy is stopped. Exit 5: the decoy did not come up. Neither this
+ * nor the probe holds a `${...}`: systemd-run expands that form in a unit's arguments before the shell sees them.
+ */
+export const DECOY_LAUNCH = [
+  "sleep 300 & d=$!",
+  "i=0",
+  `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
+  'codex "$@" "$d"; r=$?',
+  'kill "$d" 2>/dev/null',
+  'exit "$r"',
 ].join("\n");
 
 /** A host the probe tries that the allow-list does not name (none when `domains` names it or a wildcard covers it). */

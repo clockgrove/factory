@@ -238,6 +238,8 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null } = {})
     ? gitIdentityReason(issue)
     : code === "git-state"
       ? "local mode: the clone's .git config, hooks, commondir or info/attributes changed during the stage (git-state); the harness was not started"
+      : code === "roots"
+        ? `${path ? `\`${path}\`, a directory the harness's sandbox lets commands write,` : "A directory the harness's sandbox lets commands write"} is a link, or has one on its path, that Factory cannot replace (roots); the harness was not started. Something the repository's setup, install or validation ran made it: stop it making that link, then re-apply \`factory:objective\``
       : code === "sandbox"
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
@@ -250,7 +252,7 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null } = {})
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
  */
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
-/** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear or sandbox; the stage Blocks (gitRefusalReason). */
+/** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear, roots or sandbox; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
   /** `path` (checkout-relative) or `rule` (a fixed confinement rule): named in the Blocked reason (gitRefusalReason). */
   constructor(code, detail, { path = null, rule = null } = {}) {
@@ -707,10 +709,11 @@ const tq = JSON.stringify;
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
 export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
-  // /proc: no command reads a process outside Codex's sandbox (a PID namespace of its own where bubblewrap can mount one;
-  // under a systemd unit the kernel refuses the read). Locally the profile denies /proc as well. On a runner it does not
-  // (`denyProc` false): under a systemd unit that deny holds and takes /dev/fd with it (bash's process substitution,
-  // /dev/stdin); the runner's confinement probe checks that no environment outside is readable (codex-runner.mjs).
+  // /proc: no command reads a process outside Codex's sandbox: each runs in a user namespace of its own without
+  // CAP_SYS_PTRACE, so the kernel refuses the read, and where bubblewrap can mount a fresh /proc it has its own PID
+  // namespace too. Locally the profile denies /proc as well. On a runner it does not (`denyProc` false): under a systemd
+  // unit that deny holds and takes /dev/fd with it (bash's process substitution, /dev/stdin); the runner's confinement
+  // probe checks the read refusal with a decoy before every start (codex-runner.mjs).
   const deny = [...secrets.map((p) => `${tq(p)}="deny"`), ...(denyProc ? [`${tq("/proc")}="deny"`] : [])];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
   // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes

@@ -420,7 +420,7 @@ async function artifactSessionSources({ repo, issue, token, workDir }) {
       error: null,
       dir: async () => {
         const dir = join(workDir, `factory-restore-${a.id}`);
-        const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: token }, timeoutMs: 120_000 });
+        const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: typeof token === "function" ? token() : token }, timeoutMs: 120_000 });
         if (d.code === 0) return dir;
         src.error = `artifact download failed (exit ${d.code ?? "timeout"})`;
         return null;

@@ -455,7 +455,7 @@ async function main() {
   // passes; the reviewer always runs in its own fresh session.
   let restored = null;
   if (inputs.resumePolicy === "fix-passes") {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.

@@ -79,7 +79,7 @@ export const APP_OPTIONAL_PERMISSIONS = Object.freeze({ actions: "read" });
 /** Projects v2 is granted by the App's org/user "projects" permission; the installation reports it as `organization_projects`. */
 export const PROJECT_PERMISSION_KEYS = ["organization_projects", "projects"];
 /** The list as the docs and doctor say it (README, the setup skill and doctor's lines carry this exact text). */
-export const APP_PERMISSIONS_TEXT = "contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs); nothing else, never workflows";
+export const APP_PERMISSIONS_TEXT = "contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows";
 
 /**
  * What a granted permission set lacks of APP_PERMISSIONS (a write counts for a read), and what it has beyond the list

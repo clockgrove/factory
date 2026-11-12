@@ -15,7 +15,7 @@ Ask once for the inputs the template needs and pass them as flags: `--harness` (
 
 Walk it; never read, print or copy the key.
 
-1. Open `https://github.com/settings/apps/new` (or the organization's `/organizations/<org>/settings/apps/new`). Name it `Factory (<repo>)`, uncheck webhooks, and grant exactly these repository permissions: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs); nothing else, never workflows.
+1. Open `https://github.com/settings/apps/new` (or the organization's `/organizations/<org>/settings/apps/new`). Name it `Factory (<repo>)`, uncheck webhooks, and grant exactly these repository permissions: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows.
 2. Create it, generate a private key, note its App ID.
 3. Install it on this repository only.
 4. Save the two secrets: `gh secret set FACTORY_APP_ID` and `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, run by the user, with the path they give as text.
@@ -29,7 +29,7 @@ Then the model credential, by the user (`gh secret set`): `ANTHROPIC_API_KEY` (n
 
 ## 4. Skills in the repository
 
-Offer to commit the Factory skills and agent definitions, which the vendors' cloud sessions need and the Action does not: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say a committed Factory skill then overrides the plugin's, pinned at that version until updated.
+Offer to commit the Factory skills and agent definitions (the vendors' cloud sessions need them): copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say a committed Factory skill then overrides the plugin's, pinned at that version until updated.
 
 ## Local mode, instead of or beside the Action
 

@@ -195,11 +195,13 @@ export const COPILOT_DECOY_LAUNCH = decoyLaunch('FACTORY_PROBE_DECOY=$d copilot 
 /**
  * A model for the probe, on this machine's loopback: Copilot's BYOK provider (COPILOT_OFFLINE), speaking the Responses
  * API. Its first answer is one shell call, `sh -c "$FACTORY_COPILOT_PROBE"`; every later one ends the session. Nothing
- * leaves the machine and nothing is billed. Returns {env, close}: the provider variables Copilot needs.
+ * leaves the machine and nothing is billed. Returns {env, close, toolOutput}: the provider variables Copilot needs, and
+ * what Copilot answered for the call (for the log only: where the sandbox did not start, its reason is there).
  */
 export async function probeModel() {
   const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } };
   let n = 0;
+  let toolOutput = "";
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => {
@@ -212,7 +214,9 @@ export async function probeModel() {
       } catch {
         // an empty or partial request is answered like a first one
       }
-      const answered = (Array.isArray(j.input) ? j.input : []).some((i) => i?.type === "function_call_output");
+      const outputs = (Array.isArray(j.input) ? j.input : []).filter((i) => i?.type === "function_call_output");
+      const answered = outputs.length > 0;
+      if (answered) toolOutput = String(outputs.at(-1).output ?? "").slice(0, 2000);
       const item = answered
         ? { type: "message", role: "assistant", id: "msg_probe", status: "completed", content: [{ type: "output_text", text: "done", annotations: [] }] }
         : { type: "function_call", id: "fc_probe", call_id: "call_probe", name: "bash", arguments: JSON.stringify({ command: 'sh -c "$FACTORY_COPILOT_PROBE"', description: "Factory's sandbox probe" }), status: "completed" };
@@ -236,6 +240,7 @@ export async function probeModel() {
   return {
     env: { COPILOT_OFFLINE: "true", COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${port}/v1`, COPILOT_PROVIDER_WIRE_API: "responses", COPILOT_MODEL: "gpt-5" },
     close: () => new Promise((resolve) => server.close(() => resolve())),
+    toolOutput: () => toolOutput,
   };
 }
 

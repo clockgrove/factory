@@ -931,6 +931,8 @@ async function copilotSandboxStart(env = process.env) {
   try {
     const runner = copilotRunner({ harness: "copilot", agent, clone, env });
     await prepareCopilotHome(runner, { env });
+    // As before a run: a link planted at a writable root is a real directory first (claude-runner.mjs realRoots).
+    await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [clone] }, runner.agentHome, scrubbedEnv(env));
     await copilotSandboxCheck(runner, scrubbedEnv(env));
     return { ok: true };
   } catch (e) {

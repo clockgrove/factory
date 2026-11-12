@@ -514,14 +514,16 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     // As a run's Copilot: in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
     const [c, a, e] = agentUser() ? asClaudeAgent(cmd, args, childEnv, extra, runner.clone) : [cmd, args, childEnv];
     const r = await run(c, a, { cwd: runner.clone, env: e, input: "Run the one command you are given.", agentExtra: extra, timeoutMs: 180_000 }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+    const said = mock.toolOutput?.() || "";
     await mock.close();
     const got = await probeResult(runner, env);
     if (got.code === 4) throw new GitRefusal("sandbox", `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
     if (got.code === 0) return;
-    last = { ...r, said: got.said };
+    // For the log: what Copilot answered for the probe's call (the sandbox's own reason where it did not start).
+    last = { ...r, said: said.replace(/\s+/g, " ").trim() };
     if (attempt === 1) log(`Copilot's sandbox probe did not run (${r.timedOut ? "timed out" : got.code === null ? `no result, exit ${r.code}` : `exit ${got.code}`}); trying once more`);
   }
-  const why = last.code === 5 ? "the probe's decoy did not come up" : String(last.stderr || "").trim().split("\n").at(-1)?.slice(0, 300) || (last.timedOut ? "timed out" : `exit ${last.code}`);
+  const why = last.code === 5 ? "the probe's decoy did not come up" : last.said ? `its command did not run: ${last.said.slice(0, 400)}` : last.timedOut ? "timed out" : `no result, exit ${last.code}: ${String(last.stderr || "").trim().split("\n").at(-1)?.slice(0, 300) || ""}`;
   throw new GitRefusal("sandbox", `Copilot's sandbox could not start here: ${why}`, { harness: "copilot" });
 }
 

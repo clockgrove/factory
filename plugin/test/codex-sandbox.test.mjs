@@ -277,3 +277,17 @@ test("no script the agent runs through a unit holds a ${...}: systemd-run expand
   for (const [name, script] of Object.entries({ CONFINEMENT_PROBE, DECOY_LAUNCH })) assert.ok(!script.includes("${"), name);
   assert.match(DECOY_LAUNCH, /grep -qxF "FACTORY_PROBE_MARKER=\$FACTORY_PROBE_MARKER"/);
 });
+
+test("Codex's domains take host names only: a loopback name, an IP address or host:port, whose port its proxy ignores, never reaches it; doctor warns locally (#108)", async () => {
+  const { sandboxDroppedHosts } = await import("../scripts/lib/local.mjs");
+  const { localDomainChecks } = await import("../scripts/doctor.mjs");
+  const given = [...LOCAL_DOMAINS, "ai-gateway.vercel.sh", "*.Example.com", "127.0.0.1:44685", "localhost:44685", "relay.localhost", "localhost", "127.0.0.1", "10.0.0.5", "api.example.com:443"];
+  const profile = codexLocalConfig({ domains: given, home: "/h" }).find((c) => c.startsWith("permissions.factory="));
+  const allowed = [...profile.match(/domains=\{([^}]*)\}/)[1].matchAll(/"([^"]+)"="allow"/g)].map((m) => m[1]);
+  assert.deepEqual(allowed, [...LOCAL_DOMAINS, "ai-gateway.vercel.sh", "*.example.com"]);
+  assert.deepEqual(sandboxDroppedHosts(given), ["127.0.0.1:44685", "localhost:44685", "relay.localhost", "localhost", "127.0.0.1", "10.0.0.5", "api.example.com:443"]);
+  const warn = localDomainChecks({ inputs: { harness: "codex" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh 127.0.0.1:44685 relay.localhost" }, local: true });
+  assert.deepEqual(warn.map((c) => c.status), ["WARN"]);
+  assert.match(warn[0].detail, /Codex's[^]*"127\.0\.0\.1:44685", "relay\.localhost"/);
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "codex" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: false }), []);
+});

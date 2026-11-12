@@ -37,15 +37,30 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
-export async function credentialChecks({ inputs, env = process.env, probe = false }) {
+/**
+ * Codex and Copilot off local mode (Actions, a cloud sandbox): their commands run as the same uid as the harness, outside
+ * any sandbox, so a command can read the model credential from the harness's /proc/<pid>/environ and from the git
+ * processes the harness starts with it (#87). Each keeps it out of its commands' own environment only. Claude Code runs
+ * its commands in its own sandbox on these routes, and local mode runs every harness's commands in its own.
+ */
+const SHELL_CREDENTIAL = { codex: "CODEX_API_KEY", copilot: "the copilot_github_token (COPILOT_GITHUB_TOKEN)" };
+export function shellCredentialCheck({ harness, local }) {
+  if (!SHELL_CREDENTIAL[harness] || local) return null;
+  const name = harness === "codex" ? "Codex" : "Copilot";
+  return WARN(`${harness} shell credential`, `on Actions and in a cloud sandbox, the commands ${name} runs (and the repository code and dependencies they run) can read ${SHELL_CREDENTIAL[harness]} from the ${name} process's /proc/<pid>/environ and from the git processes it starts: they run as the same uid, and ${name}'s own sandbox is off there`, `accept it with a spend limit on the credential (docs/PLAN.md, Credentials and billing), run ${name} Objectives in local mode, or use claude, whose commands run in its own sandbox on every route`);
+}
+
+export async function credentialChecks({ inputs, env = process.env, probe = false, local = backend(env).name === "local" }) {
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
+  const shell = shellCredentialCheck({ harness: h, local });
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
   if (inputs.credential === "login" || localFallback) {
     out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
+    if (shell) out.push(shell);
     if (probe) out.push(await probeHarness({ inputs, env }));
     return out;
   }
@@ -75,6 +90,7 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     if (!tok) out.push(FAIL("copilot credential", "no token for Copilot", "set copilot_github_token: a fine-grained token with only the Copilot Requests permission (gh secret set COPILOT_GITHUB_TOKEN); the job's own token is never used, since it can write"));
     else out.push(await copilotWriteProbe({ repo: inputs.repo, token: tok }));
   }
+  if (shell) out.push(shell);
   if (probe) out.push(await probeHarness({ inputs, env }));
   return out;
 }
@@ -1016,7 +1032,7 @@ async function main() {
   }
   const results = [];
   const local = args.local === "true" || backend().name === "local";
-  results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
+  results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));

@@ -205,7 +205,7 @@ export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
  * (a link higher up the path) refuses the start (code `roots`), naming the path under the home.
  */
 export async function realRoots({ fix = [], check = [] }, home, env = process.env, { run = exec } = {}) {
-  const r = await run("/bin/sh", ["-c", 'home=$1; shift; base=$(realpath -e -- "$home") || exit 4; fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; case "$c" in "$home"/*) want="$base${c#"$home"}" ;; *) want="$c" ;; esac; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$want" ]; then printf "%s\t%s\t%s\n" "$c" "$want" "$r"; exit 3; fi; done', "sh", home, ...fix, "--", ...check], { cwd: home, env });
+  const r = await run("/bin/sh", ["-c", 'home=$1; shift; base=$(realpath -e -- "$home") || exit 4; fix=1; for c; do if [ "$c" = "--" ]; then fix=0; continue; fi; if [ "$fix" = 1 ]; then if [ -L "$c" ]; then rm -f -- "$c"; fi; [ -d "$c" ] || mkdir -p -m 700 -- "$c" 2>/dev/null || true; fi; case "$c" in "$home"/*) rest=${c#"$home"}; want=$base$rest ;; *) want=$c ;; esac; r=$(realpath -e -- "$c" 2>/dev/null) || r=; if [ "$r" != "$want" ]; then printf "%s\t%s\t%s\n" "$c" "$want" "$r"; exit 3; fi; done', "sh", home, ...fix, "--", ...check], { cwd: home, env });
   if (r.code === 3) {
     const [path, want, got] = String(r.stdout).trim().split("\t");
     throw new GitRefusal("roots", `${path} is not a real directory of its own (a link on its path): it resolves to ${got || "nothing"}, not ${want}`, { path: path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : null });

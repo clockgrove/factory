@@ -786,6 +786,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   let checksFixed = false;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
+  // Workflow files read at a head while classifying a wait (triage.mjs checkSources): once per stage.
+  const workflowFiles = new Map();
   // Factory's own catch-up merges (outbox.mjs caughtUp) validated red: each gets one fix pass that is not counted.
   const caughtRed = new Set();
   // With required checks configured, the repository's CI is Factory's validation: the head is
@@ -828,7 +830,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     };
     const classify = async (x) => {
       const files = async () => ((await rest(`repos/${checks.repo.full}/pulls/${checks.prNumber}/files?per_page=100`, { token: checks.token, paginate: true })) || []).flatMap((f) => [f.filename, f.previous_filename].filter(Boolean));
-      const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history, files });
+      const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history, files, cache: workflowFiles });
       return checksNotStarted({ sha, names: checks.names, checkRuns: x.runs || [], ...read, waitedMin: Math.round((Date.now() - waitedFrom) / 60000) });
     };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.

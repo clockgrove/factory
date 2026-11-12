@@ -426,20 +426,33 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
     else if (uses.startsWith("./") && depth < 3) for (const c of (await workflowChecks(await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => ""), readLocal, depth + 1)).checks) checks.push(`${own} / ${c}`);
     else checks.push(`${own} / \${{ callee }}`);
   }
-  const pr = doc?.on && typeof doc.on === "object" && !Array.isArray(doc.on) ? doc.on.pull_request : null;
+  const on = doc?.on && typeof doc.on === "object" && !Array.isArray(doc.on) ? doc.on : null;
+  const pr = on?.pull_request;
   const key = pr && typeof pr === "object" ? ["paths", "paths-ignore"].find((k) => Array.isArray(pr[k])) : null;
-  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String) } : null };
+  // The filter decides alone only when pull_request is the one trigger that can start the workflow on the head:
+  // another (push, pull_request_target, workflow_dispatch…) may run it anyway (`sole` false).
+  const sole = !!on && Object.keys(on).every((t) => t === "pull_request" || NOT_ON_HEAD.includes(t));
+  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null };
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
-/** A GitHub path filter pattern as a RegExp: `**` any path, `*` and `?` within one segment. */
-const globRe = (p) => new RegExp(`^${p.replace(/\*\*\/?|\*|\?|[.+^${}()|[\]\\]/g, (m) => (m.startsWith("**") ? ".*" : m === "*" ? "[^/]*" : m === "?" ? "[^/]" : `\\${m}`))}$`);
+/** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
+const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
+/**
+ * A GitHub path filter pattern as a RegExp: `**` any path, `*` within one segment. Only those: a pattern with GitHub's
+ * other operators (`?` and `+` repeat the character before, `[…]` a set) is not read here (filterSkips: unknown).
+ */
+const globRe = (p) => new RegExp(`^${p.replace(/\*\*\/?|\*|[.^${}()|\\]/g, (m) => (m.startsWith("**") ? ".*" : m === "*" ? "[^/]*" : `\\${m}`))}$`);
+const OTHER_OPERATORS = /[?+[\]]/;
 /**
  * Whether a `pull_request` path filter skips a change that touches `files`: `paths` runs when a file matches (patterns in
- * order, a `!` one excluding again), `paths-ignore` runs unless every file matches. Null when the files are unknown.
+ * order, a `!` one excluding again), `paths-ignore` runs unless every file matches. Null (unknown) unless that is
+ * certain: pull_request is the workflow's only trigger on the head (`sole`), the files are read and not empty, and every
+ * pattern uses only `*`, `**` and `!`.
  */
 export function filterSkips(filters, files) {
-  if (!filters || !Array.isArray(files)) return null;
+  // Unknown (null), never a skip: no filter, another trigger, no changed files read, or an operator not read here.
+  if (!filters || !filters.sole || !Array.isArray(files) || !files.length || filters.patterns.some((p) => OTHER_OPERATORS.test(p.replace(/^!/, "")))) return null;
   const match = (f) => {
     let hit = false;
     for (const p of filters.patterns) {
@@ -461,7 +474,7 @@ export function filterSkips(filters, files) {
  * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `workflowRuns` null: they
  * could not be read (`readError`).
  */
-export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null }) {
+export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null, cache = new Map() }) {
   const actions = { token: actionsToken };
   let workflowRuns;
   try {
@@ -479,7 +492,12 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
   const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
   const missing = names.filter((n) => !latestRun(checkRuns, n));
   if (missing.length) {
-    const read = (path) => rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => "");
+    // A workflow file at the head is read once per stage (`cache`, the caller's), however often the wait is classified.
+    const read = (path) => {
+      const key = `${sha}:${path}`;
+      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => ""));
+      return cache.get(key);
+    };
     // Every workflow of the repository, a path-filtered one that never ran on the head included, and those that ran.
     const listed = ((await rest(`repos/${repo.full}/actions/workflows?per_page=100`, actions).catch(() => null))?.workflows || []).filter((w) => w.state === "active").map((w) => ({ id: w.id, path: w.path }));
     const all = new Map([...listed, ...workflowRuns.map((w) => ({ id: w.workflow_id, path: w.path }))].filter((w) => w.id && w.path).map((w) => [w.id, String(w.path).replace(/@.*$/, "")]));
@@ -489,9 +507,10 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
       const { checks, filters } = await workflowChecks(await read(path), read);
       const its = missing.filter((n) => checks.some((c) => reports(c, n)));
       for (const n of its) add(n, id);
-      if (its.length && filters) {
-        changed ??= await files().catch(() => null);
-        skips.set(id, { key: filters.key, skips: filterSkips(filters, changed) });
+      // Every producer is recorded, filtered or not: a check is filtered out only when each of them skips the change.
+      if (its.length) {
+        if (filters) changed ??= await files().catch(() => null);
+        skips.set(id, filters ? { key: filters.key, skips: filterSkips(filters, changed) } : { key: null, skips: false });
       }
     }
     const left = missing.filter((n) => !producers.has(n));
@@ -556,12 +575,15 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
     const ids = producers.get(n);
     const mine = ids ? workflowRuns.filter((w) => ids.has(w.workflow_id)) : [];
     const queued = mine.filter((w) => UNSTARTED.includes(w.status));
-    const filter = ids ? [...ids].map((id) => skips.get(id)).find(Boolean) : null;
+    // Filtered out only when every workflow that produces it skips this change for certain; a filter that may, a hint.
+    const filters = ids ? [...ids].map((id) => skips.get(id)) : [];
+    const allSkip = filters.length > 0 && filters.every((f) => f?.skips === true);
+    const filter = allSkip ? filters[0] : filters.find((f) => f?.key && f.skips !== false) || null;
     if (queued.length) started.push({ n, w: queued[0], ...(queued[0].status === "pending" ? { by: "concurrency", text: held(queued[0]) } : { text: `workflow run ${label(queued[0])} queued ${mins(queued[0].created_at) ?? "?"} min with no job started` }) });
     else if (mine.some((w) => w.status === "waiting")) approval.push(n);
     else if (mine.some((w) => w.status !== "completed")) running.push({ n, w: mine.find((w) => w.status !== "completed") });
-    else if (ids && !mine.length && filter?.skips === true) filtered.push({ n, key: filter.key });
-    else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min${filter && filter.skips === null ? ` (its workflow's ${filter.key} may skip this change)` : ""}` });
+    else if (ids && !mine.length && allSkip) filtered.push({ n, key: filter.key });
+    else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min${filter ? ` (its workflow's path filter, ${filter.key}, may skip this change)` : ""}` });
     else unreported.push(n);
   }
   if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };

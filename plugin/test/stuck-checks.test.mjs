@@ -22,7 +22,7 @@ async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs 
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
-  const reads = { checks: 0, runs: 0 };
+  const reads = { checks: 0, runs: 0, contents: 0 };
   const at = (v, n) => (typeof v === "function" ? v(n) : v);
   globalThis.fetch = async (url) => {
     const u = new URL(url);
@@ -43,6 +43,7 @@ async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs 
     let m = /\/actions\/jobs\/(\d+)$/.exec(p);
     if (m && jobs[m[1]]) return json(jobs[m[1]]);
     m = /\/contents\/(.+)$/.exec(p);
+    if (m) reads.contents += 1;
     if (m && files[m[1]] !== undefined && u.searchParams.get("ref") === SHA) return new Response(files[m[1]], { status: 200 });
     if (p === `/repos/${REPO.full}/commits` || /\/issues\/\d+\/comments$/.test(p)) return json(p.endsWith("/commits") ? [{ sha: OLD }] : []);
     if (p === `/repos/${REPO.full}`) return json({ default_branch: "main" });
@@ -62,6 +63,7 @@ async function loop(github, { checks = {}, deadlineMs = 30_000, triage = null } 
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const phases = [];
   let checkReads = 0;
+  let contentReads = 0;
   const result = await withGitHub(github, async (reads) => {
     const r = await validationLoop({
       checkout: "/nonexistent",
@@ -79,9 +81,10 @@ async function loop(github, { checks = {}, deadlineMs = 30_000, triage = null } 
       ...(triage ? { triage } : {}),
     });
     checkReads = reads.checks;
+    contentReads = reads.contents;
     return r;
   });
-  return { result, phases, checkReads };
+  return { result, phases, checkReads, contentReads };
 }
 
 const ciRun = (over = {}) => ({ id: 77, name: "CI", status: "queued", conclusion: null, check_suite_id: 9, workflow_id: 5, path: ".github/workflows/ci.yml", created_at: ago(47), updated_at: ago(47), ...over });
@@ -183,17 +186,17 @@ test("a required workflow whose pull_request path filter skips the change Blocks
   const runs = await loop({ checkRuns: [], workflowRuns: [], files: filtered, workflows, prFiles: ["src/app.js"] });
   assert.match(runs.result.stuck.reason, /^GitHub has not started .*no workflow run for it was created in \d+ min \(infrastructure/);
   const unknown = await loop({ checkRuns: [], workflowRuns: [], files: filtered, workflows });
-  assert.match(unknown.result.stuck.reason, /no workflow run for it was created in \d+ min \(its workflow's on\.pull_request\.paths may skip this change\)/);
+  assert.match(unknown.result.stuck.reason, /no workflow run for it was created in \d+ min \(its workflow's path filter, on\.pull_request\.paths, may skip this change\)/);
 });
 
 test("filterSkips: paths runs on a match (a ! pattern excludes again), paths-ignore unless every file matches", async () => {
   const { filterSkips } = await import("../scripts/lib/triage.mjs");
-  const paths = (patterns) => ({ key: "on.pull_request.paths", ignore: false, patterns });
+  const paths = (patterns) => ({ key: "on.pull_request.paths", ignore: false, patterns, sole: true });
   assert.equal(filterSkips(paths(["src/**"]), ["src/a/b.js"]), false);
   assert.equal(filterSkips(paths(["src/**", "!src/**/*.md"]), ["src/a/b.md"]), true);
   assert.equal(filterSkips(paths(["*.js"]), ["src/a.js"]), true, "* stays within one segment");
-  assert.equal(filterSkips({ key: "on.pull_request.paths-ignore", ignore: true, patterns: ["docs/**"] }, ["docs/a.md"]), true);
-  assert.equal(filterSkips({ key: "on.pull_request.paths-ignore", ignore: true, patterns: ["docs/**"] }, ["docs/a.md", "src/a.js"]), false);
+  assert.equal(filterSkips({ key: "on.pull_request.paths-ignore", ignore: true, patterns: ["docs/**"], sole: true }, ["docs/a.md"]), true);
+  assert.equal(filterSkips({ key: "on.pull_request.paths-ignore", ignore: true, patterns: ["docs/**"], sole: true }, ["docs/a.md", "src/a.js"]), false);
   assert.equal(filterSkips(paths(["src/**"]), null), null, "files unknown");
 });
 
@@ -223,4 +226,57 @@ test("a reusable workflow's job and an expression-named job resolve to the requi
   assert.ok(checks.some((c) => reports(c, "Test ubuntu-latest")));
   assert.ok(checks.some((c) => reports(c, "remote / lint")), "a workflow in another repository: any job under the caller");
   assert.ok(!checks.some((c) => reports(c, "quality")));
+});
+
+// ------------------------------------------------------------------ "filtered" only when certain (#82's review)
+
+const ciFiltered = (on) => `on:\n${on}\njobs:\n  quality:\n    runs-on: x\n`;
+const oneWorkflow = [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }];
+/** The loop on a head with no run of the check's workflow: filtered (a Block at once) or a wait with the filter as a hint. */
+const filterCase = (text, prFiles, workflows = oneWorkflow, extra = {}) => loop({ checkRuns: [], workflowRuns: [], files: { ".github/workflows/ci.yml": text, ...extra }, workflows, prFiles });
+const waitsWithHint = (r, what) => {
+  assert.notEqual(r.result.stuck.kind, "filtered", what);
+  assert.equal(r.result.stuck.kind, "not-started", what);
+  assert.ok(r.phases.some((l) => /waiting up to/.test(l)), `${what}: it waits`);
+  assert.match(r.result.stuck.reason, /may skip this change/, what);
+};
+
+test("GitHub's ?, + and [] filter operators are not guessed at: such a filter is unknown, and the check is waited for", async () => {
+  const { filterSkips } = await import("../scripts/lib/triage.mjs");
+  const probes = [["**/*.jsx?", "src/page.js"], ["**/*.[jt]s", "src/a.ts"], ["v[0-9]+/**", "v12/a.js"]];
+  for (const [pattern, file] of probes) {
+    for (const ignore of [false, true]) assert.equal(filterSkips({ key: "k", ignore, patterns: [pattern], sole: true }, [file]), null, `${pattern} vs ${file}`);
+    waitsWithHint(await filterCase(ciFiltered(`  pull_request:\n    paths: ['${pattern}']`), [file]), `${pattern} vs ${file}`);
+  }
+});
+
+test("a path filter decides alone only when pull_request is the workflow's only trigger on the head; push beside it, in either order, waits", async () => {
+  const { filterSkips } = await import("../scripts/lib/triage.mjs");
+  for (const on of ["  push:\n  pull_request:\n    paths: ['src/**']", "  pull_request:\n    paths: ['src/**']\n  push:", "  pull_request_target:\n  pull_request:\n    paths: ['src/**']"]) waitsWithHint(await filterCase(ciFiltered(on), ["docs/a.md"]), on);
+  // merge_group runs on the queue's commit, never the head: the filter still decides.
+  assert.equal((await filterCase(ciFiltered("  merge_group:\n  pull_request:\n    paths: ['src/**']"), ["docs/a.md"])).result.stuck.kind, "filtered");
+  assert.equal(filterSkips({ key: "k", ignore: false, patterns: ["src/**"], sole: false }, ["docs/a.md"]), null);
+});
+
+test("a check two workflows produce is filtered out only when both skip: GitHub's ci.yml and ci-skip.yml pair waits, listed in either order", async () => {
+  const ci = { id: 5, path: ".github/workflows/ci.yml", state: "active" };
+  const skip = { id: 6, path: ".github/workflows/ci-skip.yml", state: "active" };
+  const companion = { ".github/workflows/ci-skip.yml": ciFiltered("  pull_request:\n    paths-ignore: ['src/**']") };
+  for (const workflows of [[ci, skip], [skip, ci]]) waitsWithHint(await filterCase(ciFiltered("  pull_request:\n    paths: ['src/**']"), ["docs/a.md"], workflows, companion), workflows.map((w) => w.path).join(" then "));
+  // Both skip a change: filtered, in either order.
+  const bothSkip = { ".github/workflows/ci-skip.yml": ciFiltered("  pull_request:\n    paths: ['lib/**']") };
+  for (const workflows of [[ci, skip], [skip, ci]]) assert.equal((await filterCase(ciFiltered("  pull_request:\n    paths: ['src/**']"), ["docs/a.md"], workflows, bothSkip)).result.stuck.kind, "filtered");
+});
+
+test("an empty changed-file list is unknown, never a skip", async () => {
+  const { filterSkips } = await import("../scripts/lib/triage.mjs");
+  for (const ignore of [false, true]) assert.equal(filterSkips({ key: "k", ignore, patterns: ["src/**"], sole: true }, []), null);
+  waitsWithHint(await filterCase(ciFiltered("  pull_request:\n    paths: ['src/**']"), []), "no files");
+});
+
+test("the workflow files are read once per stage, however often the wait is classified", async () => {
+  // Not started at first and after the wait: classified twice on one head.
+  const r = await loop({ checkRuns: [], workflowRuns: [ciRun()], files: { ".github/workflows/ci.yml": CI }, workflows: oneWorkflow });
+  assert.match(r.result.stuck.reason, /^GitHub has not started/);
+  assert.equal(r.contentReads, 1);
 });

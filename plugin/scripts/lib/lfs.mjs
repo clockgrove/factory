@@ -132,6 +132,8 @@ export const lfsPinArgs = (remoteUrl) => (lfsPinConfig(remoteUrl) || []).flatMap
  * (#73). With GIT_LFS_SKIP_SMUDGE=1 git-lfs writes the pointer files and makes no request; the media then arrives by
  * Factory's hand-over (outbox.mjs lfsSetup, lfsHandOver): the objects fetched into the mirror with Factory's token,
  * copied into the checkout's store, and `git lfs checkout`. git-lfs's clean side is untouched, so the index stays right.
+ * The harness's own git (a conflict pass's rebase or merge) cannot take this env: the hand-over gives its store every
+ * object it can check out first (outbox.mjs workingSet), so it never downloads either (#76).
  */
 export const SKIP_SMUDGE_ENV = Object.freeze({ GIT_LFS_SKIP_SMUDGE: "1" });
 

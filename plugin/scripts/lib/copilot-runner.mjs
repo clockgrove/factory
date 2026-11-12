@@ -184,7 +184,7 @@ export async function resetCopilotState(runner, env = process.env) {
   await writeAgentFiles(runner.copilotHome, homeFiles(runner), runner.agentHome, env);
   for (const tar of SESSIONS_HELD()) {
     const put = await exec("tar", ["-xf", "-", "-C", runner.sessions], { cwd: runner.agentHome, env, input: tar });
-    if (put.code !== 0) throw new GitRefusal("git-clear", `a saved session could not be put back in Copilot's state: ${String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}`}`);
+    if (put.code !== 0) throw new GitRefusal("git-clear", `a saved session could not be put back in Copilot's state: ${String(put.stderr).trim().split("\n").slice(0, 3).join("; ").slice(0, 300) || `exit ${put.code}`}`);
   }
   const cleared = await exec("/bin/sh", ["-c", 'd=$1; shift; cd -- "$d" 2>/dev/null || exit 0; rm -rf -- "$@"', "sh", runner.agentTmp, ...HARNESS_CONFIG.dirs, ...HARNESS_CONFIG.files], { cwd: runner.agentHome, env });
   if (cleared.code !== 0) throw new GitRefusal("git-clear", "the agent's temp directory could not be cleared of harness configuration");

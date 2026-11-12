@@ -14,10 +14,10 @@ import { CLI, GATEWAY_CODEX_URL, codexGatewayOf, credentialEnv, harnessCommand, 
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
-import { exec, onPath } from "./lib/proc.mjs";
+import { agentUser, exec, onPath } from "./lib/proc.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
+import { codexLocalConfig, droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -38,16 +38,15 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 // ------------------------------------------------------------ credentials
 
 /**
- * Codex and Copilot off local mode (Actions, a cloud sandbox): their commands run as the same uid as the harness, outside
- * any sandbox, so a command can read the model credential from the harness's /proc/<pid>/environ and from the git
- * processes the harness starts with it (#87). Each keeps it out of its commands' own environment only. Claude Code runs
- * its commands in its own sandbox on these routes, and local mode runs every harness's commands in its own.
+ * Copilot off local mode (Actions, a cloud sandbox): its commands run as the same uid as the harness, outside any
+ * sandbox, so a command can read the model credential from the harness's /proc/<pid>/environ and from the git
+ * processes the harness starts with it (#87). It keeps it out of its commands' own environment only. Claude Code and
+ * Codex run their commands in their own sandboxes on these routes, and local mode runs every harness's commands in its
+ * own.
  */
-const SHELL_CREDENTIAL = { codex: "CODEX_API_KEY", copilot: "the copilot_github_token (COPILOT_GITHUB_TOKEN)" };
 export function shellCredentialCheck({ harness, local }) {
-  if (!SHELL_CREDENTIAL[harness] || local) return null;
-  const name = harness === "codex" ? "Codex" : "Copilot";
-  return WARN(`${harness} shell credential`, `on Actions and in a cloud sandbox, the commands ${name} runs (and the repository code and dependencies they run) can read ${SHELL_CREDENTIAL[harness]} from the ${name} process's /proc/<pid>/environ and from the git processes it starts: they run as the same uid, and ${name}'s own sandbox is off there`, `accept it with a spend limit on the credential (docs/PLAN.md, Credentials and billing), run ${name} Objectives in local mode, or use claude, whose commands run in its own sandbox on every route`);
+  if (harness !== "copilot" || local) return null;
+  return WARN("copilot shell credential", "on Actions and in a cloud sandbox, the commands Copilot runs (and the repository code and dependencies they run) can read the copilot_github_token (COPILOT_GITHUB_TOKEN) from the Copilot process's /proc/<pid>/environ and from the git processes it starts: they run as the same uid, and Copilot's own sandbox cannot start there", "accept it with a spend limit on the credential (docs/PLAN.md, Credentials and billing), run Copilot Objectives in local mode, or use claude or codex, whose commands run in their own sandboxes on every route");
 }
 
 export async function credentialChecks({ inputs, env = process.env, probe = false, local = backend(env).name === "local" }) {
@@ -842,23 +841,38 @@ export async function runnerChecks({ inputs, env = process.env }) {
   return out;
 }
 
+/** Per harness with a sandbox on a runner: its name in the checks, and the binaries it needs where the job runs. */
+const RUNNER_SANDBOX = {
+  claude: { name: "Claude Code", bins: [["bwrap", "bubblewrap"], ["socat", "socat"], ["rg", "ripgrep"]], refuses: "refuses to start without it" },
+  codex: { name: "Codex", bins: [["bwrap", "bubblewrap"]], refuses: "the stage Blocks before it starts without it" },
+};
+
 /** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */
 export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-bwrap && sudo apparmor_parser -r /etc/apparmor.d/factory-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
 
 /**
- * Claude Code on Actions and in a cloud sandbox runs its commands in its bubblewrap sandbox (harness.mjs claudeRunner).
- * Wherever its settings are checked: each `allowed_domains` entry it would drop is a WARN. Where the job runs (a runner
- * job, a sandbox stage): bwrap, socat and rg, which the Action and the stage's start install on Ubuntu; on a
- * self-hosted runner, AppArmor letting bwrap make user namespaces, which the Action does not change there. Not in local
- * mode, whose own checks name them (local.mjs). `has`, `read` and `profiles` are seams for the tests.
+ * Claude Code and Codex on Actions and in a cloud sandbox run their commands in their own bubblewrap sandboxes
+ * (harness.mjs claudeRunner, codexRunner). Wherever their settings are checked: each `allowed_domains` entry they would
+ * drop is a WARN. Where the job runs (a runner job, a sandbox stage): the binaries each needs, which the Action and the
+ * stage's start install on Ubuntu; on a self-hosted runner, AppArmor letting bwrap make user namespaces, which the
+ * Action does not change there; for Codex, its sandbox started once (`start`), which fails where it cannot start. Not
+ * in local mode, whose own checks name them (local.mjs). `has`, `read`, `profiles` and `start` are seams for the tests.
  */
-export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles }) {
-  if (inputs.harness !== "claude" || local) return [];
+export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles, start = codexSandboxStart }) {
+  const h = inputs.harness;
+  const sb = RUNNER_SANDBOX[h];
+  if (!sb || local) return [];
   const out = [];
   const dropped = droppedDomains(input("allowed_domains", { env }));
-  if (dropped.length) out.push(WARN("allowed_domains", `not host names, so Claude Code's sandbox does not allow them: ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address"));
+  if (dropped.length) out.push(WARN("allowed_domains", `not host names, so ${sb.name}'s sandbox does not allow them: ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path or IP address"));
   if (!(env.GITHUB_ACTIONS || env.FACTORY_STAGE_SANDBOX === "1")) return out;
-  for (const [bin, pkg] of [["bwrap", "bubblewrap"], ["socat", "socat"], ["rg", "ripgrep"]]) out.push((await has(bin)) ? PASS(`claude sandbox: ${bin}`, "present") : FAIL(`claude sandbox: ${bin}`, `${bin} not on PATH; Claude Code runs every command in its bubblewrap sandbox here and refuses to start without it`, `install ${pkg} on the runner (sudo apt-get install -y bubblewrap socat ripgrep; the Action does this on GitHub's hosted runners)`));
+  const pkgs = sb.bins.map(([, pkg]) => pkg).join(" ");
+  const missing = [];
+  for (const [bin, pkg] of sb.bins) {
+    const ok = await has(bin);
+    if (!ok) missing.push(bin);
+    out.push(ok ? PASS(`${h} sandbox: ${bin}`, "present") : FAIL(`${h} sandbox: ${bin}`, `${bin} not on PATH; ${sb.name} runs every command in its bubblewrap sandbox here and ${sb.refuses}`, `install ${pkg} on the runner (sudo apt-get install -y ${pkgs}; the Action does this on GitHub's hosted runners)`));
+  }
   if (env.RUNNER_ENVIRONMENT === "self-hosted") {
     let restricted = false;
     try {
@@ -868,9 +882,28 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
     }
     const loaded = restricted || (await has("apparmor_parser")) ? await profiles() : "";
     const blocks = (restricted && !/^factory-bwrap /m.test(loaded)) || /^unpriv_bwrap /m.test(loaded);
-    out.push(blocks ? FAIL("claude sandbox: apparmor", "AppArmor keeps bwrap from making the user namespaces Claude Code's sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners", APPARMOR_ADMIN_STEP) : PASS("claude sandbox: apparmor", restricted ? "the factory-bwrap profile lets bwrap make user namespaces" : "no user-namespace restriction"));
+    out.push(blocks ? FAIL(`${h} sandbox: apparmor`, `AppArmor keeps bwrap from making the user namespaces ${sb.name}'s sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners`, APPARMOR_ADMIN_STEP) : PASS(`${h} sandbox: apparmor`, restricted ? "the factory-bwrap profile lets bwrap make user namespaces" : "no user-namespace restriction"));
+  }
+  // Codex's sandbox, started once where the job runs (the stage checks again as the agent before every start).
+  const r = h === "codex" && !missing.length ? await start(env) : null;
+  if (r) {
+    out.push(r.ok ? PASS("codex sandbox: start", "Codex's sandbox starts here") : FAIL("codex sandbox: start", `Codex's sandbox does not start here: ${r.reason}`, env.RUNNER_ENVIRONMENT === "self-hosted" ? APPARMOR_ADMIN_STEP : "give bwrap unprivileged user and network namespaces (on Ubuntu the factory-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)"));
   }
   return out;
+}
+
+/**
+ * `codex sandbox` with local mode's profile around /bin/true, as the agent in its temp directory (on Actions the CLI is
+ * the agent's to run, never the runner's): {ok, reason}, or null before the agent exists.
+ */
+async function codexSandboxStart(env = process.env) {
+  const agent = agentUser();
+  if (!agent) return null;
+  const home = `${agent.tmp}/codex-sandbox-check`;
+  const args = ["sandbox", ...codexLocalConfig({ clone: null, addDirs: [agent.tmp], home: agent.home, secrets: [] }), "--", "/bin/true"];
+  const r = await exec("/bin/sh", ["-c", 'mkdir -p "$1" && CODEX_HOME="$1" && export CODEX_HOME && shift && exec codex "$@"', "sh", home, ...args], { cwd: agent.tmp, env: { PATH: env.PATH || "/usr/bin:/bin" }, timeoutMs: 120_000 }).catch((e) => ({ code: 1, stderr: e.message }));
+  await exec("/bin/rm", ["-rf", "--", home], { cwd: agent.tmp }).catch(() => {});
+  return r.code === 0 ? { ok: true } : { ok: false, reason: String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${r.code}` };
 }
 
 /** The AppArmor profiles loaded (root's to read), or "" when they cannot be read. */

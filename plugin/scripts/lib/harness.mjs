@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, captureSession, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
+import { codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -234,6 +235,21 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
   return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env })), ...offered.map((p) => `127.0.0.1:${p}`)] };
 }
 
+/** The Vercel AI Gateway's host, which a runner's Codex commands may reach when the gateway is Codex's provider. */
+export const GATEWAY_HOST = new URL(GATEWAY_CODEX_URL).hostname;
+
+/**
+ * A runner's Codex run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
+ * (lib/codex-runner.mjs: Factory's HOME for Codex, its fresh CODEX_HOME, the caches) and the hosts its commands may reach
+ * (`allowed_domains`, and the gateway's host when it is the provider). `present` is filled before each start: the
+ * checkout's read-only paths that exist. Null for any other harness, in local mode and before the agent uid exists.
+ */
+export function codexRunner({ harness, agent, clone, env = process.env, codexHome }) {
+  if (harness !== "codex" || !agent || !clone || backend(env).name === "local") return null;
+  const gateway = env[CODEX_GATEWAY_ENV] ? [GATEWAY_HOST] : [];
+  return { clone, ...codexRunnerLayout(agent, codexHome), domains: [...new Set([...runnerDomains(input("allowed_domains", { env })), ...gateway])], present: null };
+}
+
 /**
  * The command line for one run. `resume` is the session id of the run to continue
  * (Claude --resume, Codex exec resume, Copilot --resume); `agent` names a pinned
@@ -245,9 +261,10 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
   const hidden = hiddenFromShell(shellSecrets);
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
   // lib/local.mjs to one bar. On a runner and in a cloud sandbox VM (`runner`: the agent uid's checkout, home and temp
-  // directory), Claude Code runs its commands in its own sandbox to the same bar (claudeRunnerSettings), so they never
-  // see its credential; Codex and Copilot skip their permissions there and keep the credential out of their commands'
-  // environment by their own flags only: their commands, the same uid, can still read it from /proc (PLAN.md, #87).
+  // directory), Claude Code and Codex run their commands in their own sandboxes to the same bar (claudeRunnerSettings,
+  // codexRunnerConfig), so they never see its credential; Copilot skips its permissions there and keeps the credential
+  // out of its commands' environment by its own flags only: its commands, the same uid, can still read it from /proc
+  // (PLAN.md, #87).
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
@@ -280,9 +297,11 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
       const args = resume ? ["exec", "resume", resume] : ["exec"];
-      // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code.
-      // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included.
-      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
+      // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code;
+      // on a runner its CODEX_HOME is made afresh before every start (codex-runner.mjs), and stays out as well.
+      // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included. Only
+      // where there is no agent uid and no local sandbox (a developer's /factory:run) are permissions skipped.
+      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : runner ? ["--ignore-user-config", ...codexRunnerConfig({ runner, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
       args.push("--json", ...perms, "--skip-git-repo-check");
       // Through the Vercel AI Gateway (`gateway`, codexGatewayOf): its provider, and the model as `openai/<id>` on a
       // resume too, which otherwise falls back to the configured default (a bare id) and changes the thread's model
@@ -293,7 +312,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (compaction) args.push("-c", `model_auto_compact_token_limit=${Number(compaction)}`);
       // The session id travels as an extra variable, so a runner's agent uid gets it with the key (runHarness agentExtra).
       const gw = gateway?.session ? { FACTORY_GATEWAY_SESSION: gateway.session } : {};
-      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV, ...gw } : gw };
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV, ...gw } : runner ? { ...HARNESS_GIT_ENV, ...codexRunnerEnv(runner), ...gw } : gw };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
@@ -390,15 +409,22 @@ export function seedSessionTotal(sessionId, total) {
 }
 
 /**
- * Before a runner's Claude Code start (lib/claude-runner.mjs): the checkout's git state put back as Factory pinned it,
- * then local mode's pre-start clear of the checkout (local.mjs clearHarnessConfig), and Claude Code's state made
- * afresh; all as the agent. A failure refuses the start.
+ * Before a runner's Claude Code or Codex start (lib/claude-runner.mjs, lib/codex-runner.mjs): the checkout's git state put
+ * back as Factory pinned it, then local mode's pre-start clear of the checkout (local.mjs clearHarnessConfig), and the
+ * harness's state made afresh; all as the agent. Codex's sandbox is then started once as a check. A failure refuses
+ * the start.
  */
-async function runnerClear(runner, env) {
+export async function runnerClear(harness, runner, env) {
   await restoreRunnerGit(runner.clone, env);
   const cleared = await clearHarnessConfig(runner.clone, (inner) => exec(...backend(env).sandbox.git(inner, env), { env })).catch((e) => {
     throw new GitRefusal("git-clear", e.message);
   });
+  if (harness === "codex") {
+    await resetCodexState(runner, env);
+    runner.present = await presentPaths(runner.clone, env);
+    await codexSandboxCheck(runner, env);
+    return cleared;
+  }
   await resetClaudeState(runner, env);
   // Its commands' env file, with a relay for each service the setup started (claude-runner.mjs envFileText).
   writeEnvFile(runner, runner.services);
@@ -409,6 +435,24 @@ async function runnerClear(runner, env) {
   return cleared;
 }
 const SERVICES_SAID = new Set();
+
+/**
+ * Codex's sandbox started once, as the agent and launched as Codex is, with the profile its run gets (`codex sandbox`,
+ * no model): where it cannot start (no bubblewrap, user namespaces refused), the stage Blocks before any command runs
+ * unsandboxed. Codex itself would only fail each command. Checked once per process.
+ */
+let SANDBOX_OK = false;
+export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
+  if (SANDBOX_OK) return;
+  const [cmd, args] = runnerLaunch(runner, "codex", ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), "--", "/bin/true"], env.PATH);
+  const r = await run(cmd, args, { cwd: runner.clone, env: { ...env, ...codexRunnerEnv(runner) }, agentExtra: ["CODEX_HOME"], timeoutMs: 120_000 });
+  if (r.code !== 0) throw new GitRefusal("sandbox", `Codex's sandbox could not start here: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 300) || `exit ${r.code}`}`);
+  SANDBOX_OK = true;
+}
+/** Tests: check again. */
+export const dropSandboxCheck = () => {
+  SANDBOX_OK = false;
+};
 
 /**
  * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
@@ -444,8 +488,9 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Locally: whatever hook, settings or MCP server a sandboxed command left in the clone is gone before the harness starts.
   // A runner's Claude Code gets the same pre-start clear, as the agent: its own git and the checkout's protected paths
   // (local.mjs prepareClone) are what its sandbox guards.
-  const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env });
-  const cleared = runner ? await runnerClear(runner, scrubbedEnv(env)) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
+  // A runner's Codex: its own sandbox, and the same clear before its start (lib/codex-runner.mjs).
+  const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env }) || codexRunner({ harness, agent: agentUid, clone: cwd, env });
+  const cleared = runner ? await runnerClear(harness, runner, scrubbedEnv(env)) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
   const cacheTtl = promptCacheTtl(harness, env);
   const creditUsd = copilotCreditUsd();
   // Copilot takes no cap under 30 AI credits: with less than that left, no Copilot run starts (the caller Blocks on the
@@ -480,18 +525,20 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Each would make Copilot load the clone's hooks, settings, .mcp.json or extensions (COPILOT_ALLOW_ALL trusts the folder).
   if (harness === "copilot") for (const k of ["COPILOT_ALLOW_ALL", "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"]) delete childEnv[k];
   // Linux: the harness process itself in srt, the stage's TMPDIR put back (srt points it at its shared /tmp/claude).
-  // A runner's Claude Code: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home (claude-runner.mjs).
+  // A runner's Claude Code or Codex: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home
+  // (claude-runner.mjs runnerLaunch).
   const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
   const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), ...shellSecrets, "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
   // A runner's Claude Code: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
-  const [execCmd, execArgs, execEnv] = runner ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
+  // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
+  const [execCmd, execArgs, execEnv] = runner && harness === "claude" ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
   const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
-  // A runner's Claude Code session, captured before anything else runs as the agent: the next start and the stage's
-  // saved transcript use this copy, never what the agent's home holds by then.
+  // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
+  // stage's saved transcript use this copy, never what the agent's home holds by then.
   const ranSession = runner ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId : null;
   if (ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
   // Only a regular file the harness wrote is read (in the outer sandbox's folder, a link could point anywhere).

@@ -11,7 +11,8 @@ import { backend } from "./backend.mjs";
 import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { prepareClaudeHome, runnerLayout } from "./claude-runner.mjs";
+import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
+import { CODEX_RUNNER_HOME } from "./codex-runner.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -75,6 +76,8 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
     await prepareClaudeHome(layout);
     await claudePlugin(checkout, layout.pluginDir, env, { shared: true });
   }
+  // Codex's HOME on a runner: Factory's own, empty, made afresh (lib/codex-runner.mjs).
+  else if (harness === "codex" && agentUser() && backend(env).name !== "local") await prepareFactoryHome(CODEX_RUNNER_HOME, "Codex");
   return written;
 }
 

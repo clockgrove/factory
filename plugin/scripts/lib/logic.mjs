@@ -666,8 +666,9 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
   if (!left.length) return null;
   const them = left.length === 1 ? "it" : "them";
   const named = left.map((h) => `\`${h}\``).join(", ");
-  // On Actions and in a cloud sandbox, Claude Code's sandbox: the workflow's `allowed_domains` input (harness.mjs claudeRunner).
-  if (route === "runner") return `Claude Code's sandbox denied ${named}. If the Objective needs ${them}, add ${them} to the Factory workflow's \`allowed_domains\` input (or \`FACTORY_ALLOWED_DOMAINS\` in its env block), then re-apply \`factory:objective\`.`;
+  // On Actions and in a cloud sandbox, Claude Code's or Codex's sandbox: the workflow's `allowed_domains` input
+  // (harness.mjs claudeRunner, codexRunner).
+  if (route === "runner") return `The harness's sandbox denied ${named}. If the Objective needs ${them}, add ${them} to the Factory workflow's \`allowed_domains\` input (or \`FACTORY_ALLOWED_DOMAINS\` in its env block), then re-apply \`factory:objective\`.`;
   return `The local sandbox denied ${named}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
 }
 

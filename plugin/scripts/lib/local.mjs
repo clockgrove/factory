@@ -238,13 +238,15 @@ export const gitRefusalReason = (code, issue) =>
     ? gitIdentityReason(issue)
     : code === "git-state"
       ? "local mode: the clone's .git config, hooks, commondir or info/attributes changed during the stage (git-state); the harness was not started"
-      : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
+      : code === "sandbox"
+        ? "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. Run doctor in the job: it names what is missing (bubblewrap, or AppArmor's user-namespace restriction on a self-hosted runner)"
+        : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
  */
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
-/** A harness start Factory refused (beforeHarness): `code` is git-identity, git-state or git-clear; the stage Blocks (gitRefusalReason). */
+/** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear or sandbox; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
   constructor(code, detail) {
     super(`refusing to start the harness: ${detail}`);
@@ -697,15 +699,16 @@ const tq = JSON.stringify;
  * own login stays readable to Codex itself, which runs outside the sandbox: the profile denies the login file,
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
-export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [] } = {}) {
+export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null } = {}) {
   // /proc: Codex's sandbox has its own pid namespace already; the deny says the same thing in the profile.
-  const deny = [...CREDENTIAL_PATHS.map((p) => (p === ".codex" ? ".codex/auth.json*" : p)).map((p) => `${tq(join(home, p))}="deny"`), `${tq("/proc")}="deny"`];
+  const deny = [...secrets.map((p) => `${tq(p)}="deny"`), `${tq("/proc")}="deny"`];
   // The clone's harness configuration by absolute path, where present: a path relative to the workspace roots applies to
   // every root, and Codex's sandbox fails to start on an absent one (a stage's temp directory has no .github). Factory makes
   // them all before a harness starts (prepareClone).
   // .git/commondir and .git/info/attributes likewise by absolute path: relative, Codex would make them in every root
   // that has no .git.
-  const ro = [...(clone ? [...harnessConfigPaths(clone), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")].filter((p) => lstatSync(p, { throwIfNoEntry: false })) : []), ...readOnly].map((p) => `${tq(p)}="read"`);
+  // `exists`: on a runner the checkout is the agent's (700), so what is there is listed as the agent (codex-runner.mjs).
+  const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly].map((p) => `${tq(p)}="read"`);
   const roots = addDirs.map((d) => `${tq(d)}=true`);
   const net = [...new Set(domains)].map((d) => `${tq(d)}="allow"`);
   const profile = `{extends=":read-only",workspace_roots={${roots.join(",")}},filesystem={${[...deny, ...ro, `":workspace_roots"={"."="write",".git"="write",".git/hooks"="read",".git/config"="read"}`].join(",")}},network={enabled=true,mode="full",allow_local_binding=true,domains={${net.join(",")}}}}`;
@@ -723,8 +726,13 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
     ...(clone ? [`projects={${tq(clone)}={trust_level="untrusted"}}`] : []),
     `approvals_reviewer="user"`,
     codexShellExclude(secretEnv),
+    // `commandEnv`: variables every command gets (on a runner the agent's HOME and TMPDIR back, codex-runner.mjs).
+    ...(commandEnv ? [`shell_environment_policy.set={${Object.entries(commandEnv).map(([k, v]) => `${k}=${tq(v)}`).join(",")}}`] : []),
   ].flatMap((c) => ["-c", c]);
 }
+
+/** The checkout's paths Codex's sandbox keeps read-only where they exist: its harness configuration and git's own. */
+export const codexReadOnly = (clone) => [...harnessConfigPaths(clone), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
 
 /**
  * Codex's `-c` value that drops `names` from the environment of every command its model runs, on every route. Codex's

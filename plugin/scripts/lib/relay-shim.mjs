@@ -23,8 +23,8 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
  * not know (a newer bubblewrap's) leaves the call as given: no forwarder, which the probes catch.
  */
 const BWRAP_ARITY = {
-  0: ["--help", "--version", "--unshare-all", "--share-net", "--unshare-user", "--unshare-user-try", "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts", "--unshare-cgroup", "--unshare-cgroup-try", "--clearenv", "--new-session", "--die-with-parent", "--as-pid-1", "--disable-userns", "--assert-userns-disabled"],
-  1: ["--args", "--argv0", "--userns", "--userns2", "--pidns", "--uid", "--gid", "--hostname", "--chdir", "--unsetenv", "--lock-file", "--sync-fd", "--remount-ro", "--overlay-src", "--tmp-overlay", "--ro-overlay", "--exec-label", "--file-label", "--proc", "--dev", "--tmpfs", "--mqueue", "--dir", "--seccomp", "--add-seccomp-fd", "--block-fd", "--userns-block-fd", "--info-fd", "--json-status-fd", "--cap-add", "--cap-drop", "--perms", "--size", "--level-prefix"],
+  0: ["--help", "--version", "--unshare-all", "--share-net", "--unshare-user", "--unshare-user-try", "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts", "--unshare-cgroup", "--unshare-cgroup-try", "--clearenv", "--new-session", "--die-with-parent", "--as-pid-1", "--disable-userns", "--assert-userns-disabled", "--level-prefix"],
+  1: ["--args", "--argv0", "--userns", "--userns2", "--pidns", "--uid", "--gid", "--hostname", "--chdir", "--unsetenv", "--lock-file", "--sync-fd", "--remount-ro", "--overlay-src", "--tmp-overlay", "--ro-overlay", "--exec-label", "--file-label", "--proc", "--dev", "--tmpfs", "--mqueue", "--dir", "--seccomp", "--add-seccomp-fd", "--block-fd", "--userns-block-fd", "--info-fd", "--json-status-fd", "--cap-add", "--cap-drop", "--perms", "--size"],
   2: ["--setenv", "--bind", "--bind-try", "--dev-bind", "--dev-bind-try", "--ro-bind", "--ro-bind-try", "--bind-fd", "--ro-bind-fd", "--file", "--bind-data", "--ro-bind-data", "--symlink", "--chmod"],
   3: ["--overlay"],
 };

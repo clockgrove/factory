@@ -3,7 +3,7 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
@@ -56,7 +56,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -78,6 +78,8 @@ export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
   // The worker's shell secrets (lib/worker-secrets.mjs) are for its harness alone (runHarness unpacks them there).
   delete e[SHELL_SECRETS_ENV];
+  // FACTORY_CONTROL_KEYS include the relay's address and the worker's state directory: Factory sets those for a
+  // harness itself, after this (runHarness), so one from anywhere else never reaches a child.
   for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS, ...FACTORY_CONTROL_KEYS]) delete e[k];
   for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
   for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
@@ -886,23 +888,21 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
 export function codexRolloutReader(runner, env) {
   if (runner) {
     const root = join(runner.codexHome, "sessions");
-    return async (id) => (plainThread(id) ? String((await exec("/bin/sh", ["-c", 'f=$(ls "$1"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || exit 0; grep -h \'"token_usage_record"\' "$f"; grep -h \'"token_count"\' "$f" | tail -n 1', "sh", root, id], { cwd: runner.agentHome, env: scrubbedEnv(env), timeoutMs: 5_000 })).stdout || "") : "");
+    return async (id) => {
+      if (!plainThread(id)) return "";
+      // The newest rollout of the thread (a resumed thread can have more than one).
+      const r = await exec("/bin/sh", ["-c", 'f=$(ls -t "$1"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || exit 0; grep -h \'"token_usage_record"\' "$f"; grep -h \'"token_count"\' "$f" | tail -n 1; exit 0', "sh", root, id], { cwd: runner.agentHome, env: scrubbedEnv(env), timeoutMs: 5_000 });
+      if (r.code !== 0 || r.timedOut) throw new Error(`the rollout could not be read (${r.timedOut ? "timed out" : `exit ${r.code}`})`);
+      return String(r.stdout || "");
+    };
   }
   const root = codexSessionRoot(env);
   return async (id) => {
-    const f = codexRolloutFiles(root, id)[0];
-    if (!f) return "";
-    const p = join(root, f);
-    const size = statSync(p).size;
-    const fd = openSync(p, "r");
-    try {
-      const len = Math.min(size, MAX_ROLLOUT_BYTES);
-      const buf = Buffer.alloc(len);
-      readSync(fd, buf, 0, len, size - len);
-      return buf.toString("utf8").split("\n").filter((l) => l.includes('"token_usage_record"') || l.includes('"token_count"')).join("\n");
-    } finally {
-      closeSync(fd);
-    }
+    // The newest rollout of the thread, read whole (its usage lines only), as the runner's read does.
+    const files = codexRolloutFiles(root, id).map((f) => join(root, f));
+    if (!files.length) return "";
+    const p = files.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+    return readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"token_usage_record"') || l.includes('"token_count"')).join("\n");
   };
 }
 

@@ -6,18 +6,27 @@
 // - Codex: its stream reports usage once per turn (`turn.completed`), and a pass is often one turn, so the thread's own
 //   rollout is read too (`rollout(threadId)`: its `token_usage_record` lines, one per model response, written before the
 //   response's tool call runs; else its last `token_count` line's running total); the larger counts, priced from the Codex table (usage.mjs priceCodex), a resumed thread's earlier total
-//   taken off once. Its sub-agent threads' spend counts once the pass ends. A model the table does not list reports
-//   nothing live.
+//   taken off once. Its sub-agent threads' spend counts once the pass ends. An unset or unlisted model is priced at the
+//   table's dearest rates, never $0; a rollout that cannot be read throws, and the relay then refuses the call.
 // - Copilot: its usage checkpoints' running AI credits (`session.usage_checkpoint` totalNanoAiu) at the run's dollars per
 //   credit; a resumed session's earlier dollars are taken off.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COPILOT_CREDIT_USD, bareModel, priceCodex } from "./usage.mjs";
+import { CODEX_PRICES, COPILOT_CREDIT_USD, bareModel, priceCodex, priceTokens } from "./usage.mjs";
 
 export const CLAUDE_PRICES = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "claude-prices.json"), "utf8"));
 
 const n = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+
+/** Codex tokens at the table's dearest rate of each kind: what an unset or unlisted model's tokens cost at most. */
+const CODEX_UPPER = (() => {
+  const rows = Object.values(CODEX_PRICES.perMillion);
+  const most = (k) => Math.max(...rows.map((r) => r[k] ?? r.input));
+  return { perMillion: { upper: { input: most("input"), cached: most("cached"), write: most("write"), output: most("output") } } };
+})();
+/** USD for Codex `tokens` at `model`'s rates, else at the table's dearest. */
+export const codexUsd = (model, tokens) => priceCodex(model, tokens) ?? priceTokens(CODEX_UPPER, "upper", tokens) ?? 0;
 
 /** A Claude model's rates: its row by exact id or a dated snapshot of one, else the table's upper bound. */
 export function claudeRate(model, table = CLAUDE_PRICES) {
@@ -105,15 +114,12 @@ export function liveSpend(harness, model = null, { prior = null, creditUsd = COP
     if (harness === "codex") {
       const p = prior?.tokens || {};
       const since = (t) => ({ input: Math.max(0, n(t.input) - n(p.input)), output: Math.max(0, n(t.output) - n(p.output)), cached: Math.max(0, n(t.cached) - n(p.cached)), written: Math.max(0, n(t.written) - n(p.written)) });
-      const fromStream = priceCodex(codex.model, since(codex)) ?? 0;
+      const fromStream = codexUsd(codex.model, since(codex));
       let fromRollout = 0;
       if (rollout && thread) {
-        try {
-          const total = rolloutTotal(await rollout(thread), thread);
-          if (total) fromRollout = priceCodex(codex.model, since(total)) ?? 0;
-        } catch {
-          // the stream's figure stands
-        }
+        // A read that fails throws: the relay refuses the call rather than read the spend as $0.
+        const total = rolloutTotal(await rollout(thread), thread);
+        if (total) fromRollout = codexUsd(codex.model, since(total));
       }
       return Math.max(fromStream, fromRollout);
     }

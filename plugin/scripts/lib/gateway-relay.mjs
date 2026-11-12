@@ -16,7 +16,9 @@
 //   of every response in each form a text can carry it.
 // - Pricing, from what the caller cannot write: the gateway's own fields at fixed top-level places (an AI SDK protocol
 //   response's `providerMetadata.gateway`, a stream's last event's), and the generation's cost looked up with the same key
-//   (`/v1/generation?id=` by the response's top-level generation id); the larger of the two counts. A request body echoed
+//   (`/v1/generation?id=` by the answer's top-level generation id, or its x-generation-id header on a stream); the larger
+//   of the two counts. A reported cost is booked at once and the lookup reconciles it aside (the gateway records a
+//   generation seconds after the answer); with no reported cost the call waits for the lookup. A request body echoed
 //   into a response (a tool's schema, a tool call's input) is never read. A call whose cost cannot be determined, an
 //   error after the request was sent, a 5xx or a broken stream is never $0: the pass ends over budget, so the stage Blocks
 //   (fail closed), and the relay refuses every later call. A 4xx answer (the gateway refused the call) is not billed.
@@ -27,6 +29,8 @@
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
+import zlib from "node:zlib";
 import { join } from "node:path";
 import { secretForms } from "./inputs.mjs";
 
@@ -69,6 +73,10 @@ const num = (v) => {
   return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
 };
 const GEN_ID = /^gen_[A-Za-z0-9]{6,64}$/;
+/** The answers that bill nothing: the gateway refused the call before any model ran. */
+const UNBILLED = new Set([400, 401, 403, 404, 413, 422, 429]);
+/** The most billable calls waiting behind the one in flight while a cap is on; more get 429. */
+export const MAX_WAITING = 8;
 
 /** The route a request takes, or null: refused. */
 export function routeOf(method, target) {
@@ -77,20 +85,22 @@ export function routeOf(method, target) {
 }
 
 /**
- * What one answer says it cost, from fixed top-level places only: {usd, id}, either null. `doc` is the parsed JSON body
- * (or, for a stream, its last event that names the gateway's metadata), `first` a stream's first event (an OpenAI
- * stream's top-level id). An `sdk` answer's cost and id: `providerMetadata.gateway.cost` and `.generationId` at its top
- * level. An `openai` answer's: only its top-level `id` when it is a generation id.
+ * What one answer says it cost, from fixed places the caller cannot write: {usd, id}, either null. `doc` is the parsed JSON
+ * body (or, for a stream, its last event that names the gateway's metadata: the `finish` event), `first` a stream's first
+ * event, `headerId` the answer's `x-generation-id` header (the gateway sends it on a stream). An `sdk` answer's cost and
+ * id: `providerMetadata.gateway.cost` (a string, "0.007") and `.generationId` at its top level, else the header's id. An
+ * `openai` answer's: its top-level generation id (or the header's), looked up.
  */
-export function costOf(doc, family, first = null) {
+export function costOf(doc, family, first = null, headerId = null) {
   const top = (o) => (o && typeof o === "object" && !Array.isArray(o) ? o : null);
   const d = top(doc);
+  const fromHeader = typeof headerId === "string" && GEN_ID.test(headerId) ? headerId : null;
   if (family === "sdk") {
     const gw = top(top(d?.providerMetadata)?.gateway);
-    return { usd: num(gw?.cost), id: typeof gw?.generationId === "string" && GEN_ID.test(gw.generationId) ? gw.generationId : null };
+    return { usd: num(gw?.cost), id: typeof gw?.generationId === "string" && GEN_ID.test(gw.generationId) ? gw.generationId : fromHeader };
   }
   if (family === "openai") {
-    const id = [d?.id, top(first)?.id].find((v) => typeof v === "string" && GEN_ID.test(v)) || null;
+    const id = [d?.id, top(first)?.id, fromHeader].find((v) => typeof v === "string" && GEN_ID.test(v)) || null;
     return { usd: null, id };
   }
   return { usd: null, id: null };
@@ -137,6 +147,33 @@ export function keyCutter(key) {
   };
 }
 
+/**
+ * One upstream call through Node's own http(s) client, with `timeoutMs` for the whole of it (fetch's agent would cut a
+ * slow model's first byte at 300 s): {status, headers: Map, body: async iterable of decoded bytes}. Never follows a
+ * redirect. A compressed answer is decoded, so its cost can be read.
+ */
+export function upstreamRequest(url, { method, headers, body = null, timeoutMs = UPSTREAM_TIMEOUT_MS }) {
+  const u = new URL(url);
+  const client = u.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.request(u, { method, headers: { ...headers, ...(body ? { "content-length": body.length } : {}) } }, (res) => {
+      const h = new Map(Object.entries(res.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(", ") : String(v)]));
+      const enc = (h.get("content-encoding") || "").toLowerCase();
+      const decoder = enc === "gzip" ? zlib.createGunzip() : enc === "br" ? zlib.createBrotliDecompress() : enc === "deflate" ? zlib.createInflate() : null;
+      if (decoder) {
+        h.delete("content-encoding");
+        res.on("error", (e) => decoder.destroy(e));
+      }
+      resolve({ status: res.statusCode, headers: { get: (k) => h.get(String(k).toLowerCase()) ?? null, [Symbol.iterator]: () => h[Symbol.iterator]() }, body: decoder ? res.pipe(decoder) : res });
+    });
+    const timer = setTimeout(() => req.destroy(new Error("timed out")), timeoutMs);
+    timer.unref();
+    req.on("close", () => clearTimeout(timer));
+    req.on("error", reject);
+    req.end(body || undefined);
+  });
+}
+
 /** Whether `header` (an Authorization value) is `Bearer <token>`, compared in constant time. */
 export function tokenMatches(header, token) {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(String(header || ""));
@@ -156,14 +193,13 @@ const refusal = (res, status, message) => {
 };
 
 /**
- * A server-sent event stream read as it passes: its first event and its last one that names the gateway's metadata (or,
- * failing that, its last event), never the whole stream.
+ * A server-sent event stream read as it passes: its first event and its dearest `finish` event (which carries the
+ * gateway's cost and generation id), never the whole stream.
  */
 function eventReader() {
   let pending = "";
   let first = null;
-  let last = null;
-  let lastMeta = null;
+  let finish = null;
   const take = (block) => {
     const line = block.split(/\r?\n/).find((l) => l.startsWith("data:"));
     if (!line) return;
@@ -175,8 +211,11 @@ function eventReader() {
     }
     if (!e || typeof e !== "object") return;
     first ??= e;
-    last = e;
-    if (e.providerMetadata) lastMeta = e;
+    // The gateway's cost rides on its `finish` event; no other event's metadata is read. Of several, the dearest counts.
+    if (e.type === "finish") {
+      const cost = (x) => num(x?.providerMetadata?.gateway?.cost) ?? -1;
+      if (!finish || cost(e) > cost(finish)) finish = e;
+    }
   };
   return {
     push(text) {
@@ -189,7 +228,7 @@ function eventReader() {
     },
     end() {
       if (pending) take(pending);
-      return { first, doc: lastMeta || last };
+      return { first, doc: finish };
     },
   };
 }
@@ -206,7 +245,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
   const keyForms = keyCutter(key);
-  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0 }, busy: false, waiters: [], failClosed: false, capped: false, pass: null, pending: new Set(), said: new Set() };
+  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0 }, busy: false, waiters: [], failClosed: false, capped: false, pass: null, pending: new Set(), checks: new Set(), said: new Set() };
   const once = (what, line) => {
     if (s.said.has(what)) return;
     s.said.add(what);
@@ -221,6 +260,12 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       s.pass.usd += usd;
       s.pass.calls += 1;
     } else s.late += usd;
+  };
+  // A looked-up cost above the reported one: added to the spend, not counted as a call of its own.
+  const bookExtra = (usd) => {
+    s.spent += usd;
+    if (s.pass) s.pass.usd += usd;
+    else s.late += usd;
   };
   const failClosed = (why) => {
     s.unpriced += 1;
@@ -283,31 +328,63 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       s.refused.unpriced += 1;
       return refusal(res, 403, "an earlier call's cost could not be determined, so the Objective's dollar cap cannot be enforced; no further call is relayed in this stage");
     }
-    if (!s.pass) {
+    if (!s.pass || s.pass.ended) {
       s.refused.pass += 1;
       return refusal(res, 403, "calls are relayed only while a Factory pass runs");
     }
     const billable = route.family !== "free";
+    // With a cap on, a billable call waits its turn before its body is read, and only a few may wait.
+    const serial = billable && capOn;
+    if (serial) {
+      if (s.busy && s.waiters.length >= MAX_WAITING) return refusal(res, 429, `more than ${MAX_WAITING} calls are waiting: with a dollar cap on, calls are relayed one at a time`);
+      await acquire();
+    }
+    let held = serial;
+    const free = () => {
+      if (held) {
+        held = false;
+        release();
+      }
+    };
     // The request body, whole and under its cap, before anything is sent.
     const chunks = [];
     let size = 0;
     try {
       for await (const c of req) {
         size += c.length;
-        if (size > route.maxBytes) return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+        if (size > route.maxBytes) {
+          free();
+          return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+        }
         chunks.push(c);
       }
     } catch {
+      free();
       return res.destroy();
     }
     if (billable) {
-      if (capOn) await acquire();
       // Checked once the calls before it are priced: the cap can be passed by this one call's cost at most.
-      const p = s.pass;
-      const harnessUsd = p?.live ? Math.max(0, Number(await Promise.resolve(p.live()).catch(() => 0)) || 0) : 0;
+      const p = s.pass && !s.pass.ended ? s.pass : null;
+      // The harness's own spend in the pass (live-spend.mjs): a figure that cannot be read refuses the call.
+      let harnessUsd = 0;
+      if (p?.live && p.budget !== null) {
+        let v;
+        try {
+          v = await Promise.race([Promise.resolve(p.live()), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10_000).unref())]);
+        } catch {
+          v = undefined;
+        }
+        if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+          free();
+          s.refused.live = (s.refused.live || 0) + 1;
+          once("live", "gateway relay: the harness's own spend in the pass could not be read; the call is refused, as the cap cannot be checked");
+          return refusal(res, 503, "the model's own spend in this pass could not be read, so the Objective's dollar cap cannot be checked; the call is refused. Try once more; if it fails again, stop and report it");
+        }
+        harnessUsd = v;
+      }
       const over = !!p && p.budget !== null && p.usd + harnessUsd >= p.budget;
       if (!p || s.failClosed || over) {
-        if (capOn) release();
+        free();
         if (over) {
           s.refused.cap += 1;
           s.capped = true;
@@ -329,7 +406,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     const done = (async () => {
       let upstream;
       try {
-        upstream = await fetchImpl(`${origin}${req.url}`, { method: req.method, headers, body: route.method === "GET" ? undefined : Buffer.concat(chunks), redirect: "manual", signal: AbortSignal.timeout(upstreamTimeoutMs) });
+        upstream = await upstreamRequest(`${origin}${req.url}`, { method: req.method, headers, body: route.method === "GET" ? null : Buffer.concat(chunks), timeoutMs: upstreamTimeoutMs });
       } catch (e) {
         if (!res.headersSent && !res.destroyed) refusal(res, 502, `the AI Gateway call failed (${String(e?.cause?.code || e?.name || "error").slice(0, 40)})`);
         return { sentError: true };
@@ -377,23 +454,40 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
           parsed.doc = null;
         }
       }
-      return { status: upstream.status, broken, overflow, ...parsed };
-    })();
+      return { status: upstream.status, broken, overflow, headerId: upstream.headers.get("x-generation-id"), ...parsed };
+    })().catch(() => ({ sentError: true }));
     if (!billable) return;
+    // The lock passes to the next call once this one is priced (finally), whatever happened to it.
     const pricing = done.then(async (o) => {
       try {
-        // A 4xx: the gateway refused the call, which is not billed.
-        if (o.status >= 400 && o.status < 500 && !o.broken) {
+        // A known refusal (a bad or unauthorised request, a missing model, too large, unprocessable, rate limited): the
+        // gateway refused the call, which is not billed. Any other 4xx fails closed below.
+        if (UNBILLED.has(o.status) && !o.broken) {
           s.failed += 1;
           return;
         }
         if (o.sentError || o.broken || o.overflow || !(o.status >= 200 && o.status < 300)) return failClosed(o.sentError ? "the call failed after it was sent" : o.broken ? "the answer broke off" : o.overflow ? "the answer was too large to read its cost" : `the gateway answered ${o.status}`);
-        const { usd, id } = costOf(o.doc, route.family, o.first);
+        const { usd, id } = costOf(o.doc, route.family, o.first, o.headerId);
+        if (usd !== null) {
+          // The gateway's own top-level cost: booked now, so the next call need not wait for the generation's record,
+          // which the gateway writes seconds later. The lookup then runs aside, and a larger looked-up cost is booked on
+          // top (in the pass still running, else in the next one).
+          book(usd);
+          if (id) {
+            const check = lookup(id).then((looked) => {
+              if (looked !== null && looked > usd) bookExtra(looked - usd);
+            });
+            s.checks.add(check);
+            check.finally(() => s.checks.delete(check));
+          }
+          return;
+        }
+        // No cost reported: the lookup is the only figure, so the next call waits for it.
         const looked = id ? await lookup(id) : null;
-        if (usd === null && looked === null) return failClosed(id ? "the gateway reported no cost for its generation" : "the answer named no cost and no generation");
-        book(Math.max(usd ?? 0, looked ?? 0));
+        if (looked === null) return failClosed(id ? "the gateway reported no cost and its generation's record never came" : "the answer named no cost and no generation");
+        book(looked);
       } finally {
-        if (capOn) release();
+        free();
       }
     });
     s.pending.add(pricing);
@@ -464,8 +558,14 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
      * since the last pass ended (a call that finished after it), so every dollar reaches a usage record.
      */
     async endPass() {
-      await Promise.allSettled([...s.pending]);
+      // Ended first: a call still waiting for its turn sees the pass ended and is refused, never sent. What is in flight
+      // still books into it.
       const p = s.pass || { usd: 0, calls: 0, unpriced: 0, capped: false, pings: 0 };
+      p.ended = true;
+      await Promise.allSettled([...s.pending]);
+      // The reported costs' lookups: waited for a while (the gateway records a generation within seconds); one still
+      // running books its difference into the next pass.
+      await Promise.race([Promise.allSettled([...s.checks]), new Promise((r) => setTimeout(r, 15_000).unref())]);
       s.pass = null;
       const late = s.late;
       const lateUnpriced = s.lateUnpriced;
@@ -475,7 +575,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     },
     totals: () => ({ usd: Math.round(s.spent * 1e6) / 1e6, pings: s.pings, calls: s.calls, failed: s.failed, unpriced: s.unpriced, capped: s.capped, failClosed: s.failClosed, refused: { ...s.refused } }),
     async close() {
-      await Promise.allSettled([...s.pending]);
+      await Promise.allSettled([...s.pending, ...s.checks]);
       for (const srv of [server, tcpServer].filter(Boolean)) {
         srv.closeAllConnections?.();
         await new Promise((r) => srv.close(() => r()));

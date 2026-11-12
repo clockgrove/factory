@@ -240,8 +240,9 @@ async function main() {
   let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
-    const workerKey = relay ? relay.totals() : null;
+    // Totals once the relay has closed: every call in flight is priced by then.
     await closeWorkerRelay(relay);
+    const workerKey = relay ? relay.totals() : null;
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;

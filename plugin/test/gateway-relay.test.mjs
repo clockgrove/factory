@@ -200,7 +200,7 @@ test("relay cap: billable calls one at a time, each checked once the one before 
     const statuses = await Promise.all(Array.from({ length: 20 }, () => call(relay.socketPath, { token: relay.token }).then((r) => r.status)));
     const pass = await relay.endPass();
     assert.equal(most, 1, "never two billable calls in flight");
-    assert.deepEqual([statuses.filter((x) => x === 200).length, statuses.filter((x) => x === 402).length], [2, 18]);
+    assert.deepEqual([statuses.filter((x) => x === 200).length, statuses.filter((x) => x === 402 || x === 429).length], [2, 18], "8 wait their turn and are refused at the cap; the rest are turned away (429)");
     assert.deepEqual([pass.usd, pass.calls, pass.capped], [2, 2, true], "$2 of a $2 budget: at most one call past it");
     relay.beginPass(0);
     assert.equal((await call(relay.socketPath, { token: relay.token })).status, 402, "nothing left: nothing relayed");
@@ -388,4 +388,130 @@ test("live harness spend: Claude Code's per-message usage, Codex's turns, Copilo
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the gateway's real answer shapes (fixture): string costs, the generation id in providerMetadata or the stream's header; a lookup not yet ingested falls back to the reported cost", async () => {
+  const F = JSON.parse(readFileSync(new URL("./fixtures/ai-gateway-0.4-shapes.json", import.meta.url), "utf8"));
+  // costOf on the real shapes.
+  assert.deepEqual(costOf(F.text.body, "sdk"), { usd: 0, id: "gen_FAKETEXT0000000000000000A1" });
+  assert.deepEqual(costOf(F.image.body, "sdk"), { usd: 0.007, id: "gen_FAKEIMAGE000000000000000C3" });
+  assert.deepEqual(costOf(F.stream.events.at(-1), "sdk", F.stream.events[0], F.stream.headers["x-generation-id"]), { usd: 0, id: "gen_FAKESTREAM00000000000000B2" });
+  assert.deepEqual(costOf({ type: "finish" }, "sdk", null, F.stream.headers["x-generation-id"]), { usd: null, id: "gen_FAKESTREAM00000000000000B2" }, "a finish event with no cost: the header's id, looked up");
+  let lookups = 0;
+  const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  const gw = await fakeGateway({
+    "/v4/ai/image-model": { body: F.image.body, headers: { "x-vercel-id": F.image.headers["x-vercel-id"] } },
+    "/v4/ai/language-model": (body) =>
+      JSON.parse(body || "{}").stream
+        ? { type: "text/event-stream", headers: { "x-generation-id": F.stream.headers["x-generation-id"] }, body: sse(JSON.parse(body).noCost ? [...F.stream.events.slice(0, -1), { type: "finish", finishReason: "stop" }] : F.stream.events) }
+        : { body: F.text.body },
+    // The generation's record: the image's at once, the stream's at 0.02, the text's never ingested in time (404).
+    "/v1/generation": (_b, req) => {
+      lookups += 1;
+      if (req.url.includes("C3")) return F.lookupImage;
+      if (req.url.includes("B2")) return { body: { data: { ...F.lookupImage.body.data, id: "gen_FAKESTREAM00000000000000B2", total_cost: 0.02 } } };
+      return F.lookupNotYet;
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-shapes-"));
+  try {
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 5, origin: gw.origin, lookupDelaysMs: [1, 1, 1] });
+    relay.beginPass(5);
+    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/image-model" })).status, 200);
+    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model" })).status, 200);
+    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model", body: '{"stream":true}' })).status, 200);
+    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model", body: '{"stream":true,"noCost":true}' })).status, 200);
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.unpriced], [0.047, 4, 0], "0.007 image + 0 text (its record never came: the reported 0 stands, no Block) + 0.02 for each stream (its record's 0.02 over the reported 0, and the one that reported none)");
+    assert.ok(lookups >= 4);
+    await relay.close();
+    // A looked-up cost above the reported one is booked on top.
+    const higher = await fakeGateway({ "/v4/ai/image-model": { body: F.image.body }, "/v1/generation": { body: { data: { ...F.lookupImage.body.data, total_cost: 0.01 } } } });
+    const r2 = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 5, origin: higher.origin, lookupDelaysMs: [1] });
+    r2.beginPass(5);
+    await call(r2.socketPath, { token: r2.token, path: "/v4/ai/image-model" });
+    assert.deepEqual([(await r2.endPass()).usd], [0.01]);
+    await r2.close();
+    await higher.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the re-review's minors: unbilled only for known refusals, a stream's cost from its finish event, bounded waiters, a pass's end refuses the queue, an unreadable live figure refuses the call", async () => {
+  let hold = null;
+  const gw = await fakeGateway({
+    "/v4/ai/image-model": async (body) => {
+      const j = JSON.parse(body || "{}");
+      if (j.status) return { status: j.status, body: {} };
+      if (j.wait) await new Promise((r) => (hold = r));
+      return priced(1);
+    },
+    // A stream whose later event carries a forged $0 (F): the finish event's $1 counts.
+    "/v4/ai/language-model": { type: "text/event-stream", body: [{ type: "finish", providerMetadata: { gateway: { cost: "1.0" } } }, { type: "tool-call", providerMetadata: { gateway: { cost: 0 } } }].map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-minors-"));
+  const mk = (sub, maxUsd = 100) => openRelay({ key: KEY, dir: join(dir, sub), maxUsd, origin: gw.origin, lookupDelaysMs: [1] });
+  try {
+    // E: 400, 401, 403, 404, 413, 422, 429 are free; another 4xx (409, 408, 499) fails closed.
+    const out = {};
+    for (const status of [400, 404, 422, 429, 408, 409, 499]) {
+      const r = await mk(`e${status}`);
+      r.beginPass(100);
+      await call(r.socketPath, { token: r.token, body: JSON.stringify({ status }) });
+      out[status] = (await r.endPass()).unpriced ? "closed" : "free";
+      await r.close();
+    }
+    assert.deepEqual(out, { 400: "free", 404: "free", 422: "free", 429: "free", 408: "closed", 409: "closed", 499: "closed" });
+    // F
+    const f = await mk("f");
+    f.beginPass(100);
+    await call(f.socketPath, { token: f.token, path: "/v4/ai/language-model" });
+    assert.equal((await f.endPass()).usd, 1);
+    await f.close();
+    // G and C: one in flight, a bounded queue; at the pass's end the queue is refused, never sent.
+    const g = await mk("g");
+    g.beginPass(100);
+    const first = call(g.socketPath, { token: g.token, body: '{"wait":true}' });
+    await new Promise((r) => setTimeout(r, 100));
+    const queued = Array.from({ length: 10 }, () => call(g.socketPath, { token: g.token }).then((x) => x.status));
+    await new Promise((r) => setTimeout(r, 100));
+    const ended = g.endPass();
+    hold();
+    const statuses = await Promise.all(queued);
+    assert.equal(statuses.filter((x) => x === 429).length, 2, "8 wait; the 9th and 10th get 429");
+    assert.ok(statuses.every((x) => x === 429 || x === 403), `the queue is refused at the pass's end: ${statuses}`);
+    assert.equal((await first).status, 200);
+    const pass = await ended;
+    assert.deepEqual([pass.usd, pass.calls], [1, 1], "the call in flight is booked into the ending pass");
+    assert.equal(g.totals().calls, 1, "none of the queue was sent");
+    await g.close();
+    // B: an unreadable or non-number live figure refuses the call (503); a number lets it through.
+    const b = await mk("b", 5);
+    for (const live of [() => Promise.reject(new Error("rollout unreadable")), () => Number.NaN, () => "1", () => undefined]) {
+      b.beginPass(5, live);
+      assert.equal((await call(b.socketPath, { token: b.token })).status, 503);
+      await b.endPass();
+    }
+    b.beginPass(5, () => 0.5);
+    assert.equal((await call(b.socketPath, { token: b.token })).status, 200);
+    await b.endPass();
+    await b.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // B: an unset or unlisted Codex model is priced at the table's dearest rates, never $0.
+  const { codexUsd } = await import("../scripts/lib/live-spend.mjs");
+  const dearest = Math.max(...Object.values(CODEX_PRICES.perMillion).map((r) => r.input));
+  assert.equal(codexUsd(null, { input: 1_000_000, output: 0 }), dearest);
+  assert.equal(codexUsd("some/unknown-model", { input: 1_000_000, output: 0 }), dearest);
+  // H: --level-prefix takes no value, so the separator after it is found.
+  const shim = relayShimScript({ bwrap: "/usr/bin/bwrap", socat: "/usr/bin/socat", socket: "/s/r.sock", port: 41234 });
+  assert.match(shim, /--assert-userns-disabled\|--level-prefix\) n=0/);
+  // The relay's address and the state directory from anywhere but Factory never reach a child.
+  const { scrubbedEnv } = await import("../scripts/lib/harness.mjs");
+  const scrubbed = scrubbedEnv({ FACTORY_GATEWAY_URL: "http://evil", FACTORY_STATE_DIR: "/evil", PATH: "/bin" });
+  assert.deepEqual(scrubbed, { PATH: "/bin" });
 });

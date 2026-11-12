@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
-import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
+import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
@@ -470,7 +470,7 @@ const SERVICES_SAID = new Set();
  * entry point (docs/PLAN.md names this).
  */
 /** The probe's own rule texts, the only ones a Blocked comment repeats (a host is named by its kind, not by the probe). */
-const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule"]);
+const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line"]);
 const ruleOf = (said) => (RULES.has(said) ? said : /^[a-z0-9.-]+, off the allow-list, is reachable$/.test(said) ? "a host off the allow-list is reachable" : "an unknown rule");
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
   let last = null;
@@ -496,10 +496,13 @@ export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
  * the probe is a Copilot session against a model on this machine's loopback (copilot-runner.mjs probeModel: no network,
  * no bill) that asks for one shell call, CONFINEMENT_PROBE beside a decoy, as for Codex: no environment the probe can
  * read may show the marker Copilot and the decoy hold (as a run's Copilot holds the token: the bubblewrap Copilot starts
- * holds it too unless Factory's shim cleared it), nothing the probe makes in the agent's home may be there afterwards,
- * the checkout's .git/config must refuse a write, the agent's temp directory take one, and a host off the allow-list be
- * refused. A broken rule Blocks; a probe that left no result (Copilot's sandbox did not start, a timeout) is tried once
- * more, then Blocks.
+ * holds it too unless Factory's shim cleared it) nor the first process's command line; Copilot's own TMPDIR (each
+ * command's network rules) must be neither listed nor writable; nothing the probe makes in the agent's home, the probe's
+ * COPILOT_HOME, Factory's HOME or its release may be there afterwards; the checkout's .git/config must refuse a write,
+ * the agent's temp directory take one, and a host off the allow-list be refused. A pass is exit 0 with the probe's pass
+ * line; a missing script or decoy is a broken rule. A broken rule Blocks; a probe that left no result (Copilot's sandbox
+ * did not start, a timeout) is tried once more, then Blocks. The probe runs offline: settings or experiments Copilot
+ * receives only online are not what it checks (docs/PLAN.md names this).
  */
 export async function copilotSandboxCheck(runner, env, { run = exec, model = probeModel } = {}) {
   let last = null;
@@ -518,7 +521,9 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     await mock.close();
     const got = await probeResult(runner, env);
     if (got.code === 4) throw new GitRefusal("sandbox", `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
-    if (got.code === 0) return;
+    // A pass is exit 0 with the probe's own last line, never exit 0 alone.
+    if (got.code === 0 && got.said === PROBE_PASS) return;
+    if (got.code === 0) throw new GitRefusal("sandbox", "Copilot's sandbox probe ended without its pass line", { rule: "the probe ended without its pass line", harness: "copilot" });
     // For the log: what Copilot answered for the probe's call (the sandbox's own reason where it did not start).
     last = { ...r, said: said.replace(/\s+/g, " ").trim() };
     if (attempt === 1) log(`Copilot's sandbox probe did not run (${r.timedOut ? "timed out" : got.code === null ? `no result, exit ${r.code}` : `exit ${got.code}`}); trying once more`);

@@ -353,13 +353,14 @@ export const START = [
   // System installs are for every uid (the agent runs the harness): umask 022 for them, whatever the stage's own is.
   'if [ -n "$need" ]; then bare sudo -n apt-get update -qq >&2 && bare sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $need >&2; bare git lfs install --skip-repo >&2 || true; fi',
   // Copilot's sandbox network as the agent makes it (copilot-runner.mjs): the VM's /dev/net/tun is root's alone, and its
-  // kernel's nf_tables has no IPv6 family, so ip6tables is the legacy backend, whose lock the agent must be able to take
-  // (NAMESPACE_WRAP leaves it writable). Each start: /dev and /run are the VM's own, made afresh at boot.
+  // kernel's nf_tables has no IPv6 family, so ip6tables is the legacy backend, which takes /run/xtables.lock: it is made
+  // here (root's), and NAMESPACE_WRAP puts a private one of the agent's over it. Each start: /dev and /run are made
+  // afresh at boot.
   'if [ "$4" = copilot ]; then',
   // A step that fails here starts the stage anyway: Copilot's pre-start probe then Blocks with what is missing.
   "  bare sudo -n chmod 0666 /dev/net/tun >&2 || true",
   "  bare sudo -n unshare --net ip6tables-nft -t filter -N factory-probe >/dev/null 2>&1 || bare sudo -n update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >&2 || true",
-  '  case "$(bare ip6tables --version 2>/dev/null || true)" in *legacy*) bare sudo -n sh -c "touch /run/xtables.lock && chmod 0666 /run/xtables.lock" >&2 || true ;; esac',
+  '  case "$(bare ip6tables --version 2>/dev/null || true)" in *legacy*) bare sudo -n touch /run/xtables.lock >&2 || true ;; esac',
   "fi",
   'want="$6"; if [ "$want" = latest ]; then want="$(bare npm view "$5" version 2>/dev/null || true)"; fi',
   'have="$(bare /usr/local/bin/"$4" --version 2>/dev/null | head -1 || true)"',

@@ -91,11 +91,13 @@ export async function presentPaths(clone, env = process.env, { run = exec } = {}
  * profile keeps PROBE_MARKER out of commands as it keeps the credential. No environment the probe can read under /proc
  * may show the marker, the decoy's above all: the decoy is readable by its uid unless the sandbox itself stops the read,
  * so a Codex release that only made its own process unreadable (non-dumpable) while loosening the sandbox fails here.
- * Exit 0 when it confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start.
+ * Exit 0 and PROBE_PASS when it confines; exit 4 with the broken rule on stdout; anything else means the sandbox did not start.
  * `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is
  * for `:`), so a writable file is left as it was. The network rule needs curl or node; with neither it fails.
  */
 export const PROBE_MARKER = "FACTORY_PROBE_MARKER";
+/** The probe's last line when every rule held: Copilot's check passes only on it (an empty script would exit 0 too). */
+export const PROBE_PASS = "factory: confined";
 export const CONFINEMENT_PROBE = [
   'h=$1; g=$2; t=$3; host=$4; m=$5; d=$6; f=".factory-sandbox-probe-$$"',
   'if [ -n "$h" ] && true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
@@ -104,11 +106,14 @@ export const CONFINEMENT_PROBE = [
   `seen() { tr '\\0' '\\n' < "$1/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$m"; }`,
   'if [ -n "$d" ] && seen "/proc/$d"; then echo "the decoy outside the sandbox is readable"; exit 4; fi',
   'if [ -n "$m" ]; then for p in /proc/[0-9]*; do if seen "$p"; then echo "the credential stand-in is readable in a process environment"; exit 4; fi; done; fi',
+  // The sandbox's first process (bubblewrap where it has a PID namespace of its own) never holds it as an argument.
+  `if [ -n "$m" ] && tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e "$m" -e "${PROBE_MARKER}=$m"; then echo "the credential stand-in is in the first process's command line"; exit 4; fi`,
   'if [ -n "$host" ]; then',
   '  if command -v curl >/dev/null 2>&1; then curl -s -m 5 -o /dev/null "https://$host/" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
   '  elif command -v node >/dev/null 2>&1; then node -e \'fetch("https://" + process.argv[1], { signal: AbortSignal.timeout(5000) }).then(() => process.exit(0), () => process.exit(1))\' "$host" 2>/dev/null && { echo "$host, off the allow-list, is reachable"; exit 4; }',
   '  else echo "no curl or node to check the network rule"; exit 4; fi',
   "fi",
+  `echo "${PROBE_PASS}"`,
   "exit 0",
 ].join("\n");
 

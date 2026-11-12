@@ -115,11 +115,12 @@ export const NAMESPACE_WRAP = [
   '[ -d "$home" ] && [ ! -L "$home" ] || { echo "factory: the agent home is not a plain directory" >&2; exit 126; }',
   `echo $$ > ${AGENT_CGROUP}/cgroup.procs`,
   "mount --make-rprivate /",
-  // The iptables lock stays writable (a mount of its own): Copilot's sandbox takes it as the agent where ip6tables is the
-  // legacy backend (launch.mjs START). Only where it is a plain file.
-  "if [ -f /run/xtables.lock ] && [ ! -L /run/xtables.lock ]; then mount --bind /run/xtables.lock /run/xtables.lock; fi",
   'private="/tmp /var/tmp /dev/shm /run/lock"',
   'for d in $private; do [ -d "$d" ] && [ ! -L "$d" ] && mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$d"; done',
+  // The iptables lock, where it is a plain file: a private one over it, from the private /run/lock only this namespace sees,
+  // which Copilot's sandbox takes as the agent where ip6tables is the legacy backend (launch.mjs START). Its rules go
+  // into network namespaces of its own, so nothing on the host needs that lock shared; the host's stays root's.
+  'if [ -f /run/xtables.lock ] && [ ! -L /run/xtables.lock ] && [ -d /run/lock ] && [ ! -L /run/lock ]; then ( umask 0; : > /run/lock/factory-xtables.lock ) && mount --bind /run/lock/factory-xtables.lock /run/xtables.lock; fi',
   'mount --bind "$home" "$home"',
   'mount -o remount,bind,nosuid,nodev "$home"',
   // Every other mount, read-only: the root and whatever the vendor mounted beside it (/dev, /sys, the cgroup tree, its
@@ -288,7 +289,7 @@ function fileStdio(limit) {
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, onLine = null, idleMs = 0, agentExtra = [], group = false, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -363,6 +364,8 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     const onOut = (chunk) => {
       outBytes += chunk.length;
       if (outBytes <= maxBytes) out.push(chunk);
+      // `killPastMax`: a child that writes past `maxBytes` is stopped, not read on and dropped (a file that never ends).
+      else if (killPastMax) kill();
       if (tee) appendOwn(tee, chunk);
       armIdle();
       if (onLine) {

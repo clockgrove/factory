@@ -264,14 +264,23 @@ export async function resetClaudeState(layout, env = process.env) {
   }
 }
 
+/** A session capture's bounds: its time and its archive's size. */
+export const SESSION_CAPTURE_MS = 120_000;
+export const SESSION_CAPTURE_BYTES = 512 * 1024 * 1024;
+
 /**
  * Right after a run, before anything else runs as the agent: the session's files archived (as the agent, from a pipe),
  * held for the next reset and for the end of the stage (session.mjs saveAgentTranscript). `layout.sessions` is the
  * harness's session root: Claude Code's `<project>/<id>.jsonl` and `<id>/`, Codex's `YYYY/MM/DD/rollout-<time>-<id>.jsonl`.
  */
 export async function captureSession(layout, sessionId, env = process.env) {
-  const archive = await archiveSession(layout, sessionId, env);
-  if (!archive) return null;
+  // Bounded: the harness's sandboxed commands can write parts of a session (Copilot's session-state/<id>/files), so a
+  // file that never ends (a sparse 16 TB one) must not hold the stage; such a session is not captured.
+  const archive = await archiveSession(layout, sessionId, env, { timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES });
+  if (!archive?.tar) {
+    log(`session ${String(sessionId).slice(0, 8)}: ${archive?.truncated ? `its files are over ${SESSION_CAPTURE_BYTES} bytes` : "its files could not be archived in time"}; not captured, so the next pass starts a fresh one`);
+    return null;
+  }
   keepSession(sessionId, archive);
   return archive.files;
 }
@@ -287,7 +296,7 @@ export async function archiveSession(layout, sessionId, env = process.env, { tim
   if (listed.timedOut) return null;
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
   if (!files.length) return null;
-  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes } : {}) });
+  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes, killPastMax: true } : {}) });
   // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
   if (tar.truncated) return { tar: null, files, truncated: true };
   if (tar.code !== 0 || tar.timedOut) return null;
@@ -367,7 +376,8 @@ export const dropGitPins = () => GIT_PINS.clear();
  * PATH under it are never read at its start.
  */
 export function runnerLaunch(layout, cmd, args, path = process.env.PATH || "") {
-  const safe = path.split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
+  // Absolute entries only: a relative one would resolve against the working directory, the agent's checkout.
+  const safe = path.split(":").filter((d) => d.startsWith("/") && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
   return ["/usr/bin/env", [`HOME=${layout.home}`, `TMPDIR=${CLAUDE_TMPDIR}`, `PATH=${safe.join(":")}`, cmd, ...args]];
 }
 

@@ -28,6 +28,7 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
+import { lstatSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, codexReadOnly, copilotHomeFiles, copilotLocalSettings, gitGuards } from "./local.mjs";
@@ -94,14 +95,15 @@ exec /usr/bin/env -i ${sq(realBwrap)} "$@"
  */
 export async function prepareCopilotHome(layout, { env = process.env, sudo = true, run = exec } = {}) {
   await prepareFactoryHome(layout.home, "Copilot", { sudo });
-  const bwrap = await run("/bin/sh", ["-c", "command -v bwrap"], { env: { PATH: env.PATH || SAFE_PATH } });
+  // The system's bwrap, never one on a PATH entry another user could write.
+  const bwrap = await run("/bin/sh", ["-c", "command -v bwrap"], { env: { PATH: SAFE_PATH }, cwd: "/" });
   const real = String(bwrap.stdout).trim();
   // Without bwrap there is no shim, so Copilot's sandbox cannot start: the pre-start probe Blocks (doctor names it).
   const shim = bwrap.code === 0 && real.startsWith("/") ? 'cat > "$1/bwrap"; chmod 755 "$1/bwrap"' : "true";
-  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH } });
+  const made = await run("/bin/sh", ["-c", `set -e; mkdir -m 755 -- "$1" "$2"; ${shim}`, "sh", layout.bin, layout.cacheHome], { input: bwrapShim(real, layout.agentHome, layout.agentTmp), env: { PATH: SAFE_PATH }, cwd: "/" });
   if (made.code !== 0) throw new Error(`Copilot's home ${layout.home} could not be filled: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   // umask 022: the agent reads what Copilot unpacks (a cloud sandbox's stage runs with 077).
-  const unpacked = await run("/bin/sh", ["-c", 'umask 022; exec copilot --version'], { env: { PATH: env.PATH || SAFE_PATH, HOME: layout.home, COPILOT_CACHE_HOME: layout.cacheHome }, timeoutMs: 120_000 });
+  const unpacked = await run("/bin/sh", ["-c", "umask 022; exec copilot --version"], { env: { PATH: absolutePath(env.PATH || SAFE_PATH), HOME: layout.home, COPILOT_CACHE_HOME: layout.cacheHome }, cwd: "/", timeoutMs: 120_000 });
   if (unpacked.code !== 0) throw new Error(`Copilot could not unpack its release into ${layout.cacheHome}: ${String(unpacked.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${unpacked.code}`}`);
 }
 
@@ -109,17 +111,19 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
  * Copilot's settings.json on a runner, which is also its sandbox's policy: local mode's (local.mjs copilotLocalSettings)
  * fitted to the agent. Commands may write the checkout (its .git for commits), the agent's temp directory and the
  * package caches; never the checkout's git hooks, config, commondir, info and harness configuration. They read the
- * agent's GitHub login (read-only), and nothing else of the agent's home is in their sandbox. No credential store is
- * denied: the agent's home holds only that login, which is for its commands. The network is `domains`.
+ * agent's GitHub login (read-only), and nothing else of the agent's home is in their sandbox. Denied: Copilot's own
+ * TMPDIR (COPILOT_TMP), where it writes each command's network rules before it loads them, and its logs. No credential
+ * store is denied: the agent's home holds only that login, which is for its commands. The network is `domains`.
+ * `copilotHome`: the COPILOT_HOME these settings are written into (a run's, or the probe's).
  */
-export function copilotRunnerSettings(runner) {
+export function copilotRunnerSettings(runner, copilotHome = runner.copilotHome) {
   return copilotLocalSettings({
     domains: runner.domains || LOCAL_DOMAINS,
     clone: runner.clone,
     addDirs: [runner.clone, runner.agentTmp, ...runner.caches],
     readOnly: [...new Set([...gitGuards(runner.clone), ...codexReadOnly(runner.clone)])],
     readable: runner.login,
-    denied: [],
+    denied: [COPILOT_TMP, ...(copilotHome ? [join(copilotHome, "logs")] : [])],
     platform: "linux",
   });
 }
@@ -127,20 +131,37 @@ export function copilotRunnerSettings(runner) {
 /** The env Copilot gets on a runner beside its credential: its fresh state and Factory's unpacked release. */
 export const copilotRunnerEnv = (layout) => ({ COPILOT_HOME: layout.copilotHome, COPILOT_CACHE_HOME: layout.cacheHome });
 
-/** Copilot's flags on a runner: its sandbox, tools and URLs allowed, file tools kept to the checkout and the agent's temp directory. */
-export const copilotRunnerFlags = (runner) => ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--add-dir", runner.agentTmp];
+/**
+ * Copilot's flags on a runner: its sandbox, tools and URLs allowed, file tools kept to the checkout and the agent's temp
+ * directory, and no update of itself (it would run a release Factory did not unpack).
+ */
+export const copilotRunnerFlags = (runner) => ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--add-dir", runner.agentTmp];
 
 /**
- * Copilot's command line on a runner: Factory's HOME for it, a fresh /tmp as its TMPDIR, and a PATH with Factory's shim
- * first and nothing of the agent's home, so nothing the agent wrote is read at its start.
+ * Copilot's own TMPDIR on a runner: a directory of its own in the /tmp its unit (PrivateTmp) or NAMESPACE_WRAP makes
+ * fresh for every start, made by its launch. Copilot binds its TMPDIR into every command's sandbox, and writes each
+ * command's network rules there before it loads them, so with /tmp itself a command could rewrite the next command's
+ * rules and open its network (found in review); this directory is denied to commands (copilotRunnerSettings), which
+ * keep their own /tmp and the agent's $TMPDIR.
+ */
+export const COPILOT_TMP = "/tmp/factory-copilot";
+
+/** A PATH's absolute entries only: a relative one would resolve against whatever directory a process runs in. */
+export const absolutePath = (path = "") => path.split(":").filter((d) => d.startsWith("/")).join(":");
+
+/**
+ * Copilot's command line on a runner: Factory's HOME for it, COPILOT_TMP as its TMPDIR (made here, a directory of its
+ * own: an existing one that is a link or not its own refuses the start), and a PATH with Factory's shim first and
+ * nothing of the agent's home, so nothing the agent wrote is read at its start.
  */
 export function copilotLaunch(layout, cmd, args, path = process.env.PATH || "") {
-  const safe = path.split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
-  return ["/usr/bin/env", [`HOME=${layout.home}`, "TMPDIR=/tmp", `PATH=${[layout.bin, ...safe].join(":")}`, cmd, ...args]];
+  const safe = absolutePath(path).split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
+  return ["/bin/sh", ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${layout.home}`, `PATH=${[layout.bin, ...safe].join(":")}`, cmd, ...args]];
 }
+export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "factory: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
 
-/** Copilot's settings and seeds for a fresh COPILOT_HOME: nothing trusted, no MCP servers, the sandbox's policy. */
-const homeFiles = (runner) => ({ ...copilotHomeFiles(), "settings.json": `${JSON.stringify(copilotRunnerSettings(runner), null, 2)}\n` });
+/** Copilot's settings and seeds for a fresh COPILOT_HOME (`home`): nothing trusted, no MCP servers, the sandbox's policy. */
+const homeFiles = (runner, home) => ({ ...copilotHomeFiles(), "settings.json": `${JSON.stringify(copilotRunnerSettings(runner, home), null, 2)}\n` });
 
 /** Write `files` ({name: text}) into `dir` as the agent, each from a pipe. */
 async function writeAgentFiles(dir, files, cwd, env) {
@@ -159,7 +180,7 @@ async function writeAgentFiles(dir, files, cwd, env) {
 export async function resetCopilotState(runner, env = process.env) {
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$2" "$3"', "sh", runner.state, runner.copilotHome, runner.sessions], { cwd: runner.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Copilot's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
-  await writeAgentFiles(runner.copilotHome, homeFiles(runner), runner.agentHome, env);
+  await writeAgentFiles(runner.copilotHome, homeFiles(runner, runner.copilotHome), runner.agentHome, env);
   for (const tar of SESSIONS_HELD()) {
     const put = await exec("tar", ["-xf", "-", "-C", runner.sessions], { cwd: runner.agentHome, env, input: tar });
     if (put.code !== 0) throw new GitRefusal("git-clear", "a saved session could not be put back in Copilot's state");
@@ -172,21 +193,33 @@ export async function resetCopilotState(runner, env = process.env) {
 
 /** The file the probe leaves its result in, in the agent's temp directory: its exit code, then its last line. */
 export const PROBE_RESULT = ".factory-copilot-probe";
-/** The file the probe tries to make in the agent's home from inside the sandbox; it must not be there afterwards. */
+/**
+ * The file the probe tries to make, from inside the sandbox, in the agent's home, the probe's own COPILOT_HOME, Factory's
+ * HOME for Copilot and its release (persistDirs); none may be there afterwards.
+ */
 export const PROBE_PERSIST = ".factory-copilot-probe-home";
+export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runner.home, runner.cacheHome];
 
 /**
  * The command the probe's model runs, from Copilot's environment (FACTORY_COPILOT_PROBE): Copilot's path checks refuse a
  * command that names a path outside the checkout, so the paths travel in the script, never in the command line. Inside
- * the sandbox it tries a file in the agent's home (Factory checks from outside that none was made: inside, a path the
- * sandbox does not bind is a throwaway), then runs CONFINEMENT_PROBE (FACTORY_PROBE_SCRIPT) with no home rule, and
- * writes its exit code and last line to PROBE_RESULT.
+ * the sandbox it refuses to go on without its script or its decoy (an empty one would pass unchecked); checks that
+ * Copilot's own TMPDIR, where each command's network rules are written, is neither listed nor writable; tries a file in
+ * each of `persist` (Factory checks from outside that none was made: inside, a path the sandbox does not bind is a
+ * throwaway); then runs CONFINEMENT_PROBE (FACTORY_PROBE_SCRIPT) with no home rule. It writes an exit code and a last
+ * line to PROBE_RESULT: a pass is 0 and PROBE_PASS, nothing else.
  */
-export const probeDriver = ({ gitConfig, host, marker }) =>
+export const probeDriver = ({ gitConfig, host, marker, persist = [] }) =>
   [
-    `true >> "$HOME/${PROBE_PERSIST}" 2>/dev/null`,
+    `out() { printf '%s\\n%s\\n' "$1" "$2" > "$TMPDIR/${PROBE_RESULT}"; exit 0; }`,
+    `[ -n "$FACTORY_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
+    `[ -n "$FACTORY_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
+    // Where Copilot's TMPDIR is, and where it would be had it the default /tmp.
+    `for p in ${sq(COPILOT_TMP)}/mxc-bwrap-proxy-* /tmp/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
+    `if true >> ${sq(`${COPILOT_TMP}/${PROBE_PERSIST}`)} 2>/dev/null; then out 4 "Copilot's temp directory is writable"; fi`,
+    ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
     `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} "$TMPDIR" ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
-    `printf '%s\\n%s\\n' "$r" "$(printf '%s\\n' "$o" | tail -n 1)" > "$TMPDIR/${PROBE_RESULT}"`,
+    `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
   ].join("\n");
 
 /** The probe's launch: CONFINEMENT_PROBE's decoy, then Copilot with the decoy's pid in its environment (for the decoy rule). */
@@ -239,7 +272,11 @@ export async function probeModel() {
   const { port } = server.address();
   return {
     env: { COPILOT_OFFLINE: "true", COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${port}/v1`, COPILOT_PROVIDER_WIRE_API: "responses", COPILOT_MODEL: "gpt-5" },
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
     toolOutput: () => toolOutput,
   };
 }
@@ -254,15 +291,16 @@ export function probeEnv(runner, marker, host) {
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
     FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker }),
+    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner) }),
   };
 }
 
 /** Before a probe, as the agent: its own COPILOT_HOME made afresh with the run's settings, no result, no planted file. */
 export async function resetProbe(runner, env = process.env) {
+  if (factoryPlanted(runner)) throw new GitRefusal("sandbox", "a file is in Factory's HOME for Copilot that Factory did not put there", { rule: "Factory's HOME for Copilot is writable", harness: "copilot" });
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -m 700 -- "$1"; rm -f -- "$2" "$3"', "sh", runner.probeHome, join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", "Copilot's sandbox probe could not be prepared");
-  await writeAgentFiles(runner.probeHome, homeFiles(runner), runner.agentHome, env);
+  await writeAgentFiles(runner.probeHome, homeFiles(runner, runner.probeHome), runner.agentHome, env);
 }
 
 /**
@@ -271,12 +309,21 @@ export async function resetProbe(runner, env = process.env) {
  * a broken rule of its own, and is removed.
  */
 export async function probeResult(runner, env = process.env) {
-  const r = await exec("/bin/sh", ["-c", 'if [ -e "$2" ] || [ -L "$2" ]; then rm -f -- "$2"; echo home; fi; cat -- "$1" 2>/dev/null; rm -f -- "$1"', "sh", join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
+  // As the agent: its home and the probe's COPILOT_HOME, which are its own. Factory's HOME and release: by Factory.
+  const r = await exec("/bin/sh", ["-c", 'for p in "$2" "$3"; do if [ -e "$p" ] || [ -L "$p" ]; then rm -f -- "$p"; echo home; fi; done; cat -- "$1" 2>/dev/null; rm -f -- "$1"', "sh", join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST), join(runner.probeHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
   const lines = String(r.stdout).split("\n");
+  if (factoryPlanted(runner)) return { code: 4, said: "Factory's HOME for Copilot is writable" };
   if (lines[0] === "home") return { code: 4, said: "the agent home is writable" };
   const code = /^\d+$/.test(lines[0] || "") ? Number(lines[0]) : null;
   return { code, said: lines[1] || "" };
 }
+
+/** Whether the probe's file is in Factory's HOME for Copilot or its release (read by Factory, which owns both). */
+const factoryPlanted = (runner) => {
+  const found = [runner.home, runner.cacheHome].map((d) => join(d, PROBE_PERSIST)).filter((f) => !!lstatSync(f, { throwIfNoEntry: false }));
+  for (const f of found) rmSync(f, { force: true });
+  return found.length > 0;
+};
 
 /** A fresh random marker for one probe. */
 export const probeMarker = () => randomBytes(16).toString("hex");

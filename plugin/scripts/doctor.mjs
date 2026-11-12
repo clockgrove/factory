@@ -848,8 +848,8 @@ const RUNNER_SANDBOX = {
 
 /** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */
 export const APPARMOR_ADMIN_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-bwrap && sudo apparmor_parser -r /etc/apparmor.d/factory-bwrap; where `sudo grep unpriv_bwrap /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict profile, also: sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict && sudo ln -s /etc/apparmor.d/bwrap-userns-restrict /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
-/** Copilot's sandbox also makes its namespaces with util-linux unshare: the same step, plus a profile for it. */
-export const APPARMOR_UNSHARE_STEP = "and for Copilot: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-unshare /usr/bin/unshare flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-unshare && sudo apparmor_parser -r /etc/apparmor.d/factory-unshare";
+/** Copilot's sandbox makes its namespaces with util-linux unshare, which its bwrap joins: the grant is unshare's. */
+export const APPARMOR_UNSHARE_STEP = "once, as an admin on the runner host: printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile factory-unshare /usr/bin/unshare flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/factory-unshare && sudo apparmor_parser -r /etc/apparmor.d/factory-unshare; where `sudo grep -E 'unpriv_(bwrap|unshare)' /sys/kernel/security/apparmor/profiles` finds Ubuntu's bwrap-userns-restrict or unshare-userns-restrict profile, also unload and disable it: sudo apparmor_parser -R /etc/apparmor.d/<name> && sudo ln -s /etc/apparmor.d/<name> /etc/apparmor.d/disable/ (docs/PLAN.md, Credentials and billing)";
 
 /**
  * Every harness on Actions and in a cloud sandbox runs its commands in its own bubblewrap sandbox (harness.mjs
@@ -883,17 +883,19 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
       // no such restriction on this kernel
     }
     const loaded = restricted || (await has("apparmor_parser")) ? await profiles() : "";
-    // Copilot's sandbox makes its namespaces with unshare and bubblewrap joins them: both need the grant.
-    const unshare = h !== "copilot" || /^factory-unshare /m.test(loaded);
-    const blocks = (restricted && (!/^factory-bwrap /m.test(loaded) || !unshare)) || /^unpriv_bwrap /m.test(loaded);
-    const step = h === "copilot" ? `${APPARMOR_ADMIN_STEP}; ${APPARMOR_UNSHARE_STEP}` : APPARMOR_ADMIN_STEP;
-    out.push(blocks ? FAIL(`${h} sandbox: apparmor`, `AppArmor keeps ${h === "copilot" ? "bwrap and unshare" : "bwrap"} from making the user namespaces ${sb.name}'s sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners`, step) : PASS(`${h} sandbox: apparmor`, restricted ? `the ${h === "copilot" ? "factory-bwrap and factory-unshare profiles let bwrap and unshare" : "factory-bwrap profile lets bwrap"} make user namespaces` : "no user-namespace restriction"));
+    // Copilot's sandbox makes its namespaces with unshare and bubblewrap joins them: the grant is unshare's, and Ubuntu's
+    // restricting profiles (bwrap-userns-restrict, unshare-userns-restrict from 25.04) must not be loaded.
+    const copilot = h === "copilot";
+    const granted = copilot ? /^factory-unshare /m.test(loaded) : /^factory-bwrap /m.test(loaded);
+    const blocks = (restricted && !granted) || /^unpriv_bwrap /m.test(loaded) || (copilot && /^unpriv_unshare /m.test(loaded));
+    const step = copilot ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP;
+    out.push(blocks ? FAIL(`${h} sandbox: apparmor`, `AppArmor keeps ${copilot ? "unshare" : "bwrap"} from making the user namespaces ${sb.name}'s sandbox needs on this self-hosted runner, and the Action changes no host-wide setting off GitHub's hosted runners`, step) : PASS(`${h} sandbox: apparmor`, restricted ? `the ${copilot ? "factory-unshare profile lets unshare" : "factory-bwrap profile lets bwrap"} make user namespaces` : "no user-namespace restriction"));
   }
   // Codex's and Copilot's sandboxes, started once where the job runs (the stage checks again as the agent before every start).
   const starter = start ?? (h === "codex" ? codexSandboxStart : h === "copilot" ? copilotSandboxStart : null);
   const r = starter && (h === "codex" || h === "copilot") && !missing.length ? await starter(env) : null;
   if (r) {
-    const fix = env.RUNNER_ENVIRONMENT === "self-hosted" ? (h === "copilot" ? `${APPARMOR_ADMIN_STEP}; ${APPARMOR_UNSHARE_STEP}` : APPARMOR_ADMIN_STEP) : h === "copilot" ? "give unshare and bwrap unprivileged user and network namespaces (on Ubuntu the factory-unshare and factory-bwrap AppArmor profiles, which the Action loads on GitHub's hosted runners), and slirp4netns /dev/net/tun and an iptables that can add an IPv6 table (the cloud sandbox's start sees to both)" : "give bwrap unprivileged user and network namespaces (on Ubuntu the factory-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)";
+    const fix = env.RUNNER_ENVIRONMENT === "self-hosted" ? (h === "copilot" ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP) : h === "copilot" ? "give unshare unprivileged user and network namespaces (on Ubuntu the factory-unshare AppArmor profile, which the Action loads on GitHub's hosted runners), and slirp4netns /dev/net/tun and an iptables that can add an IPv6 table (the cloud sandbox's start sees to both)" : "give bwrap unprivileged user and network namespaces (on Ubuntu the factory-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)";
     out.push(r.ok ? PASS(`${h} sandbox: start`, `${sb.name}'s sandbox starts and confines here`) : FAIL(`${h} sandbox: start`, `${sb.name}'s sandbox does not start here: ${r.reason}`, fix));
   }
   return out;

@@ -287,7 +287,7 @@ runs:
         # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap: a profile grants them to /usr/bin/bwrap alone
         # (not the sysctl, which lifts it for every program), and Ubuntu 26.04's bwrap-userns-restrict profile, which
         # takes the capabilities its sandbox needs, is unloaded when loaded. Copilot's sandbox makes its namespaces with
-        # util-linux unshare, which bubblewrap then joins: a second profile grants them to /usr/bin/unshare. Only on
+        # util-linux unshare, which bubblewrap then joins: for Copilot the profile is for /usr/bin/unshare instead. Only on
         # GitHub's hosted runners, which are thrown away after the job: on a self-hosted runner these would outlast it
         # and change the whole host, so doctor names the one-time admin step instead.
         case "$HARNESS" in claude) PKGS="bubblewrap socat ripgrep" ;; codex) PKGS="bubblewrap" ;; copilot) PKGS="bubblewrap slirp4netns" ;; *) PKGS="" ;; esac
@@ -295,11 +295,15 @@ runs:
           sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null || { sudo -n apt-get update -qq && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS >/dev/null; } || echo "::warning::$PKGS did not install; doctor names what is missing"
           if [ -d /sys/kernel/security/apparmor ]; then
             if sudo -n grep -q '^unpriv_bwrap ' /sys/kernel/security/apparmor/profiles; then sudo -n apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict || echo "::warning::bwrap-userns-restrict could not be unloaded"; fi
-            printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-bwrap >/dev/null
-            sudo -n apparmor_parser -r /etc/apparmor.d/factory-bwrap || echo "::warning::the AppArmor profile for bwrap did not load; $HARNESS refuses to start where its sandbox cannot"
             if [ "$HARNESS" = copilot ]; then
+              # Copilot's bwrap joins the namespaces unshare made, so only unshare needs the grant (and, on Ubuntu 25.04
+              # and later, its unshare-userns-restrict profile unloaded, as bwrap-userns-restrict above).
+              if sudo -n grep -q '^unpriv_unshare ' /sys/kernel/security/apparmor/profiles; then sudo -n apparmor_parser -R /etc/apparmor.d/unshare-userns-restrict || echo "::warning::unshare-userns-restrict could not be unloaded"; fi
               printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-unshare /usr/bin/unshare flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-unshare >/dev/null
               sudo -n apparmor_parser -r /etc/apparmor.d/factory-unshare || echo "::warning::the AppArmor profile for unshare did not load; copilot refuses to start where its sandbox cannot"
+            else
+              printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-bwrap >/dev/null
+              sudo -n apparmor_parser -r /etc/apparmor.d/factory-bwrap || echo "::warning::the AppArmor profile for bwrap did not load; $HARNESS refuses to start where its sandbox cannot"
             fi
           fi
         fi

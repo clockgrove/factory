@@ -53,6 +53,29 @@ export function priceTokens(table, model, tokens) {
 }
 
 /**
+ * A Codex stage's dollars from its usage record at `table`'s rates: its sub-agent threads (`subAgents`, each run's own
+ * share, codex-threads.mjs) each at its own model, the rest of `tokens` at `model`. `{usd, lowerBound}`: a sub-agent
+ * whose model is unlisted leaves the dollars a lower bound; usd is null only when nothing could be priced.
+ */
+export function priceStage(table, model, tokens, subAgents = []) {
+  const subs = (Array.isArray(subAgents) ? subAgents : []).filter((t) => t?.tokens && typeof t.tokens === "object");
+  if (!subs.length) return { usd: priceTokens(table, model, tokens), lowerBound: false };
+  const sum = (k) => subs.reduce((n, t) => n + (typeof t.tokens[k] === "number" ? t.tokens[k] : 0), 0);
+  const rest = Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, tokens?.[k] === null || tokens?.[k] === undefined ? null : Math.max(0, tokens[k] - sum(k))]));
+  let usd = priceTokens(table, model, rest);
+  let lowerBound = false;
+  for (const t of subs) {
+    const p = priceTokens(table, t.model || model, t.tokens);
+    if (p === null) lowerBound = true;
+    else if (usd === null) {
+      usd = p;
+      lowerBound = true;
+    } else usd += p;
+  }
+  return { usd: usd === null ? null : Math.round(usd * 10000) / 10000, lowerBound };
+}
+
+/**
  * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` and
  * `daily_usd` cannot stop them (Codex has no in-run cap; Factory checks dollars after each run) and only a budget on the
  * provider's key does. Doctor and the stage's progress comment say it.
@@ -336,8 +359,8 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
  * `usage.{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` is the
  * thread's running total, restored by `codex exec resume` (sinceSession takes a resumed pass's
  * share). `input_tokens` already includes the cached and the written parts and `output_tokens` the reasoning
- * part, so neither is added again. Sub-agent threads are folded in by Codex where it
- * reports them at all. Dollars come from the price table. An `item.completed` of type `error` followed by a completed
+ * part, so neither is added again. Sub-agent threads (`spawn_agent`) are threads of their own, in
+ * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
  * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure.
  */
 export function parseCodex(stdout, model) {
@@ -371,6 +394,8 @@ export function parseCodex(stdout, model) {
     }
     if (e.type === "turn.failed" || e.type === "error") failed = e.error?.message || e.message || e.type;
     if (e.type === "item.completed" && e.item?.type === "error") itemError = e.item.message || "item error";
+    // Sub-agent work (spawn, wait, message): its threads' usage is not in this stream (codex-threads.mjs).
+    if ((e.type === "item.started" || e.type === "item.completed") && e.item?.type === "collab_tool_call") rec.subAgentWork = true;
   }
   failed = failed || itemError;
   rec.turns = turns;

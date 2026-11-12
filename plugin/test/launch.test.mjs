@@ -517,6 +517,19 @@ test("a stage that ends its child still counts its spend; a token request names 
   assert.deepEqual([claude.usd, claude.usdUpperBound, claude.ok], [12, true, false], "no result from a killed Claude run: counted at its budget");
   const codex = killedUsage({ harness: "codex", model: "gpt-5.5", events: '{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}\n', maxUsd: 12 });
   assert.deepEqual([codex.usd > 0, codex.usdUpperBound, codex.basis.startsWith("priced")], [true, undefined, true], "a Codex stream is priced from its tokens as far as it got");
+  // The #129 worker's stream shape: a wait on its implementer, whose thread's spend is not in the stream (#88).
+  const wait = '{"type":"item.started","item":{"id":"item_5","type":"collab_tool_call","tool":"wait","sender_thread_id":"t1","receiver_thread_ids":[],"prompt":null,"agents_states":{},"status":"in_progress"}}\n';
+  const turn = '{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}\n';
+  const spawned = (maxUsd, events = `${wait}${turn}`) => killedUsage({ harness: "codex", model: "gpt-5.5", events, maxUsd });
+  assert.deepEqual([spawned(12).usd, spawned(12).usdUpperBound], [12, true], "a budget above what is known: counted at the budget, an upper bound");
+  const over = spawned(codex.usd / 2);
+  assert.deepEqual([over.usd, over.usdUpperBound, over.usdLowerBound], [codex.usd, undefined, true], "known spend above the budget is never lowered to it");
+  const uncapped = spawned(0);
+  assert.deepEqual([uncapped.usd, uncapped.usdUpperBound, uncapped.usdLowerBound], [codex.usd, undefined, true], "no budget: the known spend, a lower bound, never null");
+  assert.ok(uncapped.basis.startsWith("priced"), "the price table's basis is kept");
+  // Only an item of that type counts, never the words in a message.
+  const said = `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\\"type\\":\\"collab_tool_call\\"}"}}\n${turn}`;
+  assert.deepEqual([spawned(12, said).usd, spawned(12, said).usdUpperBound], [codex.usd, undefined]);
   assert.equal(killedUsage({ harness: "claude", model: null, events: "", maxUsd: 0 }).usd, null);
   const ask = launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: 9, claim: "abc", want: "token", ask: 1794175200 } });
   assert.equal(ask.ask, 1794175200);

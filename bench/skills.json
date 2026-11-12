@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "553175a44a68",
+  "digest": "9db87108980f",
   "skills": {
     "deliver-pr": {
       "sha256": "2b3569d79d1a1eebd28a8076522d68683e898933ffe8a12dad949847b8366a51",
@@ -72,9 +72,9 @@
       "words": 619,
       "files": {
         "reference.md": {
-          "sha256": "6e986ce6130e138b6ea70730243df1de0597e31a70f790e8cfae2af33eb1176b",
+          "sha256": "b2e9d821a30f4e5ead395ff818ec09d61ba87800f3a63e156932589c32dd8323",
           "lines": 25,
-          "words": 549
+          "words": 575
         }
       }
     },
@@ -89,5 +89,5 @@
       "words": 700
     }
   },
-  "recordedAt": "2026-11-12T03:35:23.985Z"
+  "recordedAt": "2026-11-12T07:22:08.111Z"
 }

@@ -25,11 +25,13 @@ const IMAGE = "/v4/ai/image-model";
  */
 async function fakeGateway(routes) {
   const seen = [];
+  const table = new Map(Object.entries(routes));
   const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const c of req) body += c;
     seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, headers: req.headers });
-    const route = routes[req.url.split("?")[0]];
+    // Only the routes this test named (a Map: no inherited name is ever looked up).
+    const route = table.get(req.url.split("?")[0]);
     const r = typeof route === "function" ? await route(body, req) : route || { status: 404, body: { error: "no route" } };
     res.writeHead(r.status ?? 200, { "content-type": r.type || "application/json", ...(r.headers || {}) });
     res.end(typeof r.body === "string" ? r.body : JSON.stringify(r.body));

@@ -6,124 +6,109 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GATEWAY_ORIGIN, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, keyCutter, openRelay, tokenMatches, upstreamUrl } from "../scripts/lib/gateway-relay.mjs";
+import { RELAYED_NAME, RELAY_PING, addKeySpend, costOf, keyCutter, openRelay, routeOf, tokenMatches } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
-import { openWorkerRelay } from "../scripts/lib/worker-relay.mjs";
+import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, writeUsage } from "../scripts/lib/session.mjs";
 import { usdText } from "../scripts/lib/logic.mjs";
 import { harnessOuterSettings } from "../scripts/lib/local.mjs";
+import { secretForms } from "../scripts/lib/inputs.mjs";
 import { costOf as benchCostOf } from "../../bench/lib/cost.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 
 const KEY = "vck_worker_relay_0123456789abcdef";
+const IMAGE = "/v4/ai/image-model";
 
-/** A stand-in AI Gateway on this machine's loopback: each path answers as `routes` says; every request is recorded. */
+/**
+ * A stand-in AI Gateway on this machine's loopback: each path answers as `routes` says (a function gets the request's
+ * body and may wait); every request is recorded.
+ */
 async function fakeGateway(routes) {
   const seen = [];
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     let body = "";
-    req.on("data", (c) => (body += c));
-    req.on("end", () => {
-      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body });
-      const r = routes[req.url.split("?")[0]] || { status: 404, body: { error: "no route" } };
-      res.writeHead(r.status ?? 200, { "content-type": r.type || "application/json", ...(r.headers || {}) });
-      res.end(typeof r.body === "string" ? r.body : JSON.stringify(r.body));
-    });
+    for await (const c of req) body += c;
+    seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, headers: req.headers });
+    const route = routes[req.url.split("?")[0]];
+    const r = typeof route === "function" ? await route(body, req) : route || { status: 404, body: { error: "no route" } };
+    res.writeHead(r.status ?? 200, { "content-type": r.type || "application/json", ...(r.headers || {}) });
+    res.end(typeof r.body === "string" ? r.body : JSON.stringify(r.body));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   return { origin: `http://127.0.0.1:${server.address().port}`, seen, close: () => new Promise((r) => server.close(r)) };
 }
 
-/** One request to the relay's socket: {status, text}. */
-function call(socketPath, { method = "POST", path = "/v4/ai/image-model", token, body = "{}" } = {}) {
+/** One request to the relay's socket: {status, text, headers}. */
+function call(socketPath, { method = "POST", path = IMAGE, token, body = "{}", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ socketPath, method, path, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json" } }, (res) => {
+    const req = http.request({ socketPath, method, path, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), "content-type": "application/json", ...headers } }, (res) => {
       let text = "";
       res.on("data", (c) => (text += c));
       res.on("end", () => resolve({ status: res.statusCode, text, headers: res.headers }));
     });
     req.on("error", reject);
-    req.end(method === "GET" ? undefined : body);
+    req.end(method === "POST" ? body : undefined);
   });
 }
+const priced = (usd, extra = {}) => ({ body: { images: ["aGk="], providerMetadata: { gateway: { cost: String(usd), generationId: "gen_abcdef12" } }, ...extra } });
 
-test("costOf: the gateway's reported cost (JSON or a stream), else its generation id, else the price table; never $0 by default", () => {
-  assert.deepEqual(costOf(JSON.stringify({ images: ["x"], providerMetadata: { gateway: { cost: "0.04", generationId: "gen_A1" } } })), { usd: 0.04 });
-  assert.deepEqual(costOf(JSON.stringify({ answers: {}, providerMetadata: { gateway: { generationId: "gen_B2" } } })), { generationId: "gen_B2" });
-  const sse = ['data: {"type":"text-delta","delta":"hi"}', 'data: {"type":"finish","providerMetadata":{"gateway":{"cost":0.0123}}}', "data: [DONE]"].join("\n\n");
-  assert.deepEqual(costOf(sse, "text/event-stream"), { usd: 0.0123 });
-  assert.deepEqual(costOf(JSON.stringify({ id: "gen_C3", model: "unknown/model" })), { generationId: "gen_C3" });
-  const table = costOf(JSON.stringify({ model: "openai/gpt-5", usage: { prompt_tokens: 1_000_000, completion_tokens: 0 } }));
-  assert.equal(table.usd, CODEX_PRICES.perMillion["gpt-5"].input, "the Codex price table (#86) for a listed model's tokens");
-  assert.equal(costOf(JSON.stringify({ ok: true })), null, "no cost, no generation, no priced tokens: unpriced");
-  assert.equal(costOf("not json"), null);
-  assert.equal(costOf(JSON.stringify({ providerMetadata: { gateway: { cost: "-1" } } })), null, "a negative cost is no cost");
+test("costOf reads fixed top-level places only: a forged cost or id nested in an echoed request is never read", () => {
+  assert.deepEqual(costOf({ images: [], providerMetadata: { gateway: { cost: "0.04", generationId: "gen_A1b2c3d4" } } }, "sdk"), { usd: 0.04, id: "gen_A1b2c3d4" });
+  // The review's B1: a tool schema, a tool call's input or a text format echoed back with a forged cost of 0.
+  const echoed = { tools: [{ parameters: { providerMetadata: { gateway: { cost: 0 } } } }], output: [{ type: "tool_use", input: { providerMetadata: { gateway: { cost: 0, generationId: "gen_forged00" } } } }], text: { format: { schema: { id: "gen_forged11" } } } };
+  assert.deepEqual(costOf(echoed, "sdk"), { usd: null, id: null }, "nothing at the top level: unpriced, never $0");
+  assert.deepEqual(costOf({ ...echoed, providerMetadata: { gateway: { cost: "5.0" } } }, "sdk"), { usd: 5, id: null });
+  assert.deepEqual(costOf({ id: "gen_Q1w2e3r4", usage: { cost: 0 }, model: "x" }, "openai"), { usd: null, id: "gen_Q1w2e3r4" }, "an OpenAI-style answer: only its generation id, looked up");
+  assert.deepEqual(costOf({ id: "chatcmpl-1" }, "openai", { id: "gen_S1t2r3m4" }), { usd: null, id: "gen_S1t2r3m4" }, "a stream's first event's id");
+  assert.deepEqual(costOf({ providerMetadata: { gateway: { cost: "-1", generationId: "not-an-id" } } }, "sdk"), { usd: null, id: null });
+  assert.deepEqual(costOf([{ providerMetadata: { gateway: { cost: 1 } } }], "sdk"), { usd: null, id: null }, "an array is no top level");
 });
 
-test("the relay's guards: Bearer token in constant time, only origin-relative paths on the gateway, the key cut from any response", () => {
+test("the relay's guards: the token, an allowlist of method and path, no method override; the key cut in every form", () => {
   assert.equal(tokenMatches("Bearer abc", "abc"), true);
   assert.equal(tokenMatches("Bearer abd", "abc"), false);
   assert.equal(tokenMatches("abc", "abc"), false);
-  assert.equal(tokenMatches(undefined, "abc"), false);
-  assert.equal(upstreamUrl("/v4/ai/image-model?x=1").href, `${GATEWAY_ORIGIN}/v4/ai/image-model?x=1`);
-  for (const bad of ["//evil.example/x", "http://evil.example/x", "evil", "/x\\y", "/a b", "", null]) assert.equal(upstreamUrl(bad), null, String(bad));
+  for (const [m, t] of [["POST", "/v4/ai/language-model"], ["POST", "/v3/ai/image-model"], ["POST", "/v1/chat/completions"], ["POST", "/v1/messages"], ["GET", "/v1/models"], ["GET", "/v4/ai/config"]]) assert.ok(routeOf(m, t), `${m} ${t}`);
+  for (const [m, t] of [["GET", "/v1/credits"], ["GET", "/v1/generation"], ["POST", "/v1/generation"], ["GET", "/v4/ai/image-model"], ["PUT", "/v4/ai/image-model"], ["TRACE", "/v1/models"], ["POST", "/v4/ai/image-model?x=1"], ["POST", "/v4/ai/video-model"], ["POST", "//evil.example/v4/ai/image-model"], ["POST", "http://evil.example/v4/ai/image-model"], ["POST", "/v4/ai/../../v1/credits"], ["GET", "/v1/report"]]) assert.equal(routeOf(m, t), null, `${m} ${t}`);
   const c = keyCutter(KEY);
-  const out = Buffer.concat([c.push(`one ${KEY.slice(0, 9)}`), c.push(`${KEY.slice(9)} two ${KEY}`), c.end()]).toString();
-  assert.equal(out, "one *** two ***");
+  const b64 = Buffer.from(`x${KEY}y`).toString("base64");
+  const out = Buffer.concat([c.push(`one ${KEY.slice(0, 9)}`), c.push(`${KEY.slice(9)} two ${encodeURIComponent(KEY)} ${b64}`), c.end()]).toString();
+  assert.ok(!out.includes(KEY) && secretForms(KEY).every((f) => !out.includes(f)), out);
+  assert.ok(c.carries(`Bearer ${Buffer.from(KEY).toString("base64")}`));
 });
 
-test("relay: forwards with the key in the token's place, prices each call, refuses without the token, outside a pass, at the cap and after an unpriced call", async () => {
+test("relay: the key in the token's place, allowlisted headers both ways; refused without the token, off the allowlist, outside a pass", async () => {
   const gw = await fakeGateway({
-    "/v4/ai/image-model": { body: { images: ["aGk="], providerMetadata: { gateway: { cost: 0.04 } } } },
-    "/v4/ai/echo-key": { body: { note: `the key was ${KEY}` }, headers: { "x-echo": KEY } },
-    "/v4/ai/language-model": { body: { providerMetadata: { gateway: { generationId: "gen_L1" } } } },
-    "/v1/generation": { body: { data: { total_cost: 0.25 } } },
-    "/v4/ai/no-cost": { body: { ok: true } },
-    "/v4/ai/rate-limited": { status: 429, body: { error: { message: "slow down" } } },
-    "/v1/models": { body: { data: [] } },
+    [IMAGE]: priced(0.04, {}),
+    "/v4/ai/echo-key": { body: {} },
+    "/v1/models": { body: { data: [] }, headers: { "x-echo": KEY, "set-cookie": "a=b", "x-vercel-id": "iad1::abc" } },
+    "/v1/generation": { body: { data: { total_cost: 0.04 } } },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-"));
-  const lines = [];
-  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 10, origin: gw.origin, lookupDelaysMs: [10, 10], log: (l) => lines.push(l) });
+  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 10, origin: gw.origin, lookupDelaysMs: [5] });
   try {
     assert.equal(statSync(relay.socketPath).mode & 0o777, 0o600, "the socket is the owner's alone");
-    assert.equal(statSync(join(dir, "r")).mode & 0o777, 0o700);
-    assert.match(relay.url, /^http:\/\/127\.0\.0\.1:\d+$/);
-    assert.ok(!relay.token.includes(KEY));
-    // No token, a wrong one, outside a pass.
     assert.equal((await call(relay.socketPath, {})).status, 401);
     assert.equal((await call(relay.socketPath, { token: `${relay.token}x` })).status, 401);
-    const outside = await call(relay.socketPath, { token: relay.token });
-    assert.equal(outside.status, 403);
-    assert.match(outside.text, /only while a Factory pass runs/);
-    assert.equal(gw.seen.length, 0, "nothing reached the gateway");
-    // The ping, without a token: the relay's probe id, nothing else.
+    assert.equal((await call(relay.socketPath, { token: relay.token })).status, 403, "outside a pass");
+    assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 403, "the model list too, outside a pass");
     assert.equal((await call(relay.socketPath, { method: "GET", path: RELAY_PING })).text.trim(), `factory-relay ${relay.probeId}`);
     relay.beginPass(1);
-    const img = await call(relay.socketPath, { token: relay.token, body: '{"prompt":"a raccoon"}' });
+    for (const [method, path, headers] of [["GET", "/v1/credits"], ["GET", "/v1/generation?id=gen_x"], ["POST", "/v4/ai/echo-key"], ["TRACE", "/v1/models"], ["GET", "/v1/models", { "x-http-method-override": "POST" }]]) assert.equal((await call(relay.socketPath, { token: relay.token, method, path, headers })).status, 403, `${method} ${path}`);
+    assert.equal(gw.seen.length, 0, "nothing reached the gateway");
+    const img = await call(relay.socketPath, { token: relay.token, body: '{"prompt":"a raccoon"}', headers: { "x-forwarded-for": "1.2.3.4", cookie: "c=d", "ai-model-id": "recraft/recraft-v4.1-flash", "x-vercel-ai-gateway-team": "t" } });
     assert.equal(img.status, 200);
-    assert.equal(gw.seen.at(-1).auth, `Bearer ${KEY}`, "the gateway gets the key");
-    assert.equal(gw.seen.at(-1).body, '{"prompt":"a raccoon"}');
-    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v1/models", method: "GET" })).status, 200, "GET is free");
-    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/rate-limited" })).status, 429, "a refused call is passed back, not billed");
-    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model" })).status, 200);
-    // Last: a response that names no cost (and echoes the key, which never comes back).
-    const echo = await call(relay.socketPath, { token: relay.token, path: "/v4/ai/echo-key" });
-    assert.ok(!echo.text.includes(KEY) && !JSON.stringify(echo.headers).includes(KEY), "the key never comes back");
-    let pass = await relay.endPass();
-    assert.equal(pass.usd, 0.29, "0.04 reported + 0.25 looked up; the echo call named no cost and failed closed");
-    assert.equal(pass.unpriced, 1, "the echo call reported neither a cost nor a generation");
-    assert.match(lines.join("\n"), /could not be determined/);
-    // After an unpriced call: every later call is refused (fail closed), free ones still pass.
-    relay.beginPass(5);
-    const closed = await call(relay.socketPath, { token: relay.token });
-    assert.equal(closed.status, 403);
-    assert.match(closed.text, /cost could not be determined/);
-    pass = await relay.endPass();
-    assert.equal(pass.calls, 0);
-    const t = relay.totals();
-    assert.equal(t.failClosed, true);
-    assert.ok(!JSON.stringify(t).includes(KEY) && !lines.join("\n").includes(KEY), "no total or log line carries the key");
+    const sent = gw.seen.at(-2) || gw.seen.at(-1);
+    const up = gw.seen.find((r) => r.url === IMAGE);
+    assert.equal(up.auth, `Bearer ${KEY}`, "the gateway gets the key");
+    assert.equal(up.body, '{"prompt":"a raccoon"}');
+    assert.deepEqual(Object.keys(up.headers).filter((h) => ["x-forwarded-for", "cookie", "x-vercel-ai-gateway-team"].includes(h)), [], "only allowlisted request headers");
+    assert.equal(up.headers["ai-model-id"], "recraft/recraft-v4.1-flash");
+    const list = await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" });
+    assert.deepEqual([list.headers["x-echo"], list.headers["set-cookie"], list.headers["x-vercel-id"]], [undefined, undefined, "iad1::abc"], "only allowlisted response headers");
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.unpriced], [0.04, 1, 0], "the model list is free; the image is booked");
+    assert.ok(sent);
   } finally {
     await relay.close();
     await gw.close();
@@ -131,29 +116,121 @@ test("relay: forwards with the key in the token's place, prices each call, refus
   }
 });
 
-test("relay: once a pass's budget is spent the next call is refused at the cap; with no max_usd nothing is capped", async () => {
-  const gw = await fakeGateway({ "/v4/ai/image-model": { body: { providerMetadata: { gateway: { cost: 0.4 } } } } });
+test("relay pricing: the larger of reported and looked up; a forged echo, an unknown cost, a 5xx or a hang-up fails closed, never $0", async () => {
+  let release = null;
+  const gw = await fakeGateway({
+    // The real cost at the top level, a forged $0 echoed from the request (B1).
+    [IMAGE]: (body) => ({ body: { providerMetadata: { gateway: { cost: "0.5", generationId: "gen_abcdef12" } }, tools: JSON.parse(body || "{}").tools } }),
+    "/v4/ai/language-model": { body: { content: [{ type: "tool-call", input: '{"providerMetadata":{"gateway":{"cost":0}}}' }], providerMetadata: { gateway: { cost: "0.1", generationId: "gen_lookup01" } } } },
+    "/v1/chat/completions": { body: { id: "gen_compat01", choices: [], usage: { prompt_tokens: 1, cost: 0 } } },
+    "/v4/ai/decision-model": { body: { answers: {}, providerMetadata: { forged: true } } },
+    "/v4/ai/embedding-model": { status: 500, body: { error: "upstream" } },
+    "/v4/ai/reranking-model": () => new Promise((r) => (release = () => r({ body: { providerMetadata: { gateway: { cost: "0.3" } } } }))),
+    "/v1/generation": (_b, req) => ({ body: { data: { total_cost: req.url.includes("gen_lookup01") ? 0.25 : req.url.includes("gen_compat01") ? 0.02 : 0.5 } } }),
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-price-"));
+  try {
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
+    relay.beginPass(100);
+    await call(relay.socketPath, { token: relay.token, body: JSON.stringify({ tools: [{ parameters: { providerMetadata: { gateway: { cost: 0 } } } }] }) });
+    await call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model" });
+    await call(relay.socketPath, { token: relay.token, path: "/v1/chat/completions" });
+    let pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.unpriced], [0.77, 3, 0], "0.5 (reported, looked up 0.5) + 0.25 (looked up over 0.1) + 0.02 (looked up)");
+    relay.beginPass(100);
+    assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/decision-model" })).status, 200);
+    pass = await relay.endPass();
+    assert.deepEqual([pass.unpriced, pass.usd], [1, 0], "no cost at the top level, no generation: unpriced");
+    const rec = addKeySpend({ usd: 1, tokens: {} }, pass);
+    assert.equal(rec.budgetExceeded, true, "an unpriced call ends the pass over budget: the stage Blocks");
+    relay.beginPass(100);
+    assert.equal((await call(relay.socketPath, { token: relay.token })).status, 403, "and every later call is refused");
+    assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 403, "the model list too");
+    await relay.endPass();
+    await relay.close();
+    // A 5xx after the call was sent: unpriced.
+    const r5 = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
+    r5.beginPass(100);
+    assert.equal((await call(r5.socketPath, { token: r5.token, path: "/v4/ai/embedding-model" })).status, 500);
+    assert.equal((await r5.endPass()).unpriced, 1);
+    await r5.close();
+    // A client that hangs up after sending: the call runs to its end and is booked (M3).
+    const rh = await openRelay({ key: KEY, dir: join(dir, "c"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
+    rh.beginPass(100);
+    await new Promise((resolve) => {
+      const req = http.request({ socketPath: rh.socketPath, method: "POST", path: "/v4/ai/reranking-model", headers: { authorization: `Bearer ${rh.token}` } }, () => {});
+      req.on("error", () => resolve());
+      req.end("{}");
+      setTimeout(() => {
+        req.destroy();
+        setTimeout(() => {
+          release();
+          resolve();
+        }, 50);
+      }, 100);
+    });
+    const hung = await rh.endPass();
+    assert.deepEqual([hung.usd, hung.calls, hung.unpriced], [0.3, 1, 0], "booked when it finished, though the client had gone");
+    await rh.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("relay cap: billable calls one at a time, each checked once the one before is priced; parallel calls pass the cap by one call at most (B2)", async () => {
+  let inflight = 0;
+  let most = 0;
+  const gw = await fakeGateway({
+    [IMAGE]: async () => {
+      inflight += 1;
+      most = Math.max(most, inflight);
+      await new Promise((r) => setTimeout(r, 40));
+      inflight -= 1;
+      return priced(1);
+    },
+    "/v1/generation": { body: { data: { total_cost: 1 } } },
+  });
   const dir = mkdtempSync(join(tmpdir(), "relay-cap-"));
   try {
-    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 5, origin: gw.origin });
-    relay.beginPass(1);
-    const codes = [];
-    for (let i = 0; i < 4; i++) codes.push((await call(relay.socketPath, { token: relay.token })).status);
-    const refused = await call(relay.socketPath, { token: relay.token });
-    assert.deepEqual(codes, [200, 200, 402, 402], "0.4 + 0.4 spent, the next 0.4 would reach $1");
-    assert.equal(refused.status, 402);
-    assert.match(JSON.parse(refused.text).error.message, /max_usd is reached/);
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 5, origin: gw.origin, lookupDelaysMs: [1] });
+    relay.beginPass(2);
+    const statuses = await Promise.all(Array.from({ length: 20 }, () => call(relay.socketPath, { token: relay.token }).then((r) => r.status)));
     const pass = await relay.endPass();
-    assert.deepEqual([pass.usd, pass.calls, pass.capped], [0.8, 2, true]);
+    assert.equal(most, 1, "never two billable calls in flight");
+    assert.deepEqual([statuses.filter((x) => x === 200).length, statuses.filter((x) => x === 402).length], [2, 18]);
+    assert.deepEqual([pass.usd, pass.calls, pass.capped], [2, 2, true], "$2 of a $2 budget: at most one call past it");
     relay.beginPass(0);
     assert.equal((await call(relay.socketPath, { token: relay.token })).status, 402, "nothing left: nothing relayed");
     await relay.endPass();
     await relay.close();
-    const free = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 0, origin: gw.origin });
+    // No max_usd: no cap, and calls run side by side.
+    most = 0;
+    const free = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 0, origin: gw.origin, lookupDelaysMs: [1] });
     free.beginPass(0);
-    for (let i = 0; i < 4; i++) assert.equal((await call(free.socketPath, { token: free.token })).status, 200);
-    assert.equal((await free.endPass()).usd, 1.6);
+    await Promise.all(Array.from({ length: 4 }, () => call(free.socketPath, { token: free.token })));
+    assert.equal((await free.endPass()).usd, 4);
+    assert.ok(most > 1);
     await free.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("relay: the key never comes back, in any form, in a body or a header", async () => {
+  const gw = await fakeGateway({
+    [IMAGE]: (_b, req) => ({ body: { note: `${req.headers.authorization} ${Buffer.from(req.headers.authorization).toString("base64")} ${encodeURIComponent(KEY)}`, providerMetadata: { gateway: { cost: "0.01" } } }, headers: { "x-request-id": KEY, "retry-after": Buffer.from(KEY).toString("base64") } }),
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-key-"));
+  try {
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 1, origin: gw.origin });
+    relay.beginPass(1);
+    const r = await call(relay.socketPath, { token: relay.token });
+    const all = `${r.text} ${JSON.stringify(r.headers)}`;
+    assert.ok(![KEY, ...secretForms(KEY)].some((f) => all.includes(f)), all);
+    await relay.endPass();
+    await relay.close();
   } finally {
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
@@ -182,7 +259,7 @@ test("a pass's key spend joins its record: usd, max_usd and daily_usd count it; 
   assert.equal(row.workerKeyUsd, 0.5);
 });
 
-test("the shim wraps only a command sandbox (--unshare-net): forwarder, ping, then the command under its argv0; anything else as given", () => {
+test("the shim wraps only a command sandbox: --unshare-net before the separator, options walked by their arity, bash -p", () => {
   const dir = mkdtempSync(join(tmpdir(), "relay-shim-"));
   try {
     // A stand-in bwrap that prints what it was asked to run.
@@ -190,21 +267,40 @@ test("the shim wraps only a command sandbox (--unshare-net): forwarder, ping, th
     writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
     const shimDir = writeRelayShim(join(dir, "bin"), { bwrap: fake, socat: "/usr/bin/socat", socket: "/run/x/relay.sock", port: 41234 });
     assert.equal(statSync(shimDir).mode & 0o777, 0o755);
-    const run = (...a) => execFileSync(join(shimDir, "bwrap"), a, { encoding: "utf8" }).trim().split("\n");
+    const shim = readFileSync(join(shimDir, "bwrap"), "utf8");
+    assert.match(shim.split("\n")[0], /^#!\/bin\/bash -p$/, "no BASH_ENV or ENV is read");
+    const run = (...a) => execFileSync(join(shimDir, "bwrap"), a, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", BASH_ENV: join(dir, "planted") } }).trim().split("\n");
+    writeFileSync(join(dir, "planted"), "echo PLANTED\n");
     assert.deepEqual(run("--version"), ["--version"]);
     assert.deepEqual(run("--ro-bind", "/", "/", "--", "/usr/bin/true"), ["--ro-bind", "/", "/", "--", "/usr/bin/true"], "no network namespace: as given");
-    const wrapped = run("--unshare-net", "--argv0", "codex-linux-sandbox", "--", "/opt/codex", "--x");
-    assert.deepEqual(wrapped.slice(0, 5), ["--unshare-net", "--argv0", "codex-linux-sandbox", "--", "/bin/bash"]);
-    const script = wrapped.slice(6, -4).join("\n");
-    assert.match(script, /'\/usr\/bin\/socat' TCP4-LISTEN:41234,bind=127\.0\.0\.1,fork,reuseaddr UNIX-CONNECT:'\/run\/x\/relay\.sock'/);
-    assert.match(script, /\.factory-relay\/ping\?shim/);
-    assert.deepEqual(wrapped.slice(-4), ["bash", "codex-linux-sandbox", "/opt/codex", "--x"], "the command and its argv0 follow");
+    // An option's value that reads `--unshare-net` or `--` is a value (the review's minor 11).
+    assert.deepEqual(run("--setenv", "X", "--unshare-net", "--", "/usr/bin/true"), ["--setenv", "X", "--unshare-net", "--", "/usr/bin/true"]);
+    assert.deepEqual(run("--setenv", "X", "--", "--unshare-net", "--", "/c").slice(0, 8), ["--setenv", "X", "--", "--unshare-net", "--", "/bin/bash", "-p", "-c"], "`--` as --setenv's value is no separator: the real one follows --unshare-net");
+    assert.deepEqual(run("--ro-bind", "/", "/", "--", "--unshare-net"), ["--ro-bind", "/", "/", "--", "--unshare-net"], "after the separator: the command's own argument");
+    assert.deepEqual(run("--some-new-option", "--unshare-net", "--", "/c"), ["--some-new-option", "--unshare-net", "--", "/c"], "an option it does not know: as given");
+    const wrapped = run("--unshare-net", "--setenv", "A", "--", "--argv0", "codex-linux-sandbox", "--", "/opt/codex", "--x");
+    const sep = wrapped.indexOf("--", 4);
+    assert.deepEqual(wrapped.slice(0, sep + 4), ["--unshare-net", "--setenv", "A", "--", "--argv0", "codex-linux-sandbox", "--", "/bin/bash", "-p", "-c"]);
+    assert.deepEqual(wrapped.slice(-7), ["bash", "/run/x/relay.sock", "41234", "/usr/bin/socat", "codex-linux-sandbox", "/opt/codex", "--x"], "the relay's place, the argv0, then the command");
+    assert.ok(!wrapped.join("\n").includes("PLANTED"), "BASH_ENV was not read");
     execFileSync("bash", ["-n", join(shimDir, "bwrap")]);
     assert.throws(() => relayShimScript({ bwrap: "bwrap", socat: "/usr/bin/socat", socket: "/s", port: 41234 }), /absolute/);
     assert.match(relayProbeCommand(41234, "abc"), /factory-relay abc/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a gateway-shaped key under another name, or AI_GATEWAY_API_KEY in another case, is withheld; the key stays in the mask list", async () => {
+  assert.deepEqual(unrelayedGatewayKeys({ AI_GATEWAY_API_KEY: KEY, ai_gateway_api_key: "x", IMAGE_KEY: "VCK_abc", FAL_KEY: "fal-1" }), ["ai_gateway_api_key", "IMAGE_KEY"]);
+  const r = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 1 }, shell: { IMAGE_KEY: "vck_other_0123456789", FAL_KEY: "fal-1" }, usageDir: "/nope" });
+  assert.deepEqual(r.shell, { FAL_KEY: "fal-1" });
+  assert.deepEqual(r.masked, ["vck_other_0123456789"]);
+  const { gatewayRelayChecks } = await import("../scripts/doctor.mjs");
+  const warn = gatewayRelayChecks({ inputs: { workerSecrets: "IMAGE_KEY=S", workerSecretValues: "S=vck_other_0123456789", harness: "claude" }, env: { GITHUB_ACTIONS: "true" } });
+  assert.deepEqual(warn.map((c) => c.status), ["WARN"]);
+  assert.match(warn[0].detail, /IMAGE_KEY: an AI Gateway key under a name other than AI_GATEWAY_API_KEY/);
+  assert.ok(!JSON.stringify(warn).includes("vck_other"));
 });
 
 test("worker relay: Copilot and a machine without socat Block with the key out of the shell; no relayed key, no relay", async () => {
@@ -217,6 +313,7 @@ test("worker relay: Copilot and a machine without socat Block with the key out o
   const noSocat = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: "/nope", env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? "/usr/bin/bwrap" : null) });
   assert.match(noSocat.blocked, /needs socat/);
   assert.ok(!(RELAYED_NAME in noSocat.shell));
+  assert.deepEqual(noSocat.masked, [KEY], "the key stays in the stage's mask list");
 });
 
 test("local mode: the outer sandbox keeps the relay's directory readable (never writable)", () => {
@@ -239,4 +336,54 @@ test("doctor: the relayed key on Copilot, or without bwrap or socat, is a WARN t
   assert.match(gatewayRelayChecks({ inputs: { ...spec, harness: "codex" }, env: { GITHUB_ACTIONS: "true" }, which: (b) => (b === "socat" ? null : "/usr/bin/bwrap") })[0].detail, /needs socat/);
   assert.match(gatewayRelayChecks({ inputs: { ...spec, harness: "copilot" }, env: {} })[0].detail, /Copilot's sandbox yet/);
   assert.deepEqual(gatewayRelayChecks({ inputs: { workerSecrets: "FAL_KEY", harness: "copilot" } }), [], "no relayed key, no check");
+});
+
+test("live harness spend: Claude Code's per-message usage, Codex's turns, Copilot's checkpoints; the relay's cap shares the pass's budget with it", async () => {
+  const { claudeUsageUsd, liveSpend } = await import("../scripts/lib/live-spend.mjs");
+  // Claude Code: a message's later lines carry its latest usage; each message counts once.
+  const claude = liveSpend("claude", "claude-opus-5-5");
+  const msg = (id, usage) => JSON.stringify({ type: "assistant", message: { id, model: "claude-opus-5-5", usage } });
+  claude.line(msg("m1", { input_tokens: 10, output_tokens: 1 }));
+  claude.line(msg("m1", { input_tokens: 1_000_000, output_tokens: 0 }));
+  claude.line(msg("m2", { input_tokens: 0, output_tokens: 100_000, cache_read_input_tokens: 1_000_000, cache_creation: { ephemeral_1h_input_tokens: 1_000_000 } }));
+  assert.equal(Math.round((await claude.usd()) * 1e4) / 1e4, 4 + 2 + 0.2 + 8, "$4 input + $2 output + $0.20 cache reads + $8 1-hour writes");
+  assert.equal(claudeUsageUsd({ output_tokens: 1_000_000 }, "claude-unknown-9"), 50, "an unlisted model at the dearest row");
+  // Codex: turns summed, a resumed thread's earlier total taken off.
+  const codex = liveSpend("codex", "gpt-5", { prior: { tokens: { input: 500_000, output: 0 } } });
+  codex.line(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1_000_000, output_tokens: 0 } }));
+  codex.line(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 500_000, output_tokens: 0 } }));
+  assert.equal(await codex.usd(), CODEX_PRICES.perMillion["gpt-5"].input);
+  // Within a turn the stream says nothing yet: the thread's rollout does.
+  const rolled = liveSpend("codex", "gpt-5", { rollout: async (id) => (id === "t-1" ? ['{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000000,"output_tokens":0}}}}', "{}"].join("\n") : "") });
+  rolled.line(JSON.stringify({ type: "thread.started", thread_id: "t-1" }));
+  assert.equal(await rolled.usd(), 2 * CODEX_PRICES.perMillion["gpt-5"].input);
+  // Codex 0.167 writes a token_usage_record per response before its tool call runs: summed, this thread's only.
+  const records = liveSpend("codex", "gpt-5", { rollout: async () => [JSON.stringify({ type: "token_usage_record", payload: { thread_id: "t-2", usage: { input_tokens: 900000 } } }), JSON.stringify({ type: "token_usage_record", payload: { thread_id: "other", usage: { input_tokens: 5e6 } } }), JSON.stringify({ type: "token_usage_record", payload: { thread_id: "t-2", usage: { input_tokens: 100000 } } })].join("\n") });
+  records.line(JSON.stringify({ type: "thread.started", thread_id: "t-2" }));
+  assert.equal(await records.usd(), CODEX_PRICES.perMillion["gpt-5"].input);
+  // Copilot: its running AI credits at the run's dollars per credit.
+  const copilot = liveSpend("copilot", null, { creditUsd: 0.01 });
+  copilot.line(JSON.stringify({ type: "session.usage_checkpoint", data: { totalNanoAiu: 5e10 } }));
+  assert.equal(await copilot.usd(), 0.5);
+  assert.equal(await liveSpend("claude").usd(), 0, "nothing yet");
+
+  // The relay: $1 left; the harness has already spent $0.95 of it, so a $0.10 key call is refused (402).
+  const gw = await fakeGateway({ [IMAGE]: priced(0.1), "/v1/generation": { body: { data: { total_cost: 0.1 } } } });
+  const dir = mkdtempSync(join(tmpdir(), "relay-live-"));
+  try {
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 5, origin: gw.origin, lookupDelaysMs: [1] });
+    let harness = 0.5;
+    relay.beginPass(1, () => harness);
+    assert.equal((await call(relay.socketPath, { token: relay.token })).status, 200, "$0.50 by the harness: room left");
+    harness = 0.95;
+    const refused = await call(relay.socketPath, { token: relay.token });
+    assert.equal(refused.status, 402);
+    assert.match(JSON.parse(refused.text).error.message, /\$0\.10 spent through the key and \$0\.95 by the model/);
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.capped], [0.1, true]);
+    await relay.close();
+  } finally {
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

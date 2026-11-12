@@ -3,7 +3,7 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFileSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, lstatSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
@@ -14,12 +14,13 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
-import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
+import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
+import { liveSpend } from "./live-spend.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -746,8 +747,14 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // A runner's Claude Code and Copilot: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
   // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
   const [execCmd, execArgs, execEnv] = runner && (harness === "claude" || harness === "copilot") ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
-  relay?.beginPass(maxUsd);
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
+  // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
+  const live = relay ? liveSpend(harness, model || null, { prior, creditUsd, rollout: harness === "codex" ? codexRolloutReader(runner, childEnv) : null }) : null;
+  relay?.beginPass(maxUsd, live ? live.usd : null);
+  const lines = live ? (l) => {
+    live.line(l);
+    onLine?.(l);
+  } : onLine;
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
@@ -871,6 +878,34 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
     return { threads: [], missed: [{ id: null, why: "the read failed" }] };
   }
 }
+/**
+ * A Codex thread's rollout lines that carry its usage (live-spend.mjs rolloutTotal: `token_usage_record` lines and the last
+ * `token_count` one), read as the run's Codex wrote it: on a runner as the agent from its CODEX_HOME, locally from the
+ * CODEX_HOME in `env`. Bounded: those lines only, at most a few seconds (MAX_ROLLOUT_BYTES locally).
+ */
+export function codexRolloutReader(runner, env) {
+  if (runner) {
+    const root = join(runner.codexHome, "sessions");
+    return async (id) => (plainThread(id) ? String((await exec("/bin/sh", ["-c", 'f=$(ls "$1"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || exit 0; grep -h \'"token_usage_record"\' "$f"; grep -h \'"token_count"\' "$f" | tail -n 1', "sh", root, id], { cwd: runner.agentHome, env: scrubbedEnv(env), timeoutMs: 5_000 })).stdout || "") : "");
+  }
+  const root = codexSessionRoot(env);
+  return async (id) => {
+    const f = codexRolloutFiles(root, id)[0];
+    if (!f) return "";
+    const p = join(root, f);
+    const size = statSync(p).size;
+    const fd = openSync(p, "r");
+    try {
+      const len = Math.min(size, MAX_ROLLOUT_BYTES);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, size - len);
+      return buf.toString("utf8").split("\n").filter((l) => l.includes('"token_usage_record"') || l.includes('"token_count"')).join("\n");
+    } finally {
+      closeSync(fd);
+    }
+  };
+}
+
 /** Whether a harness run's stream shows a shell command it ran (Claude Code's Bash tool, Codex's command execution). */
 export function commandsRan(harness, stdout) {
   const t = String(stdout || "");

@@ -432,7 +432,8 @@ async function main() {
   const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
   relay = opened.relay;
   const shellSecrets = opened.shell;
-  shellSecretValues = Object.values(shellSecrets);
+  // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
+  shellSecretValues = [...Object.values(shellSecrets), ...opened.masked];
   if (opened.blocked) {
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", reason: opened.blocked, notify: inputs.notify, stage: "review" }, token);

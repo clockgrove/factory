@@ -562,7 +562,8 @@ test("a sandbox stage's start: apt, npm and the CLI's version check get no crede
   // Only these on PATH, so git-lfs and gh are missing and the apt step runs; the rest are stubs that log their env.
   for (const t of ["bash", "sh", "env", "mkdir", "chmod", "rm", "mv", "tar", "date", "head", "setsid", "nohup"]) symlinkSync(`/usr/bin/${t}`, join(bin, t));
   const stub = (name, body = "") => {
-    writeFileSync(join(bin, name), `#!/bin/sh\n{ echo "== \${0##*/} $*"; env; } >> ${JSON.stringify(log)}\n${body}\n`);
+    // One write per call: the test reads the log once the node stub's header shows, so its env must land with it.
+    writeFileSync(join(bin, name), `#!/bin/sh\no=$(echo "== \${0##*/} $*"; env)\nprintf '%s\\n' "$o" >> ${JSON.stringify(log)}\n${body}\n`);
     chmodSync(join(bin, name), 0o755);
   };
   stub("sudo", '[ "$1" = -n ] && shift; exec "$@"');

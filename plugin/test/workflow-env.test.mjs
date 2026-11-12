@@ -128,6 +128,12 @@ test("local mode reads the workflow's settings from the default branch's commit,
   assert.match(warn.detail, /FACTORY_LOCAL_DOMAINS, FACTORY_LOCAL_ENV/);
   assert.deepEqual(workflowSourceChecks(committed.wf, committed), [], "the same settings: nothing to say");
   assert.match(workflowSourceChecks({}, { wf: {}, branch: "trunk", error: "origin/trunk has no .github/workflows/factory.yml" })[0].detail, /uses none/);
+  // Doctor run outside a clone (--repo only): not checked, which says nothing about what serve uses.
+  const none = committedWorkflowEnv("/nowhere", { git: () => ({ status: 128, stdout: "" }) });
+  assert.equal(none.noClone, true);
+  const [skipped] = workflowSourceChecks({}, none);
+  assert.match(skipped.detail, /^not checked: doctor runs outside a clone/);
+  assert.doesNotMatch(skipped.detail, /uses none/);
   // A change pushed to the default branch is what the next start reads (fetched first).
   git(dev, "checkout", "-q", "trunk");
   flow({ FACTORY_MODEL: "m2" });

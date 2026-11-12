@@ -1175,6 +1175,7 @@ export function workflowEnvChecks(wf = {}) {
  * none there, or when this working tree's settings differ from it (local mode uses the default branch's).
  */
 export function workflowSourceChecks(working, committed) {
+  if (committed.noClone) return [WARN("workflow source", "not checked: doctor runs outside a clone of the repository, so it cannot read the default branch's .github/workflows/factory.yml (serve reads it from its own clone)", "run doctor --local from the repository's clone to check the settings local mode uses")];
   if (committed.error) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`, "merge the workflow into the default branch (factory:setup writes it)")];
   const [line] = workflowDriftLines(working, committed);
   return line ? [WARN("workflow source", line, `commit the change to ${committed.branch}; local mode never reads a working tree's workflow`)] : [];

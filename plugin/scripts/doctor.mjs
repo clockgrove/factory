@@ -12,6 +12,7 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { prepareCopilotHome } from "./lib/copilot-runner.mjs";
+import { untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
@@ -860,7 +861,7 @@ export const APPARMOR_UNSHARE_STEP = "once, as an admin on the runner host: prin
  * before every start, run once (`start`), which fails where the sandbox cannot start or does not confine. Not in local
  * mode, whose own checks name them (local.mjs). `has`, `read`, `profiles` and `start` are seams for the tests.
  */
-export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles, start = null }) {
+export async function claudeSandboxChecks({ inputs, env = process.env, local = backend(env).name === "local", has = onPath, read = (p) => readFileSync(p, "utf8"), profiles = apparmorProfiles, start = null, restore = sessionRestoreStart }) {
   const h = inputs.harness;
   const sb = RUNNER_SANDBOX[h];
   if (!sb || local) return [];
@@ -898,7 +899,34 @@ export async function claudeSandboxChecks({ inputs, env = process.env, local = b
     const fix = env.RUNNER_ENVIRONMENT === "self-hosted" ? (h === "copilot" ? APPARMOR_UNSHARE_STEP : APPARMOR_ADMIN_STEP) : h === "copilot" ? "give unshare unprivileged user and network namespaces (on Ubuntu the factory-unshare AppArmor profile, which the Action loads on GitHub's hosted runners), and slirp4netns /dev/net/tun and an iptables that can add an IPv6 table (the cloud sandbox's start sees to both)" : "give bwrap unprivileged user and network namespaces (on Ubuntu the factory-bwrap AppArmor profile, which the Action loads on GitHub's hosted runners)";
     out.push(r.ok ? PASS(`${h} sandbox: start`, `${sb.name}'s sandbox starts and confines here`) : FAIL(`${h} sandbox: start`, `${sb.name}'s sandbox does not start here: ${r.reason}`, fix));
   }
+  // A held session put back as the agent, as every resumed stage does (lib/untar.mjs), where the agent exists.
+  const back = await restore(env);
+  if (back) out.push(back.ok ? PASS("session restore", "a held session is put back as the agent here") : FAIL("session restore", `a held session cannot be put back as the agent here, so a resumed stage Blocks (git-clear): ${back.reason}`, "report it with this line and the runner's OS (docs/PLAN.md, Security): the agent's confinement refuses what the unpacker needs"));
   return out;
+}
+
+/**
+ * A held session's round trip where the job runs, as the agent in its temp directory: a nested directory archived with
+ * tar, as Factory captures a session (claude-runner.mjs archiveSession), and unpacked into a fresh directory, as every
+ * reset puts one back (untar.mjs). {ok, reason}, or null before the agent exists.
+ */
+async function sessionRestoreStart(env = process.env) {
+  const agent = agentUser();
+  if (!agent) return null;
+  const dir = `${agent.tmp}/session-restore-check`;
+  const opts = { cwd: agent.tmp, env: scrubbedEnv(env) };
+  try {
+    const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -- "$1/from/s1/checkpoints" "$1/to"; echo factory > "$1/from/s1/checkpoints/index.md"', "sh", dir], opts);
+    if (made.code !== 0) return { ok: false, reason: `the check could not be set up: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}` };
+    const tar = await exec("tar", ["-C", `${dir}/from`, "-cf", "-", "s1"], { ...opts, encoding: "buffer" });
+    if (tar.code !== 0) return { ok: false, reason: "tar could not archive a session as the agent" };
+    const put = await untarAsAgent(tar.stdout, `${dir}/to`, opts);
+    if (put.code !== 0) return { ok: false, reason: String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}` };
+    const got = await exec("/bin/cat", [`${dir}/to/s1/checkpoints/index.md`], opts);
+    return got.code === 0 && String(got.stdout).trim() === "factory" ? { ok: true } : { ok: false, reason: "the unpacked session is not what was archived" };
+  } finally {
+    await exec("/bin/rm", ["-rf", "--", dir], opts).catch(() => {});
+  }
 }
 
 /**

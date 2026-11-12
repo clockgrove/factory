@@ -60,6 +60,7 @@ import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
+import { untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
@@ -379,7 +380,8 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
         holdSession(s.id, tar.stdout);
         return { id: s.id, from: src.name, reason: "" };
       }
-      const put = await exec("sh", ["-c", 'mkdir -p "$1" && tar -xf - -C "$1" --skip-old-files', "sh", AGENT_SESSION_ROOT[harness]], { cwd: agent.home, input: tar.stdout });
+      const made = tar.code === 0 ? await exec("mkdir", ["-p", "--", AGENT_SESSION_ROOT[harness]], { cwd: agent.home }) : { code: 1 };
+      const put = made.code === 0 ? await untarAsAgent(tar.stdout, AGENT_SESSION_ROOT[harness], { cwd: agent.home, keep: true }) : made;
       if (tar.code !== 0 || put.code !== 0) return { id: null, from: src.name, reason: "the saved session could not be put back in the agent's home" };
       return { id: s.id, from: src.name, reason: "" };
     }

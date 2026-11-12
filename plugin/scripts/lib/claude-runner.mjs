@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal } from "./local.mjs";
+import { untarAsAgent } from "./untar.mjs";
 import { log } from "./inputs.mjs";
 
 /** Claude Code's HOME on a runner: Factory's own, outside every home the agent can write. */
@@ -259,8 +260,8 @@ export async function resetClaudeState(layout, env = process.env) {
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$1/config" "$1/config/projects" "$1/cmd"; [ -z "$2" ] || mkdir -p -m 700 -- "$2"', "sh", layout.state, layout.editDiffs || ""], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Claude Code's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS.values()) {
-    const put = await exec("tar", ["-xf", "-", "-C", join(layout.config, "projects")], { cwd: layout.agentHome, env, input: tar });
-    if (put.code !== 0) throw new GitRefusal("git-clear", "a saved session could not be put back in Claude Code's state");
+    const put = await untarAsAgent(tar, join(layout.config, "projects"), { cwd: layout.agentHome, env });
+    if (put.code !== 0) throw new GitRefusal("git-clear", `a saved session could not be put back in Claude Code's state: ${String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}`}`);
   }
 }
 

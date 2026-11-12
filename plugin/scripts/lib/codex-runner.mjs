@@ -28,6 +28,7 @@ import { join, relative } from "node:path";
 import { exec } from "./proc.mjs";
 import { GitRefusal, codexLocalConfig, codexReadOnly } from "./local.mjs";
 import { RUNNER_CACHES, SESSIONS_HELD } from "./claude-runner.mjs";
+import { untarAsAgent } from "./untar.mjs";
 
 /** Codex's HOME on a runner: Factory's own, outside every home the agent can write. */
 export const CODEX_RUNNER_HOME = "/var/lib/factory-codex";
@@ -59,8 +60,8 @@ export async function resetCodexState(layout, env = process.env) {
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$2" "$3"', "sh", layout.state, layout.codexHome, layout.sessions], { cwd: layout.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Codex's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
   for (const tar of SESSIONS_HELD()) {
-    const put = await exec("tar", ["-xf", "-", "-C", layout.sessions], { cwd: layout.agentHome, env, input: tar });
-    if (put.code !== 0) throw new GitRefusal("git-clear", "a saved session could not be put back in Codex's state");
+    const put = await untarAsAgent(tar, layout.sessions, { cwd: layout.agentHome, env });
+    if (put.code !== 0) throw new GitRefusal("git-clear", `a saved session could not be put back in Codex's state: ${String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}`}`);
   }
 }
 

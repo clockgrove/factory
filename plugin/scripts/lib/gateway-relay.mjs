@@ -56,6 +56,12 @@ export const UPSTREAM_TIMEOUT_MS = 20 * 60_000;
 export const BODY_TIMEOUT_MS = 5 * 60_000;
 
 /**
+ * An image edit's body cap: its reference images travel in it, base64 in JSON as raccoon-world's turnaround sends them
+ * (four photo references came to 38.5 MiB). Only one capped call's body is held at a time (one billable call in flight).
+ */
+export const EDITS_MAX_BYTES = 128 * 1024 * 1024;
+
+/**
  * What the relay forwards: method, path (no query) and the request's size cap. `family` says where its cost is read:
  * `sdk` (the AI SDK's gateway protocol: `providerMetadata.gateway` at the top level, or in a stream's last event),
  * `openai` (an OpenAI- or Anthropic-compatible answer: its top-level generation id, looked up), `image` (an OpenAI-compatible
@@ -66,7 +72,7 @@ export const BODY_TIMEOUT_MS = 5 * 60_000;
 export const ROUTES = [
   { method: "POST", path: /^\/v[1-9]\/ai\/(language-model|image-model|embedding-model|decision-model|reranking-model)$/, family: "sdk", maxBytes: 64 * 1024 * 1024 },
   { method: "POST", path: /^\/v1\/(chat\/completions|responses|embeddings|messages|images\/generations)$/, family: "openai", maxBytes: 64 * 1024 * 1024 },
-  { method: "POST", path: /^\/v1\/images\/edits$/, family: "image", maxBytes: 32 * 1024 * 1024 },
+  { method: "POST", path: /^\/v1\/images\/edits$/, family: "image", maxBytes: EDITS_MAX_BYTES },
   { method: "GET", path: /^\/v[1-9]\/ai\/config$|^\/v1\/models$/, family: "free", maxBytes: 0 },
 ];
 /**

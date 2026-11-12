@@ -109,3 +109,90 @@ export const untarAsAgent = (tar, dest, { cwd, env, keep = false, timeoutMs = 12
   const [cmd, args] = wrap ? wrap(inner) : [inner[0], inner.slice(1)];
   return exec(cmd, args, { cwd, env, input: tar, timeoutMs });
 };
+
+/**
+ * The other way: archive `names` (relative to `root`, as listed) as the agent, without GNU tar. On Ubuntu 26.04 its
+ * `tar -c` stats a member name with a slash in it through openat2 too, which the agent's unit refuses ("Cannot stat:
+ * Function not implemented"), so Claude Code's `<project>/<id>.jsonl` and Codex's `YYYY/MM/DD/rollout-*.jsonl` could
+ * not be captured. GNU tar format (a long name in a GNU `L` entry, a size past 8 GB in base 256), which GNU tar and
+ * UNTAR both read. A directory is archived with what is under it; links and other special files are left out. A file
+ * is archived at the size it had when its header was written (zeros if it shrank, cut if it grew). Exit 0 when done,
+ * 1 with the reason otherwise (a name that is not plain and relative, an entry that is not there).
+ */
+export const TARPACK = String.raw`
+const fs = require("fs"), path = require("path");
+const [root, ...names] = process.argv.slice(1);
+const fail = (m) => { process.stderr.write("tarpack: " + m + "\n"); process.exit(1); };
+const out = (b) => { let w = 0; while (w < b.length) { try { w += fs.writeSync(1, b, w, b.length - w); } catch (e) { if (e.code !== "EAGAIN") throw e; } } };
+const oct = (n, len) => n.toString(8).padStart(len - 1, "0") + "\0";
+const header = (name, type, size, mode, mtime) => {
+  const h = Buffer.alloc(512);
+  h.write(name.slice(0, 100), 0, "utf8");
+  h.write(oct(mode & 0o777, 8), 100, "latin1");
+  h.write(oct(0, 8), 108, "latin1");
+  h.write(oct(0, 8), 116, "latin1");
+  if (size < 8 ** 11) h.write(oct(size, 12), 124, "latin1");
+  else { h[124] = 0x80; let v = size; for (let i = 135; i > 124; i--) { h[i] = v % 256; v = Math.floor(v / 256); } }
+  h.write(oct(Math.max(0, Math.floor(mtime)), 12), 136, "latin1");
+  h[156] = type.charCodeAt(0);
+  h.write("ustar  \0", 257, "latin1");
+  h.fill(" ", 148, 156);
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += h[i];
+  h.write(oct(sum, 7) + " ", 148, "latin1");
+  return h;
+};
+const pad = (n) => (n % 512 ? Buffer.alloc(512 - (n % 512)) : null);
+const entry = (name, type, size, mode, mtime) => {
+  if (Buffer.byteLength(name) > 100) {
+    const long = Buffer.from(name + "\0");
+    out(header("././@LongLink", "L", long.length, 0o644, 0));
+    out(long);
+    const p = pad(long.length);
+    if (p) out(p);
+  }
+  out(header(name, type, size, mode, mtime));
+};
+const add = (rel) => {
+  const abs = path.join(root, rel);
+  const st = fs.lstatSync(abs, { throwIfNoEntry: false });
+  if (!st) fail(JSON.stringify(rel) + " is not there");
+  if (st.isDirectory()) {
+    entry(rel + "/", "5", 0, st.mode, st.mtimeMs / 1000);
+    for (const n of fs.readdirSync(abs).sort()) add(rel + "/" + n);
+    return;
+  }
+  if (!st.isFile()) return;
+  const size = st.size;
+  entry(rel, "0", size, st.mode, st.mtimeMs / 1000);
+  const fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const buf = Buffer.alloc(1024 * 1024);
+  let done = 0;
+  while (done < size) {
+    const n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - done), null);
+    if (n <= 0) { out(Buffer.alloc(size - done)); done = size; break; }
+    out(buf.subarray(0, n));
+    done += n;
+  }
+  fs.closeSync(fd);
+  const p = pad(size);
+  if (p) out(p);
+};
+const rst = fs.lstatSync(root, { throwIfNoEntry: false });
+if (!rst || !rst.isDirectory()) fail("the root is not a directory");
+for (const n of names) {
+  if (!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(n) || n.split("/").some((s) => s === "." || s === "..")) fail("refused name " + JSON.stringify(n.slice(0, 200)));
+  let p = root;
+  for (const s of n.split("/").slice(0, -1)) { p = path.join(p, s); const s2 = fs.lstatSync(p, { throwIfNoEntry: false }); if (!s2 || !s2.isDirectory()) fail(JSON.stringify(n) + " is not under a real directory"); }
+  add(n);
+}
+out(Buffer.alloc(1024));
+process.exit(0);
+`;
+
+/**
+ * Archive `names` under `root` as the agent (TARPACK): the command runs in the agent's confinement through proc.mjs
+ * exec's own rule (a `cwd` in the agent's home). Returns exec's result with the archive as a Buffer on stdout.
+ */
+export const tarAsAgent = (root, names, { cwd, env, timeoutMs, maxBytes, killPastMax = false } = {}) =>
+  exec(process.execPath, ["-e", TARPACK, root, ...names], { cwd, env, encoding: "buffer", timeoutMs, ...(maxBytes ? { maxBytes, killPastMax } : {}) });

@@ -12,7 +12,7 @@ import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./l
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { prepareCopilotHome } from "./lib/copilot-runner.mjs";
-import { untarAsAgent } from "./lib/untar.mjs";
+import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
@@ -918,8 +918,8 @@ async function sessionRestoreStart(env = process.env) {
   try {
     const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -- "$1/from/s1/checkpoints" "$1/to"; echo factory > "$1/from/s1/checkpoints/index.md"', "sh", dir], opts);
     if (made.code !== 0) return { ok: false, reason: `the check could not be set up: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}` };
-    const tar = await exec("tar", ["-C", `${dir}/from`, "-cf", "-", "s1"], { ...opts, encoding: "buffer" });
-    if (tar.code !== 0) return { ok: false, reason: "tar could not archive a session as the agent" };
+    const tar = await tarAsAgent(`${dir}/from`, ["s1/checkpoints/index.md"], opts);
+    if (tar.code !== 0) return { ok: false, reason: `a session could not be archived as the agent: ${String(tar.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${tar.code}`}` };
     const put = await untarAsAgent(tar.stdout, `${dir}/to`, opts);
     if (put.code !== 0) return { ok: false, reason: String(put.stderr).trim().split("\n").at(-1)?.slice(0, 200) || `exit ${put.code}` };
     const got = await exec("/bin/cat", [`${dir}/to/s1/checkpoints/index.md`], opts);

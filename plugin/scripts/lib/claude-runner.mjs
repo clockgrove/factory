@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { asAgent, exec, SAFE_PATH } from "./proc.mjs";
 import { GitRefusal } from "./local.mjs";
-import { untarAsAgent } from "./untar.mjs";
+import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { log } from "./inputs.mjs";
 
 /** Claude Code's HOME on a runner: Factory's own, outside every home the agent can write. */
@@ -302,7 +302,8 @@ async function archiveSessionWhy(layout, sessionId, env = process.env, { timeout
   if (listed.timedOut) return { archive: null, why: "timed out" };
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
   if (!files.length) return { archive: null, why: "none" };
-  const tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: layout.agentHome, env, encoding: "buffer", input: `${files.join("\0")}\0`, timeoutMs, ...(maxBytes ? { maxBytes, killPastMax: true } : {}) });
+  // Factory's own packer, not GNU tar (untar.mjs TARPACK: 26.04's tar cannot stat a nested name in the agent's unit).
+  const tar = await tarAsAgent(root, files, { cwd: layout.agentHome, env, timeoutMs, maxBytes, killPastMax: true });
   // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
   if (tar.truncated) return { archive: { tar: null, files, truncated: true }, why: "truncated" };
   if (tar.code !== 0 || tar.timedOut) return { archive: null, why: tar.timedOut ? "timed out" : "failed" };

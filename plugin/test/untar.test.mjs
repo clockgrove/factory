@@ -136,3 +136,33 @@ test("the archive is read as a stream: a file larger than one read lands whole",
   assert.equal(r.code, 0, String(r.stderr));
   assert.ok(readFileSync(join(to, "ab", "cd", "oid")).equals(big));
 });
+
+test("Factory's packer: GNU tar and the unpacker read it; nested and long names; links left out; names refused", async () => {
+  const { TARPACK, tarAsAgent } = await import("../scripts/lib/untar.mjs");
+  assert.ok(!TARPACK.includes("${"));
+  const root = mkdtempSync(join(tmpdir(), "tarpack-"));
+  const src = join(root, "src");
+  const long = `${"p".repeat(90)}/${"r".repeat(80)}.jsonl`;
+  mkdirSync(join(src, "2026", "11", "12"), { recursive: true });
+  mkdirSync(join(src, "p".repeat(90)), { recursive: true });
+  writeFileSync(join(src, "2026", "11", "12", "rollout-1-abc.jsonl"), "codex\n");
+  writeFileSync(join(src, long), "claude\n");
+  mkdirSync(join(src, "s1", "checkpoints"), { recursive: true });
+  writeFileSync(join(src, "s1", "checkpoints", "index.md"), "copilot\n");
+  symlinkSync("/etc/passwd", join(src, "s1", "link"));
+  const r = await tarAsAgent(src, ["2026/11/12/rollout-1-abc.jsonl", long, "s1"], {});
+  assert.equal(r.code, 0, String(r.stderr));
+  const listed = execFileSync("tar", ["-tf", "-"], { input: r.stdout, encoding: "utf8" }).trim().split("\n");
+  assert.deepEqual(listed, ["2026/11/12/rollout-1-abc.jsonl", long, "s1/", "s1/checkpoints/", "s1/checkpoints/index.md"], "GNU tar reads it; the link is left out");
+  const to = join(root, "to");
+  mkdirSync(to);
+  assert.equal((await untarAsAgent(r.stdout, to, {})).code, 0);
+  assert.equal(readFileSync(join(to, long), "utf8"), "claude\n");
+  assert.equal(readFileSync(join(to, "2026", "11", "12", "rollout-1-abc.jsonl"), "utf8"), "codex\n");
+  assert.equal(readFileSync(join(to, "s1", "checkpoints", "index.md"), "utf8"), "copilot\n");
+  for (const bad of ["../x", "/etc/passwd", "s1/../.."]) assert.equal((await tarAsAgent(src, [bad], {})).code, 1, bad);
+  symlinkSync(join(src, "s1"), join(src, "via"));
+  assert.equal((await tarAsAgent(src, ["via/checkpoints/index.md"], {})).code, 1, "never through a linked directory");
+  const capped = await tarAsAgent(src, ["s1"], { maxBytes: 600, killPastMax: true });
+  assert.equal(capped.truncated, true);
+});

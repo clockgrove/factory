@@ -60,7 +60,7 @@ import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
-import { untarAsAgent } from "./untar.mjs";
+import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
@@ -297,7 +297,7 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
       const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, id], { cwd: agent.home });
       files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
       if (!files.length) continue;
-      tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
+      tar = await tarAsAgent(root, files, { cwd: agent.home });
     }
     if (tar.code !== 0) continue;
     mkdirSync(dest, { recursive: true });

@@ -58,8 +58,9 @@ import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
 import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
-import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
+import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
+import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
@@ -296,7 +297,7 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
       const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, id], { cwd: agent.home });
       files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
       if (!files.length) continue;
-      tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
+      tar = await tarAsAgent(root, files, { cwd: agent.home, timeoutMs: SESSION_CAPTURE_MS, maxBytes: SESSION_CAPTURE_BYTES, killPastMax: true });
     }
     if (tar.code !== 0) continue;
     mkdirSync(dest, { recursive: true });
@@ -379,7 +380,8 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
         holdSession(s.id, tar.stdout);
         return { id: s.id, from: src.name, reason: "" };
       }
-      const put = await exec("sh", ["-c", 'mkdir -p "$1" && tar -xf - -C "$1" --skip-old-files', "sh", AGENT_SESSION_ROOT[harness]], { cwd: agent.home, input: tar.stdout });
+      const made = tar.code === 0 ? await exec("mkdir", ["-p", "--", AGENT_SESSION_ROOT[harness]], { cwd: agent.home }) : { code: 1 };
+      const put = made.code === 0 ? await untarAsAgent(tar.stdout, AGENT_SESSION_ROOT[harness], { cwd: agent.home, keep: true }) : made;
       if (tar.code !== 0 || put.code !== 0) return { id: null, from: src.name, reason: "the saved session could not be put back in the agent's home" };
       return { id: s.id, from: src.name, reason: "" };
     }

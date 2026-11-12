@@ -1,0 +1,195 @@
+import "./temp.mjs";
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { UNTAR, untarAsAgent } from "../scripts/lib/untar.mjs";
+import { claudeSandboxChecks } from "../scripts/doctor.mjs";
+
+const untar = (archive, dest, keep = false) => spawnSync(process.execPath, ["-e", UNTAR, dest, keep ? "1" : "0"], { input: archive, encoding: "buffer" });
+
+test("a held session archive unpacks without GNU tar: nested directories, long names, pax paths, modes and times", async () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  const from = join(root, "from");
+  const long = `${"d".repeat(120)}/${"f".repeat(130)}.jsonl`;
+  mkdirSync(join(from, "s1", "checkpoints"), { recursive: true });
+  mkdirSync(join(from, "s1", "d".repeat(120)), { recursive: true });
+  writeFileSync(join(from, "s1", "checkpoints", "index.md"), "one\n");
+  writeFileSync(join(from, "s1", long), "two\n");
+  writeFileSync(join(from, "s1", "suid"), "x", { mode: 0o4755 });
+  utimesSync(join(from, "s1", "checkpoints", "index.md"), 1_700_000_000, 1_700_000_000);
+  for (const format of ["gnu", "pax"]) {
+    const to = join(root, `to-${format}`);
+    mkdirSync(to);
+    const tar = execFileSync("tar", ["-C", from, `--format=${format}`, "-cf", "-", "s1"]);
+    const r = await untarAsAgent(tar, to, {});
+    assert.equal(r.code, 0, String(r.stderr));
+    assert.equal(readFileSync(join(to, "s1", "checkpoints", "index.md"), "utf8"), "one\n");
+    assert.equal(readFileSync(join(to, "s1", long), "utf8"), "two\n", `${format}: a name past 100 bytes`);
+    assert.equal(statSync(join(to, "s1", "checkpoints", "index.md")).mtimeMs, 1_700_000_000_000);
+    assert.equal(statSync(join(to, "s1", "suid")).mode & 0o7000, 0, "no setuid or setgid bit");
+  }
+});
+
+test("the unpacker writes nothing outside its destination: links skipped, .. and absolute names refused, a linked parent refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  const from = join(root, "from");
+  mkdirSync(join(from, "s1"), { recursive: true });
+  symlinkSync("/etc", join(from, "s1", "out"));
+  writeFileSync(join(from, "s1", "ok"), "ok");
+  const to = join(root, "to");
+  mkdirSync(to);
+  const r = untar(execFileSync("tar", ["-C", from, "-cf", "-", "s1"]), to);
+  assert.equal(r.status, 0);
+  assert.ok(!existsSync(join(to, "s1", "out")), "a link is skipped");
+  assert.match(String(r.stderr), /skipped "s1\/out" \(type 2\)/);
+  const dotdot = execFileSync("tar", ["-C", from, "--transform", "s,^s1,../s1,", "-cf", "-", "s1/ok"]);
+  const bad = join(root, "bad");
+  mkdirSync(bad);
+  const r2 = untar(dotdot, bad);
+  assert.equal(r2.status, 1);
+  assert.match(String(r2.stderr), /refused name/);
+  assert.ok(!existsSync(join(root, "s1")), "nothing written above the destination");
+  // A parent that is a link (planted between capture and restore) refuses: never written through.
+  const linked = join(root, "linked");
+  mkdirSync(linked);
+  symlinkSync(root, join(linked, "s1"));
+  const r3 = untar(execFileSync("tar", ["-C", from, "-cf", "-", "s1/ok"]), linked);
+  assert.equal(r3.status, 1);
+  assert.match(String(r3.stderr), /is not a directory/);
+  assert.ok(!existsSync(join(root, "ok")));
+  // A destination that is a link refuses too, and a cut-short archive.
+  assert.equal(untar(execFileSync("tar", ["-C", from, "-cf", "-", "s1/ok"]), join(linked, "s1")).status, 1);
+  const whole = execFileSync("tar", ["-C", from, "-cf", "-", "s1/ok"]);
+  const cut = join(root, "cut");
+  mkdirSync(cut);
+  assert.equal(untar(whole.subarray(0, 600), cut).status, 1);
+});
+
+test("keep leaves a file already there; otherwise it is replaced, a link in its place included", () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  mkdirSync(join(root, "from", "s1"), { recursive: true });
+  writeFileSync(join(root, "from", "s1", "a"), "new");
+  const tar = execFileSync("tar", ["-C", join(root, "from"), "-cf", "-", "s1"]);
+  const to = join(root, "to");
+  mkdirSync(join(to, "s1"), { recursive: true });
+  writeFileSync(join(to, "s1", "a"), "old");
+  assert.equal(untar(tar, to, true).status, 0);
+  assert.equal(readFileSync(join(to, "s1", "a"), "utf8"), "old");
+  symlinkSync(join(root, "elsewhere"), join(to, "s1", "b"));
+  writeFileSync(join(root, "from", "s1", "b"), "b");
+  assert.equal(untar(execFileSync("tar", ["-C", join(root, "from"), "-cf", "-", "s1"]), to).status, 0);
+  assert.equal(readFileSync(join(to, "s1", "a"), "utf8"), "new");
+  assert.ok(lstatSync(join(to, "s1", "b")).isFile(), "the link is replaced, not written through");
+  assert.ok(!existsSync(join(root, "elsewhere")));
+});
+
+test("nothing systemd-run would expand in the unpacker; doctor's session restore row", async () => {
+  assert.ok(!UNTAR.includes("${"));
+  const names = (rows) => rows.map((r) => `${r.name}:${r.status}`);
+  const hosted = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
+  for (const h of ["claude", "codex", "copilot"]) {
+    const rows = await claudeSandboxChecks({ inputs: { harness: h }, env: hosted, local: false, has: async () => true, start: async () => null, restore: async () => ({ ok: false, reason: "untar: s1 is not a directory" }) });
+    assert.equal(names(rows).at(-1), "session restore:FAIL", h);
+    assert.match(rows.at(-1).detail, /resumed stage Blocks/);
+  }
+  const ok = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: hosted, local: false, has: async () => true, restore: async () => ({ ok: true }) });
+  assert.equal(names(ok).at(-1), "session restore:PASS");
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "claude" }, env: hosted, local: false, has: async () => true, restore: async () => null })).filter((n) => n.startsWith("session")), [], "before the agent exists, no row");
+});
+
+test("a crafted size refuses the archive, never loops: negative, not octal, or past a safe integer", async () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  mkdirSync(join(root, "from", "s1"), { recursive: true });
+  writeFileSync(join(root, "from", "s1", "a"), "x".repeat(2000));
+  const good = execFileSync("tar", ["-C", join(root, "from"), "--format=gnu", "-cf", "-", "s1/a"]);
+  const crafted = (size) => {
+    const t = Buffer.from(good);
+    t.write(size.padEnd(12, "\0"), 124, "latin1");
+    // The header checksum, recomputed with the field as spaces, as tar does.
+    t.fill(" ", 148, 156);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += t[i];
+    t.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "latin1");
+    return t;
+  };
+  for (const size of ["-0002000", "0000zz", "\x80\x7f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"]) {
+    const to = mkdtempSync(join(root, "to-"));
+    const t0 = Date.now();
+    const r = await untarAsAgent(crafted(size), to, { timeoutMs: 10_000 });
+    assert.equal(r.code, 1, JSON.stringify(size));
+    assert.ok(!r.timedOut && Date.now() - t0 < 10_000, "refused at once, not stopped by the time cap");
+    assert.match(String(r.stderr), /not a whole number of bytes/);
+  }
+});
+
+test("the archive is read as a stream: a file larger than one read lands whole", async () => {
+  const root = mkdtempSync(join(tmpdir(), "untar-"));
+  mkdirSync(join(root, "from", "ab", "cd"), { recursive: true });
+  const big = Buffer.alloc(5 * 1024 * 1024 + 123, 7);
+  writeFileSync(join(root, "from", "ab", "cd", "oid"), big);
+  const to = join(root, "to");
+  mkdirSync(to);
+  const r = await untarAsAgent(execFileSync("tar", ["-C", join(root, "from"), "-cf", "-", "ab/cd/oid"], { maxBuffer: 64 * 1024 * 1024 }), to, {});
+  assert.equal(r.code, 0, String(r.stderr));
+  assert.ok(readFileSync(join(to, "ab", "cd", "oid")).equals(big));
+});
+
+test("Factory's packer: GNU tar and the unpacker read it; nested and long names; links left out; names refused", async () => {
+  const { TARPACK, tarAsAgent } = await import("../scripts/lib/untar.mjs");
+  assert.ok(!TARPACK.includes("${"));
+  const root = mkdtempSync(join(tmpdir(), "tarpack-"));
+  const src = join(root, "src");
+  const long = `${"p".repeat(90)}/${"r".repeat(80)}.jsonl`;
+  mkdirSync(join(src, "2026", "11", "12"), { recursive: true });
+  mkdirSync(join(src, "p".repeat(90)), { recursive: true });
+  writeFileSync(join(src, "2026", "11", "12", "rollout-1-abc.jsonl"), "codex\n");
+  writeFileSync(join(src, long), "claude\n");
+  mkdirSync(join(src, "s1", "checkpoints"), { recursive: true });
+  writeFileSync(join(src, "s1", "checkpoints", "index.md"), "copilot\n");
+  symlinkSync("/etc/passwd", join(src, "s1", "link"));
+  const r = await tarAsAgent(src, ["2026/11/12/rollout-1-abc.jsonl", long, "s1"], {});
+  assert.equal(r.code, 0, String(r.stderr));
+  const listed = execFileSync("tar", ["-tf", "-"], { input: r.stdout, encoding: "utf8" }).trim().split("\n");
+  assert.deepEqual(listed, ["2026/11/12/rollout-1-abc.jsonl", long, "s1/", "s1/checkpoints/", "s1/checkpoints/index.md"], "GNU tar reads it; the link is left out");
+  const to = join(root, "to");
+  mkdirSync(to);
+  assert.equal((await untarAsAgent(r.stdout, to, {})).code, 0);
+  assert.equal(readFileSync(join(to, long), "utf8"), "claude\n");
+  assert.equal(readFileSync(join(to, "2026", "11", "12", "rollout-1-abc.jsonl"), "utf8"), "codex\n");
+  assert.equal(readFileSync(join(to, "s1", "checkpoints", "index.md"), "utf8"), "copilot\n");
+  for (const bad of ["../x", "/etc/passwd", "s1/../.."]) assert.equal((await tarAsAgent(src, [bad], {})).code, 1, bad);
+  symlinkSync(join(src, "s1"), join(src, "via"));
+  assert.equal((await tarAsAgent(src, ["via/checkpoints/index.md"], {})).code, 1, "never through a linked directory");
+  const capped = await tarAsAgent(src, ["s1"], { maxBytes: 600, killPastMax: true });
+  assert.equal(capped.truncated, true);
+});
+
+test("the packer skips, and names, what it cannot read below the names passed in: a name not UTF-8, a file it may not open, a tree past the path limit", async () => {
+  const { tarAsAgent } = await import("../scripts/lib/untar.mjs");
+  const root = mkdtempSync(join(tmpdir(), "tarpack-"));
+  const s1 = join(root, "s1");
+  mkdirSync(s1);
+  writeFileSync(join(s1, "ok"), "ok\n");
+  writeFileSync(Buffer.concat([Buffer.from(`${s1}/`), Buffer.from([0x66, 0xff, 0x41])]), "latin\n");
+  writeFileSync(join(s1, "closed"), "secret", { mode: 0o000 });
+  // Made one relative step at a time (a shell's cd keeps the whole path, and stops at the limit).
+  execFileSync(process.execPath, ["-e", 'const fs = require("fs"); process.chdir(process.argv[1]); for (let i = 0; i < 250; i++) { fs.mkdirSync("dddddddddddddddddddd"); process.chdir("dddddddddddddddddddd"); } fs.writeFileSync("f", "deep");', s1]);
+  try {
+    const r = await tarAsAgent(root, ["s1"], {});
+    assert.equal(r.code, 0, String(r.stderr));
+    const err = String(r.stderr);
+    assert.match(err, /skipped "s1\/66ff41" \(a name that is not UTF-8\)/);
+    if (process.getuid() !== 0) assert.match(err, /skipped "s1\/closed" \(EACCES\)/);
+    assert.match(err, /ENAMETOOLONG/);
+    const listed = execFileSync("tar", ["-tf", "-"], { input: r.stdout, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\n");
+    assert.ok(listed.includes("s1/ok"), "the rest is captured");
+    // A name passed in that cannot be read still fails the whole archive.
+    if (process.getuid() !== 0) assert.equal((await tarAsAgent(root, ["s1/closed"], {})).code, 1);
+  } finally {
+    // GNU rm walks a tree past the path limit; the temp root's own removal may not.
+    execFileSync("rm", ["-rf", "--", s1]);
+  }
+});

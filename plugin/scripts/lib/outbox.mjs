@@ -15,6 +15,7 @@ import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion,
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { heldSecrets, secretForms } from "./inputs.mjs";
+import { untarAsAgent } from "./untar.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
@@ -579,7 +580,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (ship.length && over()) warnings.push(NO_TIME);
     else if (ship.length) {
       const tar = await exec("tar", ["-C", join(mirror, "lfs", "objects"), "--null", "-T", "-", "-cf", "-"], { encoding: "buffer", maxBytes: 8 * 1024 ** 3, input: `${ship.join("\0")}\0`, timeoutMs: ms() });
-      const put = tar.code === 0 && !tar.timedOut && !over() ? await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && tar -xUf - -C "$d"', "sh", checkout], agentGitEnv), { env: agentGitEnv, input: tar.stdout, timeoutMs: ms() }) : { code: 1 };
+      // The checkout's store, made as the agent; the objects unpacked into it as the agent by Factory's own unpacker
+      // (untar.mjs: GNU tar cannot make nested directories in the agent's unit on Ubuntu 26.04, #102).
+      const wrap = (inner) => backend(agentGitEnv).sandbox.git(inner, agentGitEnv);
+      const store = tar.code === 0 && !tar.timedOut && !over() ? await exec(...wrap(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && printf "%s" "$d"', "sh", checkout]), { env: agentGitEnv, timeoutMs: ms() }) : { code: 1 };
+      const d = String(store.stdout || "");
+      const put = store.code === 0 && !store.timedOut && d.startsWith("/") && !over() ? await untarAsAgent(tar.stdout, d, { env: agentGitEnv, wrap, timeoutMs: ms() ?? 0 }) : { code: 1 };
       if (put.code !== 0 || put.timedOut) warnings.push(over() ? NO_TIME : "Git LFS objects could not be handed to the checkout");
     }
     if (co && over()) warnings.push(NO_CHECKOUT);

@@ -27,11 +27,22 @@ async function fakeGateway(routes) {
   const seen = [];
   const table = new Map(Object.entries(routes));
   const server = http.createServer(async (req, res) => {
-    let body = "";
-    for await (const c of req) body += c;
-    seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, headers: req.headers });
+    const parts = [];
+    for await (const c of req) parts.push(c);
+    const raw = Buffer.concat(parts);
+    const body = raw.toString("utf8");
+    seen.push({ method: req.method, url: req.url, auth: req.headers.authorization, body, raw, headers: req.headers });
     // Only the routes this test named (a Map: no inherited name is ever looked up).
     const route = table.get(req.url.split("?")[0]);
+    // As the real gateway: an image edit's body must parse as its content-type says (multipart by its own boundary, with
+    // the model and at least one PNG; or JSON with image URLs), or it is refused (400) before any route answers.
+    if (req.url.split("?")[0] === "/v1/images/edits") {
+      const why = await editProblem(raw, req.headers["content-type"]);
+      if (why) {
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: why, type: "invalid_request_error" } }));
+      }
+    }
     // As the real gateway: a model call without its model header is refused (400), before any route answers.
     const kind = /^\/v\d+\/ai\/([a-z]+)-model$/.exec(req.url.split("?")[0])?.[1];
     if (kind && !req.headers[kind === "language" ? "ai-language-model-id" : "ai-model-id"]) {
@@ -44,6 +55,44 @@ async function fakeGateway(routes) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   return { origin: `http://127.0.0.1:${server.address().port}`, seen, close: () => new Promise((r) => server.close(r)) };
+}
+
+const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+/** Why the stand-in gateway refuses an image edit's body, or null: it parses as its content-type says. */
+async function editProblem(raw, type = "") {
+  if (/^multipart\/form-data;\s*boundary=/i.test(type)) {
+    let form;
+    try {
+      form = await new Response(raw, { headers: { "content-type": type } }).formData();
+    } catch {
+      return "the multipart body does not parse with its boundary";
+    }
+    const images = [...form.getAll("image[]"), ...form.getAll("image")].filter((f) => typeof f === "object");
+    const pngs = await Promise.all(images.map(async (f) => Buffer.from(await f.arrayBuffer()).subarray(0, 8).equals(PNG)));
+    return form.get("model") && pngs.length && pngs.every(Boolean) ? null : "a multipart edit needs the model and PNG images";
+  }
+  if (/^application\/json/i.test(type)) {
+    try {
+      const j = JSON.parse(raw.toString("utf8"));
+      return j.model && Array.isArray(j.images) && j.images.length && j.images.every((i) => typeof i?.image_url === "string") ? null : "a JSON edit needs the model and image URLs";
+    } catch {
+      return "the JSON body does not parse";
+    }
+  }
+  return "an image edit is multipart/form-data or JSON";
+}
+
+/** One request to the relay's socket with exactly these headers and bytes: {status, text, headers}. */
+function send(socketPath, { method = "POST", path, headers = {}, body = null }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ socketPath, method, path, headers }, (res) => {
+      let text = "";
+      res.on("data", (c) => (text += c));
+      res.on("end", () => resolve({ status: res.statusCode, text, headers: res.headers }));
+    });
+    req.on("error", reject);
+    req.end(body ?? undefined);
+  });
 }
 
 /** One request to the relay's socket: {status, text, headers}. */
@@ -629,6 +678,110 @@ test("Copilot on a runner: each stage's relay shim is its own, in its relay dire
     dropSharedCopilotRelay(join(dir, "factory-relay"));
     assert.equal(existsSync(shared), false);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("image edits (#129): the recorded multipart and JSON requests pass byte for byte; priced from the gateway's top-level cost or the lookup by id; any other shape fails closed", async () => {
+  const F = JSON.parse(readFileSync(new URL("./fixtures/image-edits-requests.json", import.meta.url), "utf8"));
+  const EDITS = "/v1/images/edits";
+  const image = { created: 1, data: [{ b64_json: "aGk=" }], usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } };
+  // The answer shapes the gateway may give: its own cost at the top level, an id only in the header, a top-level id.
+  const answers = [
+    { body: { ...image, providerMetadata: { gateway: { cost: "0.04", generationId: "gen_EDITREPORTED01" } } } },
+    { body: image, headers: { "x-generation-id": "gen_EDITHEADER0002" } },
+    { body: { ...image, id: "gen_EDITTOPLEVEL03" } },
+  ];
+  const looked = { gen_EDITREPORTED01: 0.05, gen_EDITHEADER0002: 0.04, gen_EDITTOPLEVEL03: 0.06 };
+  let next = 0;
+  const gw = await fakeGateway({ [EDITS]: () => answers[next++] ?? { body: image }, "/v1/generation": (_b, req) => ({ body: { data: { total_cost: looked[new URL(req.url, "http://x").searchParams.get("id")] } } }) });
+  const dir = mkdtempSync(join(tmpdir(), "relay-edits-"));
+  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
+  try {
+    relay.beginPass(100);
+    const kinds = Object.keys(F.requests);
+    assert.deepEqual(kinds, ["sdkMultipart", "fetchMultipart", "fetchJson"]);
+    for (const kind of kinds) {
+      const r = F.requests[kind];
+      const bytes = Buffer.from(r.body, "base64");
+      const res = await send(relay.socketPath, { method: r.method, path: r.path, headers: { ...r.headers, authorization: `Bearer ${relay.token}`, "content-length": bytes.length }, body: bytes });
+      assert.equal(res.status, 200, `${kind}: ${res.text}`);
+      const up = gw.seen.filter((x) => x.url === EDITS).at(-1);
+      assert.equal(up.headers["content-type"], r.headers["content-type"], `${kind}: the content-type and its boundary untouched`);
+      assert.ok(up.raw.equals(bytes), `${kind}: the body byte for byte`);
+      assert.equal(up.auth, `Bearer ${KEY}`);
+    }
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.unpriced], [0.15, 3, 0], "0.05 (looked up over 0.04 reported) + 0.04 (by the header's id) + 0.06 (by the top-level id)");
+    // A changed boundary no longer parses: the gateway refuses it (400), unbilled.
+    relay.beginPass(100);
+    const m = F.requests.fetchMultipart;
+    const broken = await send(relay.socketPath, { path: EDITS, headers: { ...m.headers, "content-type": "multipart/form-data; boundary=other", authorization: `Bearer ${relay.token}` }, body: Buffer.from(m.body, "base64") });
+    assert.equal(broken.status, 400);
+    // An answer with no top-level cost and no generation id (a cost only in `usage` or nested in `data`) fails closed.
+    const unknown = await send(relay.socketPath, { path: EDITS, headers: { ...m.headers, authorization: `Bearer ${relay.token}` }, body: Buffer.from(m.body, "base64") });
+    assert.equal(unknown.status, 200);
+    const after = await relay.endPass();
+    assert.deepEqual([after.usd, after.calls, after.unpriced], [0, 0, 1], "unknown cost: unpriced, never $0");
+    assert.equal(relay.totals().failed, 1, "the refused one is not billed");
+    assert.equal(relay.totals().failClosed, true);
+  } finally {
+    await relay.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.deepEqual(costOf({ ...image, data: [{ b64_json: "aGk=", providerMetadata: { gateway: { cost: "0", generationId: "gen_NESTED000001" } } }], usage: { cost: 0 } }, "image"), { usd: null, id: null }, "nothing nested or in usage is read");
+  assert.deepEqual(costOf({ providerMetadata: { gateway: { cost: "0.04" } } }, "openai"), { usd: null, id: null }, "other OpenAI-compatible answers keep the lookup only");
+  assert.equal(routeOf("POST", "/v1/images/edits")?.family, "image");
+  assert.equal(routeOf("POST", "/v1/images/edits?x=1"), null);
+  assert.equal(routeOf("GET", "/v1/credits"), null, "/v1/credits stays refused");
+});
+
+test("image edits (#129): 32 MB at most, refused before waiting when declared; a call waiting its turn keeps no body deadline, a stalled body is dropped and frees the turn", async () => {
+  const EDITS = "/v1/images/edits";
+  const F = JSON.parse(readFileSync(new URL("./fixtures/image-edits-requests.json", import.meta.url), "utf8"));
+  const m = F.requests.fetchMultipart;
+  const boundary = /boundary=(.+)$/.exec(m.headers["content-type"])[1];
+  // A multipart edit with one large reference PNG.
+  const big = (bytes) => Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nopenai/gpt-image-2\r\n--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n`), PNG, Buffer.alloc(bytes), Buffer.from(`\r\n--${boundary}--\r\n`)]);
+  const priced = { body: { created: 1, data: [{ b64_json: "aGk=" }], providerMetadata: { gateway: { cost: "0.01", generationId: "gen_EDITSLOW00001" } } } };
+  const gw = await fakeGateway({ [EDITS]: () => new Promise((r) => setTimeout(() => r(priced), 600)), "/v1/generation": { body: { data: { total_cost: 0.01 } } } });
+  const dir = mkdtempSync(join(tmpdir(), "relay-edits-big-"));
+  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5], bodyTimeoutMs: 300 });
+  const auth = { authorization: `Bearer ${relay.token}`, "content-type": m.headers["content-type"] };
+  try {
+    relay.beginPass(100);
+    // Declared over the cap: 413 at once, nothing read or sent.
+    const declared = await new Promise((resolve, reject) => {
+      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": 32 * 1024 * 1024 + 1 } }, (res) => {
+        resolve(res.statusCode);
+        req.destroy();
+      });
+      req.on("error", () => {});
+      req.flushHeaders();
+      setTimeout(() => reject(new Error("no answer before the body")), 2000).unref();
+    });
+    assert.equal(declared, 413);
+    // Sent chunked, with no length: refused once it passes 32 MB.
+    assert.equal((await send(relay.socketPath, { path: EDITS, headers: { ...auth, "transfer-encoding": "chunked" }, body: big(32 * 1024 * 1024) })).status, 413);
+    assert.equal(gw.seen.length, 0, "neither reached the gateway");
+    // Two edits at once under the cap: the second waits 600 ms behind the first, past its 300 ms body deadline, and passes.
+    const [a, b] = await Promise.all([send(relay.socketPath, { path: EDITS, headers: auth, body: big(4 * 1024 * 1024) }), send(relay.socketPath, { path: EDITS, headers: auth, body: big(8 * 1024 * 1024) })]);
+    assert.deepEqual([a.status, b.status], [200, 200], b.text);
+    assert.ok(gw.seen.at(-1).raw.equals(big(8 * 1024 * 1024)), "the large body arrived whole");
+    // A body that stalls once it is read: dropped at its deadline, and the next call gets its turn.
+    const stalled = await new Promise((resolve) => {
+      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": 1000 } }, () => resolve("answered"));
+      req.on("error", () => resolve("dropped"));
+      req.write(Buffer.alloc(10));
+    });
+    assert.equal(stalled, "dropped");
+    assert.equal((await send(relay.socketPath, { path: EDITS, headers: auth, body: big(10) })).status, 200, "the turn was freed");
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.calls, pass.unpriced], [3, 0]);
+  } finally {
+    await relay.close();
+    await gw.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

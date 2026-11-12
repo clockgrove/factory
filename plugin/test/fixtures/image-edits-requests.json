@@ -1,0 +1,44 @@
+{
+  "_note": "Recorded offline on 2026-11-12 by a local stand-in, no key: an image edit with two reference PNGs sent to the gateway's OpenAI-compatible POST /v1/images/edits by the AI SDK (ai@7.0.165, @ai-sdk/openai 4.0.116, multipart), by fetch with FormData (multipart, Node v24.20.0), and as JSON with data URLs. Bodies are base64; authorization, host, connection and content-length are left out.",
+  "requests": {
+    "sdkMultipart": {
+      "method": "POST",
+      "path": "/v1/images/edits",
+      "headers": {
+        "user-agent": "ai/7.0.165 ai-sdk-provider-utils/5.0.80 node.js/24",
+        "content-type": "multipart/form-data; boundary=----formdata-undici-020383737428",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "LS0tLS0tZm9ybWRhdGEtdW5kaWNpLTAyMDM4MzczNzQyOA0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJtb2RlbCINCg0Kb3BlbmFpL2dwdC1pbWFnZS0yDQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDIwMzgzNzM3NDI4DQpDb250ZW50LURpc3Bvc2l0aW9uOiBmb3JtLWRhdGE7IG5hbWU9InByb21wdCINCg0KYSB0dXJuYXJvdW5kIHNoZWV0DQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDIwMzgzNzM3NDI4DQpDb250ZW50LURpc3Bvc2l0aW9uOiBmb3JtLWRhdGE7IG5hbWU9ImltYWdlW10iOyBmaWxlbmFtZT0iYmxvYiINCkNvbnRlbnQtVHlwZTogaW1hZ2UvcG5nDQoNColQTkcNChoKAAAADUlIRFIAAAABAAAAAQgGAAAAHxXEiQAAAA1JREFUeJxjOFGh8R8ABdwCaIiSmPEAAAAASUVORK5CYIINCi0tLS0tLWZvcm1kYXRhLXVuZGljaS0wMjAzODM3Mzc0MjgNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0iaW1hZ2VbXSI7IGZpbGVuYW1lPSJibG9iIg0KQ29udGVudC1UeXBlOiBpbWFnZS9wbmcNCg0KiVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGPgEpH7r2Fk8x8ACUEC0RSI/0oAAAAASUVORK5CYIINCi0tLS0tLWZvcm1kYXRhLXVuZGljaS0wMjAzODM3Mzc0MjgNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0ibiINCg0KMQ0KLS0tLS0tZm9ybWRhdGEtdW5kaWNpLTAyMDM4MzczNzQyOA0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJzaXplIg0KDQoxNTM2eDEwMjQNCi0tLS0tLWZvcm1kYXRhLXVuZGljaS0wMjAzODM3Mzc0MjgNCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icXVhbGl0eSINCg0KbG93DQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDIwMzgzNzM3NDI4LS0NCg=="
+    },
+    "fetchMultipart": {
+      "method": "POST",
+      "path": "/v1/images/edits",
+      "headers": {
+        "content-type": "multipart/form-data; boundary=----formdata-undici-074056893161",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "user-agent": "node",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "LS0tLS0tZm9ybWRhdGEtdW5kaWNpLTA3NDA1Njg5MzE2MQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJtb2RlbCINCg0Kb3BlbmFpL2dwdC1pbWFnZS0yDQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDc0MDU2ODkzMTYxDQpDb250ZW50LURpc3Bvc2l0aW9uOiBmb3JtLWRhdGE7IG5hbWU9InByb21wdCINCg0KYSB0dXJuYXJvdW5kIHNoZWV0DQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDc0MDU2ODkzMTYxDQpDb250ZW50LURpc3Bvc2l0aW9uOiBmb3JtLWRhdGE7IG5hbWU9ImltYWdlW10iOyBmaWxlbmFtZT0iYS5wbmciDQpDb250ZW50LVR5cGU6IGltYWdlL3BuZw0KDQqJUE5HDQoaCgAAAA1JSERSAAAAAQAAAAEIBgAAAB8VxIkAAAANSURBVHicYzhRofEfAAXcAmiIkpjxAAAAAElFTkSuQmCCDQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDc0MDU2ODkzMTYxDQpDb250ZW50LURpc3Bvc2l0aW9uOiBmb3JtLWRhdGE7IG5hbWU9ImltYWdlW10iOyBmaWxlbmFtZT0iYi5wbmciDQpDb250ZW50LVR5cGU6IGltYWdlL3BuZw0KDQqJUE5HDQoaCgAAAA1JSERSAAAAAgAAAAEIBgAAAPQif4oAAAARSURBVHicY+ASkfuvYWTzHwAJQQLRFIj/SgAAAABJRU5ErkJggg0KLS0tLS0tZm9ybWRhdGEtdW5kaWNpLTA3NDA1Njg5MzE2MQ0KQ29udGVudC1EaXNwb3NpdGlvbjogZm9ybS1kYXRhOyBuYW1lPSJzaXplIg0KDQoxNTM2eDEwMjQNCi0tLS0tLWZvcm1kYXRhLXVuZGljaS0wNzQwNTY4OTMxNjENCkNvbnRlbnQtRGlzcG9zaXRpb246IGZvcm0tZGF0YTsgbmFtZT0icXVhbGl0eSINCg0KbG93DQotLS0tLS1mb3JtZGF0YS11bmRpY2ktMDc0MDU2ODkzMTYxLS0NCg=="
+    },
+    "fetchJson": {
+      "method": "POST",
+      "path": "/v1/images/edits",
+      "headers": {
+        "content-type": "application/json",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "user-agent": "node",
+        "accept-encoding": "gzip, deflate"
+      },
+      "body": "eyJtb2RlbCI6Im9wZW5haS9ncHQtaW1hZ2UtMiIsImltYWdlcyI6W3siaW1hZ2VfdXJsIjoiZGF0YTppbWFnZS9wbmc7YmFzZTY0LGlWQk9SdzBLR2dvQUFBQU5TVWhFVWdBQUFBRUFBQUFCQ0FZQUFBQWZGY1NKQUFBQURVbEVRVlI0bkdNNFVhSHhId0FGM0FKb2lKS1k4UUFBQUFCSlJVNUVya0pnZ2c9PSJ9LHsiaW1hZ2VfdXJsIjoiZGF0YTppbWFnZS9wbmc7YmFzZTY0LGlWQk9SdzBLR2dvQUFBQU5TVWhFVWdBQUFBSUFBQUFCQ0FZQUFBRDBJbitLQUFBQUVVbEVRVlI0bkdQZ0VwSDdyMkZrOHg4QUNVRUMwUlNJLzBvQUFBQUFTVVZPUks1Q1lJST0ifV0sInByb21wdCI6ImEgdHVybmFyb3VuZCBzaGVldCIsInNpemUiOiIxNTM2eDEwMjQiLCJxdWFsaXR5IjoibG93IiwibiI6MX0="
+    }
+  }
+}

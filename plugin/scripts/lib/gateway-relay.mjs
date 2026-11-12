@@ -10,12 +10,12 @@
 //   commands reach the socket through a forwarder Factory's bwrap shim starts on the command namespace's own 127.0.0.1
 //   (relay-shim.mjs). The token gates every call: another local user or process that reaches the socket or the port
 //   gets nothing without it.
-// - What it forwards: only the gateway's generation endpoints (POST) and its read-only model list (GET) on ROUTES, only to
-//   GATEWAY_ORIGIN, with the key in place of the token and an allowlist of request and response headers. Never another
-//   path or method, a method override, a redirect it follows, an absolute URL, CONNECT or an upgrade. The key is cut out
-//   of every response in each form a text can carry it.
+// - What it forwards: only the gateway's generation endpoints (POST; an image edit's multipart body as sent) and its
+//   read-only model list (GET) on ROUTES, only to GATEWAY_ORIGIN, with the key in place of the token and an allowlist of
+//   request and response headers. Never another path or method, a method override, a redirect it follows, an absolute
+//   URL, CONNECT or an upgrade. The key is cut out of every response in each form a text can carry it.
 // - Pricing, from what the caller cannot write: the gateway's own fields at fixed top-level places (an AI SDK protocol
-//   response's `providerMetadata.gateway`, a stream's last event's), and the generation's cost looked up with the same key
+//   response's or an image edit's `providerMetadata.gateway`, a stream's last event's), and the generation's cost looked up with the same key
 //   (`/v1/generation?id=` by the answer's top-level generation id, or its x-generation-id header on a stream); the larger
 //   of the two counts. A reported cost is booked at once and the lookup reconciles it aside (the gateway records a
 //   generation seconds after the answer); with no reported cost the call waits for the lookup. A request body echoed
@@ -52,15 +52,21 @@ export const MAX_PRICED_BYTES = 128 * 1024 * 1024;
 export const LOOKUP_DELAYS_MS = [1000, 3000, 6000, 12000, 20000, 30000];
 /** How long a call may take upstream, sending to the last byte of its answer (a long image generation). */
 export const UPSTREAM_TIMEOUT_MS = 20 * 60_000;
+/** How long a request's body may take to arrive once the relay reads it (not while it waits its turn under a cap). */
+export const BODY_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * What the relay forwards: method, path (no query) and the request's size cap. `family` says where its cost is read:
  * `sdk` (the AI SDK's gateway protocol: `providerMetadata.gateway` at the top level, or in a stream's last event),
- * `openai` (an OpenAI- or Anthropic-compatible answer: its top-level generation id, looked up), `free` (the model list).
+ * `openai` (an OpenAI- or Anthropic-compatible answer: its top-level generation id, looked up), `image` (an OpenAI-compatible
+ * image edit: the gateway's `providerMetadata.gateway` at the top level if it adds one, else as `openai`), `free` (the
+ * model list). An image edit's body is multipart form data (the AI SDK's OpenAI provider, fetch with FormData) or JSON
+ * with data URLs; either passes as sent, its content-type and boundary untouched, up to a few reference images.
  */
 export const ROUTES = [
   { method: "POST", path: /^\/v[1-9]\/ai\/(language-model|image-model|embedding-model|decision-model|reranking-model)$/, family: "sdk", maxBytes: 64 * 1024 * 1024 },
   { method: "POST", path: /^\/v1\/(chat\/completions|responses|embeddings|messages|images\/generations)$/, family: "openai", maxBytes: 64 * 1024 * 1024 },
+  { method: "POST", path: /^\/v1\/images\/edits$/, family: "image", maxBytes: 32 * 1024 * 1024 },
   { method: "GET", path: /^\/v[1-9]\/ai\/config$|^\/v1\/models$/, family: "free", maxBytes: 0 },
 ];
 /**
@@ -94,7 +100,9 @@ export function routeOf(method, target) {
  * body (or, for a stream, its last event that names the gateway's metadata: the `finish` event), `first` a stream's first
  * event, `headerId` the answer's `x-generation-id` header (the gateway sends it on a stream). An `sdk` answer's cost and
  * id: `providerMetadata.gateway.cost` (a string, "0.007") and `.generationId` at its top level, else the header's id. An
- * `openai` answer's: its top-level generation id (or the header's), looked up.
+ * `openai` answer's: its top-level generation id (or the header's), looked up. An `image` answer's: the gateway's
+ * top-level `providerMetadata.gateway` cost and id when it adds them, else as `openai`. Any other shape names neither, and
+ * the call fails closed.
  */
 export function costOf(doc, family, first = null, headerId = null) {
   const top = (o) => (o && typeof o === "object" && !Array.isArray(o) ? o : null);
@@ -104,9 +112,10 @@ export function costOf(doc, family, first = null, headerId = null) {
     const gw = top(top(d?.providerMetadata)?.gateway);
     return { usd: num(gw?.cost), id: typeof gw?.generationId === "string" && GEN_ID.test(gw.generationId) ? gw.generationId : fromHeader };
   }
-  if (family === "openai") {
-    const id = [d?.id, top(first)?.id, fromHeader].find((v) => typeof v === "string" && GEN_ID.test(v)) || null;
-    return { usd: null, id };
+  if (family === "openai" || family === "image") {
+    const gw = family === "image" ? top(top(d?.providerMetadata)?.gateway) : null;
+    const id = [gw?.generationId, d?.id, top(first)?.id, fromHeader].find((v) => typeof v === "string" && GEN_ID.test(v)) || null;
+    return { usd: num(gw?.cost), id };
   }
   return { usd: null, id: null };
 }
@@ -245,7 +254,7 @@ function eventReader() {
  * less: no cap). Returns the relay: {url, port, tcpPort, socketPath, dir, token, probeId, beginPass(budget), endPass(),
  * totals(), close()}.
  */
-export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, log = () => {} }) {
+export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -310,6 +319,9 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
   };
 
   const handle = async (req, res) => {
+    // The request's body arrives within BODY_TIMEOUT_MS of its being read (a refused one's too), else the connection drops.
+    const bodyDeadline = () => setTimeout(() => !req.complete && req.destroy(), bodyTimeoutMs).unref();
+    let bodyTimer = bodyDeadline();
     if (req.method === "GET" && (req.url === RELAY_PING || req.url === `${RELAY_PING}?shim`)) {
       // A command sandbox's forwarder came up (relay-shim.mjs): counted for the pass, as the shim's proof of life.
       if (req.url.endsWith("?shim")) {
@@ -338,11 +350,17 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       return refusal(res, 403, "calls are relayed only while a Factory pass runs");
     }
     const billable = route.family !== "free";
-    // With a cap on, a billable call waits its turn before its body is read, and only a few may wait.
+    // A body its declared length puts over the cap is refused before it is read or waits.
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > route.maxBytes) return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+    // With a cap on, a billable call waits its turn before its body is read, and only a few may wait. The body's deadline
+    // stops while it waits (a few image edits queued behind each other take minutes) and starts again once it is read.
     const serial = billable && capOn;
     if (serial) {
       if (s.busy && s.waiters.length >= MAX_WAITING) return refusal(res, 429, `more than ${MAX_WAITING} calls are waiting: with a dollar cap on, calls are relayed one at a time`);
+      clearTimeout(bodyTimer);
       await acquire();
+      bodyTimer = bodyDeadline();
     }
     let held = serial;
     const free = () => {
@@ -367,6 +385,8 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       free();
       return res.destroy();
     }
+    // Read whole: the deadline is done (a body refused over its cap keeps it while the rest is drained).
+    clearTimeout(bodyTimer);
     if (billable) {
       // Checked once the calls before it are priced: the cap can be passed by this one call's cost at most.
       const p = s.pass && !s.pass.ended ? s.pass : null;
@@ -503,8 +523,9 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     srv.on("upgrade", (_req, sock) => sock.destroy());
     srv.on("connect", (_req, sock) => sock.destroy());
     srv.headersTimeout = 60_000;
-    // The whole request, headers and body, within five minutes.
-    srv.requestTimeout = 5 * 60_000;
+    // The headers within a minute; the body's own deadline (BODY_TIMEOUT_MS) runs only while it is read, never while a
+    // call waits its turn (Node's requestTimeout would drop a large body queued behind a long call).
+    srv.requestTimeout = 0;
     return srv;
   };
   const server = listen(

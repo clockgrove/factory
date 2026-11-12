@@ -137,7 +137,10 @@ test("the worker opens them from worker_secret_values, withholding Factory's own
   const note = shellSecretsNote(["AI_GATEWAY_API_KEY"]);
   assert.match(note, /`AI_GATEWAY_API_KEY`/);
   assert.match(note, /read and spend it/);
-  assert.equal(shellSecretsNote([]), "");
+  assert.match(note, /AI_GATEWAY_API_KEY` holds a relay token, not the key[^]*FACTORY_GATEWAY_URL/, "the relayed key's card line names the relay");
+  assert.match(shellSecretsNote([]), /\$FACTORY_STATE_DIR[^]*advisory/, "every card names the state directory");
+  assert.ok(!shellSecretsNote([]).includes("gave your shell"));
+  assert.ok(!shellSecretsNote(["FAL_KEY"]).includes("relay token"));
 });
 
 test("doctor: a WARN for each refused entry, a SOURCE with no value and a value equal to Factory's key; names only", () => {
@@ -433,18 +436,21 @@ test("runHarness: a pass gets the worker secrets on Claude Code, Codex and Copil
 const fs = require("node:fs");
 try { fs.readFileSync(0); } catch {}
 const vals = Object.values(process.env);
-fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cli: ${JSON.stringify(cli)}, key: vals.includes(${JSON.stringify(KEY)}), named: process.env.AI_GATEWAY_API_KEY === ${JSON.stringify(KEY)}, carrier: ${JSON.stringify(SHELL_SECRETS_ENV)} in process.env }) + "\\n");
+fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cli: ${JSON.stringify(cli)}, key: vals.includes(${JSON.stringify(KEY)}), named: process.env.FAL_KEY === ${JSON.stringify(KEY)}, gateway: "AI_GATEWAY_API_KEY" in process.env, carrier: ${JSON.stringify(SHELL_SECRETS_ENV)} in process.env }) + "\\n");
 `, { mode: 0o755 });
   }
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
   holdSecrets([KEY]);
   try {
-    const env = { PATH: process.env.PATH, HOME: bin, ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY }) };
+    // FAL_KEY is handed over as it is; AI_GATEWAY_API_KEY only ever as a running relay's token (#97), so with no relay
+    // running it reaches no harness at all.
+    const env = { PATH: process.env.PATH, HOME: bin, ...packShellSecrets({ FAL_KEY: KEY, AI_GATEWAY_API_KEY: "vck_not_relayed_0123456789" }) };
     for (const harness of ["claude", "codex", "copilot"]) {
       for (const reviewer of [false, true]) await runHarness({ harness, prompt: "p", maxUsd: 0, cwd: bin, env, timeoutMs: 30_000, label: reviewer ? "review" : "answer", reviewer, agent: reviewer && harness !== "codex" ? "reviewer" : undefined });
     }
     const rows = readFileSync(seen, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(rows.every((r) => !r.gateway), "the relayed name without a relay never reaches a harness");
     assert.deepEqual(rows.map((r) => [r.cli, r.key, r.named, r.carrier]), [
       ["claude", true, true, false],
       ["claude", false, false, false],

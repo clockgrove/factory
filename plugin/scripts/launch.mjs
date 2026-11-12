@@ -347,8 +347,9 @@ export const START = [
   'need=""; command -v git-lfs >/dev/null || need="$need git-lfs"; command -v gh >/dev/null || need="$need gh"',
   // Claude Code runs its commands in its bubblewrap sandbox here (harness.mjs claudeRunner): bwrap and socat, and ripgrep.
   'if [ "$4" = claude ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v socat >/dev/null || need="$need socat"; command -v rg >/dev/null || need="$need ripgrep"; fi',
-  // Codex runs its commands in its own sandbox here too (harness.mjs codexRunner), on the system's bwrap.
-  'if [ "$4" = codex ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; fi',
+  // Codex runs its commands in its own sandbox here too (harness.mjs codexRunner), on the system's bwrap; socat for the
+  // gateway relay's forwarder in each command's sandbox (lib/relay-shim.mjs).
+  'if [ "$4" = codex ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v socat >/dev/null || need="$need socat"; fi',
   // Copilot too (harness.mjs copilotRunner): bwrap, and slirp4netns, iptables and ip for its sandbox's network.
   'if [ "$4" = copilot ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v slirp4netns >/dev/null || need="$need slirp4netns"; command -v ip6tables-restore >/dev/null || need="$need iptables"; command -v ip >/dev/null || need="$need iproute2"; fi',
   // System installs are for every uid (the agent runs the harness): umask 022 for them, whatever the stage's own is.

@@ -254,13 +254,15 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
               : harness === "copilot"
                 ? "Copilot's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (copilot sandbox: bwrap, slirp4netns, apparmor, start) name what is missing"
                 : "Codex's sandbox could not start on this runner (sandbox); the harness was not started, so no command ran unsandboxed. The doctor lines at the top of the work job's log (codex sandbox: bwrap, apparmor, start) name what is missing"
-        : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
+        : code === "relay"
+          ? `the gateway relay's forwarder did not come up in ${harness === "copilot" ? "Copilot" : harness === "claude" ? "Claude Code" : "Codex"}'s sandbox (relay); the harness was not started, and the key was never handed over. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
+          : "Factory's pre-start check of the checkout's git directory failed (git-clear); the harness was not started";
 /**
  * The Blocked comment's marker id for a git-identity Block: the same for every repeat on one clone (a stage that keeps
  * finding it updates its comment rather than adding one), a new one for a fresh clone. The pin is hashed: no inode on GitHub.
  */
 export const gitIdentityKey = (stage, id) => `git-identity:${stage}:${createHash("sha256").update(String(id || "none")).digest("hex").slice(0, 12)}`;
-/** A harness start Factory refused (beforeHarness, a runner's pre-start clear): `code` is git-identity, git-state, git-clear, roots or sandbox; the stage Blocks (gitRefusalReason). */
+/** A harness start Factory refused (beforeHarness, a runner's pre-start clear, the relay probe): `code` is git-identity, git-state, git-clear, roots, sandbox or relay; the stage Blocks (gitRefusalReason). */
 export class GitRefusal extends Error {
   /** `path` (checkout-relative), `rule` (a fixed confinement rule), `harness` (whose sandbox) and `local` (local mode's probe): named in the Blocked reason (gitRefusalReason). */
   constructor(code, detail, { path = null, rule = null, harness = null, local = false } = {}) {
@@ -955,7 +957,7 @@ kill "$sl" "$ns" 2>/dev/null
 [ -n "$ok" ] || { echo "slirp4netns did not configure its interface: $(tail -1 "$TMPDIR/slirp.err" 2>/dev/null)" >&2; exit 4; }
 echo ok
 `;
-const OUTER_PROFILE = "profile-4";
+const OUTER_PROFILE = "profile-5";
 
 const versionOf = (cmd) => {
   const r = spawnSync(cmd, ["--version"], { encoding: "utf8", timeout: 30_000 });
@@ -1319,8 +1321,10 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
 /**
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
+ * `relayDir`: the stage's gateway relay directory (worker-relay.mjs localRelayDir): its socket stays reachable inside, for the
+ * forwarder Factory's bwrap shim starts in each command's sandbox (relay-shim.mjs); never writable.
  */
-export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null } = {}) {
+export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null } = {}) {
   const own = harnessHomes(harness, env, home);
   const isOwn = (p) => own.some((o) => p === o || p.startsWith(`${o}/`));
   // ~/.claude.json holds the developer's MCP servers: read-only, not a writable path.
@@ -1331,7 +1335,7 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
     // install: the harness's own release directory, readable where a credential store holds it (Codex's installer puts
     // it in ~/.codex, denied when CODEX_HOME is elsewhere).
     filesystem: {
-      denyRead: [...credentialPaths(home).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: writable })],
+      denyRead: [...credentialPaths(home).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relayDir ? [relayDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
       denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install],

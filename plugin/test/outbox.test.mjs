@@ -892,3 +892,160 @@ test("outbox: the checkout takes Factory's catch-up merge of a default branch th
   if (real) assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
   else assert.match(readFileSync(join(r.work, "assets/b.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
 });
+
+const isPointer = (r, file) => readFileSync(join(r.work, file), "utf8").startsWith(`${POINTER_HEAD}\n`);
+const inStore = (r, bytes) => {
+  const oid = createHash("sha256").update(bytes).digest("hex");
+  try {
+    return readFileSync(join(r.work, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)).equals(bytes);
+  } catch {
+    return false;
+  }
+};
+
+/** What a git command the harness runs in the checkout said (stdout and stderr), when it must fail. */
+const failing = (r, ...a) => {
+  try {
+    execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...quiet } });
+  } catch (e) {
+    return `${e.stdout || ""}${e.stderr || ""}`;
+  }
+  assert.fail(`git ${a.join(" ")} succeeded`);
+};
+
+/** The first stage on factory/1: the branch from main, one commit of app.txt, pushed. */
+async function firstStage(r) {
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  r.put(r.work, "app.txt", "branch\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  assert.equal(await box.push(), true, box.error);
+}
+
+test("outbox: rebase mode puts the checkout on Factory's rebase with the default branch's new media (#76)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  await firstStage(r);
+  // The resumed stage starts, then the default branch gains media (a sibling merged) and Factory rebases onto it.
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.expected())).warning, "");
+  const bytes = media("main", "assets/b.bin");
+  await box.refresh();
+  const sha = await box.rebase({ name: "factory", email: "f@f" });
+  assert.equal(await box.push({ sha }), true, box.error);
+  const on = await box.putOnRebased(sha);
+  assert.deepEqual(on, { code: 0, error: "", warning: "" });
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), sha);
+  assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
+  assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "");
+});
+
+test("outbox: lfsHandOver does nothing without LFS routing, and says so when routing arrived after setup or git-lfs is missing (#76)", async (t) => {
+  const r = repos();
+  await firstStage(r);
+  // Neither the branch nor the default branch routes anything through LFS: nothing to do, nothing to say.
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.deepEqual(await box.lfsSetup(box.expected()), { used: false, ok: true, reason: "", warning: "" });
+  assert.deepEqual(await box.lfsHandOver(box.expected()), { used: false, warning: "" });
+  // Mid-stage the default branch starts routing media through LFS; Factory's rebase brings it in.
+  const bytes = randomBytes(3000);
+  const oid = createHash("sha256").update(bytes).digest("hex");
+  mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
+  writeFileSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
+  r.run(r.other, "pull", "-q", "origin", "main");
+  r.put(r.other, ".gitattributes", "assets/** filter=lfs diff=lfs merge=lfs -text\n");
+  r.put(r.other, "assets/c.bin", `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
+  r.run(r.other, "commit", "-q", "--no-verify", "-m", "lfs media");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  await box.refresh();
+  const sha = await box.rebase({ name: "factory", email: "f@f" });
+  assert.equal(await box.push({ sha }), true, box.error);
+  const config = readFileSync(join(r.work, ".git", "config"), "utf8");
+  if (await lfsVersion()) {
+    const on = await box.putOnRebased(sha);
+    assert.equal(on.code, 0, on.error);
+    assert.match(on.warning, /^[0-9a-f]{7} routes files through Git LFS, which this stage's checkout was not set up for: its objects are in the checkout's store and the files stay pointers/);
+    assert.equal(readFileSync(join(r.work, ".git", "config"), "utf8"), config, "the pinned git config is left alone");
+    assert.ok(isPointer(r, "assets/c.bin"));
+    assert.ok(inStore(r, bytes), "the object is delivered to the checkout's store");
+  }
+  // No git-lfs where Factory runs: said, not silent.
+  const bin = mkdtempSync(join(r.root, "bin-"));
+  symlinkSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
+  const path = process.env.PATH;
+  process.env.PATH = bin;
+  try {
+    if (await lfsVersion()) return t.skip("git-lfs sits beside git here: it cannot be hidden");
+    const h = await box.lfsHandOver(sha);
+    assert.equal(h.used, true);
+    assert.match(h.warning, /routes files through Git LFS and git-lfs is not installed here; they stay pointer files$/);
+  } finally {
+    process.env.PATH = path;
+  }
+});
+
+test("outbox: a conflict pass's own rebase onto a default branch with new media downloads nothing (#76)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  await firstStage(r);
+  // Someone else's commits on the branch change its media twice: a rebase replays the first version too.
+  const v1 = media("factory/1", "assets/a.bin");
+  const v2 = media("factory/1", "assets/a.bin");
+  // The default branch gains media and a change of app.txt that conflicts with the branch's.
+  const b = media("main", "assets/b.bin");
+  r.put(r.other, "app.txt", "main\n");
+  r.run(r.other, "commit", "-q", "-m", "main's app");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  // The send-back stage: Factory's rebase conflicts, so the harness rebases in the checkout itself.
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.expected())).warning, "");
+  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's rebase conflicts");
+  assert.ok(inStore(r, v1) && inStore(r, v2) && inStore(r, b), "every object the rebase can check out is in the store");
+  // The harness's git, as it would run it: no credential, LFS storage out of reach (lfsCheckout), filters required.
+  const said = failing(r, "rebase", "refs/remotes/origin/main");
+  assert.match(said, /CONFLICT \(content\): Merge conflict in app\.txt/, "the rebase stops on app.txt");
+  assert.doesNotMatch(said, /smudge|filter/, "not on media");
+  writeFileSync(join(r.work, "app.txt"), "both\n");
+  r.run(r.work, "add", "app.txt");
+  r.run(r.work, "-c", "core.editor=true", "rebase", "--continue");
+  assert.equal(r.run(r.work, "rev-parse", "HEAD~3"), r.run(r.origin, "rev-parse", "main"));
+  assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), v2);
+  assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), b);
+});
+
+test("outbox: a catch-up merge that conflicts leaves the default branch's media in the checkout's store for the conflict pass (#76)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  const box = await withWorkflow(r);
+  r.put(r.work, "app.txt", "branch\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  // Mid-run the default branch gains media, changes the workflow file and changes app.txt the other way.
+  const bytes = media("main", "assets/b.bin");
+  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
+  r.put(r.other, "app.txt", "main\n");
+  r.run(r.other, "commit", "-q", "-m", "ci v2, main's app");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  assert.equal(await box.push(), false);
+  assert.ok(box.conflict, "Factory's merge conflicts: the harness resolves it");
+  assert.equal(box.lfsWarning, "");
+  assert.ok(inStore(r, bytes));
+  // The conflict pass: the default branch handed over, the harness merges it in the checkout.
+  await box.feed();
+  const said = failing(r, "merge", "--no-edit", "refs/remotes/origin/main");
+  assert.match(said, /CONFLICT \(content\): Merge conflict in app\.txt/, "the merge stops on app.txt");
+  assert.doesNotMatch(said, /smudge|filter/, "not on media");
+  assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
+  // A stage past its end hands nothing over and says so.
+  const late = await open(r, { deadlineAt: Date.now() - 1 });
+  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over" });
+});

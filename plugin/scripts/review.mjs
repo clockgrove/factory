@@ -313,7 +313,7 @@ async function main() {
   // starts at GitHub's head now. No GitHub token reaches a child: on Actions the agent reads with its own read-only
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
-  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), base: tmp.factory });
+  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
   const identity = await gitIdentity(app, keeper.token);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);

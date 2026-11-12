@@ -197,7 +197,7 @@ async function main() {
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
   let outbox;
   try {
-    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), base: tmp.factory });
+    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
   } catch (e) {
     if (e.code !== "ref-collision") throw e;
     log(e.message);
@@ -249,13 +249,10 @@ async function main() {
         // workflow file meanwhile, if any), and the checkout is put on it for validation.
         await outbox.push({ sha: rebasedTo });
         if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} after the rebase: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing`);
-        const rebasedHead = outbox.head || rebasedTo;
-        await outbox.feed({ rebased: rebasedHead });
-        // Pointer files for its Git LFS media first (outbox.mjs putOn), then the media handed over.
-        const moved = await outbox.putOn("refs/factory/rebased");
+        // Pointer files for its Git LFS media first, then the media handed over (outbox.mjs putOnRebased).
+        const moved = await outbox.putOnRebased(outbox.head || rebasedTo);
         if (moved.code !== 0) throw new Error(`the checkout could not be put on the rebased ${branch}: ${moved.error}`);
-        const media = await outbox.lfsHandOver(rebasedHead, { timeoutMs: remainingMs(deadlineAt) });
-        if (media.warning) log(`warning: ${media.warning}; the run goes on with pointer files`);
+        if (moved.warning) log(`warning: ${moved.warning}`);
       }
       log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);
     }
@@ -451,6 +448,9 @@ async function main() {
     log(`${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run and ${branch} conflicts with it; the harness resolves the conflict`);
     await progress(`conflict with ${defaultBranch}: harness ${inputs.harness} resolves it`);
     await outbox.feed();
+    // The default branch's Git LFS media is in the checkout's store already (outbox.mjs push), so the harness's own merge
+    // or rebase downloads nothing; what fell short is said here.
+    if (outbox.lfsWarning) log(`warning: ${outbox.lfsWarning}`);
     const catchPrompt = conflictPassPrompt({ prompt, branch, defaultBranch, cause: `because ${defaultBranch} changed ${outbox.conflict.paths.join(", ")} during the run` });
     const resume = session.canResume ? session.id : null;
     const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: () => io.tick() });

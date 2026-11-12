@@ -6,7 +6,7 @@
 // stage Blocks. Factory runs no git command of its own in the agent's checkout for this.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
@@ -191,10 +191,17 @@ async function indexBundle(file, git) {
   return refs[0];
 }
 
+/** The objects in a Git LFS store Factory owns, as their paths under it (`ab/cd/<oid>`). */
+function storeObjects(store) {
+  const hex = (n) => (dir) => (existsSync(dir) ? readdirSync(dir).filter((e) => new RegExp(`^[0-9a-f]{${n}}$`).test(e)) : []);
+  return hex(2)(store).flatMap((a) => hex(2)(join(store, a)).flatMap((b) => hex(64)(join(store, a, b)).map((o) => `${a}/${b}/${o}`)));
+}
+
 /**
  * The stage's outbox for factory/<issue>. `remote` is the repository's URL (GitHub's https URL; a path in tests),
  * `token()` the current write token (null for a remote that needs none), `agentEnv` the env the agent's commands run
- * with (its sandbox settings ride in it), `local` whether the local media cap applies. The mirror holds only what
+ * with (its sandbox settings ride in it), `local` whether the local media cap applies, `deadlineAt` the stage's end (epoch
+ * ms), which bounds every Git LFS hand-over. The mirror holds only what
  * GitHub has and what the agent's bundles brought: nothing of any other clone on the machine.
  */
 export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
@@ -210,7 +217,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], mirror, scratch }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, mirror, scratch }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -274,7 +281,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     conflict: null,
     detail: "",
     synced: true,
-    // Why the last catch-up merge the checkout took left Git LFS pointer files (sync), or "".
+    // Why the last push's Git LFS hand-over (its catch-up merge, or the default branch it conflicts with) fell short, or "".
     lfsWarning: "",
   };
   // New-branch conflicts with the default branch seen so far (catchUp): the second is refused.
@@ -410,53 +417,106 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return base;
   };
 
-  /** Whether a .gitattributes in `head`'s tree routes any path through Git LFS (comment lines aside). */
-  const routedAt = async (head) => (await git(["grep", "-q", "-I", "-E", "-e", "^[[:space:]]*[^#[:space:]].*filter=lfs", head, "--", ":(glob)**/.gitattributes"])).code === 0;
+  /** Whether a .gitattributes in `rev`'s tree routes any path through Git LFS (comment lines aside). */
+  const routedAt = async (rev) => !!rev && (await git(["grep", "-q", "-I", "-E", "-e", "^[[:space:]]*[^#[:space:]].*filter=lfs", rev, "--", ":(glob)**/.gitattributes"])).code === 0;
+
+  /**
+   * The commits whose Git LFS media a git in the checkout can check out this stage: `head`, the default branch as the
+   * checkout has it (`base`: a rebase or merge the harness runs, in a conflict pass or on its own, goes onto it), and the
+   * branch's commits on GitHub beyond the default branch (a rebase replays each one). With all their objects in the
+   * checkout's store, no git there ever needs an LFS download, Factory's own or the harness's (#76).
+   */
+  const workingSet = async (head) => {
+    const own = expected ? (await git(["rev-list", expected, "--not", base])).stdout.split("\n") : [];
+    return [...new Set([head, base, ...own].map((r) => String(r || "").trim()).filter((r) => SHA.test(r)))];
+  };
+
+  /** Whether the checkout's git has a Git LFS smudge filter (in its own config or one it inherits). */
+  const hasFilter = async () => {
+    const r = await box.agentGit(["config", "--get-regexp", "^filter\\.lfs\\.(process|smudge)$"]);
+    return r.code === 0 && !!String(r.stdout).trim();
+  };
 
   /**
    * Git LFS in the agent's checkout, set up from the mirror: the filters installed and the endpoint's access mode
-   * written in the git sandbox, the objects of `head`'s tree fetched by Factory into the mirror (with its token) and
-   * handed over as an archive, and the files checked out in the sandbox. {used: false} for a tree without LFS patterns;
-   * only a missing git-lfs is not ok; a failed fetch is a warning (pointer files stay).
+   * written in the git sandbox when `head` or the default branch routes files through LFS, then the hand-over of the
+   * stage's working set (workingSet). {used: false} when neither does; only a missing git-lfs is not ok; a failed fetch
+   * is a warning (pointer files stay).
    */
   box.lfsSetup = async (head, { timeoutMs } = {}) => {
-    if (!(await routedAt(head))) return { used: false, ok: true, reason: "", warning: "" };
+    if (!(await routedAt(head)) && !(await routedAt(base))) return { used: false, ok: true, reason: "", warning: "" };
     if (!(await lfsVersion())) return { used: true, ok: false, reason: "this repository's .gitattributes uses Git LFS and git-lfs is not installed here (install git-lfs on the runner or machine)", warning: "" };
     const endpoint = lfsEndpoint(remote);
     const setup = await box.agentGit(["lfs", "install", "--local", "--force"]);
     if (setup.code !== 0) return { used: true, ok: false, reason: `git lfs install failed in the checkout: ${String(setup.stderr).trim().split("\n").at(-1)?.slice(0, 160)}`, warning: "" };
     if (endpoint) await box.agentGit(["config", `lfs.${endpoint}.access`, "basic"]);
-    return { used: true, ok: true, reason: "", warning: await handOver(head, { timeoutMs }) };
+    return { used: true, ok: true, reason: "", warning: await handOver(await workingSet(head), { timeoutMs }) };
   };
 
   /**
-   * The media of `head`'s tree for a checkout Factory has just moved there (the rebased branch, its catch-up merge),
-   * after lfsSetup: the same hand-over, with no change to the checkout's git config (its git state is pinned by then).
-   * {used: false} when `head` routes nothing through LFS, git-lfs is missing or the checkout has no LFS filter (its
-   * files are pointers anyway); else {used: true, warning} ("" when the media arrived).
+   * The working set's media (workingSet) for a checkout Factory has moved (`head`: its rebase, its catch-up merge) or
+   * whose default branch moved (`head` null), after lfsSetup. The checkout's git config is never changed here: it is
+   * pinned by then. {used: false} only when neither `head` nor the default branch routes files through LFS; else
+   * {used: true, warning}, "" when the media arrived. Routing that arrived after the stage set up (the checkout has no
+   * LFS filter) is said in the warning: the objects go to the store, the files stay pointers until the next stage.
    */
   box.lfsHandOver = async (head, { timeoutMs } = {}) => {
-    if (!(await routedAt(head)) || !(await lfsVersion())) return { used: false, warning: "" };
-    const filter = await box.agentGit(["config", "--get-regexp", "^filter\\.lfs\\.(process|smudge)$"]);
-    if (filter.code !== 0 || !String(filter.stdout).trim()) return { used: false, warning: "" };
-    return { used: true, warning: await handOver(head, { timeoutMs }) };
+    if (!(await routedAt(head)) && !(await routedAt(base))) return { used: false, warning: "" };
+    const what = `${(head || base).slice(0, 7)} routes files through Git LFS`;
+    if (!(await lfsVersion())) return { used: true, warning: `${what} and git-lfs is not installed here; they stay pointer files` };
+    const revs = await workingSet(head);
+    if (await hasFilter()) return { used: true, warning: await handOver(revs, { timeoutMs }) };
+    const failed = await handOver(revs, { timeoutMs, checkout: false });
+    return { used: true, warning: [`${what}, which this stage's checkout was not set up for: its objects are in the checkout's store and the files stay pointers until the next stage sets Git LFS up`, failed].filter(Boolean).join("; ") };
   };
 
-  /** The objects of `head`'s tree fetched into the mirror, copied into the checkout's store, and `git lfs checkout` there; a warning or "". */
-  const handOver = async (head, { timeoutMs } = {}) => {
-    const fetched = await git([...lfsPinArgs(remote), "lfs", "fetch", "origin", head], { timeoutMs });
+  /**
+   * The objects of `revs`' trees fetched into the mirror with Factory's token, the ones the checkout's store lacks
+   * copied there, and (`checkout`) `git lfs checkout`, all within `timeoutMs` and the stage's end (`deadlineAt`). What
+   * did arrive is handed over even when the fetch failed. A warning, or "".
+   */
+  const handOver = async (revs, { timeoutMs, checkout: co = true } = {}) => {
+    const until = Math.min(deadlineAt, Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : Infinity);
+    const ms = () => (Number.isFinite(until) ? Math.max(1, until - Date.now()) : undefined);
+    const over = () => Number.isFinite(until) && until <= Date.now();
+    if (!revs.length) return "";
+    if (over()) return "no time was left in the stage to hand the Git LFS objects over";
+    const warnings = [];
+    const fetched = await git([...lfsPinArgs(remote), "lfs", "fetch", "origin", ...revs], { timeoutMs: ms() });
     if (fetched.code !== 0 || fetched.timedOut) {
       const out = `${fetched.stdout}\n${fetched.stderr}`;
       const quota = lfsQuotaLine(out);
-      return quota ? `Git LFS refused the download (quota): ${quota}` : `Git LFS objects could not be fetched: ${out.split("\n").map((l) => l.trim()).find((l) => /error|fatal|failed|denied|not found/i.test(l))?.slice(0, 200) || `exit ${fetched.code}`}`;
+      warnings.push(fetched.timedOut ? "the Git LFS fetch ran out of the stage's time" : quota ? `Git LFS refused the download (quota): ${quota}` : `Git LFS objects could not be fetched: ${out.split("\n").map((l) => l.trim()).find((l) => /error|fatal|failed|denied|not found/i.test(l))?.slice(0, 200) || `exit ${fetched.code}`}`);
     }
-    if (existsSync(join(mirror, "lfs", "objects"))) {
-      const tar = await exec("tar", ["-C", join(mirror, "lfs", "objects"), "-cf", "-", "."], { encoding: "buffer", maxBytes: 8 * 1024 ** 3 });
-      const put = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && tar -xf - -C "$d" --skip-old-files', "sh", checkout], agentGitEnv), { env: agentGitEnv, input: tar.stdout });
-      if (tar.code !== 0 || put.code !== 0) return "Git LFS objects could not be handed to the checkout";
+    const store = join(mirror, "lfs", "objects");
+    const inMirror = storeObjects(store);
+    if (inMirror.length && !over()) {
+      // Only what the checkout's store lacks crosses over: a reused clone already has most of it.
+      const listed = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" || exit 1; [ -d "$d" ] || exit 0; cd "$d" && find . -type f', "sh", checkout], agentGitEnv), { env: agentGitEnv, timeoutMs: ms() });
+      const there = new Set(listed.code === 0 ? String(listed.stdout).split("\n").map((l) => l.trim().split("/").at(-1)) : []);
+      const fresh = inMirror.filter((f) => !there.has(f.split("/").at(-1)));
+      if (fresh.length && !over()) {
+        const tar = await exec("tar", ["-C", store, "--null", "-T", "-", "-cf", "-"], { encoding: "buffer", maxBytes: 8 * 1024 ** 3, input: `${fresh.join("\0")}\0`, timeoutMs: ms() });
+        const put = tar.code === 0 && !tar.timedOut && !over() ? await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && tar -xf - -C "$d" --skip-old-files', "sh", checkout], agentGitEnv), { env: agentGitEnv, input: tar.stdout, timeoutMs: ms() }) : { code: 1 };
+        if (put.code !== 0 || put.timedOut) warnings.push(over() ? "no time was left in the stage to hand the Git LFS objects over" : "Git LFS objects could not be handed to the checkout");
+      }
+    } else if (inMirror.length) warnings.push("no time was left in the stage to hand the Git LFS objects over");
+    if (co && !over()) {
+      const done = await box.agentGit(["lfs", "checkout"], { timeoutMs: ms() });
+      if (done.code !== 0 || done.timedOut) warnings.push("git lfs checkout failed in the checkout; the run goes on with pointer files");
     }
-    const co = await box.agentGit(["lfs", "checkout"]);
-    return co.code === 0 ? "" : "git lfs checkout failed in the checkout; the run goes on with pointer files";
+    return [...new Set(warnings)].join("; ");
+  };
+
+  /**
+   * Put the checkout on Factory's own rebase `sha` (rebase mode, once pushed) with its media: pointer files first
+   * (putOn), then the hand-over (lfsHandOver). {code, error, warning}.
+   */
+  box.putOnRebased = async (sha, opts = {}) => {
+    await box.feed({ rebased: sha });
+    const on = await box.putOn("refs/factory/rebased");
+    if (on.code !== 0) return { ...on, warning: "" };
+    return { ...on, warning: (await box.lfsHandOver(sha, opts)).warning };
   };
 
   /**
@@ -531,8 +591,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       box.synced = false;
     }
     unsynced = box.synced ? null : { from, to: head };
-    // The default branch's media the merge brought, handed over (it left them as pointers).
-    box.lfsWarning = box.synced ? (await box.lfsHandOver(head).catch(() => ({ warning: "Git LFS objects could not be handed to the checkout" }))).warning : "";
+    // The default branch's media the merge brought, handed over: the merge left them as pointers, and a checkout that
+    // could not take it may still merge or rebase onto the default branch itself.
+    box.lfsWarning = (await box.lfsHandOver(head).catch(() => ({ warning: "Git LFS objects could not be handed to the checkout" }))).warning;
   };
 
   /** The workflow files `head` has unlike the default branch, and whether the branch itself changed any of them. */
@@ -697,6 +758,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // not pushed: the caller hands the conflict to the harness (the conflict prompt) and pushes again; a second conflict
     // is refused. An existing branch goes as it is, and its PR's conflict takes the send-back path.
     const caught = await catchUp(head).catch(() => ({ head }));
+    // The default branch moved and the checkout cannot take Factory's merge: the harness merges or rebases onto it
+    // itself (the conflict pass), so its media is in the checkout's store first.
+    if (caught.conflict) box.lfsWarning = (await box.lfsHandOver(null).catch(() => ({ warning: "Git LFS objects could not be handed to the checkout" }))).warning;
     if (caught.conflict && !expected) {
       const why = `${branch} conflicts with ${defaultBranch}, which changed ${caught.conflict.paths.join(", ")} since the branch's base; GitHub refuses a branch carrying an older workflow file from this token, so it was not pushed`;
       if (conflicts > 0) return refuse(why);

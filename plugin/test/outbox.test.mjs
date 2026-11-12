@@ -2,7 +2,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -1047,5 +1047,96 @@ test("outbox: a catch-up merge that conflicts leaves the default branch's media 
   assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
   // A stage past its end hands nothing over and says so.
   const late = await open(r, { deadlineAt: Date.now() - 1 });
-  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over" });
+  assert.deepEqual(await late.lfsHandOver(null), { used: true, warning: "no time was left in the stage to hand the Git LFS objects over; no time was left in the stage for git lfs checkout; the files stay pointers" });
+});
+
+test("outbox: the hand-over downloads only what the checkout's store lacks by oid and size, and says when time cut git lfs checkout (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  await firstStage(r);
+  const a = media("factory/1", "assets/a.bin");
+  const b = media("factory/1", "assets/b.bin");
+  const stage = async (extra = {}) => {
+    const box = await open(r, extra);
+    await box.feed();
+    assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+    return box;
+  };
+  const box1 = await stage();
+  assert.equal((await box1.lfsSetup(box1.expected())).warning, "");
+  assert.ok(inStore(r, a) && inStore(r, b));
+  // The next stage in the same clone. a.bin's object is gone from LFS storage: a stage that downloaded it again would
+  // fail. The branch gains c.bin, whose oid the checkout's store holds with the wrong size: it is downloaded and
+  // replaced, not taken by its name.
+  const oid = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  rmSync(join(r.origin, "lfs", "objects", oid(a).slice(0, 2), oid(a).slice(2, 4), oid(a)));
+  const c = media("factory/1", "assets/c.bin");
+  mkdirSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4)), { recursive: true });
+  writeFileSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4), oid(c)), c.subarray(0, 100));
+  const box2 = await stage();
+  assert.deepEqual(await box2.lfsSetup(box2.expected()), { used: true, ok: true, reason: "", warning: "" });
+  assert.ok(inStore(r, a) && inStore(r, b) && inStore(r, c));
+  for (const [f, bytes] of [["a", a], ["b", b], ["c", c]]) assert.deepEqual(readFileSync(join(r.work, `assets/${f}.bin`)), bytes);
+  // Time runs out before git lfs checkout: said, not skipped silently.
+  assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
+});
+
+test("outbox: a large working set is handed over whole: FACTORY_LOCAL_MEDIA_MAX_MB caps what a branch pushes, not what a stage downloads (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  await lfsCheckout(r);
+  // main gains 40 media files, far over the local limit set below.
+  const files = [];
+  r.run(r.other, "pull", "-q", "origin", "main");
+  for (let i = 0; i < 40; i += 1) {
+    const bytes = randomBytes(3000);
+    const oid = createHash("sha256").update(bytes).digest("hex");
+    mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
+    writeFileSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
+    r.put(r.other, `assets/m${i}.bin`, `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
+    files.push([`assets/m${i}.bin`, bytes]);
+  }
+  r.run(r.other, "commit", "-q", "--no-verify", "-m", "much media");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  process.env.FACTORY_LOCAL_MEDIA_MAX_MB = "0.001";
+  try {
+    const box = await open(r, { local: true });
+    await box.feed();
+    assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+    assert.deepEqual(await box.lfsSetup(box.base), { used: true, ok: true, reason: "", warning: "" });
+    for (const [f, bytes] of files) assert.deepEqual(readFileSync(join(r.work, f)), bytes, f);
+  } finally {
+    delete process.env.FACTORY_LOCAL_MEDIA_MAX_MB;
+  }
+});
+
+test("outbox: a tree read the hand-over cannot take whole is said, not dropped silently (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  media("main", "assets/a.bin");
+  const box = await open(r, { readMaxBytes: 64 });
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  const lfs = await box.lfsSetup(box.base);
+  assert.match(lfs.warning, /^the tree of [0-9a-f]{7} could not be read whole \(over 64 bytes\), so some Git LFS files may stay pointers/);
+});
+
+test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's download (#79)", async (t) => {
+  if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
+  const r = repos();
+  const { media } = await lfsCheckout(r);
+  const box = await open(r);
+  await box.feed();
+  assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  assert.equal((await box.lfsSetup(box.base)).warning, "");
+  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Factory's mirror reads it from its HEAD.
+  r.put(r.work, ".lfsconfig", "[lfs]\n\tfetchinclude = nothing/**\n");
+  r.run(r.work, "commit", "-q", "-m", "fetch filter");
+  assert.equal(await box.push(), true, box.error);
+  const bytes = media("main", "assets/b.bin");
+  await box.refresh();
+  assert.deepEqual(await box.lfsHandOver(null), { used: true, warning: "" });
+  assert.ok(inStore(r, bytes), "the default branch's media is in the checkout's store");
 });

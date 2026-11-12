@@ -6,7 +6,7 @@
 // stage Blocks. Factory runs no git command of its own in the agent's checkout for this.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
@@ -191,17 +191,12 @@ async function indexBundle(file, git) {
   return refs[0];
 }
 
-/** The objects in a Git LFS store Factory owns, as their paths under it (`ab/cd/<oid>`). */
-function storeObjects(store) {
-  const hex = (n) => (dir) => (existsSync(dir) ? readdirSync(dir).filter((e) => new RegExp(`^[0-9a-f]{${n}}$`).test(e)) : []);
-  return hex(2)(store).flatMap((a) => hex(2)(join(store, a)).flatMap((b) => hex(64)(join(store, a, b)).map((o) => `${a}/${b}/${o}`)));
-}
-
 /**
  * The stage's outbox for factory/<issue>. `remote` is the repository's URL (GitHub's https URL; a path in tests),
  * `token()` the current write token (null for a remote that needs none), `agentEnv` the env the agent's commands run
  * with (its sandbox settings ride in it), `local` whether the local media cap applies, `deadlineAt` the stage's end (epoch
- * ms), which bounds every Git LFS hand-over. The mirror holds only what
+ * ms), which bounds every Git LFS hand-over, `readMaxBytes` the most Factory reads of one listing in its mirror (the
+ * hand-over's tree reads; tests lower it). The mirror holds only what
  * GitHub has and what the agent's bundles brought: nothing of any other clone on the machine.
  */
 export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
@@ -217,7 +212,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, mirror, scratch }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -471,39 +466,127 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The objects of `revs`' trees fetched into the mirror with Factory's token, the ones the checkout's store lacks
-   * copied there, and (`checkout`) `git lfs checkout`, all within `timeoutMs` and the stage's end (`deadlineAt`). What
-   * did arrive is handed over even when the fetch failed. A warning, or "".
+   * The Git LFS pointers in `revs`' trees: {found: oid to {oid, size, blob} (the pointer's blob in the mirror), warning}.
+   * Read from the mirror's own objects, in three bounded reads: the trees' blobs, their sizes (`--batch-check`), and only
+   * the blobs of at most 1024 bytes, kept when their text is a pointer. A read cut at `readMaxBytes` is said in
+   * `warning`: the pointers it would have named stay pointer files, never silently.
+   */
+  const pointersOf = async (revs) => {
+    const cut = [];
+    const blobs = new Set();
+    for (const rev of revs) {
+      const ls = await git(["ls-tree", "-r", "-z", rev], { maxBytes: readMaxBytes });
+      if (ls.truncated) cut.push(`the tree of ${rev.slice(0, 7)}`);
+      if (ls.code !== 0 && !ls.truncated) continue;
+      const entries = ls.stdout.split("\0");
+      // A cut read's last entry may be partial.
+      for (const e of ls.truncated ? entries.slice(0, -1) : entries) {
+        const m = /^\d+ blob ([0-9a-f]{40,64})\t/.exec(e);
+        if (m) blobs.add(m[1]);
+      }
+    }
+    const found = new Map();
+    const said = () => (cut.length ? `${cut.join(", ")} could not be read whole (over ${readMaxBytes} bytes), so some Git LFS files may stay pointers` : "");
+    if (!blobs.size) return { found, warning: said() };
+    const check = await git(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], { input: `${[...blobs].join("\n")}\n`, maxBytes: readMaxBytes });
+    if (check.truncated) cut.push("the sizes of their files");
+    const lines = check.stdout.split("\n");
+    const small = (check.truncated ? lines.slice(0, -1) : lines).map((l) => l.split(" ")).filter(([id, t, n]) => SHA.test(id) && t === "blob" && Number(n) <= 1024).map(([id]) => id);
+    if (!small.length) return { found, warning: said() };
+    const out = await git(["cat-file", "--batch"], { input: `${small.join("\n")}\n`, encoding: "buffer", maxBytes: readMaxBytes });
+    if (out.truncated) cut.push("their pointer files");
+    const buf = out.stdout;
+    const head = Buffer.from(`${POINTER_HEAD}\n`);
+    const legacy = Buffer.from(`${LEGACY_POINTER_HEAD}\n`);
+    for (let i = 0; i < buf.length; ) {
+      const nl = buf.indexOf(10, i);
+      if (nl < 0) break;
+      const [id, type, size] = buf.subarray(i, nl).toString("utf8").split(" ");
+      if (type !== "blob" || !size) {
+        i = nl + 1;
+        continue;
+      }
+      const n = Number(size);
+      if (nl + 1 + n > buf.length) break;
+      const body = buf.subarray(nl + 1, nl + 1 + n);
+      const p = body.subarray(0, head.length).equals(head) || body.subarray(0, legacy.length).equals(legacy) ? parsePointer(body.toString("utf8")) : null;
+      if (p && !found.has(p.oid)) found.set(p.oid, { ...p, blob: id });
+      i = nl + 1 + n + 1;
+    }
+    return { found, warning: said() };
+  };
+
+  /** The objects in the checkout's Git LFS store, oid to size in bytes (read in its sandbox; empty when none). */
+  const checkoutStore = async (timeoutMs) => {
+    const r = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" || exit 1; [ -d "$d" ] || exit 0; cd "$d" && find . -type f -exec wc -c {} +', "sh", checkout], agentGitEnv), { env: agentGitEnv, timeoutMs });
+    const sizes = new Map();
+    if (r.code !== 0) return sizes;
+    for (const l of String(r.stdout).split("\n")) {
+      const m = /^\s*(\d+) \.\/[0-9a-f]{2}\/[0-9a-f]{2}\/([0-9a-f]{64})$/.exec(l);
+      if (m) sizes.set(m[2], Number(m[1]));
+    }
+    return sizes;
+  };
+
+  /** Size of an object in the mirror's Git LFS store, or -1. */
+  const mirrorSize = (oid) => {
+    try {
+      return statSync(join(mirror, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)).size;
+    } catch {
+      return -1;
+    }
+  };
+
+  const NO_TIME = "no time was left in the stage to hand the Git LFS objects over";
+  const NO_CHECKOUT = "no time was left in the stage for git lfs checkout; the files stay pointers";
+
+  /**
+   * The media of `revs`' trees for the checkout, all of it whatever its size. Only the objects its store lacks, matched
+   * by each pointer's oid and size, are handled: those the mirror lacks too are downloaded with Factory's token, then
+   * copied over; and (`checkout`) `git lfs checkout` runs. All within `timeoutMs` and the stage's end
+   * (`deadlineAt`); what did arrive is handed over even when the download failed. A warning, or "".
    */
   const handOver = async (revs, { timeoutMs, checkout: co = true } = {}) => {
     const until = Math.min(deadlineAt, Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : Infinity);
     const ms = () => (Number.isFinite(until) ? Math.max(1, until - Date.now()) : undefined);
     const over = () => Number.isFinite(until) && until <= Date.now();
     if (!revs.length) return "";
-    if (over()) return "no time was left in the stage to hand the Git LFS objects over";
+    if (over()) return co ? `${NO_TIME}; ${NO_CHECKOUT}` : NO_TIME;
     const warnings = [];
-    const fetched = await git([...lfsPinArgs(remote), "lfs", "fetch", "origin", ...revs], { timeoutMs: ms() });
-    if (fetched.code !== 0 || fetched.timedOut) {
-      const out = `${fetched.stdout}\n${fetched.stderr}`;
-      const quota = lfsQuotaLine(out);
-      warnings.push(fetched.timedOut ? "the Git LFS fetch ran out of the stage's time" : quota ? `Git LFS refused the download (quota): ${quota}` : `Git LFS objects could not be fetched: ${out.split("\n").map((l) => l.trim()).find((l) => /error|fatal|failed|denied|not found/i.test(l))?.slice(0, 200) || `exit ${fetched.code}`}`);
-    }
-    const store = join(mirror, "lfs", "objects");
-    const inMirror = storeObjects(store);
-    if (inMirror.length && !over()) {
-      // Only what the checkout's store lacks crosses over: a reused clone already has most of it.
-      const listed = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" || exit 1; [ -d "$d" ] || exit 0; cd "$d" && find . -type f', "sh", checkout], agentGitEnv), { env: agentGitEnv, timeoutMs: ms() });
-      const there = new Set(listed.code === 0 ? String(listed.stdout).split("\n").map((l) => l.trim().split("/").at(-1)) : []);
-      const fresh = inMirror.filter((f) => !there.has(f.split("/").at(-1)));
-      if (fresh.length && !over()) {
-        const tar = await exec("tar", ["-C", store, "--null", "-T", "-", "-cf", "-"], { encoding: "buffer", maxBytes: 8 * 1024 ** 3, input: `${fresh.join("\0")}\0`, timeoutMs: ms() });
-        const put = tar.code === 0 && !tar.timedOut && !over() ? await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && tar -xf - -C "$d" --skip-old-files', "sh", checkout], agentGitEnv), { env: agentGitEnv, input: tar.stdout, timeoutMs: ms() }) : { code: 1 };
-        if (put.code !== 0 || put.timedOut) warnings.push(over() ? "no time was left in the stage to hand the Git LFS objects over" : "Git LFS objects could not be handed to the checkout");
+    const wanted = await pointersOf(revs);
+    if (wanted.warning) warnings.push(wanted.warning);
+    const have = await checkoutStore(ms());
+    const missing = [...wanted.found.values()].filter((p) => have.get(p.oid) !== p.size);
+    const absent = missing.filter((p) => mirrorSize(p.oid) !== p.size);
+    if (absent.length && over()) warnings.push(NO_TIME);
+    else if (absent.length) {
+      // Exactly the missing pointers, in a tree of Factory's own in the mirror: git-lfs fetches what a tree points to.
+      const tree = await git(["mktree"], { input: absent.map((p) => `100644 blob ${p.blob}\t${p.oid}\n`).join("") });
+      const { name, email } = box.author;
+      const who = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+      const wants = tree.code === 0 ? await git(["commit-tree", tree.stdout.trim(), "-m", "Git LFS objects to fetch"], { env: { ...gitEnv(), ...who } }) : tree;
+      // The tree's paths are oids: no path filter of the repository's (lfs.fetchinclude and lfs.fetchexclude, which a
+      // branch's .lfsconfig may set) may drop them. Command-line config outranks .lfsconfig.
+      const fetched = wants.code === 0 ? await git([...lfsPinArgs(remote), "-c", "lfs.fetchinclude=", "-c", "lfs.fetchexclude=", "lfs", "fetch", "origin", wants.stdout.trim()], { timeoutMs: ms() }) : wants;
+      if (fetched.code !== 0 || fetched.timedOut) {
+        const out = `${fetched.stdout}\n${fetched.stderr}`;
+        const quota = lfsQuotaLine(out);
+        warnings.push(fetched.timedOut ? "the Git LFS fetch ran out of the stage's time" : quota ? `Git LFS refused the download (quota): ${quota}` : `Git LFS objects could not be fetched: ${out.split("\n").map((l) => l.trim()).find((l) => /error|fatal|failed|denied|not found/i.test(l))?.slice(0, 200) || `exit ${fetched.code}`}`);
       }
-    } else if (inMirror.length) warnings.push("no time was left in the stage to hand the Git LFS objects over");
-    if (co && !over()) {
+    }
+    // Only what the checkout's store lacks crosses over, replacing a file of the wrong size there.
+    const ship = missing.filter((p) => mirrorSize(p.oid) === p.size).map((p) => `${p.oid.slice(0, 2)}/${p.oid.slice(2, 4)}/${p.oid}`);
+    if (ship.length && over()) warnings.push(NO_TIME);
+    else if (ship.length) {
+      const tar = await exec("tar", ["-C", join(mirror, "lfs", "objects"), "--null", "-T", "-", "-cf", "-"], { encoding: "buffer", maxBytes: 8 * 1024 ** 3, input: `${ship.join("\0")}\0`, timeoutMs: ms() });
+      const put = tar.code === 0 && !tar.timedOut && !over() ? await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", 'd="$(git -C "$1" rev-parse --absolute-git-dir)/lfs/objects" && mkdir -p "$d" && tar -xUf - -C "$d"', "sh", checkout], agentGitEnv), { env: agentGitEnv, input: tar.stdout, timeoutMs: ms() }) : { code: 1 };
+      if (put.code !== 0 || put.timedOut) warnings.push(over() ? NO_TIME : "Git LFS objects could not be handed to the checkout");
+    }
+    if (co && over()) warnings.push(NO_CHECKOUT);
+    else if (co) {
       const done = await box.agentGit(["lfs", "checkout"], { timeoutMs: ms() });
-      if (done.code !== 0 || done.timedOut) warnings.push("git lfs checkout failed in the checkout; the run goes on with pointer files");
+      if (done.timedOut) warnings.push(NO_CHECKOUT);
+      else if (done.code !== 0) warnings.push("git lfs checkout failed in the checkout; the run goes on with pointer files");
     }
     return [...new Set(warnings)].join("; ");
   };

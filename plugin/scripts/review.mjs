@@ -227,7 +227,8 @@ async function main() {
   let cred = { env: {} };
   const progress = progressReporter(repo, issue, token, { stage: "review", harness: inputs.harness, model: inputs.reviewerModel });
   if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
-  // The work lineage's session (a restored worker session, a fix pass, the answer pass): what finish saves.
+  // The work lineage's session (a restored worker session, a fix pass, the answer pass): what a later stage resumes.
+  // finish saves it and every other session this stage ran (the reviewer's own), so the review's spend can be checked.
   const session = { id: null, canResume: true };
   let reentry = null;
   const finish = async (exit, reason) => {
@@ -236,7 +237,7 @@ async function main() {
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: records.map((r) => r?.sessionId), usageDir, checkout, secrets: [...Object.values(cred.env), ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);

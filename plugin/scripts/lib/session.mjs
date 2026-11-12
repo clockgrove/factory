@@ -204,20 +204,24 @@ export function sessionFiles(harness, root, id) {
 }
 
 /**
- * Copy the harness session into the usage directory so a later stage of the same Objective can resume it: its
- * files under `<usageDir>/transcript/`, each masked like the event log. Returns `{harness, id, files, checkout}`
- * for the usage record, or null when there is nothing to save. A session is only valid in the same checkout path,
- * which the record's `checkout` lets the restore check.
+ * Copy the stage's harness sessions into the usage directory, each file masked like the event log: the work lineage's
+ * (`sessionId`), which a later stage of the same Objective can resume, and every other session the stage ran (`also`:
+ * the reviewer's own, a fresh retry's), so the stage's spend can be checked request by request. All of them go under
+ * `<usageDir>/transcript/`. Returns `{harness, id, files, checkout}` for the lineage (`id` null when it saved none) plus
+ * `others: [{id, files}]` when any other session was saved, or null when nothing was. A session is only valid in the
+ * same checkout path, which the record's `checkout` lets the restore check; only `id` and `files` are ever restored.
  */
-export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets = [] }) {
+export function saveTranscript({ harness, sessionId, also = [], usageDir, checkout, secrets = [] }) {
   const root = sessionRoot(harness);
-  const files = sessionFiles(harness, root, sessionId);
-  if (!files.length) return null;
+  const saved = stageSessions(sessionId, also)
+    .map((id) => ({ id, files: sessionFiles(harness, root, id) }))
+    .filter((s) => s.files.length);
+  if (!saved.length) return null;
   const dest = join(usageDir, "transcript");
   // Locally the usage directory is writable from the sandbox: start from an empty copy, so nothing the model left
   // there (a symlink out of the sandbox) is written through or restored later. rmSync does not follow links.
   rmSync(dest, { recursive: true, force: true });
-  for (const rel of files) {
+  for (const rel of saved.flatMap((s) => s.files)) {
     mkdirSync(join(dest, rel, ".."), { recursive: true });
     cpSync(join(root, rel), join(dest, rel), { recursive: true });
   }
@@ -229,7 +233,19 @@ export function saveTranscript({ harness, sessionId, usageDir, checkout, secrets
     }
   };
   mask(dest);
-  return { harness, id: sessionId, files, checkout };
+  return savedRecord({ harness, sessionId, saved, checkout });
+}
+
+/** The stage's session ids, the lineage's first, each once; only plain names (they are matched as file names). */
+function stageSessions(sessionId, also) {
+  return [...new Set([sessionId, ...(also || [])])].filter((id) => /^[A-Za-z0-9._-]+$/.test(String(id || "")));
+}
+
+/** The usage record's `session`: the lineage's id and files (what a later stage restores), the stage's other sessions beside it. */
+function savedRecord({ harness, sessionId, saved, checkout }) {
+  const lineage = saved.find((s) => s.id === sessionId);
+  const others = saved.filter((s) => s !== lineage);
+  return { harness, id: lineage ? sessionId : null, files: lineage ? lineage.files : [], checkout, ...(others.length ? { others } : {}) };
 }
 
 /** A plain relative path: letters, digits, `.`, `_`, `-` and `/`, no `..`, no leading `/`. */
@@ -256,32 +272,40 @@ function savedEntries(root, names) {
 const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: ".codex/sessions", copilot: ".copilot/session-state" };
 
 /**
- * saveTranscript for the agent uid (Actions): the session's files are listed and archived by the agent, the archive
+ * saveTranscript for the agent uid (Actions): each session's files are listed and archived by the agent, the archive
  * read through a pipe and unpacked by Factory into an empty directory (no owners, no symlinks kept), then masked.
  */
-export async function saveAgentTranscript({ harness, sessionId, usageDir, checkout, secrets = [] }) {
+export async function saveAgentTranscript({ harness, sessionId, also = [], usageDir, checkout, secrets = [] }) {
   const agent = agentUser();
   const root = AGENT_SESSION_ROOT[harness];
-  if (!agent || !root || !/^[A-Za-z0-9._-]+$/.test(String(sessionId || ""))) return null;
-  // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
-  // Claude Code's session as Factory captured it right after its run (claude-runner.mjs captureSession), never what
-  // the agent's home holds by now; the other harnesses' are read from the agent's home.
-  const held = harness === "claude" ? capturedSession(sessionId) : null;
-  let files = held?.files || [];
-  let tar = held ? { code: 0, stdout: held.tar } : null;
-  if (!held) {
-    const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, sessionId], { cwd: agent.home });
-    files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
-    if (!files.length) return null;
-    tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
-  }
-  if (tar.code !== 0) return null;
+  const ids = stageSessions(sessionId, also);
+  if (!agent || !root || !ids.length) return null;
   const dest = join(usageDir, "transcript");
   rmSync(dest, { recursive: true, force: true });
-  mkdirSync(dest, { recursive: true });
-  const archive = join(mkdtempSync(join(tmpdir(), "transcript-")), "t.tar");
-  writeNew(archive, tar.stdout);
-  await exec("tar", ["-xf", archive, "-C", dest, "--no-same-owner", "--no-same-permissions"]);
+  let work = null;
+  const saved = [];
+  for (const id of ids) {
+    // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
+    // Claude Code's session as Factory captured it right after its run (claude-runner.mjs captureSession), never what
+    // the agent's home holds by now; the other harnesses' are read from the agent's home.
+    const held = harness === "claude" ? capturedSession(id) : null;
+    let files = held?.files || [];
+    let tar = held ? { code: 0, stdout: held.tar } : null;
+    if (!held) {
+      const listed = await exec("sh", ["-c", 'cd "$1" 2>/dev/null || exit 0; find . -maxdepth 4 \\( -name "$2.jsonl" -o -name "$2" -o -name "*-$2.jsonl" \\) -print0', "sh", root, id], { cwd: agent.home });
+      files = listed.stdout.split("\0").map((l) => l.replace(/^\.\//, "")).filter(plainRelative);
+      if (!files.length) continue;
+      tar = await exec("tar", ["-C", root, "--null", "-T", "-", "-cf", "-"], { cwd: agent.home, encoding: "buffer", input: `${files.join("\0")}\0` });
+    }
+    if (tar.code !== 0) continue;
+    mkdirSync(dest, { recursive: true });
+    work ??= mkdtempSync(join(tmpdir(), "transcript-"));
+    const archive = join(work, `t${saved.length}.tar`);
+    writeNew(archive, tar.stdout);
+    await exec("tar", ["-xf", archive, "-C", dest, "--no-same-owner", "--no-same-permissions"]);
+    saved.push({ id, files });
+  }
+  if (!saved.length) return null;
   await exec("find", [dest, "-type", "l", "-delete"]);
   const mask = (p) => {
     for (const name of readdirSync(p, { withFileTypes: true })) {
@@ -291,7 +315,7 @@ export async function saveAgentTranscript({ harness, sessionId, usageDir, checko
     }
   };
   mask(dest);
-  return { harness, id: sessionId, files, checkout };
+  return savedRecord({ harness, sessionId, saved, checkout });
 }
 
 /**

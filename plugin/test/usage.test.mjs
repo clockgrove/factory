@@ -317,6 +317,44 @@ test("sessions: a Codex rollout is saved into the usage directory and restored l
   }
 });
 
+test("sessions: a stage saves every session it ran (the reviewer's own too), masked, and only the lineage's is restored", async () => {
+  const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
+  const root = mkdtempSync(join(tmpdir(), "sess-"));
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  process.env.CODEX_HOME = join(root, "codex");
+  process.env.FACTORY_LOCAL = "1";
+  try {
+    const day = join(root, "codex", "sessions", "2026", "11", "11");
+    mkdirSync(day, { recursive: true });
+    const rel = (id) => join("2026", "11", "11", `rollout-2026-11-11T09-00-00-${id}.jsonl`);
+    for (const id of ["fix1", "rev1", "rev2"]) writeFileSync(join(root, "codex", "sessions", rel(id)), `{"id":"${id}","key":"sk-live-0123456789"}\n`);
+    const ws = join(root, "ws");
+    // A fresh review (no lineage): the reviewer's first pass and its rerun, each once, a record without a session skipped.
+    const review = join(ws, "usage-review-1");
+    mkdirSync(review, { recursive: true });
+    const r = saveTranscript({ harness: "codex", sessionId: null, also: ["rev1", null, "rev2", "rev1"], usageDir: review, checkout: "/c", secrets: ["sk-live-0123456789"] });
+    assert.deepEqual(r, { harness: "codex", id: null, files: [], checkout: "/c", others: [{ id: "rev1", files: [rel("rev1")] }, { id: "rev2", files: [rel("rev2")] }] });
+    for (const id of ["rev1", "rev2"]) assert.equal(readFileSync(join(review, "transcript", rel(id)), "utf8"), `{"id":"${id}","key":"***"}\n`);
+    // A review with a fix pass: the lineage's id and files as before, the reviewer's beside it.
+    const fix = join(ws, "usage-review-2");
+    mkdirSync(fix, { recursive: true });
+    const s = saveTranscript({ harness: "codex", sessionId: "fix1", also: ["rev1", "fix1"], usageDir: fix, checkout: "/c", secrets: [] });
+    assert.deepEqual(s, { harness: "codex", id: "fix1", files: [rel("fix1")], checkout: "/c", others: [{ id: "rev1", files: [rel("rev1")] }] });
+    assert.equal(saveTranscript({ harness: "codex", sessionId: null, also: ["gone"], usageDir: join(ws, "none"), checkout: "/c" }), null);
+    writeFileSync(join(fix, "result.json"), JSON.stringify({ session: s }));
+    writeFileSync(join(review, "result.json"), JSON.stringify({ session: r }));
+    rmSync(join(root, "codex", "sessions"), { recursive: true });
+    // The newest stage saved only the reviewer's sessions: the restore looks past it to the lineage, and puts back its files only.
+    assert.deepEqual(await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" }), { id: "fix1", from: "usage-review-2", reason: "" });
+    assert.ok(existsSync(join(root, "codex", "sessions", rel("fix1"))));
+    assert.ok(!existsSync(join(root, "codex", "sessions", rel("rev1"))));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a resumed Claude pass counts its own share, not the session's running total", async () => {
   const { parseUsage, sinceSession, mergeUsage } = await import("../scripts/lib/usage.mjs");
   // Shapes and numbers from a real run: the fix pass resumed the work session and reported the session's totals.

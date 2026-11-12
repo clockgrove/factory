@@ -861,7 +861,7 @@ export async function runnerChecks({ inputs, env = process.env }) {
 const RUNNER_SANDBOX = {
   claude: { name: "Claude Code", bins: [["bwrap", "bubblewrap"], ["socat", "socat"], ["rg", "ripgrep"]], refuses: "refuses to start without it" },
   codex: { name: "Codex", bins: [["bwrap", "bubblewrap"]], refuses: "the stage Blocks before it starts without it" },
-  copilot: { name: "Copilot", bins: [["bwrap", "bubblewrap"], ["slirp4netns", "slirp4netns"]], refuses: "the stage Blocks before it starts without it" },
+  copilot: { name: "Copilot", bins: [["bwrap", "bubblewrap"], ["slirp4netns", "slirp4netns"], ["socat", "socat"]], refuses: "the stage Blocks before it starts without it" },
 };
 
 /** The one-time admin step a self-hosted Ubuntu runner needs for Claude Code's sandbox (the Action applies it only on GitHub's hosted runners). */

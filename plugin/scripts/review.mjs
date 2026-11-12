@@ -33,6 +33,7 @@ import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, pos
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
+import { withGatewayRefusal } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -509,8 +510,9 @@ async function main() {
     if (!pre.green) {
       const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, triageRefused: pre.triageRefused, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: d.reason || "validation red before review", detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
-      await finish("blocked", d.reason || "validation red before review");
+      const why = withGatewayRefusal(d.reason || "validation red before review", relay?.totals().gatewayRefused);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: why, detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
+      await finish("blocked", why);
       return;
     }
     pr = await getPr(repo, pr.number, token);
@@ -782,6 +784,8 @@ async function main() {
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason() });
+  // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
+  if (decision.exit === "blocked") decision.reason = withGatewayRefusal(decision.reason, relay?.totals().gatewayRefused);
   await dropLabel();
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally nothing runs an unlabelled ready PR, so the Question stands there). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass

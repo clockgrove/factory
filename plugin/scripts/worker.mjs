@@ -33,6 +33,7 @@ import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
+import { withGatewayRefusal } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -667,6 +668,8 @@ async function main() {
       }
     }
   }
+  // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
+  if (decision.exit === "blocked") decision.reason = withGatewayRefusal(decision.reason, relay?.totals().gatewayRefused);
   const askedAtPlan = decision.exit === "question" && !!planNeeds;
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).
   if (askedAtPlan) await progress.planAsked(needs.repos);

@@ -1114,7 +1114,7 @@ function lineageTotal(id, records) {
 /** Write usage/result.json and return the merged record. */
 /**
  * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
- * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price).
+ * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price, the AI Gateway's own budget or credits refusal as `gatewayRefused`).
  * Empty when no relay ran.
  */
 export function keyBreakdown(records, workerKey = null) {
@@ -1131,7 +1131,7 @@ export function keyBreakdown(records, workerKey = null) {
     fields: {
       workerKeyUsd: keyUsd,
       harnessUsd: total === null ? null : Math.round(Math.max(0, total - keyUsd) * 1e6) / 1e6,
-      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, refused: workerKey.refused } } : {}),
+      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), refused: workerKey.refused } } : {}),
     },
   };
 }

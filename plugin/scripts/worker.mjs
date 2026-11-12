@@ -349,7 +349,7 @@ async function main() {
   // session (on Actions it rides the usage artifact; locally it is on the box); every other entry starts fresh.
   let restored = null;
   if (inputs.resumePolicy === "fix-passes" && rebaseConflict) {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.

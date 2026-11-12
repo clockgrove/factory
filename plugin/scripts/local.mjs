@@ -568,9 +568,10 @@ export class Local {
       // it starts would inherit it, nor in a file. With an App, the stage asks this process for each notice token over
       // Node's IPC channel (fd 4), which Node keeps from everything the stage starts (app-token.mjs serveNotices).
       const notice = this.notice ? ["--notice", "ipc"] : [];
-      // The work stage alone: the worker secrets' values from this shell (lib/worker-secrets.mjs), which its worker carries
-      // to the harness only, as the workflow's `worker_secret_values` reaches a runner's; nothing before the stage gets them.
-      const values = script === "worker.mjs" ? localSecretValues(input("worker_secrets", { env }), process.env) : "";
+      // The work and review stages: the worker secrets' values from this shell (lib/worker-secrets.mjs), which the worker
+      // carries to its harness only and the review stage to its fix and answer passes only (never the reviewer), as the
+      // workflow's `worker_secret_values` reaches a runner's; nothing before the stage gets them.
+      const values = script === "worker.mjs" || script === "review.mjs" ? localSecretValues(input("worker_secrets", { env }), process.env) : "";
       // This process posts what the stage leaves too: none of those values.
       holdSecrets([...parseSecretValues(values).values()]);
       const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, FACTORY_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });

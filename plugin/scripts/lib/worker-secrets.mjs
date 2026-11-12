@@ -14,11 +14,13 @@
 // that changes how commands run: such an entry is refused. Factory's own AI_GATEWAY_API_KEY is refused as a SOURCE, and
 // a value that equals Factory's key is withheld (compared in constant time, in this process, never printed).
 //
-// Only the worker's harness gets them, through one variable (SHELL_SECRETS_ENV) that runHarness unpacks for the harness
-// child alone and scrubbedEnv removes everywhere else: the repository's setup, install and validation, Factory's own
-// git, and the reviewer never see them.
+// Only the work lineage's harness gets them: the work stage's passes, and the fix and answer passes that continue the
+// worker's session in the review stage. They travel in one variable (SHELL_SECRETS_ENV) that runHarness unpacks for the
+// harness child alone and scrubbedEnv removes everywhere else: the repository's setup, install and validation and
+// Factory's own git never see them. The reviewer never does either: its calls are marked `reviewer` and runHarness
+// strips them there (harnessShell), whatever env it is handed.
 import { timingSafeEqual } from "node:crypto";
-import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets } from "./inputs.mjs";
+import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets, holdSecrets, log, mask } from "./inputs.mjs";
 
 /** The one variable that carries the worker's shell secrets (JSON {NAME: value}) from worker.mjs to runHarness. */
 export const SHELL_SECRETS_ENV = "FACTORY_SHELL_SECRETS";
@@ -180,6 +182,42 @@ export function takeShellSecrets(env = {}) {
     // not JSON: nothing is carried
   }
   return { shell, env: rest };
+}
+
+/**
+ * What runHarness hands one harness call: {shell: {NAME: value} for the harness child, env: `given` without the carrier}.
+ * A reviewer call (`reviewer`) gets no shell secrets, and no variable whose value is a held secret (inputs.mjs
+ * holdSecrets: every opted-in value), whatever `given` carries: the reviewer never holds a worker secret.
+ */
+export function harnessShell(given = {}, { reviewer = false } = {}) {
+  const taken = takeShellSecrets(given);
+  if (!reviewer) return taken;
+  const held = new Set(heldSecrets());
+  const env = Object.fromEntries(Object.entries(taken.env).filter(([, v]) => !(typeof v === "string" && held.has(v))));
+  return { shell: {}, env };
+}
+
+/**
+ * The worker secrets of this run, for the work stage and the review stage's fix and answer passes: {NAME: value} for the
+ * harness's shell, each value masked in the job log and held (never posted, stored, sent to the gateway or pushed). The
+ * log names what reaches the shell and what was refused, never a value. Values come from `worker_secret_values` (on
+ * Actions and in a cloud sandbox the workflow's, in local mode the one `serve` packed from its shell); one equal to
+ * Factory's own AI Gateway key (`factoryKey()`) is withheld.
+ */
+export function openWorkerSecrets(inputs, { factoryKey }) {
+  if (!String(inputs.workerSecrets || "").trim()) return {};
+  const values = parseSecretValues(inputs.workerSecretValues);
+  // The opted-in values this process holds (withheld ones too). A line no entry names is no secret of the worker's.
+  const opted = optedValues(inputs.workerSecrets, inputs.workerSecretValues);
+  holdSecrets(opted);
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
+  for (const v of opted) mask(v);
+  for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
+  for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
+  for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
+  const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
+  if (given.length) log(`worker secrets: ${given.map(secretLabel).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
+  return ws.env;
 }
 
 /**

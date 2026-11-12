@@ -301,8 +301,8 @@ export const stageProgressKey = (runId, claim) => (/^\d{1,20}$/.test(String(runI
 
 /**
  * The environment the stage starts with in the sandbox: the workflow's settings as inputs (never a secret), the GitHub
- * context, the stage's own names, the two tokens, only the credential its harness needs and, for a work stage, the
- * worker secrets' values.
+ * context, the stage's own names, the two tokens, only the credential its harness needs and the worker secrets' values
+ * (the work stage's harness and the review stage's fix and answer passes get them; its reviewer never does).
  */
 export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
   const out = {};
@@ -318,8 +318,9 @@ export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, 
   // Codex with both keys gets the gateway's only: the one it runs on (harness.mjs credentialEnv).
   const harnessKeys = (HARNESS_SECRETS[inputs.harness] || []).filter((k) => !(k === "codexApiKey" && inputs.codexGatewayKey));
   for (const key of [...harnessKeys, "aiGatewayApiKey"]) if (inputs[key]) out[`FACTORY_INPUT_${INPUT_NAME[key]}`] = inputs[key];
-  // The worker secrets' values (lib/worker-secrets.mjs), for a work stage only: its worker hands them to its harness alone.
-  if (stage === "work" && inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
+  // The worker secrets' values (lib/worker-secrets.mjs): the worker hands them to its harness alone, the review stage to
+  // its fix and answer passes alone.
+  if (inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
   Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });
   if (pr) out.FACTORY_STAGE_PR = String(pr);
   if (tokens.read) out.FACTORY_READ_TOKEN = tokens.read;

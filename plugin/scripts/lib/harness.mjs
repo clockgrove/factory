@@ -17,7 +17,7 @@ import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./u
 import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
-import { SHELL_SECRETS_ENV, takeShellSecrets } from "./worker-secrets.mjs";
+import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -612,7 +612,8 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
  * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
  * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
  * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
- * stands and the stage Blocks with it.
+ * stands and the stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
+ * harnessShell).
  */
 export async function runHarness(opts) {
   const rec = await runOnce(opts);
@@ -622,9 +623,10 @@ export async function runHarness(opts) {
   return { ...fresh, resumeRefused: { session: opts.resume, ...(rec.refusal ? { status: rec.refusal.status, type: rec.refusal.type, code: rec.refusal.code } : {}) } };
 }
 
-async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null }) {
-  // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own.
-  const { shell, env } = takeShellSecrets(given);
+async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null, reviewer = false }) {
+  // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own, and out of a
+  // reviewer call's altogether.
+  const { shell, env } = harnessShell(given, { reviewer });
   const shellSecrets = Object.keys(shell);
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.
   const agentUid = agentUser();

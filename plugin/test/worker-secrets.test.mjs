@@ -3,12 +3,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand, hiddenFromShell, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { SHELL_SECRETS_ENV, localSecretValues, missingSecretsFix, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
+import { SHELL_SECRETS_ENV, harnessShell, localSecretValues, missingSecretsFix, openWorkerSecrets, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
 import { decideExit, parseExitRecord } from "../scripts/lib/logic.mjs";
 import { shellSecretsNote } from "../scripts/lib/session.mjs";
 import { stageEnvironment } from "../scripts/launch.mjs";
 import { workerSecretChecks } from "../scripts/doctor.mjs";
-import { openWorkerSecrets } from "../scripts/worker.mjs";
 
 const AGENT = { user: "factory-agent", uid: 1002, home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
 const KEY = "vck_worker_0123456789abcdef";
@@ -116,7 +115,7 @@ test("a worker that lacks a secret Blocks naming it, and the fix names the opt-i
   assert.equal(missingSecretsFix([], "", "runner"), null);
 });
 
-test("routes: a cloud work stage gets the values, a review stage does not; local mode packs them from serve's shell", () => {
+test("routes: a cloud work stage and a review stage get the values (for the fix and answer passes); local mode packs them from serve's shell", () => {
   const inputs = { harness: "claude", anthropicApiKey: "an", workerSecretValues: `W=${KEY}` };
   const env = { FACTORY_WORKER_SECRETS: "AI_GATEWAY_API_KEY=W", FACTORY_INPUT_WORKER_SECRET_VALUES: `W=${KEY}` };
   const work = stageEnvironment({ inputs, env, stage: "work", issue: 1, claim: "c", tokens: { write: "w" } });
@@ -124,7 +123,7 @@ test("routes: a cloud work stage gets the values, a review stage does not; local
   assert.equal(work.FACTORY_WORKER_SECRETS, "AI_GATEWAY_API_KEY=W", "the opt-in is a setting, like any other");
   assert.equal("FACTORY_WORKER_SECRET_VALUES" in work, false, "the values only as the secret input");
   const review = stageEnvironment({ inputs, env, stage: "review", issue: 1, pr: 2, claim: "c", tokens: { write: "w" } });
-  assert.equal("FACTORY_INPUT_WORKER_SECRET_VALUES" in review, false);
+  assert.equal(review.FACTORY_INPUT_WORKER_SECRET_VALUES, `W=${KEY}`, "the review stage's fix and answer passes continue the worker's session");
   assert.equal(localSecretValues("AI_GATEWAY_API_KEY=W, FAL_KEY GONE_KEY ML", { W: ` ${KEY} `, FAL_KEY: "f", ML: "a\nb", PATH: "/x" }), `W=${KEY}\nFAL_KEY=f`);
   assert.equal(localSecretValues("", { W: KEY }), "");
   const resolved = resolveInputs({ env: { FACTORY_WORKER_SECRETS: "A=B", FACTORY_INPUT_WORKER_SECRET_VALUES: "B=v" } });
@@ -398,4 +397,65 @@ test("a value under 8 characters is named by doctor; the lower-case percent-enco
   assert.deepEqual(checks.map((c) => c.status), ["WARN"]);
   assert.match(checks[0].detail, /SHORT_KEY: a value under 8 characters/);
   assert.ok(secretForms("vck_a/b+c=d0123").includes("vck_a%2fb%2bc%3dd0123"));
+});
+
+// ------------------------------------------------------------------ fix and answer passes (#98)
+
+test("the reviewer never gets a worker secret: harnessShell drops the carrier and every variable holding a held value", async () => {
+  const { dropHeldSecrets, holdSecrets } = await import("../scripts/lib/inputs.mjs");
+  const passEnv = { PATH: "/bin", FACTORY_ISSUE: "7", STRAY: KEY, ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY, FAL_KEY: "fal-0123456789" }) };
+  holdSecrets([KEY, "fal-0123456789"]);
+  try {
+    const pass = harnessShell(passEnv);
+    assert.deepEqual(pass.shell, { AI_GATEWAY_API_KEY: KEY, FAL_KEY: "fal-0123456789" }, "a fix or answer pass gets them");
+    assert.equal(SHELL_SECRETS_ENV in pass.env, false, "the carrier never reaches the child's own env");
+    const reviewer = harnessShell(passEnv, { reviewer: true });
+    assert.deepEqual(reviewer.shell, {});
+    assert.equal(SHELL_SECRETS_ENV in reviewer.env, false);
+    assert.ok(!JSON.stringify(reviewer.env).includes(KEY) && !JSON.stringify(reviewer.env).includes("fal-0123456789"), "no held value under any name");
+    assert.equal(reviewer.env.FACTORY_ISSUE, "7", "the rest of its env is untouched");
+  } finally {
+    dropHeldSecrets();
+  }
+});
+
+test("runHarness: a pass gets the worker secrets on Claude Code, Codex and Copilot; a reviewer call on the same env never does", async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { runHarness } = await import("../scripts/lib/harness.mjs");
+  const { dropHeldSecrets, holdSecrets } = await import("../scripts/lib/inputs.mjs");
+  const bin = mkdtempSync(join(tmpdir(), "ws-reviewer-"));
+  const seen = join(bin, "seen.jsonl");
+  // Each fake CLI records whether its env carries the key, under any name, and the carrier.
+  for (const cli of ["claude", "codex", "copilot"]) {
+    writeFileSync(join(bin, cli), `#!${process.execPath}
+const fs = require("node:fs");
+try { fs.readFileSync(0); } catch {}
+const vals = Object.values(process.env);
+fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cli: ${JSON.stringify(cli)}, key: vals.includes(${JSON.stringify(KEY)}), named: process.env.AI_GATEWAY_API_KEY === ${JSON.stringify(KEY)}, carrier: ${JSON.stringify(SHELL_SECRETS_ENV)} in process.env }) + "\\n");
+`, { mode: 0o755 });
+  }
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  holdSecrets([KEY]);
+  try {
+    const env = { PATH: process.env.PATH, HOME: bin, ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY }) };
+    for (const harness of ["claude", "codex", "copilot"]) {
+      for (const reviewer of [false, true]) await runHarness({ harness, prompt: "p", maxUsd: 0, cwd: bin, env, timeoutMs: 30_000, label: reviewer ? "review" : "answer", reviewer, agent: reviewer && harness !== "codex" ? "reviewer" : undefined });
+    }
+    const rows = readFileSync(seen, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(rows.map((r) => [r.cli, r.key, r.named, r.carrier]), [
+      ["claude", true, true, false],
+      ["claude", false, false, false],
+      ["codex", true, true, false],
+      ["codex", false, false, false],
+      ["copilot", true, true, false],
+      ["copilot", false, false, false],
+    ]);
+  } finally {
+    process.env.PATH = saved;
+    dropHeldSecrets();
+    rmSync(bin, { recursive: true, force: true });
+  }
 });

@@ -28,10 +28,11 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { accessSync, constants, lstatSync, rmSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { accessSync, constants, existsSync, lstatSync, realpathSync, rmSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
-import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnly, copilotHomeFiles, copilotLocalSettings, gitGuards } from "./local.mjs";
+import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnly, copilotHomeFiles, copilotLocalSettings, credentialPaths, gitGuards } from "./local.mjs";
 import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
@@ -74,16 +75,17 @@ export function copilotRunnerLayout(agent, home = COPILOT_RUNNER_HOME) {
  * the token included, and bubblewrap stays in every command's sandbox as its pid 1, whose environment each command can
  * read; this starts the real one with none (bubblewrap sets every command's environment itself: `--clearenv`, then
  * `--setenv`). Among bubblewrap's own options (before the first `--`) each command's HOME and TMPDIR become the agent's
- * (`home`, `tmp`; null leaves Copilot's). Nothing else changes. Lives in Factory's HOME for Copilot, which the agent
- * cannot write. Local mode runs it with neither (local.mjs stageEnv), in the stage's usage directory.
+ * (`home`, `tmp`; null leaves Copilot's), and `pathFirst` (local mode: the stage's node, localToolchain) leads each
+ * command's PATH. Nothing else changes. Lives in Factory's HOME for Copilot, which the agent cannot write. Local mode runs
+ * it without `home` (local.mjs stageEnv), in the stage's usage directory.
  */
-export const bwrapShim = (realBwrap, home = null, tmp = null) => `#!/bin/sh
+export const bwrapShim = (realBwrap, home = null, tmp = null, pathFirst = null) => `#!/bin/sh
 # Factory: Copilot's bubblewrap (lib/copilot-runner.mjs). Started with no environment, so the token Copilot holds is
-# not in the sandbox's pid 1${home || tmp ? "; each command's HOME and TMPDIR are the agent's" : ""}.
+# not in the sandbox's pid 1${home || tmp ? "; each command's HOME and TMPDIR are the agent's" : ""}${pathFirst ? "; the stage's node leads each command's PATH" : ""}.
 first=1; p1=""; p2=""; done=""
 for a do
   if [ "$first" = 1 ]; then set --; first=0; fi
-${home ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = HOME ]; then a=${sq(home)}; fi\n` : ""}${tmp ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = TMPDIR ]; then a=${sq(tmp)}; fi\n` : ""}  [ "$a" = "--" ] && done=1
+${home ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = HOME ]; then a=${sq(home)}; fi\n` : ""}${tmp ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = TMPDIR ]; then a=${sq(tmp)}; fi\n` : ""}${pathFirst ? `  if [ -z "$done" ] && [ "$p2" = --setenv ] && [ "$p1" = PATH ]; then a=${sq(pathFirst)}:$a; fi\n` : ""}  [ "$a" = "--" ] && done=1
   set -- "$@" "$a"
   p2=$p1; p1=$a
 done
@@ -273,6 +275,53 @@ export function stageNode(layout, path = "") {
     return { node: join(d, "node"), npm: exe(join(d, "npm")) ? join(d, "npm") : "" };
   }
   return null;
+}
+
+/**
+ * Local mode's toolchain for Copilot's commands on Linux (#111): the stage's node, which a developer's version manager
+ * (nvm, mise, asdf, Volta) keeps in their home, where Copilot's sandbox binds nothing. The first `node` on the stage's
+ * PATH by its real path; a version manager's shim (whose real path is not a `node`) gives way to the node running Factory
+ * (`execPath`), which is what the shim chose. Returns {bin, toolchain: {node, npm}, dirs, denied}, or null with no node:
+ * - `bin` leads each command's PATH (bwrapShim `pathFirst`), so a command finds this node before a shim it cannot run;
+ * - `dirs`: its install prefix (`bin`'s parent; npm is bin/npm -> ../lib), read-only in commands' policy, and nothing
+ *   else of the home. None where the sandbox binds it already (/usr/bin), or where it is `/`, the home or above it, in or
+ *   above a credential store, or in or above `off`: what any sandbox may write (the Objective's directory, the stage's
+ *   temp directory), so no sandboxed code can swap it for a link before Copilot's bubblewrap binds it by its path. The
+ *   probe's toolchain rule then Blocks.
+ * - `denied`: its `etc` (npm's global npmrc, which can hold a registry token), where there is one.
+ * `toolchain` is what the probe proves (probeDriver).
+ */
+export function localToolchain({ path = "", off = [], home = homedir(), execPath = process.execPath } = {}) {
+  const real = (f) => {
+    try {
+      return realpathSync(f);
+    } catch {
+      return null;
+    }
+  };
+  const first = absolutePath(path)
+    .split(":")
+    .map((d) => join(d, "node"))
+    .find((f) => {
+      try {
+        accessSync(f, constants.X_OK);
+        return statSync(f).isFile();
+      } catch {
+        return false;
+      }
+    });
+  if (!first) return null;
+  let node = real(first);
+  if (!node || basename(node) !== "node") node = real(execPath);
+  if (!node || basename(node) !== "node") return null;
+  const bin = dirname(node);
+  const npm = join(bin, "npm");
+  const toolchain = { node, npm: existsSync(npm) ? npm : "" };
+  const prefix = basename(bin) === "bin" ? dirname(bin) : bin;
+  const fenced = [...off, ...credentialPaths(home)].filter((x) => x && x.startsWith("/"));
+  const bound = SYSTEM_BOUND.some((d) => within(bin, d));
+  const safe = !bound && prefix !== "/" && !within(home, prefix) && !fenced.some((x) => within(prefix, x) || within(x, prefix));
+  return { bin, toolchain, dirs: safe ? [prefix] : [], denied: safe && existsSync(join(prefix, "etc")) ? [join(prefix, "etc")] : [] };
 }
 export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "factory: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
 

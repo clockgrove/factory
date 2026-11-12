@@ -525,7 +525,7 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     const said = mock.toolOutput?.() || "";
     await mock.close();
     const got = await probeResult(runner, env);
-    if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? `Copilot's sandbox does not give commands the stage's toolchain: ${node ? `${node.node}${node.npm ? ` and ${node.npm}` : ""} not found or not run in a command` : got.said}` : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
+    if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? toolchainRefused(node) : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
     // A pass is exit 0 with the probe's own last line, never exit 0 alone.
     if (got.code === 0 && got.said === PROBE_PASS) return;
     if (got.code === 0) throw new GitRefusal("sandbox", "Copilot's sandbox probe ended without its pass line", { rule: "the probe ended without its pass line", harness: "copilot" });
@@ -536,6 +536,9 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
   const why = last.code === 5 ? "the probe's decoy did not come up" : last.said ? `its command did not run: ${last.said.slice(0, 400)}` : last.timedOut ? "timed out" : `no result, exit ${last.code}: ${String(last.stderr || "").trim().split("\n").at(-1)?.slice(0, 300) || ""}`;
   throw new GitRefusal("sandbox", `Copilot's sandbox could not start here: ${why}`, { harness: "copilot" });
 }
+
+/** The refusal's detail (for the log) when the probe's toolchain rule broke: the node and npm a command did not run. */
+const toolchainRefused = (t) => `Copilot's sandbox does not give commands the stage's toolchain: ${t?.node ? `${t.node}${t.npm ? ` and ${t.npm}` : ""} not found or not run in a command` : TOOLCHAIN_RULE}`;
 
 /**
  * Copilot's flags in local mode: its sandbox, tools and URLs allowed, no update of itself, no logs (Copilot binds its logs
@@ -588,9 +591,9 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
       const marker = probeMarker();
       const ctmp = freshCopilotTmp(local) || probe.agentTmp;
       const args = ["-s", outer, "--", "env", `TMPDIR=${ctmp}`, process.execPath, script, "/bin/sh", "-c", COPILOT_DECOY_LAUNCH, "sh", ...flags];
-      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains)) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+      const r = await run("srt", args, { cwd: local.clone, env: { ...env, ...probeEnv(probe, marker, offListHost(local.domains), local.toolchain || null) }, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
       const got = await probeResult(probe, env);
-      if (got.code === 4) throw new GitRefusal("sandbox", `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot", local: true });
+      if (got.code === 4) throw new GitRefusal("sandbox", got.said === TOOLCHAIN_RULE ? toolchainRefused(local.toolchain) : `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot", local: true });
       // A pass is exit 0 with the probe's own last line, never exit 0 alone.
       if (got.code === 0 && got.said === PROBE_PASS) return;
       if (got.code === 0) throw new GitRefusal("sandbox", "Copilot's sandbox probe ended without its pass line", { rule: "the probe ended without its pass line", harness: "copilot", local: true });

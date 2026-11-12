@@ -246,7 +246,7 @@ export const gitRefusalReason = (code, issue, { path = null, rule = null, harnes
         ? path
           ? `Codex's sandbox cannot protect the checkout's \`${path}\`, a link to nothing (sandbox); the harness was not started. Remove the link from the branch, or point it at a path that exists`
           : rule === TOOLCHAIN_RULE
-            ? `Copilot's sandbox started but its commands do not find or cannot run the stage's toolchain (node on the stage's PATH, and the npm beside it) (sandbox); the harness was not started. The work job's log names the node`
+            ? `Copilot's sandbox started but its commands do not find or cannot run the stage's toolchain (node on the stage's PATH, and the npm beside it) (sandbox); the harness was not started. ${local ? "The stage log on the local machine" : "The work job's log"} names the node`
             : rule
             ? `${harness === "copilot" ? "Copilot" : "Codex"}'s sandbox started but does not confine here (${rule}) (sandbox); the harness was not started, so no command ran unconfined. ${local ? "The stage log on the local machine" : "The work job's log"} has the probe's output`
             : local
@@ -1355,7 +1355,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
 }
 
 /**

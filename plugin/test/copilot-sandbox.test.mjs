@@ -368,3 +368,48 @@ test("Copilot's probe proves the stage's toolchain runs in a command; a toolchai
   await assert.rejects(copilotSandboxCheck(runner, { PATH: `${bin}:/usr/bin` }, { run: leaving(`4\n${TOOLCHAIN_RULE}\n`), model }), (e) => e instanceof GitRefusal && e.rule === TOOLCHAIN_RULE && e.message.includes(node));
   assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "copilot" }), /do not find or cannot run the stage's toolchain/);
 });
+
+test("local Copilot (#111): the stage's node, from a version manager in the home, read-only in its commands' reach and first on their PATH; the probe proves it", async () => {
+  const { localToolchain } = await import("../scripts/lib/copilot-runner.mjs");
+  const { localSandbox } = await import("../scripts/lib/local.mjs");
+  const root = mkdtempSync(join(tmpdir(), "cplt-"));
+  const home = join(root, "h");
+  const prefix = join(home, ".nvm", "versions", "node", "v24");
+  for (const d of [join(prefix, "bin"), join(prefix, "etc"), join(home, ".shims"), join(home, "bin"), join(home, "work", ".factory")]) mkdirSync(d, { recursive: true });
+  for (const f of [join(prefix, "bin", "node"), join(prefix, "bin", "npm"), join(home, "bin", "node"), join(home, "mise")]) writeFileSync(f, "#!/bin/sh\n", { mode: 0o755 });
+  symlinkSync(join(home, "mise"), join(home, ".shims", "node"));
+  const node = join(prefix, "bin", "node");
+  const off = [join(home, "work"), join(home, "work", ".factory")];
+  const got = localToolchain({ path: `rel:${join(prefix, "bin")}:/usr/bin`, off, home });
+  assert.deepEqual(got, { bin: join(prefix, "bin"), toolchain: { node, npm: join(prefix, "bin", "npm") }, dirs: [prefix], denied: [join(prefix, "etc")] }, "its install prefix only, its global npmrc denied");
+  assert.deepEqual(localToolchain({ path: `${join(home, ".shims")}:/usr/bin`, off, home, execPath: node }).toolchain.node, node, "a version manager's shim gives way to the node it chose, the one running Factory");
+  assert.deepEqual(localToolchain({ path: join(home, "bin"), off, home }).dirs, [], "never the home itself");
+  assert.deepEqual(localToolchain({ path: join(prefix, "bin"), off: [prefix], home }).dirs, [], "never what a sandbox may write");
+  assert.deepEqual(localToolchain({ path: join(prefix, "bin"), off, home: join(prefix, "lib") }).dirs, [], "never above the home");
+  assert.equal(localToolchain({ path: "/nowhere", off, home }), null, "no node: nothing to bind or prove");
+  // Factory's bwrap leads each command's PATH with it (after Factory's git), among bubblewrap's own options only.
+  const real = join(root, "real-bwrap");
+  writeFileSync(real, '#!/bin/sh\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
+  writeFileSync(join(root, "bwrap"), bwrapShim(real, null, "/s/t", `/u/gitbin:${join(prefix, "bin")}`), { mode: 0o755 });
+  const argv = ["--setenv", "PATH", "/u/bwrapbin:/usr/bin", "--setenv", "TMPDIR", "/x", "--", "sh", "--setenv", "PATH", "kept"];
+  const out = execFileSync(join(root, "bwrap"), argv, { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim().split("\n").map((l) => l.slice(4));
+  assert.deepEqual(out, ["--setenv", "PATH", `/u/gitbin:${join(prefix, "bin")}:/u/bwrapbin:/usr/bin`, "--setenv", "TMPDIR", "/s/t", "--", "sh", "--setenv", "PATH", "kept"]);
+  assert.ok(!bwrapShim("/usr/bin/bwrap", "/h", "/t").includes("PATH"), "a runner's shim leaves PATH alone");
+  // The stage hands it to the harness process, and the local probe proves it, Blocking with the rule.
+  assert.deepEqual(localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ toolchain: got.toolchain }) }).toolchain, got.toolchain);
+  const [tmp, usage, clone, chome] = ["t", "u", "w", "c"].map((d) => join(root, d));
+  for (const d of [tmp, join(usage, "harness"), clone, chome]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(chome, "settings.json"), "{}\n");
+  const local = { clone, addDirs: [tmp], cacheDirs: [], domains: LOCAL_DOMAINS, copilotTmp: copilotPrivateTmp(usage), toolchain: got.toolchain };
+  const env = { PATH: "/usr/bin", TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COPILOT_HOME: chome };
+  let seen = "";
+  const leaving = (result) => async (cmd, args, opts) => {
+    seen = opts.env.FACTORY_COPILOT_PROBE;
+    writeFileSync(join(tmp, PROBE_RESULT), result);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await copilotLocalCheck(local, "/o.json", env, { run: leaving(`0\n${PROBE_PASS}\n`), home });
+  assert.ok(seen.includes(`!= '${node}'`) && seen.includes("npm --version"), "the probe checks the stage's node and npm");
+  await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving(`4\n${TOOLCHAIN_RULE}\n`), home }), (e) => e.rule === TOOLCHAIN_RULE && e.local && e.message.includes(node));
+  assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "copilot", local: true }), /stage's toolchain.*The stage log on the local machine/);
+});

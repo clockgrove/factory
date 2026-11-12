@@ -124,6 +124,24 @@ export function localMediaCapMb(env = process.env) {
 export const lfsPinArgs = (remoteUrl) => (lfsPinConfig(remoteUrl) || []).flatMap(([k, v]) => ["-c", `${k}=${v}`]);
 
 /**
+ * The rule for every git command Factory runs in the agent's checkout that moves HEAD or writes the working tree
+ * (outbox.mjs putOn and its catch-up merge sync, the rebased branch put on the checkout in worker.mjs, local.mjs
+ * PREPARE_CLONE's restore, the local clone itself): it never smudges Git LFS files. That git has no GitHub credential
+ * (locally none at all, GIT_TERMINAL_PROMPT=0), and a reused clone keeps the filters an earlier stage installed with
+ * filter.lfs.required set, so a smudge of an object the store lacks asks for a username and fails the whole command
+ * (#73). With GIT_LFS_SKIP_SMUDGE=1 git-lfs writes the pointer files and makes no request; the media then arrives by
+ * Factory's hand-over (outbox.mjs lfsSetup, lfsHandOver): the objects fetched into the mirror with Factory's token,
+ * copied into the checkout's store, and `git lfs checkout`. git-lfs's clean side is untouched, so the index stays right.
+ */
+export const SKIP_SMUDGE_ENV = Object.freeze({ GIT_LFS_SKIP_SMUDGE: "1" });
+
+/**
+ * `inner` (a command as argv) under SKIP_SMUDGE_ENV. The variable rides in argv (`env K=V ...`), not the process env: a
+ * runner's agent gets only an allow-listed env (proc.mjs asAgent), so a variable set there would never reach its git.
+ */
+export const noSmudge = (inner) => ["env", ...Object.entries(SKIP_SMUDGE_ENV).map(([k, v]) => `${k}=${v}`), ...inner];
+
+/**
  * Factory's own host-side git sees the real history: refs/replace and .git/info/grafts, which sandboxed code can write,
  * are ignored (the graft file is pointed at a path that cannot exist).
  */

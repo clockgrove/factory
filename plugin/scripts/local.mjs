@@ -39,7 +39,7 @@ import { BACKENDS } from "./lib/backend.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
-import { lfsPinEnv } from "./lib/lfs.mjs";
+import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { authorGate, trustedIssue } from "./lib/objective-trust.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -329,7 +329,7 @@ export class Local {
     const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
     const code = await new Promise((done) => {
       // The token goes to https://github.com only (the empty entry clears every inherited helper, for any host).
-      const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, GIT_LFS_SKIP_SMUDGE: "1" }, stdio: ["ignore", "inherit", "inherit"] });
+      const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, ...SKIP_SMUDGE_ENV }, stdio: ["ignore", "inherit", "inherit"] });
       child.on("close", done);
     });
     if (code !== 0) throw new Error(`git clone of ${this.repoFull} failed (exit ${code})`);

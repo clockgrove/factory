@@ -2,7 +2,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -804,4 +804,91 @@ test("gitError: git's first error lines with the paths they list, never its clos
   assert.equal(gitError("Aborting\n"), "Aborting", "no error: line: the first line");
   assert.equal(gitError(""), "");
   assert.ok(gitError(`error: ${"x".repeat(1000)}\n`).length <= 300);
+});
+
+/**
+ * #73: a reused checkout whose earlier stage installed the Git LFS filters (required), and whose own git cannot reach LFS
+ * storage, as the agent's sandbox cannot (no credential). With git-lfs: the real filters, set up by lfsSetup, and an
+ * endpoint that does not exist. Without it: a stand-in required filter that fails as git-lfs does with no credential,
+ * unless told to skip the smudge. `media` puts an LFS file into origin: its object in origin's store, its pointer
+ * committed on `branch` by someone else. Returns {real, media}.
+ */
+async function lfsCheckout(r) {
+  const real = !!(await lfsVersion());
+  r.put(r.other, ".gitattributes", "assets/** filter=lfs diff=lfs merge=lfs -text\n");
+  r.run(r.other, "commit", "-q", "-m", "lfs");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  if (real) {
+    const box = await open(r);
+    await box.feed();
+    assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+    assert.equal((await box.lfsSetup(box.base)).used, true);
+    r.run(r.work, "config", "lfs.url", `file://${join(r.root, "no-lfs-storage")}`);
+  } else {
+    const fake = join(r.root, "fake-lfs-smudge");
+    writeFileSync(fake, `#!/bin/sh\nif [ "$GIT_LFS_SKIP_SMUDGE" = 1 ]; then exec cat; fi\necho "fatal: could not read Username for 'https://github.com': terminal prompts disabled" >&2\nexit 1\n`, { mode: 0o755 });
+    r.run(r.work, "config", "filter.lfs.smudge", fake);
+    r.run(r.work, "config", "filter.lfs.clean", "cat");
+    r.run(r.work, "config", "filter.lfs.required", "true");
+  }
+  const media = (branch, file) => {
+    const bytes = randomBytes(3000);
+    const oid = createHash("sha256").update(bytes).digest("hex");
+    const store = join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4));
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, oid), bytes);
+    r.run(r.other, "fetch", "-q", "origin");
+    r.run(r.other, "checkout", "-q", "-B", branch, `origin/${branch}`);
+    r.put(r.other, file, `${POINTER_HEAD}\noid sha256:${oid}\nsize 3000\n`);
+    r.run(r.other, "commit", "-q", "--no-verify", "-m", `media ${file}`);
+    r.run(r.other, "push", "-q", "origin", `HEAD:${branch}`);
+    return bytes;
+  };
+  return { real, media };
+}
+
+test("outbox: a resumed checkout with Git LFS filters is put on a branch that gained media it lacks; the media arrives by the hand-over (#73)", async () => {
+  const r = repos();
+  const { real, media } = await lfsCheckout(r);
+  // The first stage: the branch from main, one commit, pushed.
+  const box1 = await open(r);
+  await box1.feed();
+  assert.deepEqual(await box1.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
+  r.put(r.work, "app.txt", "v2\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  assert.equal(await box1.push(), true, box1.error);
+  // Meanwhile the branch gains media whose object the checkout's store lacks.
+  const bytes = media("factory/1", "assets/a.bin");
+  const head = r.run(r.other, "rev-parse", "HEAD");
+  // The resumed run: Factory's checkout leaves a pointer file and asks LFS storage for nothing.
+  const box2 = await open(r);
+  await box2.feed();
+  assert.deepEqual(await box2.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), head);
+  assert.match(readFileSync(join(r.work, "assets/a.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
+  if (!real) return;
+  // Then the hand-over: the object from Factory's mirror, the real file in the checkout, nothing shown as changed.
+  assert.deepEqual(await box2.lfsSetup(box2.expected()), { used: true, ok: true, reason: "", warning: "" });
+  assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), bytes);
+  assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "");
+});
+
+test("outbox: the checkout takes Factory's catch-up merge of a default branch that gained Git LFS media, then the media (#73)", async () => {
+  const r = repos();
+  const { real, media } = await lfsCheckout(r);
+  const box = await withWorkflow(r);
+  r.put(r.work, "app.txt", "v2\n");
+  r.run(r.work, "commit", "-q", "-m", "work");
+  // Mid-run: the default branch gains media and changes the workflow file, so Factory merges it in before the push.
+  const bytes = media("main", "assets/b.bin");
+  r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
+  r.run(r.other, "commit", "-q", "-m", "ci v2");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  assert.equal(await box.push(), true, box.error);
+  assert.ok(box.merged, "Factory merged the default branch");
+  assert.equal(box.synced, true, "the checkout took the merge");
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), r.run(r.origin, "rev-parse", "factory/1"));
+  assert.equal(box.lfsWarning, "");
+  if (real) assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
+  else assert.match(readFileSync(join(r.work, "assets/b.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
 });

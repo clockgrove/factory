@@ -249,8 +249,13 @@ async function main() {
         // workflow file meanwhile, if any), and the checkout is put on it for validation.
         await outbox.push({ sha: rebasedTo });
         if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} after the rebase: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing`);
-        await outbox.feed({ rebased: outbox.head || rebasedTo });
-        await outbox.agentGit(["checkout", "-q", "-B", branch, "refs/factory/rebased"]);
+        const rebasedHead = outbox.head || rebasedTo;
+        await outbox.feed({ rebased: rebasedHead });
+        // Pointer files for its Git LFS media first (outbox.mjs putOn), then the media handed over.
+        const moved = await outbox.putOn("refs/factory/rebased");
+        if (moved.code !== 0) throw new Error(`the checkout could not be put on the rebased ${branch}: ${moved.error}`);
+        const media = await outbox.lfsHandOver(rebasedHead, { timeoutMs: remainingMs(deadlineAt) });
+        if (media.warning) log(`warning: ${media.warning}; the run goes on with pointer files`);
       }
       log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);
     }
@@ -472,7 +477,7 @@ async function main() {
   // A conflict no pass resolved, and no cap or plan-time Question to name: Blocked with it, not as a run that left no commits.
   if (catchConflict() && !planNeeds && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) outbox.block(outbox.error);
   if (!pushed) log(`push refused: ${outbox.error}${outbox.detail ? ` (GitHub: ${outbox.detail})` : ""}`);
-  else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}`);
+  else if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} since the branch's base: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing${outbox.synced ? "" : " (the checkout could not take the merge; the next push builds on it)"}${outbox.lfsWarning ? `; warning: ${outbox.lfsWarning}` : ""}`);
   let { pr: found, delta } = await observe(repo, outbox, { branch }, token);
   const hits = protectedTouched(delta.files, protectedList);
   // A split part's PR says `Refs #N`, every other one `Closes #N`. The exit record's `part` decides when the pass wrote

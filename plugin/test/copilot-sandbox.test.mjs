@@ -31,7 +31,7 @@ test("Copilot on a runner: its own sandbox under Factory's policy, never --allow
   assert.equal(runner.home, COPILOT_RUNNER_HOME);
   const { args, env } = harnessCommand({ harness: "copilot", model: "m", prompt: "p", runner });
   assert.ok(!args.includes("--allow-all"), "no longer everything allowed");
-  assert.deepEqual(args.slice(0, 6), ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--add-dir", AGENT.tmp], "file tools in the checkout and the agent's temp directory only; no update of itself");
+  assert.deepEqual(args.slice(0, 8), ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--log-level", "none", "--add-dir", AGENT.tmp], "file tools in the checkout and the agent's temp directory only; no update of itself; no logs in its commands' reach");
   assert.ok(!args.includes("--trust-folder"));
   assert.equal(args.find((a) => a.startsWith("--secret-env-vars=")), `--secret-env-vars=${SHELL_SECRET_KEYS.join(",")}`);
   assert.equal(env.COPILOT_HOME, `${AGENT.home}/.factory-copilot/home`);
@@ -61,7 +61,7 @@ test("Copilot's runner policy: writes in the checkout, temp directory and caches
   for (const p of ["config", "hooks", "commondir", "info", "info/attributes"]) assert.ok(fs.readonlyPaths.includes(join(runner.clone, ".git", p)), `.git/${p}: read-only`);
   for (const p of [".github/hooks", ".github/copilot", ".mcp.json"]) assert.ok(fs.readonlyPaths.includes(join(runner.clone, p)), `${p}: read-only`);
   for (const p of [".gitconfig", ".config/gh", ".factory"]) assert.ok(fs.readonlyPaths.includes(join(runner.agentHome, p)), `the agent's ${p}: read for its commands`);
-  assert.deepEqual(fs.deniedPaths, [COPILOT_TMP, join(runner.copilotHome, "logs")], "Copilot's own TMPDIR (each command's network rules) and its logs; the agent's login is for its commands");
+  assert.deepEqual(fs.deniedPaths, [COPILOT_TMP], "Copilot's own TMPDIR (each command's network rules); the agent's login is for its commands");
   assert.deepEqual(settings.userPolicy.network, { allowOutbound: true, allowLocalNetwork: false, allowedHosts: LOCAL_DOMAINS });
   const local = copilotLocalSettings({ clone: "/c", addDirs: ["/c"], home: "/h", platform: "darwin" }).sandbox.userPolicy.filesystem;
   assert.ok(local.deniedPaths.includes("/h/.config/gh"), "local mode still denies the developer's credential stores");

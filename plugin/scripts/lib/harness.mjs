@@ -470,7 +470,7 @@ const SERVICES_SAID = new Set();
  * entry point (docs/PLAN.md names this).
  */
 /** The probe's own rule texts, the only ones a Blocked comment repeats (a host is named by its kind, not by the probe). */
-const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line"]);
+const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line", "Copilot's logs are readable by commands"]);
 const ruleOf = (said) => (RULES.has(said) ? said : /^[a-z0-9.-]+, off the allow-list, is reachable$/.test(said) ? "a host off the allow-list is reachable" : "an unknown rule");
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
   let last = null;

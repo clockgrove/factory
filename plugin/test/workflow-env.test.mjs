@@ -87,3 +87,53 @@ test("every FACTORY_* name Factory reads is a setting, a secret, a control varia
   assert.deepEqual(unclassified, [], "classify each new name: FACTORY_CONTROL_KEYS (scrubbed from children) or FACTORY_CHILD_KEYS (lib/harness.mjs)");
   for (const k of [...FACTORY_CONTROL_KEYS, ...FACTORY_CHILD_KEYS, ...[...SECRET_INPUTS].map((n) => `FACTORY_${n.toUpperCase()}`)]) assert.ok(!WORKFLOW_SETTINGS.has(k), `${k} is no workflow setting`);
 });
+
+test("local mode reads the workflow's settings from the default branch's commit, never the working tree's branch; a working tree that differs is named (#122)", async () => {
+  const { committedWorkflowEnv } = await import("../scripts/lib/local.mjs");
+  const { workflowDriftLines } = await import("../scripts/lib/inputs.mjs");
+  const { workflowSourceChecks } = await import("../scripts/doctor.mjs");
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(join(tmpdir(), "wf-"));
+  const git = (dir, ...a) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" } });
+  const origin = join(root, "origin.git");
+  const dev = join(root, "dev");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "trunk", origin]);
+  execFileSync("git", ["clone", "-q", origin, dev]);
+  const flow = (env) => {
+    mkdirSync(join(dev, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(dev, ".github", "workflows", "factory.yml"), `name: Factory\nenv:\n${Object.entries(env).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\njobs: {}\n`);
+  };
+  git(dev, "checkout", "-q", "-b", "trunk");
+  writeFileSync(join(dev, "README"), "x\n");
+  git(dev, "add", "README");
+  git(dev, "commit", "-q", "-m", "first");
+  git(dev, "push", "-q", "origin", "trunk");
+  assert.deepEqual(committedWorkflowEnv(dev), { wf: {}, branch: "trunk", error: "origin/trunk has no .github/workflows/factory.yml" }, "none on the default branch: none used");
+  flow({ FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "pypi.org" });
+  git(dev, "add", ".github");
+  git(dev, "commit", "-q", "-m", "workflow");
+  git(dev, "push", "-q", "origin", "trunk");
+  // An unreviewed branch checked out here widens local mode in its working tree, and in a commit of its own.
+  git(dev, "checkout", "-q", "-b", "contributor");
+  flow({ FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "evil.example", FACTORY_LOCAL_ENV: "AWS_SECRET_ACCESS_KEY" });
+  git(dev, "commit", "-qam", "widen");
+  const committed = committedWorkflowEnv(dev);
+  assert.deepEqual(committed, { wf: { FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "pypi.org" }, branch: "trunk", error: null }, "the default branch's, whatever is checked out");
+  const working = workflowEnv(readFileSync(join(dev, ".github", "workflows", "factory.yml"), "utf8"));
+  assert.deepEqual(workflowDriftLines(working, committed), [".github/workflows/factory.yml here differs from origin/trunk in FACTORY_LOCAL_DOMAINS, FACTORY_LOCAL_ENV: local mode uses origin/trunk's; commit the change to trunk to use it"]);
+  const [warn] = workflowSourceChecks(working, committed);
+  assert.equal(warn.status, "WARN");
+  assert.match(warn.detail, /FACTORY_LOCAL_DOMAINS, FACTORY_LOCAL_ENV/);
+  assert.deepEqual(workflowSourceChecks(committed.wf, committed), [], "the same settings: nothing to say");
+  assert.match(workflowSourceChecks({}, { wf: {}, branch: "trunk", error: "origin/trunk has no .github/workflows/factory.yml" })[0].detail, /uses none/);
+  // A change pushed to the default branch is what the next start reads (fetched first).
+  git(dev, "checkout", "-q", "trunk");
+  flow({ FACTORY_MODEL: "m2" });
+  git(dev, "commit", "-qam", "m2");
+  git(dev, "push", "-q", "origin", "trunk");
+  git(dev, "reset", "-q", "--hard", "HEAD~1");
+  git(dev, "update-ref", "refs/remotes/origin/trunk", "HEAD");
+  assert.deepEqual(committedWorkflowEnv(dev).wf, { FACTORY_MODEL: "m2" });
+});

@@ -25,10 +25,10 @@ import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowSettings } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -246,9 +246,14 @@ export class Local {
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
     if (!this.repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
     this.repo = repoOf(this.repoFull);
+    // The workflow's settings as committed on the default branch (#122), never this working tree's, whatever branch is
+    // checked out: as the Action runs the reviewed workflow. A working tree that differs is named (doctor too).
+    const committed = committedWorkflowEnv(this.dev);
+    if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
+    for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     // The workflow file is repository content: only its settings reach a stage, never a name Factory reads as its own
     // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
-    const wf = workflowSettings(readWorkflowEnv(this.dev));
+    const wf = workflowSettings(committed.wf);
     if (wf.dropped.length) log(`.github/workflows/factory.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`);
     this.wf = wf.kept;
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();

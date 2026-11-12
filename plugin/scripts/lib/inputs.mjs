@@ -107,6 +107,22 @@ export const WORKFLOW_SETTINGS = new Set([
     .map((n) => `FACTORY_${n.toUpperCase()}`),
   ...LOCAL_WORKFLOW_SETTINGS,
 ]);
+/** The settings whose value differs between two workflow env blocks (the working tree's and the default branch's, #122). */
+export const workflowDrift = (working = {}, committed = {}) => {
+  const a = workflowSettings(working).kept;
+  const b = workflowSettings(committed).kept;
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => a[k] !== b[k]).sort();
+};
+/**
+ * What local mode says when this working tree's workflow settings differ from the default branch's, which it uses (#122):
+ * one line naming the settings, or none.
+ */
+export function workflowDriftLines(working, committed) {
+  if (!committed.branch) return [];
+  const drift = workflowDrift(working, committed.wf);
+  return drift.length ? [`.github/workflows/factory.yml here differs from origin/${committed.branch} in ${drift.join(", ")}: local mode uses origin/${committed.branch}'s; commit the change to ${committed.branch} to use it`] : [];
+}
+
 /** A workflow env block (local.mjs workflowEnv) split into the settings Factory takes and the names it drops. */
 export function workflowSettings(wf = {}) {
   const kept = {};

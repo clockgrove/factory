@@ -59,7 +59,7 @@ test("allowed_domains: added to LOCAL_DOMAINS, host names and *. entries only; d
   assert.match(rows[0].detail, /"bad_host", "1\.2\.3\.4", "http:\/\/x\.org"/);
 });
 
-test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it; Copilot unchanged", () => {
+test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it", () => {
   const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: { FACTORY_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
   assert.deepEqual(runner.domains, [...LOCAL_DOMAINS, "pypi.org"]);
   assert.equal(runner.home, CLAUDE_HOME);
@@ -89,7 +89,6 @@ test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it; C
   assert.equal(claudeRunner({ harness: "codex", agent: AGENT, clone: "/c" }), null);
   assert.equal(claudeRunner({ harness: "claude", agent: null, clone: "/c" }), null, "no agent uid, no runner sandbox");
   assert.equal(claudeRunner({ harness: "claude", agent: AGENT, clone: "/c", env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
-  assert.ok(harnessCommand({ harness: "copilot", prompt: "p", runner }).args.includes("--allow-all"), "Copilot skips its sandbox on a runner");
 });
 
 test("a ~/.bashrc a validation command planted in the agent's home never runs at the next Claude start", async () => {
@@ -159,10 +158,9 @@ test("the checkout's git state is put back before every Claude start; a replaced
   dropGitPins();
 });
 
-test("allowed_domains is the fix for Claude's and Codex's sandboxes on a runner, not Copilot's", () => {
-  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "claude"), /`allowed_domains` input/);
-  assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "codex"), /`allowed_domains` input/);
-  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, "copilot"), null);
+test("allowed_domains is the fix for every harness's sandbox on a runner", () => {
+  for (const h of ["claude", "codex", "copilot"]) assert.match(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, h), /`allowed_domains` input/, h);
+  assert.equal(BACKENDS.actions.sandbox.deniedFix(["cdn.example.org"], {}, null), null);
 });
 
 test("doctor: in a job, bwrap, socat and rg; on a self-hosted runner, AppArmor with the one-time admin step", async () => {

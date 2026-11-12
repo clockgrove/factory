@@ -115,6 +115,9 @@ export const NAMESPACE_WRAP = [
   '[ -d "$home" ] && [ ! -L "$home" ] || { echo "factory: the agent home is not a plain directory" >&2; exit 126; }',
   `echo $$ > ${AGENT_CGROUP}/cgroup.procs`,
   "mount --make-rprivate /",
+  // The iptables lock stays writable (a mount of its own): Copilot's sandbox takes it as the agent where ip6tables is the
+  // legacy backend (launch.mjs START). Only where it is a plain file.
+  "if [ -f /run/xtables.lock ] && [ ! -L /run/xtables.lock ]; then mount --bind /run/xtables.lock /run/xtables.lock; fi",
   'private="/tmp /var/tmp /dev/shm /run/lock"',
   'for d in $private; do [ -d "$d" ] && [ ! -L "$d" ] && mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs "$d"; done',
   'mount --bind "$home" "$home"',
@@ -122,7 +125,7 @@ export const NAMESPACE_WRAP = [
   // Every other mount, read-only: the root and whatever the vendor mounted beside it (/dev, /sys, the cgroup tree, its
   // own share). A target findmnt prints escaped (a space in it) fails the remount, and the wrapper with it: fail closed.
   'findmnt -rno TARGET | while IFS= read -r m; do',
-  '  case "$m" in /proc|/proc/*|/dev/pts|"$home"|/tmp|/var/tmp|/dev/shm|/run/lock) continue ;; esac',
+  '  case "$m" in /proc|/proc/*|/dev/pts|"$home"|/tmp|/var/tmp|/dev/shm|/run/lock|/run/xtables.lock) continue ;; esac',
   '  if [ "$m" = /dev ]; then mount -o remount,bind,ro,nosuid "$m"; else mount -o remount,bind,ro,nosuid,nodev "$m"; fi',
   "done",
   'export HOME="$home" TMPDIR="$tmp" PATH="$path" USER="$user" LOGNAME="$user"',

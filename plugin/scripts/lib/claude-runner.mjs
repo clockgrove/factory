@@ -383,7 +383,7 @@ export const CLAUDE_TMPDIR = "/tmp";
 export const runnerEnv = (layout) => ({ CLAUDE_CONFIG_DIR: layout.config, CLAUDE_CODE_TMPDIR: layout.cmdTmp, CLAUDE_ENV_FILE: layout.envFile, NODE_USE_ENV_PROXY: "1" });
 
 /**
- * Claude Code's command as the agent (proc.mjs asAgent), its unit without ProtectKernelTunables: that setting's
+ * Claude Code's (and Copilot's) command as the agent (proc.mjs asAgent), its unit without ProtectKernelTunables: that setting's
  * read-only mounts over parts of /proc keep a user namespace from mounting a fresh /proc, so bubblewrap cannot start
  * under it ("Can't mount proc on /newroot/proc"). The agent stays unprivileged with no new privileges and no
  * capabilities, so /proc/sys and /sys stay root's to write; every other command the agent runs keeps the setting.

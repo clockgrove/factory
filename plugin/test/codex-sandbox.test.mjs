@@ -253,7 +253,8 @@ test("Codex's task card on a runner: the sandbox notes, and setup's services out
   assert.match(notes, /deniedHosts/);
   assert.match(notes, /outside your sandbox: your commands cannot reach it/);
   assert.doesNotMatch(notes, /localhost:5432/, "no relay for Codex: no port is offered");
-  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "copilot", []), "");
+  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "copilot", [5432]), notes, "Copilot's are the same");
+  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "unknown", []), "");
 });
 
 test("doctor: Codex in a job needs bwrap, AppArmor on a self-hosted runner, and its sandbox starting", async () => {

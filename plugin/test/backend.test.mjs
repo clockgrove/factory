@@ -40,7 +40,7 @@ test("sandbox and gate: local wraps Factory's commands in srt (and factory-db fo
   assert.equal(BACKENDS.actions.sandbox.harness({ FACTORY_LOCAL_SANDBOX: "{}" }), null);
   assert.throws(() => BACKENDS.local.sandbox.harness({ FACTORY_LOCAL: "1" }), /unsandboxed/);
   assert.equal(BACKENDS.actions.sandbox.cardNotes(), "");
-  assert.equal(BACKENDS.actions.sandbox.cardNotes({}, "copilot"), "", "Copilot skips its sandbox on a runner");
+  assert.match(BACKENDS.actions.sandbox.cardNotes({}, "copilot"), /\$TMPDIR[\s\S]*`deniedHosts`[\s\S]*outside your sandbox/, "Copilot's sandbox on a runner: Codex's notes");
   assert.match(BACKENDS.actions.sandbox.cardNotes({}, "codex"), /\$TMPDIR[\s\S]*`deniedHosts`/, "Codex's sandbox on a runner: local mode's notes");
   assert.match(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /\$TMPDIR[\s\S]*`deniedHosts`/, "Claude Code's sandbox on a runner: local mode's notes");
   assert.doesNotMatch(BACKENDS.actions.sandbox.cardNotes({}, "claude"), /localhost|service/i, "no service offered: nothing said about services");

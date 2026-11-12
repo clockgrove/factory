@@ -10,6 +10,7 @@ import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
+import { COPILOT_DECOY_LAUNCH, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
 import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -252,6 +253,17 @@ export function codexRunner({ harness, agent, clone, env = process.env, codexHom
 }
 
 /**
+ * A runner's Copilot run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
+ * (lib/copilot-runner.mjs: Factory's HOME for Copilot with its bwrap and release, its fresh COPILOT_HOME, the caches,
+ * the agent's GitHub login) and the hosts its commands may reach (`allowed_domains`). Null for any other harness, in
+ * local mode and before the agent uid exists.
+ */
+export function copilotRunner({ harness, agent, clone, env = process.env, copilotHome }) {
+  if (harness !== "copilot" || !agent || !clone || backend(env).name === "local") return null;
+  return { clone, ...copilotRunnerLayout(agent, copilotHome), domains: runnerDomains(input("allowed_domains", { env })) };
+}
+
+/**
  * The command line for one run. `resume` is the session id of the run to continue
  * (Claude --resume, Codex exec resume, Copilot --resume); `agent` names a pinned
  * agent definition to run as (Claude --agent, Copilot --agent; Codex has no flag,
@@ -262,10 +274,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
   const hidden = hiddenFromShell(shellSecrets);
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
   // lib/local.mjs to one bar. On a runner and in a cloud sandbox VM (`runner`: the agent uid's checkout, home and temp
-  // directory), Claude Code and Codex run their commands in their own sandboxes to the same bar (claudeRunnerSettings,
-  // codexRunnerConfig), so they never see its credential; Copilot skips its permissions there and keeps the credential
-  // out of its commands' environment by its own flags only: its commands, the same uid, can still read it from /proc
-  // (PLAN.md, #87).
+  // directory), every harness runs its commands in its own sandbox to the same bar (claudeRunnerSettings,
+  // codexRunnerConfig, copilotRunnerSettings), so they never see its credential (PLAN.md, #87).
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine
@@ -323,7 +333,10 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // the working directory and the added directories (without --allow-all-paths, any other path is refused headless).
       // The package caches are writable to commands through the policy only: an added directory's .github/agents and
       // .github/skills would load as trusted configuration. --trust-folder is never passed (the clone stays untrusted).
-      const perms = local ? ["--sandbox", "--allow-all-tools", "--allow-all-urls", ...local.addDirs.filter((d) => !(local.cacheDirs || []).includes(d)).flatMap((d) => ["--add-dir", d])] : ["--allow-all"];
+      // On a runner the same: its sandbox under the policy in the COPILOT_HOME Factory makes afresh before every start
+      // (copilot-runner.mjs), file tools in the checkout and the agent's temp directory. Only where there is no agent uid
+      // and no local sandbox (a developer's /factory:run) is everything allowed.
+      const perms = local ? ["--sandbox", "--allow-all-tools", "--allow-all-urls", ...local.addDirs.filter((d) => !(local.cacheDirs || []).includes(d)).flatMap((d) => ["--add-dir", d])] : runner ? copilotRunnerFlags(runner) : ["--allow-all"];
       // Copilot's built-in GitHub MCP server would act with whatever token Copilot holds: always off.
       // The prompt goes on stdin, never `-p <prompt>`: one argv string over 128 KB fails to start on Linux (E2BIG), and
       // without -p a piped stdin is a non-interactive prompt (1.0.107, checked live with 200 KB, fresh and --resume).
@@ -340,7 +353,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // it (1.0.107, checked live), so it is what is left, never plus the session's past. Copilot takes no less than 30
       // credits; with less than that left runHarness starts no Copilot run at all.
       if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
-      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV } : {} };
+      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV } : runner ? { ...HARNESS_GIT_ENV, ...copilotRunnerEnv(runner) } : {} };
     }
     default:
       throw new Error(`unknown harness ${harness}`);
@@ -410,10 +423,10 @@ export function seedSessionTotal(sessionId, total) {
 }
 
 /**
- * Before a runner's Claude Code or Codex start (lib/claude-runner.mjs, lib/codex-runner.mjs): the checkout's git state put
- * back as Factory pinned it, then local mode's pre-start clear of the checkout (local.mjs clearHarnessConfig), and the
- * harness's state made afresh, and the sandbox's writable roots made real directories; all as the agent. Codex's
- * sandbox then runs the confinement probe. A failure refuses the start.
+ * Before a runner's harness start (lib/claude-runner.mjs, lib/codex-runner.mjs, lib/copilot-runner.mjs): the checkout's
+ * git state put back as Factory pinned it, then local mode's pre-start clear of the checkout (local.mjs
+ * clearHarnessConfig), and the harness's state made afresh, and the sandbox's writable roots made real directories; all
+ * as the agent. Codex's and Copilot's sandboxes then run the confinement probe. A failure refuses the start.
  */
 export async function runnerClear(harness, runner, env) {
   await restoreRunnerGit(runner.clone, env);
@@ -425,6 +438,12 @@ export async function runnerClear(harness, runner, env) {
     await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [runner.clone] }, runner.agentHome, env);
     runner.present = await presentPaths(runner.clone, env);
     await codexSandboxCheck(runner, env);
+    return cleared;
+  }
+  if (harness === "copilot") {
+    await resetCopilotState(runner, env);
+    await realRoots({ fix: [runner.agentTmp, ...runner.caches], check: [runner.clone] }, runner.agentHome, env);
+    await copilotSandboxCheck(runner, env);
     return cleared;
   }
   await resetClaudeState(runner, env);
@@ -472,6 +491,41 @@ export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
 }
 
 /**
+ * Copilot's sandbox, before every start, as the agent and launched as Copilot is (its flags, its HOME, PATH and unit),
+ * with the run's settings in a COPILOT_HOME of its own. Copilot has no command that runs one command in its sandbox, so
+ * the probe is a Copilot session against a model on this machine's loopback (copilot-runner.mjs probeModel: no network,
+ * no bill) that asks for one shell call, CONFINEMENT_PROBE beside a decoy, as for Codex: no environment the probe can
+ * read may show the marker Copilot and the decoy hold (as a run's Copilot holds the token: the bubblewrap Copilot starts
+ * holds it too unless Factory's shim cleared it), nothing the probe makes in the agent's home may be there afterwards,
+ * the checkout's .git/config must refuse a write, the agent's temp directory take one, and a host off the allow-list be
+ * refused. A broken rule Blocks; a probe that left no result (Copilot's sandbox did not start, a timeout) is tried once
+ * more, then Blocks.
+ */
+export async function copilotSandboxCheck(runner, env, { run = exec, model = probeModel } = {}) {
+  let last = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await resetProbe(runner, env);
+    const marker = probeMarker();
+    const mock = await model();
+    const flags = [...copilotRunnerFlags(runner), `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+    const [cmd, args] = copilotLaunch(runner, "/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", ...flags], env.PATH);
+    const childEnv = { ...env, ...HARNESS_GIT_ENV, ...mock.env, ...probeEnv(runner, marker, offListHost(runner.domains)) };
+    const extra = [...Object.keys(mock.env), ...Object.keys(probeEnv(runner, marker, "")), ...Object.keys(HARNESS_GIT_ENV)];
+    // As a run's Copilot: in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
+    const [c, a, e] = agentUser() ? asClaudeAgent(cmd, args, childEnv, extra, runner.clone) : [cmd, args, childEnv];
+    const r = await run(c, a, { cwd: runner.clone, env: e, input: "Run the one command you are given.", agentExtra: extra, timeoutMs: 180_000 }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+    await mock.close();
+    const got = await probeResult(runner, env);
+    if (got.code === 4) throw new GitRefusal("sandbox", `Copilot's sandbox does not confine: ${got.said.slice(0, 200)}`, { rule: ruleOf(got.said), harness: "copilot" });
+    if (got.code === 0) return;
+    last = { ...r, said: got.said };
+    if (attempt === 1) log(`Copilot's sandbox probe did not run (${r.timedOut ? "timed out" : got.code === null ? `no result, exit ${r.code}` : `exit ${got.code}`}); trying once more`);
+  }
+  const why = last.code === 5 ? "the probe's decoy did not come up" : String(last.stderr || "").trim().split("\n").at(-1)?.slice(0, 300) || (last.timedOut ? "timed out" : `exit ${last.code}`);
+  throw new GitRefusal("sandbox", `Copilot's sandbox could not start here: ${why}`, { harness: "copilot" });
+}
+
+/**
  * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
  * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
  * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
@@ -505,8 +559,9 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Locally: whatever hook, settings or MCP server a sandboxed command left in the clone is gone before the harness starts.
   // A runner's Claude Code gets the same pre-start clear, as the agent: its own git and the checkout's protected paths
   // (local.mjs prepareClone) are what its sandbox guards.
-  // A runner's Codex: its own sandbox, and the same clear before its start (lib/codex-runner.mjs).
-  const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env }) || codexRunner({ harness, agent: agentUid, clone: cwd, env });
+  // A runner's Codex and Copilot: their own sandboxes, and the same clear before each start (lib/codex-runner.mjs,
+  // lib/copilot-runner.mjs).
+  const runner = claudeRunner({ harness, agent: agentUid, clone: cwd, env }) || codexRunner({ harness, agent: agentUid, clone: cwd, env }) || copilotRunner({ harness, agent: agentUid, clone: cwd, env });
   const cleared = runner ? await runnerClear(harness, runner, scrubbedEnv(env)) : await backend(env).sandbox.beforeHarness(scrubbedEnv(env));
   const cacheTtl = promptCacheTtl(harness, env);
   const creditUsd = copilotCreditUsd();
@@ -542,15 +597,15 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Each would make Copilot load the clone's hooks, settings, .mcp.json or extensions (COPILOT_ALLOW_ALL trusts the folder).
   if (harness === "copilot") for (const k of ["COPILOT_ALLOW_ALL", "GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"]) delete childEnv[k];
   // Linux: the harness process itself in srt, the stage's TMPDIR put back (srt points it at its shared /tmp/claude).
-  // A runner's Claude Code or Codex: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home
-  // (claude-runner.mjs runnerLaunch).
-  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
+  // A runner's harness: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home
+  // (claude-runner.mjs runnerLaunch; Copilot's with Factory's bwrap first, copilot-runner.mjs copilotLaunch).
+  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || ""}`, cmd, ...args]] : runner && harness === "copilot" ? copilotLaunch(runner, cmd, args, childEnv.PATH) : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
   const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), ...shellSecrets, "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
-  // A runner's Claude Code: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
+  // A runner's Claude Code and Copilot: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
   // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
-  const [execCmd, execArgs, execEnv] = runner && harness === "claude" ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
+  const [execCmd, execArgs, execEnv] = runner && (harness === "claude" || harness === "copilot") ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
   const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();

@@ -246,7 +246,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
   // Local mode (a developer's box): each harness runs its model's commands in its own sandbox, configured by
   // lib/local.mjs to one bar. On a runner and in a cloud sandbox VM (`runner`: the agent uid's checkout, home and temp
   // directory), Claude Code runs its commands in its own sandbox to the same bar (claudeRunnerSettings), so they never
-  // see its credential; Codex and Copilot skip their permissions there and withhold the credential by their own flags.
+  // see its credential; Codex and Copilot skip their permissions there and keep the credential out of their commands'
+  // environment by their own flags only: their commands, the same uid, can still read it from /proc (PLAN.md, #87).
   switch (harness) {
     case "claude": {
       // One cached system-prompt prefix for every worker and reviewer on identical checkouts: the per-machine

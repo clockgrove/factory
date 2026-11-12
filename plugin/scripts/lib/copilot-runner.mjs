@@ -28,13 +28,15 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { lstatSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, lstatSync, rmSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
-import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, codexReadOnly, copilotHomeFiles, copilotLocalSettings, gitGuards } from "./local.mjs";
+import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnly, copilotHomeFiles, copilotLocalSettings, gitGuards } from "./local.mjs";
 import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
+
+export { TOOLCHAIN_RULE };
 
 /** Copilot's HOME on a runner: Factory's own, outside every home the agent can write. */
 export const COPILOT_RUNNER_HOME = "/var/lib/factory-copilot";
@@ -114,7 +116,8 @@ export async function prepareCopilotHome(layout, { env = process.env, sudo = tru
  * agent's GitHub login (read-only), and nothing else of the agent's home is in their sandbox. Denied: Copilot's own
  * TMPDIR (COPILOT_TMP), where it writes each command's network rules before it loads them. (Its logs directory Copilot
  * binds into every command's sandbox whatever the policy says; it writes none: copilotRunnerFlags.) No credential store
- * is denied: the agent's home holds only that login, which is for its commands. The network is `domains`.
+ * is denied: the agent's home holds only that login, which is for its commands. They also read the stage's toolchain
+ * (`runner.toolchain`, runnerToolchain), read-only. The network is `domains`.
  */
 export function copilotRunnerSettings(runner) {
   return copilotLocalSettings({
@@ -122,7 +125,7 @@ export function copilotRunnerSettings(runner) {
     clone: runner.clone,
     addDirs: [runner.clone, runner.agentTmp, ...runner.caches],
     readOnly: [...new Set([...gitGuards(runner.clone), ...codexReadOnly(runner.clone)])],
-    readable: runner.login,
+    readable: [...runner.login, ...(runner.toolchain || [])],
     denied: [COPILOT_TMP],
     platform: "linux",
   });
@@ -156,8 +159,82 @@ export const absolutePath = (path = "") => path.split(":").filter((d) => d.start
  * nothing of the agent's home, so nothing the agent wrote is read at its start.
  */
 export function copilotLaunch(layout, cmd, args, path = process.env.PATH || "") {
-  const safe = absolutePath(path).split(":").filter((d) => d && d !== layout.agentHome && !d.startsWith(`${layout.agentHome}/`));
-  return ["/bin/sh", ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${layout.home}`, `PATH=${[layout.bin, ...safe].join(":")}`, cmd, ...args]];
+  return ["/bin/sh", ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${layout.home}`, `PATH=${[layout.bin, ...launchPath(layout, path)].join(":")}`, cmd, ...args]];
+}
+
+/** The stage's PATH as Copilot gets it after Factory's bin: its absolute entries, none in the agent's home. */
+export const launchPath = (layout, path = "") => absolutePath(path).split(":").filter((d) => d && !within(d, layout.agentHome));
+
+/** Whether `p` is `dir` or under it. */
+const within = (p, dir) => p === dir || p.startsWith(`${dir}/`);
+
+/**
+ * What Copilot's sandbox binds into every command itself (MXC's bubblewrap backend, checked with 1.0.109): the system's
+ * own directories. Nothing else of the filesystem is there unless its policy names it: not /usr/local, not /opt (the
+ * toolchains a runner's setup puts there, Actions' /opt/hostedtoolcache), not a home.
+ */
+const SYSTEM_BOUND = ["/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64", "/usr/libx32", "/usr/libexec", "/usr/share", "/etc", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"];
+
+/** Never put in commands' reach as toolchain, nor any directory above one of these: the kernel's and the runtime's own. */
+const NOT_TOOLCHAIN = ["/proc", "/sys", "/dev", "/run", "/var/run"];
+
+/**
+ * The directories the stage's toolchain lives in, by the PATH Copilot gets (launchPath), for its commands to read: each
+ * entry Copilot's sandbox does not bind itself, as its install prefix where it is a `bin` or `sbin` directory (npm is
+ * bin/npm -> ../lib/node_modules/npm, Python's lib is beside its bin). Without them a command finds Copilot's PATH but
+ * none of its toolchain (#105). Never `/`, nothing in or above the agent's home, Factory's HOME for Copilot, its TMPDIR
+ * or NOT_TOOLCHAIN. Pure: runnerToolchain keeps those the agent can reach.
+ */
+export function toolchainDirs(layout, path = "") {
+  const off = [layout.agentHome, layout.home, COPILOT_TMP, ...NOT_TOOLCHAIN];
+  const out = [];
+  for (const d of launchPath(layout, path)) {
+    if (/[\t\n]/.test(d) || SYSTEM_BOUND.some((s) => within(d, s))) continue;
+    const t = /\/s?bin$/.test(d) ? dirname(d) : d;
+    if (t === "/" || off.some((x) => within(t, x) || within(x, t))) continue;
+    if (!out.includes(t)) out.push(t);
+  }
+  // A directory under another one kept is in commands' reach already.
+  return out.filter((t) => !out.some((o) => o !== t && within(t, o)));
+}
+
+/**
+ * The stage's toolchain directories (toolchainDirs) that the agent can reach, read as the agent and by where each really
+ * is (a link into the agent's home or Factory's is dropped): Copilot's sandbox cannot bind one it cannot reach, and would
+ * not start. Kept on `runner.toolchain` for its settings (copilotRunnerSettings), once per runner.
+ */
+export async function runnerToolchain(runner, env = process.env) {
+  if (runner.toolchain) return runner.toolchain;
+  const dirs = toolchainDirs(runner, env.PATH || "");
+  const r = dirs.length ? await exec("/bin/sh", ["-c", 'for d; do r=$(cd -P -- "$d" 2>/dev/null && pwd -P) && printf \'%s\\t%s\\n\' "$d" "$r"; done; exit 0', "sh", ...dirs], { cwd: runner.agentHome, env }) : { stdout: "" };
+  const off = [runner.agentHome, runner.home, COPILOT_TMP, ...NOT_TOOLCHAIN];
+  const reached = String(r.stdout)
+    .split("\n")
+    .map((l) => l.split("\t"))
+    .filter(([d, real]) => dirs.includes(d) && real?.startsWith("/") && real !== "/" && !off.some((x) => within(real, x) || within(x, real)));
+  runner.toolchain = reached.map(([d]) => d);
+  return runner.toolchain;
+}
+
+/**
+ * The stage's node and the npm beside it, as a command finds them on the PATH Copilot gets (launchPath): the first entry
+ * with an executable `node`, read by Factory. {node, npm}: npm "" where there is none beside it; null where the PATH has
+ * no node (nothing to prove).
+ */
+export function stageNode(layout, path = "") {
+  const exe = (f) => {
+    try {
+      accessSync(f, constants.X_OK);
+      return statSync(f).isFile();
+    } catch {
+      return false;
+    }
+  };
+  for (const d of launchPath(layout, path)) {
+    if (!exe(join(d, "node"))) continue;
+    return { node: join(d, "node"), npm: exe(join(d, "npm")) ? join(d, "npm") : "" };
+  }
+  return null;
 }
 export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "factory: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
 
@@ -181,6 +258,7 @@ async function writeAgentFiles(dir, files, cwd, env) {
 export async function resetCopilotState(runner, env = process.env) {
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -m 700 -- "$1" "$2" "$3"', "sh", runner.state, runner.copilotHome, runner.sessions], { cwd: runner.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", `Copilot's state could not be made afresh: ${String(made.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
+  await runnerToolchain(runner, env);
   await writeAgentFiles(runner.copilotHome, homeFiles(runner), runner.agentHome, env);
   for (const tar of SESSIONS_HELD()) {
     const put = await untarAsAgent(tar, runner.sessions, { cwd: runner.agentHome, env });
@@ -211,9 +289,10 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
  * line to PROBE_RESULT: a pass is 0 and PROBE_PASS, nothing else. `copilotTmp`: Copilot's own TMPDIR (local mode's:
  * harness.mjs copilotLocalCheck); the commands' own $TMPDIR must not hold its rules either. `tmp`: the temp directory
  * commands must have, for the result and the temp rule, by its path (local mode: where $TMPDIR is not it, as without
- * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR.
+ * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
+ * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105); null: no rule.
  */
-export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "" }) => {
+export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null }) => {
   const T = tmp ? sq(tmp) : '"$TMPDIR"';
   return [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > ${T}/${PROBE_RESULT}; exit 0; }`,
@@ -227,6 +306,8 @@ export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", 
     // Bubblewrap is the sandbox's first process: its arguments must not hold the marker. (Copilot's own: Codex's probe
     // gets the marker as an argument, which its sandbox's first process then holds.)
     `if tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e ${sq(marker)} -e ${sq(`${PROBE_MARKER}=${marker}`)}; then out 4 "the credential stand-in is in the first process's command line"; fi`,
+    // The stage's toolchain, as a command finds it: the same node first on its PATH, and it and npm run.
+    ...(toolchain?.node ? [`if [ "$(command -v node)" != ${sq(toolchain.node)} ] || ! node --version >/dev/null 2>&1${toolchain.npm ? " || ! npm --version >/dev/null 2>&1" : ""}; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
     `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${T} ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
     `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
@@ -294,15 +375,16 @@ export async function probeModel() {
 
 /**
  * The probe's environment beside the provider's: a fresh COPILOT_HOME of its own (the run's settings), Factory's
- * release, the marker Copilot and the decoy hold (as Copilot holds the token), and the scripts.
+ * release, the marker Copilot and the decoy hold (as Copilot holds the token), and the scripts; `toolchain` for its
+ * toolchain rule (probeDriver).
  */
-export function probeEnv(runner, marker, host) {
+export function probeEnv(runner, marker, host, toolchain = null) {
   return {
     COPILOT_HOME: runner.probeHome,
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
     FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}) }),
+    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}) }),
   };
 }
 
@@ -311,6 +393,7 @@ export async function resetProbe(runner, env = process.env) {
   if (factoryPlanted(runner)) throw new GitRefusal("sandbox", "a file is in Factory's HOME for Copilot that Factory did not put there", { rule: "Factory's HOME for Copilot is writable", harness: "copilot" });
   const made = await exec("/bin/sh", ["-c", 'set -e; rm -rf -- "$1"; mkdir -p -m 700 -- "$1"; rm -f -- "$2" "$3"', "sh", runner.probeHome, join(runner.agentTmp, PROBE_RESULT), join(runner.agentHome, PROBE_PERSIST)], { cwd: runner.agentHome, env });
   if (made.code !== 0) throw new GitRefusal("git-clear", "Copilot's sandbox probe could not be prepared");
+  await runnerToolchain(runner, env);
   await writeAgentFiles(runner.probeHome, homeFiles(runner), runner.agentHome, env);
 }
 

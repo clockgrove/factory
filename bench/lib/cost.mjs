@@ -266,9 +266,10 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.basis = rec.basis && /harness-reported/.test(rec.basis) ? rec.basis : part.usd === null ? "unmetered: no total_cost_usd" : "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
     } else if (rec.harness === "codex") {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
-      // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's.
+      // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's. The spend
+      // through a relayed gateway key is no harness spend: kept as the worker priced it.
       const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents);
-      part.usd = priced.usd;
+      part.usd = priced.usd === null ? null : round4(priced.usd + (num(rec.workerKeyUsd) ?? 0));
       if (priced.lowerBound || (rec.subAgents?.length && rec.usdLowerBound)) out.usdLowerBound = true;
       // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
       const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
@@ -286,6 +287,12 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     } else {
       part.usd = num(rec.usd);
       part.basis = rec.basis ?? "unknown harness";
+    }
+    // The spend through a relayed AI Gateway key (#97), already in the part's dollars: broken out on the row.
+    const key = num(rec.workerKeyUsd);
+    if (key !== null) {
+      part.workerKeyUsd = key;
+      out.workerKeyUsd = round4((out.workerKeyUsd ?? 0) + key);
     }
     out.parts.push(part);
     // Activity: turns and harness calls per Objective (the token levers' metric), sessions (continuity),

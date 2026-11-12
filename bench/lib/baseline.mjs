@@ -15,6 +15,8 @@ export const MEASURES = [
   ["turns", (r) => r.activity?.turns ?? null, "turns"],
   ["usd", (r) => r.cost?.usd ?? null, "$"],
   // A sandbox's cost is cents per stage: kept to four places, where the other measures keep one.
+  // The spend through a relayed AI Gateway key (#97), already in "$": the worker's pipeline, apart from the harness.
+  ["workerKeyUsd", (r) => r.cost?.workerKeyUsd ?? null, "worker key $", 2],
   ["vendorUsd", (r) => r.cost?.vendorUsd ?? null, "sandbox $", 4],
   ["totalUsd", (r) => r.cost?.totalUsd ?? r.cost?.usd ?? null, "total $", 2],
   ["cachedTokens", (r) => r.cost?.tokens?.cached ?? null, "cached tok"],

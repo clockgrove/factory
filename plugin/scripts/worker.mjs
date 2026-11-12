@@ -32,6 +32,7 @@ import { refusalExit } from "./lib/local.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
+import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -67,6 +68,8 @@ async function main() {
   let cred = { env: {} };
   // The worker secrets' values (lib/worker-secrets.mjs), masked in the uploaded stream like every other secret.
   let shellSecretValues = [];
+  // The gateway relay for an opted-in AI Gateway key (lib/worker-relay.mjs), closed and booked when the stage ends.
+  let relay = null;
 
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
@@ -87,19 +90,22 @@ async function main() {
   let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
+    // Totals once the relay has closed: every call in flight is priced by then.
+    await closeWorkerRelay(relay);
+    const workerKey = relay ? relay.totals() : null;
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
     }
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
-    if (spendInProgress()) progress.spend(usage.usd);
+    if (spendInProgress()) progress.spend(usage.usd, usage.workerKeyUsd ? { workerKeyUsd: usage.workerKeyUsd } : null);
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
@@ -309,8 +315,17 @@ async function main() {
   // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
-  const shellSecrets = openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) });
-  shellSecretValues = Object.values(shellSecrets);
+  // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
+  const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
+  relay = opened.relay;
+  const shellSecrets = opened.shell;
+  // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
+  shellSecretValues = [...Object.values(shellSecrets), ...opened.masked];
+  if (opened.blocked) {
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: opened.blocked, notify: inputs.notify, stage: "work" }, token);
+    await finish("blocked", opened.blocked);
+    return;
+  }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);

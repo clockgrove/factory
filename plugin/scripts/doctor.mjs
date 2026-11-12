@@ -19,7 +19,9 @@ import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
-import { agentUser, exec, onPath } from "./lib/proc.mjs";
+import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
+import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
+import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, sandboxDroppedHosts, readWorkflowEnv } from "./lib/local.mjs";
@@ -93,6 +95,22 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   }
   if (probe) out.push(await probeHarness({ inputs, env }));
   return out;
+}
+
+/**
+ * The gateway relay (lib/gateway-relay.mjs), when the worker secrets carry the AI Gateway key: it is relayed, never handed
+ * over, so a harness the relay does not reach yet, or a machine without its forwarder's tools, Blocks every stage.
+ */
+export function gatewayRelayChecks({ inputs, env = process.env, which = whichSync }) {
+  // An AI Gateway key under any other name (another case, or a gateway key's value): withheld from the worker.
+  const values = parseSecretValues(inputs.workerSecretValues);
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (src) => values.get(src) ?? (env.GITHUB_ACTIONS ? undefined : env[src]), factoryKey: "" });
+  const odd = unrelayedGatewayKeys(ws.env);
+  const out = odd.length ? [WARN("gateway relay", `${odd.map(nameLabel).join(", ")}: an AI Gateway key under a name other than ${RELAYED_NAME}, so the worker never gets it (a gateway key is only ever relayed)`, `opt the key in as ${RELAYED_NAME}=SOURCE, the one name Factory relays`)] : [];
+  if (!parseWorkerSecrets(inputs.workerSecrets).entries.some((e) => e.name === RELAYED_NAME)) return out;
+  if (inputs.harness === "copilot") return [...out, WARN("gateway relay", `${RELAYED_NAME} is relayed, never handed over, and the relay does not reach Copilot's sandbox yet: every stage Blocks before its run`, `run on Claude Code or Codex, or leave ${RELAYED_NAME} out of worker_secrets`)];
+  const missing = ["bwrap", "socat"].filter((b) => !which(b, { PATH: SAFE_PATH }) && !(env.GITHUB_ACTIONS ? null : which(b, env)));
+  return [...out, missing.length ? WARN("gateway relay", `${RELAYED_NAME} is relayed through a forwarder in each command's sandbox, which needs ${missing.join(" and ")} here: every stage Blocks before its run`, `install ${missing.map((b) => (b === "bwrap" ? "bubblewrap" : b)).join(" ")} (the Action does on GitHub's hosted runners)`) : PASS("gateway relay", `${RELAYED_NAME} stays in Factory's process; the worker's shell gets a relay token and FACTORY_GATEWAY_URL, and each call counts against max_usd`)];
 }
 
 /**
@@ -1153,6 +1171,7 @@ export async function jobChecks({ inputs, repo, token, app, checkout, notice = f
   const out = [];
   out.push(...(await credentialChecks({ inputs })));
   out.push(...workerSecretChecks({ inputs }));
+  out.push(...gatewayRelayChecks({ inputs }));
   out.push(...(await githubChecks({ inputs, repo, token, app, notice, job: true })));
   out.push(...(await repositoryChecks({ inputs, checkout })));
   out.push(...(await runnerChecks({ inputs })));
@@ -1221,6 +1240,7 @@ async function main() {
   const results = [];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
+  results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));

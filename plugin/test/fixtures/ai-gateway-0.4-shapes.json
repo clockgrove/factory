@@ -1,0 +1,63 @@
+{
+  "_note": "The Vercel AI Gateway's answers as one real probe saw them on 2026-11-12 (AI SDK ai@7.0.165, protocol v4: a free text call, the same streamed, a $0.007 image call, and the generation lookups), reduced to their shapes. Every id, request id, x-vercel-id, clientSessionId and timestamp is fake; costs are the real ones.",
+  "text": {
+    "status": 200,
+    "headers": { "content-type": "application/json", "x-vercel-id": "fake1::fake2-0000000000000-000000000000" },
+    "body": {
+      "content": [{ "type": "text", "text": "ok" }],
+      "finishReason": "stop",
+      "usage": { "inputTokens": 19, "outputTokens": 1 },
+      "providerMetadata": {
+        "gateway": {
+          "routing": { "originalModelId": "nvidia/nemotron-3.5-lightning-free", "resolvedProvider": "nvidia", "finalProvider": "nvidia", "modelAttemptCount": 1, "modelAttempts": [{ "canonicalSlug": "nvidia/nemotron-3.5-lightning-free", "success": true, "providerAttempts": [{ "provider": "nvidia", "success": true, "startTime": 1000000000000, "endTime": 1000000000100, "providerRequestId": "00000000-0000-0000-0000-000000000001", "statusCode": 200, "providerResponseId": "chatcmpl-00000000-0000-0000-0000-000000000001" }] }], "clientSessionId": "fakefakefakefakefakefakefakefake", "clientSessionIdSource": "fingerprint" },
+          "cost": "0",
+          "marketCost": "0",
+          "surchargeCost": "0",
+          "gatewayCost": "0",
+          "generationId": "gen_FAKETEXT0000000000000000A1"
+        }
+      },
+      "warnings": []
+    }
+  },
+  "stream": {
+    "status": 200,
+    "headers": { "content-type": "text/event-stream", "x-generation-id": "gen_FAKESTREAM00000000000000B2", "x-model-id": "nvidia/nemotron-3.5-lightning-free", "x-vercel-id": "fake1::fake2-0000000000000-000000000001" },
+    "events": [
+      { "type": "stream-start", "warnings": [] },
+      { "type": "response-metadata", "id": "chatcmpl-00000000-0000-0000-0000-000000000002", "modelId": "nvidia/nemotron-3.5-lightning-free", "timestamp": "2000-01-01T00:00:00.000Z" },
+      { "type": "reasoning-start", "id": "r0" },
+      { "type": "reasoning-delta", "id": "r0", "delta": "ok" },
+      { "type": "reasoning-end", "id": "r0" },
+      {
+        "type": "finish",
+        "finishReason": "stop",
+        "usage": { "inputTokens": 19, "outputTokens": 5 },
+        "providerMetadata": { "gateway": { "routing": { "originalModelId": "nvidia/nemotron-3.5-lightning-free", "clientSessionId": "fakefakefakefakefakefakefakefake" }, "cost": "0", "marketCost": "0", "surchargeCost": "0", "gatewayCost": "0", "generationId": "gen_FAKESTREAM00000000000000B2" } }
+      }
+    ]
+  },
+  "image": {
+    "status": 200,
+    "headers": { "content-type": "application/json", "x-vercel-id": "fake1::fake2-0000000000000-000000000002" },
+    "body": {
+      "images": ["aGk="],
+      "warnings": [],
+      "providerMetadata": {
+        "gateway": {
+          "routing": { "originalModelId": "recraft/recraft-v4.1-flash", "resolvedProvider": "recraft", "finalProvider": "recraft", "clientSessionId": "fakefakefakefakefakefakefakefake" },
+          "cost": "0.007",
+          "marketCost": "0.007",
+          "surchargeCost": "0",
+          "gatewayCost": "0.007",
+          "inferenceCost": "0.007",
+          "inputInferenceCost": "0",
+          "outputInferenceCost": "0.007",
+          "generationId": "gen_FAKEIMAGE000000000000000C3"
+        }
+      }
+    }
+  },
+  "lookupNotYet": { "status": 404, "body": { "error": "not_found", "id": "gen_FAKETEXT0000000000000000A1", "message": "Generation not found" } },
+  "lookupImage": { "status": 200, "body": { "data": { "id": "gen_FAKEIMAGE000000000000000C3", "total_cost": 0.007, "market_cost": 0.007, "surcharge_cost": 0, "gateway_cost": 0.007, "upstream_inference_cost": 0, "created_at": "2000-01-01T00:00:00.000Z", "model": "recraft/recraft-v4.1-flash", "provider_name": "recraft", "tokens_prompt": 0, "tokens_completion": 0 } } }
+}

@@ -632,9 +632,13 @@ export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded 
  * The card's line on the worker secrets in the worker's shell (lib/worker-secrets.mjs), by name; "" when there are none.
  */
 export function shellSecretsNote(names = []) {
-  if (!names.length) return "";
+  // The worker's own state directory (harness.mjs workerStateDir), on every card.
+  const state = "\n\nKeep your own state between commands (a run ledger, caches) in `$FACTORY_STATE_DIR`: outside the checkout, kept for this stage. A ledger there is advisory; Factory's own count caps spend.";
+  if (!names.length) return state;
   const them = names.length === 1 ? "it" : "them";
-  return `\n\nThe repository gave your shell ${names.map((n) => `\`${n}\``).join(", ")}, for what the Objective needs: every command you run can read and spend ${them}. Use ${them} only for the Objective's own steps, never print ${them}, and never write ${them} into a file or a commit.`;
+  // An AI Gateway key is relayed (gateway-relay.mjs): the name holds the relay's token, the address is FACTORY_GATEWAY_URL.
+  const relayed = names.includes("AI_GATEWAY_API_KEY") ? " `AI_GATEWAY_API_KEY` holds a relay token, not the key: Factory relays each call to the AI Gateway, counts it against the Objective's max_usd and refuses calls once it is reached (stop then, and say so). Point the gateway client at `$FACTORY_GATEWAY_URL` (the AI SDK: `createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY, baseURL: process.env.FACTORY_GATEWAY_URL + \"/v4/ai\" })`); a client that ignores it reaches nothing." : "";
+  return `${state}\n\nThe repository gave your shell ${names.map((n) => `\`${n}\``).join(", ")}, for what the Objective needs: every command you run can read and spend ${them}. Use ${them} only for the Objective's own steps, never print ${them}, and never write ${them} into a file or a commit.${relayed}`;
 }
 
 /**
@@ -712,14 +716,15 @@ export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
   /^[A-Za-z0-9-]{1,60}$/.test(env.FACTORY_PROGRESS_RUN || "") ? env.FACTORY_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
 /** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", spend = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+export const progressTail = ({ harness = null, model = "", spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "" }) {
   const lines = [];
   const links = [];
   const started = Date.now();
   let status = "";
   let spend = null;
+  let spendParts = null;
   let read = null;
   let triage = null;
   let asked = null;
@@ -730,7 +735,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const write = async () => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, spend, read, triage, asked });
+    const tail = progressTail({ harness, model, spend, spendParts, read, triage, asked });
     const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
     lastWrite = Date.now();
     await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
@@ -751,8 +756,11 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     });
   };
   /** A run with no usage artifact (local mode) records its dollars here, where any dispatcher can sum them. */
-  progress.spend = (usd) => {
-    if (Number.isFinite(usd)) spend = usd;
+  progress.spend = (usd, parts = null) => {
+    if (Number.isFinite(usd)) {
+      spend = usd;
+      spendParts = parts;
+    }
   };
   /**
    * Record which maintainer decisions this run fed to a model (logic.mjs decisionsRead), so a later pass knows what
@@ -1104,14 +1112,39 @@ function lineageTotal(id, records) {
 }
 
 /** Write usage/result.json and return the merged record. */
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false }) {
+/**
+ * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
+ * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price).
+ * Empty when no relay ran.
+ */
+export function keyBreakdown(records, workerKey = null) {
+  const recs = records.filter((r) => r && typeof r.workerKeyUsd === "number");
+  if (!recs.length && !workerKey) return { fields: {}, extra: 0 };
+  const inPasses = recs.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0);
+  // Spend the relay booked outside every pass (a call that finished after its pass ended): counted all the same.
+  const extra = workerKey ? Math.max(0, (Number(workerKey.usd) || 0) - inPasses) : 0;
+  const keyUsd = Math.round((inPasses + extra) * 1e6) / 1e6;
+  const merged = mergeUsage(records)?.usd ?? null;
+  const total = merged === null && !extra ? null : (merged ?? 0) + extra;
+  return {
+    extra,
+    fields: {
+      workerKeyUsd: keyUsd,
+      harnessUsd: total === null ? null : Math.round(Math.max(0, total - keyUsd) * 1e6) / 1e6,
+      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, refused: workerKey.refused } } : {}),
+    },
+  };
+}
+
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false, workerKey = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
+  const kb = keyBreakdown(records, workerKey);
   const result = {
     harness,
     harnessVersion,
     model: merged.model ?? model ?? null,
-    usd: merged.usd ?? null,
+    usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,
     basis: merged.basis,
@@ -1141,6 +1174,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     sessionTotal: lineageTotal(session?.id, records),
     // Counted by the dispatcher from the progress comment's spend line, not from this record (dispatch.mjs todaysSpend).
     ...(spendInProgress ? { spendInProgress: true } : {}),
+    // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
+    ...kb.fields,
+    // A relayed call whose cost could not be determined: the dollars are a lower bound.
+    ...(workerKey?.unpriced ? { usdLowerBound: true } : {}),
   };
   // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
   const stored = redactSecrets(result);

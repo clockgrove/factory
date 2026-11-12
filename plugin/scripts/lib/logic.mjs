@@ -757,7 +757,7 @@ export const EXITS = ["delivered", "question", "blocked"];
 export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records) >= maxUsd;
 
 /** The exit line's dollars: the figure, else "unmetered" with why (its basis), so no reader takes it for a missing price. */
-export const usdText = (usage) => (typeof usage?.usd === "number" ? String(usage.usd) : `unmetered${/^unmetered: ./.test(usage?.basis || "") ? ` (${usage.basis.slice("unmetered: ".length)})` : ""}`);
+export const usdText = (usage) => (typeof usage?.usd === "number" ? `${usage.usd}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unmetered"}, worker key ${usage.workerKeyUsd})` : ""}` : `unmetered${/^unmetered: ./.test(usage?.basis || "") ? ` (${usage.basis.slice("unmetered: ".length)})` : ""}`);
 
 /** Copilot's own units beside the dollars on the progress line: "; 3 premium requests, 41.2 AI credits"; "" for others. */
 export function copilotCount(usage) {

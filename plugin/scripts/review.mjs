@@ -32,6 +32,7 @@ import { authorGate } from "./lib/objective-trust.mjs";
 import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
+import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -229,6 +230,8 @@ async function main() {
   let cred = { env: {} };
   // The worker secrets' values, once the fix and answer passes have them: masked in the saved stream and transcript.
   let shellSecretValues = [];
+  // The gateway relay for the fix and answer passes (lib/worker-relay.mjs), closed and booked when the stage ends.
+  let relay = null;
   const progress = progressReporter(repo, issue, token, { stage: "review", harness: inputs.harness, model: inputs.reviewerModel });
   if (pr.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
   // The work lineage's session (a restored worker session, a fix pass, the answer pass): what a later stage resumes.
@@ -237,18 +240,21 @@ async function main() {
   let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
+    // Totals once the relay has closed: every call in flight is priced by then.
+    await closeWorkerRelay(relay);
+    const workerKey = relay ? relay.totals() : null;
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
     }
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
-    if (spendInProgress()) progress.spend(usage.usd);
+    if (spendInProgress()) progress.spend(usage.usd, usage.workerKeyUsd ? { workerKeyUsd: usage.workerKeyUsd } : null);
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
@@ -423,8 +429,18 @@ async function main() {
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): the fix and answer passes
   // continue the worker's session, so they get them as the work stage's passes do (passEnv). The reviewer never does: it
   // runs on harnessEnv, and its calls are marked `reviewer` (runHarness strips them there too).
-  const shellSecrets = openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) });
-  shellSecretValues = Object.values(shellSecrets);
+  // An opted-in AI Gateway key stays in this process behind the relay; the passes get its token (lib/worker-relay.mjs).
+  const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
+  relay = opened.relay;
+  const shellSecrets = opened.shell;
+  // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
+  shellSecretValues = [...Object.values(shellSecrets), ...opened.masked];
+  if (opened.blocked) {
+    await dropLabel();
+    await applyExit(repo, { issue, pr, exit: "blocked", reason: opened.blocked, notify: inputs.notify, stage: "review" }, token);
+    await finish("blocked", opened.blocked);
+    return;
+  }
   const passEnv = { ...harnessEnv, ...packShellSecrets(shellSecrets) };
   // A split part's PR keeps `Refs #N` whatever pr.md the answer pass writes.
   const splitPart = isSplitPart(await partsRecord(repo, issue, token).catch(() => null), pr.number);

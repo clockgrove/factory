@@ -1,0 +1,18 @@
+{
+  "_note": "Claude Code reports a run's dollars only at its end (result.total_cost_usd), so the gateway relay prices a running pass's per-message usage from this table (live-spend.mjs). USD per million tokens, Anthropic first-party rates as listed on `date`. `cacheRead` is the listed cache-read rate; `write5m` and `write1h` are the standard 1.25x and 2x of `input` for 5-minute and 1-hour cache writes. A model matches by its exact id or as that id plus a dated suffix; any other model is priced at `upperBound`, the dearest row, so the live estimate never runs low.",
+  "date": "2026-11-03",
+  "source": "Anthropic model pricing (Claude API skill's current-models table, cached 2026-11-03)",
+  "perMillion": {
+    "claude-fable-5-2": { "input": 8.0, "output": 40.0, "cacheRead": 0.2, "write5m": 10.0, "write1h": 16.0 },
+    "claude-mythos-5-2": { "input": 8.0, "output": 40.0, "cacheRead": 0.2, "write5m": 10.0, "write1h": 16.0 },
+    "claude-fable-5-1": { "input": 10.0, "output": 50.0, "cacheRead": 1.0, "write5m": 12.5, "write1h": 20.0 },
+    "claude-fable-5": { "input": 10.0, "output": 50.0, "cacheRead": 1.0, "write5m": 12.5, "write1h": 20.0 },
+    "claude-opus-5-5": { "input": 4.0, "output": 20.0, "cacheRead": 0.2, "write5m": 5.0, "write1h": 8.0 },
+    "claude-opus-5": { "input": 5.0, "output": 25.0, "cacheRead": 0.5, "write5m": 6.25, "write1h": 10.0 },
+    "claude-opus-4-8": { "input": 5.0, "output": 25.0, "cacheRead": 0.5, "write5m": 6.25, "write1h": 10.0 },
+    "claude-sonnet-5-5": { "input": 2.0, "output": 10.0, "cacheRead": 0.1, "write5m": 2.5, "write1h": 4.0 },
+    "claude-sonnet-5": { "input": 2.0, "output": 10.0, "cacheRead": 0.2, "write5m": 2.5, "write1h": 4.0 },
+    "claude-haiku-5-5": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "write5m": 0.125, "write1h": 0.2 }
+  },
+  "upperBound": { "input": 10.0, "output": 50.0, "cacheRead": 1.0, "write5m": 12.5, "write1h": 20.0 }
+}

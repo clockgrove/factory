@@ -609,7 +609,7 @@ export function spendRecords(collected, { app = null } = {}) {
     const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, usd: spend ? modelUsd : null, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
+    out.push({ source: "spend", harness, model, usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!out.some((r) => r.usd !== null || r.vendor)) return [];
@@ -839,8 +839,10 @@ export function markdownTable(rows) {
     const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     const model = r.cost.usd !== null && r.cost.tokens.input !== null ? `${fmtUsd(r.cost.usd)} (${fmtTokens(r.cost.tokens)})` : fmtUsd(r.cost.usd);
+    // The spend through a relayed gateway key (#97) is in the dollars: named beside them.
+    const keyNote = r.cost.workerKeyUsd > 0 ? ` incl. ${fmtUsd(r.cost.workerKeyUsd)} worker key` : "";
     // A sandbox's vendor cost beside the model's, and the total: dollars per merged Objective counts both.
-    const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? model : `${model} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
+    const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
     const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
     const cells = [`#${r.issue}`, r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];

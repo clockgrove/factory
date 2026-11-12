@@ -3,8 +3,8 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFileSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,10 +14,13 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
-import { MAX_ROLLOUT_BYTES, codexSessionRoot, codexThreads, localRollouts, withSubAgents } from "./codex-threads.mjs";
+import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
+import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend } from "./gateway-relay.mjs";
+import { relayProbeCommand } from "./relay-shim.mjs";
+import { liveSpend } from "./live-spend.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -53,7 +56,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -75,6 +78,8 @@ export function scrubbedEnv(base = process.env, extra = {}) {
   const e = { ...base, ...extra };
   // The worker's shell secrets (lib/worker-secrets.mjs) are for its harness alone (runHarness unpacks them there).
   delete e[SHELL_SECRETS_ENV];
+  // FACTORY_CONTROL_KEYS include the relay's address and the worker's state directory: Factory sets those for a
+  // harness itself, after this (runHarness), so one from anywhere else never reaches a child.
   for (const k of [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, ...GITHUB_TOKEN_KEYS, ...FACTORY_SECRET_KEYS, ...FACTORY_CONTROL_KEYS]) delete e[k];
   for (const k of Object.keys(e)) if (e[k] === undefined || e[k] === null) delete e[k];
   for (const k of Object.keys(e)) if (/^FACTORY_INPUT_(APP_ID|APP_PRIVATE_KEY|APP_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN|AI_GATEWAY_API_KEY|GITHUB_TOKEN|ANTHROPIC_OIDC_EXCHANGE_URL|VERCEL_TOKEN|VERCEL_TEAM_ID|VERCEL_PROJECT_ID)$/.test(k)) delete e[k];
@@ -652,6 +657,10 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own, and out of a
   // reviewer call's altogether.
   const { shell, env } = harnessShell(given, { reviewer });
+  // The gateway relay (gateway-relay.mjs): a pass whose shell carries the stage relay's token is metered through it. The
+  // relayed name with any other value (no relay is running) never reaches a command: the key is never handed over.
+  const relay = shell[RELAYED_NAME] && activeRelay()?.token === shell[RELAYED_NAME] ? activeRelay() : null;
+  if (shell[RELAYED_NAME] && !relay) delete shell[RELAYED_NAME];
   const shellSecrets = Object.keys(shell);
   // On Actions the agent uid writes Copilot's usage file in its own temp directory; Factory reads it back as the agent.
   const agentUid = agentUser();
@@ -683,6 +692,18 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   }
   const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets, gateway: codexGatewayOf(harness, env) });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
+  // The work lineage's passes: the worker's own state directory (outside the checkout, kept for the stage) and, with the
+  // relay, its address. In the harness's own env, so they pass the runner's agent filter and reach its commands.
+  if (!reviewer) extraEnv[STATE_DIR_ENV] = await workerStateDir({ runner, env });
+  if (relay) {
+    extraEnv[RELAY_URL_ENV] = relay.url;
+    // Codex's sandbox before the stage's first relayed pass: a command in it reaches this relay through the shim's
+    // forwarder, or the stage Blocks here, before the run (relay-shim.mjs).
+    if (harness === "codex" && relay.shimDir && !relay.probed?.codex) {
+      await codexRelayProbe({ relay, runner, local: backend(env).sandbox.harness(env), outer: backend(env).sandbox.outer(env), env });
+      relay.probed = { ...relay.probed, codex: true };
+    }
+  }
   if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });
@@ -717,14 +738,25 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Linux: the harness process itself in srt, the stage's TMPDIR put back (srt points it at its shared /tmp/claude).
   // A runner's harness: Factory's HOME for it, its own TMPDIR and a PATH with nothing of the agent's home
   // (claude-runner.mjs runnerLaunch; Copilot's with Factory's bwrap first, copilot-runner.mjs copilotLaunch).
-  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${outerTmp}`, cmd, ...args]] : runner && harness === "copilot" ? copilotLaunch(runner, cmd, args, childEnv.PATH) : runner ? runnerLaunch(runner, cmd, args, childEnv.PATH) : [cmd, args];
+  // The relay's bwrap shim first on the harness's PATH, so its sandbox starts each command with the forwarder
+  // (relay-shim.mjs): inside srt only for the harness (srt's own bubblewrap is the real one), on a runner in its launch.
+  const shimPath = relay?.shimDir ? `${relay.shimDir}:${childEnv.PATH || ""}` : null;
+  if (shimPath && !outer && !runner) childEnv.PATH = shimPath;
+  const [runCmd, runArgs] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${outerTmp}`, ...(shimPath ? [`PATH=${shimPath}`] : []), cmd, ...args]] : runner && harness === "copilot" ? copilotLaunch(runner, cmd, args, childEnv.PATH) : runner ? runnerLaunch(runner, cmd, args, shimPath ?? childEnv.PATH) : [cmd, args];
   // Its stdout and stderr are files, never pipes (proc.mjs fileStdio): a pipe another process in the chain made
   // non-blocking (srt's Node does) crashed Codex on EAGAIN mid-pass (#2649).
   const agentExtra = [...MODEL_SECRET_KEYS, ...Object.keys(extraEnv), ...shellSecrets, "COPILOT_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
   // A runner's Claude Code and Copilot: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
   // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
   const [execCmd, execArgs, execEnv] = runner && (harness === "claude" || harness === "copilot") ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
+  // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
+  const live = relay ? liveSpend(harness, model || null, { prior, creditUsd, rollout: harness === "codex" ? codexRolloutReader(runner, childEnv) : null }) : null;
+  relay?.beginPass(maxUsd, live ? live.usd : null);
+  const lines = live ? (l) => {
+    live.line(l);
+    onLine?.(l);
+  } : onLine;
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
@@ -774,6 +806,17 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (last) SESSION_TOTALS.set(reported.sessionId, kept);
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
+  }
+  // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
+  if (relay) {
+    const pass = await relay.endPass();
+    addKeySpend(rec, pass);
+    if (pass.calls || pass.usd) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unpriced ? "; a call's cost could not be determined, so the relay refused every later call" : ""}`);
+    // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
+    if (!pass.pings && commandsRan(harness, r.stdout)) {
+      rec.workerKeyUnreached = true;
+      log(`${label}: the harness ran commands, but none came up with the gateway relay's forwarder (its sandbox did not start them through Factory's bwrap shim); the relay was out of their reach`);
+    }
   }
   rec.label = label;
   rec.resumed = !!resume;
@@ -837,6 +880,86 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
     return { threads: [], missed: [{ id: null, why: "the read failed" }] };
   }
 }
+/**
+ * A Codex thread's rollout lines that carry its usage (live-spend.mjs rolloutTotal: `token_usage_record` lines and the last
+ * `token_count` one), read as the run's Codex wrote it: on a runner as the agent from its CODEX_HOME, locally from the
+ * CODEX_HOME in `env`. Bounded: those lines only, at most a few seconds (MAX_ROLLOUT_BYTES locally).
+ */
+export function codexRolloutReader(runner, env) {
+  if (runner) {
+    const root = join(runner.codexHome, "sessions");
+    return async (id) => {
+      if (!plainThread(id)) return "";
+      // The newest rollout of the thread (a resumed thread can have more than one).
+      const r = await exec("/bin/sh", ["-c", 'f=$(ls -t "$1"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || exit 0; grep -h \'"token_usage_record"\' "$f"; grep -h \'"token_count"\' "$f" | tail -n 1; exit 0', "sh", root, id], { cwd: runner.agentHome, env: scrubbedEnv(env), timeoutMs: 5_000 });
+      if (r.code !== 0 || r.timedOut) throw new Error(`the rollout could not be read (${r.timedOut ? "timed out" : `exit ${r.code}`})`);
+      return String(r.stdout || "");
+    };
+  }
+  const root = codexSessionRoot(env);
+  return async (id) => {
+    // The newest rollout of the thread, read whole (its usage lines only), as the runner's read does.
+    const files = codexRolloutFiles(root, id).map((f) => join(root, f));
+    if (!files.length) return "";
+    const p = files.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+    return readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"token_usage_record"') || l.includes('"token_count"')).join("\n");
+  };
+}
+
+/** Whether a harness run's stream shows a shell command it ran (Claude Code's Bash tool, Codex's command execution). */
+export function commandsRan(harness, stdout) {
+  const t = String(stdout || "");
+  if (harness === "claude") return /"type":"tool_use","id":"[^"]*","name":"Bash"/.test(t);
+  if (harness === "codex") return /"type":"command_execution"/.test(t);
+  return false;
+}
+
+/**
+ * The worker's state directory (STATE_DIR_ENV): `factory-state` in the temp directory its commands share, which every
+ * sandbox lets them write and which lasts the stage, outside the checkout. Made before each pass (as the agent on a runner).
+ */
+export async function workerStateDir({ runner, env = process.env }) {
+  if (runner) {
+    const dir = join(runner.agentTmp, "factory-state");
+    await exec("/bin/sh", ["-c", 'mkdir -p -m 700 -- "$1"', "sh", dir], { cwd: runner.agentHome, env: scrubbedEnv(env) });
+    return dir;
+  }
+  const dir = join(env.TMPDIR || tmpdir(), "factory-state");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+/**
+ * Codex's sandbox reaches the relay (relay-shim.mjs relayProbeCommand), started as the run's is: on a runner as the agent
+ * with the run's profile, locally with local mode's and in srt when the harness runs there. Throws GitRefusal "relay".
+ */
+export async function codexRelayProbe({ relay, runner, local, outer, env = process.env, run = exec }) {
+  const probe = ["--", "/bin/bash", "-c", relayProbeCommand(relay.port, relay.probeId)];
+  const shimPath = `${relay.shimDir}:${env.PATH || ""}`;
+  let r;
+  if (runner) {
+    const [cmd, args] = runnerLaunch(runner, "codex", ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), ...probe], shimPath);
+    r = await run(cmd, args, { cwd: runner.clone, env: { ...scrubbedEnv(env), ...codexRunnerEnv(runner) }, agentExtra: ["CODEX_HOME"], timeoutMs: 120_000 }).catch((e) => ({ code: null, stdout: "", stderr: e.message }));
+  } else {
+    const codex = ["codex", "sandbox", ...codexLocalConfig({ domains: local?.domains, clone: local?.clone, addDirs: local?.addDirs || [], readOnly: local?.readOnly || [] }), ...probe];
+    // A fresh CODEX_HOME of its own in the stage's temp directory: `codex sandbox` needs no login, and the developer's
+    // config (which local mode's outer sandbox guards) is none of the probe's business.
+    const home = join(env.TMPDIR || tmpdir(), `codex-relay-probe-${process.pid}`);
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    const vars = [`PATH=${shimPath}`, `CODEX_HOME=${home}`, ...(env.TMPDIR ? [`TMPDIR=${env.TMPDIR}`] : [])];
+    const [cmd, args] = outer ? ["srt", ["-s", outer, "--", "env", ...vars, ...codex]] : ["/usr/bin/env", [...vars, ...codex]];
+    try {
+      r = await run(cmd, args, { cwd: local?.clone || process.cwd(), env: scrubbedEnv(env), timeoutMs: 120_000 }).catch((e) => ({ code: null, stdout: "", stderr: e.message }));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+  const said = String(r.stdout || "").trim().split("\n").at(-1) || "";
+  if (r.code === 0 && said === "ok") return;
+  log(`gateway relay probe in Codex's sandbox: exit ${r.code}; ${said.slice(0, 200)} ${String(r.stderr || "").trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
+  throw new GitRefusal("relay", "the gateway relay's forwarder did not come up in Codex's sandbox", { harness: "codex", local: !runner });
+}
+
 /** How long one sub-agent rollout's archive or unpacking may take. */
 const THREAD_READ_MS = 120_000;
 

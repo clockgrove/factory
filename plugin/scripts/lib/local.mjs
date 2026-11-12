@@ -12,6 +12,7 @@ import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer } from "./logic.mjs";
 import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
+import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -359,7 +360,7 @@ export function prepareProtectedPaths(clone) {
 const PREPARE_CLONE = String.raw`
 const fs = require("fs"), path = require("path"), cp = require("child_process");
 const [clone, clear, lockArg, ...dirs] = process.argv.slice(1);
-const P = ${JSON.stringify(SRT_PROTECTED)}, H = ${JSON.stringify(HARNESS_CONFIG)}, X = ${JSON.stringify(HARNESS_EXEC_CONFIG)}, R = ${JSON.stringify(GIT_REPOINT)};
+const P = ${JSON.stringify(SRT_PROTECTED)}, H = ${JSON.stringify(HARNESS_CONFIG)}, X = ${JSON.stringify(HARNESS_EXEC_CONFIG)}, R = ${JSON.stringify(GIT_REPOINT)}, NS = ${JSON.stringify(SKIP_SMUDGE_ENV)};
 const refuse = (why) => { process.stderr.write("refusing to start the harness: " + why + "\n"); process.exit(3); };
 const dotgit = path.join(clone, ".git");
 const gst = fs.lstatSync(dotgit, { throwIfNoEntry: false });
@@ -376,7 +377,8 @@ let names = [];
 if (clear === "1") {
   if (!gst || !gst.isDirectory()) refuse(".git is not the clone's own directory");
   for (const r of R) fs.rmSync(path.join(dotgit, r), { recursive: true, force: true });
-  const git = (...a) => cp.execFileSync("git", ["-C", clone, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.ignoreSubmodules=all", ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+  // Its restore of HARNESS_EXEC_CONFIG writes the working tree: no Git LFS smudge (lfs.mjs noSmudge).
+  const git = (...a) => cp.execFileSync("git", ["-C", clone, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.ignoreSubmodules=all", ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...NS } });
   const real = fs.realpathSync(dotgit);
   const at = git("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").split("\n").filter(Boolean);
   if (at.length !== 2 || at.some((d) => fs.realpathSync(d) !== real)) refuse("git reads another directory than the clone's .git");

@@ -1,18 +1,24 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CHECKS_WAIT_BACKOFF_MS, CHECKS_WAIT_MS, CHECKS_WAIT_TRIES, checksWaitMarker, checksWaitNext, checksWaitOf, checksWaiting, decideExit, marker, setSelf } from "../scripts/lib/logic.mjs";
-import { checksNotStarted } from "../scripts/lib/triage.mjs";
+import { decideExit } from "../scripts/lib/logic.mjs";
 
-// #72: a required check GitHub never started is no red: no fix pass, no counted pass, and never "validation red".
+// #72: a required check GitHub never started is no red: no fix pass, no counted pass, a bounded wait in the stage, and
+// then a Block naming the stuck run, never "validation red".
 
 const SHA = "a".repeat(40);
+const OLD = "b".repeat(40);
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-const BOT = { login: "factory-app[bot]", type: "Bot" };
 const min = 60_000;
+const ago = (m) => new Date(Date.now() - m * min).toISOString();
+const CI = "jobs:\n  quality:\n    name: quality\n    runs-on: ubuntu-latest\n";
 
-/** GitHub on fetch for one head: its check runs and workflow runs (each a value, or a function of the read count). */
-async function withGitHub({ checkRuns = [], workflowRuns = [] }, fn) {
+/**
+ * GitHub on fetch for one head. `checkRuns` and `workflowRuns` are values or functions of the read count; `files` the
+ * workflow files at the head by path; `jobs` Actions jobs by id; `older` an older commit's check runs by name and
+ * `suites` the workflow run of a check suite.
+ */
+async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs = {}, older = {}, suites = {} }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -20,15 +26,24 @@ async function withGitHub({ checkRuns = [], workflowRuns = [] }, fn) {
   const at = (v, n) => (typeof v === "function" ? v(n) : v);
   globalThis.fetch = async (url) => {
     const u = new URL(url);
+    const p = u.pathname;
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-    if (/\/commits\/[0-9a-f]+\/check-runs$/.test(u.pathname)) {
+    if (p === `/repos/${REPO.full}/commits/${SHA}/check-runs`) {
       const runs = at(checkRuns, (reads.checks += 1));
       return json({ total_count: runs.length, check_runs: runs });
     }
-    if (u.pathname === `/repos/${REPO.full}/actions/runs` && u.searchParams.get("head_sha") === SHA) {
+    if (p === `/repos/${REPO.full}/commits/${OLD}/check-runs`) return json({ check_runs: older[u.searchParams.get("check_name")] || [] });
+    if (p === `/repos/${REPO.full}/actions/runs` && u.searchParams.get("head_sha") === SHA) {
       const runs = at(workflowRuns, (reads.runs += 1));
       return json({ total_count: runs.length, workflow_runs: runs });
     }
+    if (p === `/repos/${REPO.full}/actions/runs` && u.searchParams.get("check_suite_id")) return json({ workflow_runs: suites[u.searchParams.get("check_suite_id")] ? [suites[u.searchParams.get("check_suite_id")]] : [] });
+    let m = /\/actions\/jobs\/(\d+)$/.exec(p);
+    if (m && jobs[m[1]]) return json(jobs[m[1]]);
+    m = /\/contents\/(.+)$/.exec(p);
+    if (m && files[m[1]] !== undefined && u.searchParams.get("ref") === SHA) return new Response(files[m[1]], { status: 200 });
+    if (p === `/repos/${REPO.full}/commits` || /\/issues\/\d+\/comments$/.test(p)) return json(p.endsWith("/commits") ? [{ sha: OLD }] : []);
+    if (p === `/repos/${REPO.full}`) return json({ default_branch: "main" });
     return json({ message: "Not Found" }, 404);
   };
   try {
@@ -40,140 +55,115 @@ async function withGitHub({ checkRuns = [], workflowRuns = [] }, fn) {
   }
 }
 
-/** One validation loop on the required check `quality`, the waits cut to milliseconds. */
-async function loop(github, { checks = {}, deadlineMs = 30_000 } = {}) {
+/** One validation loop on the required check `quality`, the waits cut to milliseconds; a fix pass stops at the spent budget. */
+async function loop(github, { checks = {}, deadlineMs = 30_000, triage = null } = {}) {
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const phases = [];
-  const result = await withGitHub(github, () =>
-    validationLoop({
+  let checkReads = 0;
+  const result = await withGitHub(github, async (reads) => {
+    const r = await validationLoop({
       checkout: "/nonexistent",
       commands: [],
       harness: "codex",
-      // A fix pass, if one were reached, stops at the spent budget instead of running a harness.
       maxUsd: 0.01,
       spentUsd: 1,
       session: {},
       taskCard: "",
       env: process.env,
       deadlineAt: Date.now() + deadlineMs,
-      checks: { repo: REPO, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 20, stuckWaitMs: 0, ...checks },
+      checks: { repo: REPO, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, maxPollMs: 4, timeoutMs: 20, stuckWaitMs: 40, guardMs: 0, ...checks },
       outbox: { push: async () => true, expected: () => SHA },
       onPhase: async (l) => phases.push(l),
-    }),
-  );
-  return { result, phases };
+      ...(triage ? { triage } : {}),
+    });
+    checkReads = reads.checks;
+    return r;
+  });
+  return { result, phases, checkReads };
 }
 
-const queuedRun = { id: 77, name: "CI", status: "queued", conclusion: null, check_suite_id: 9, created_at: new Date(Date.now() - 47 * min).toISOString() };
+const ciRun = (over = {}) => ({ id: 77, name: "CI", status: "queued", conclusion: null, check_suite_id: 9, workflow_id: 5, path: ".github/workflows/ci.yml", created_at: ago(47), updated_at: ago(47), ...over });
+const files = { ".github/workflows/ci.yml": CI };
 
-test("a required check whose workflow run GitHub left queued spends no fix pass, counts no pass and Blocks as infrastructure", async () => {
-  const { result, phases } = await loop({ checkRuns: [], workflowRuns: [queuedRun] });
+test("a required check whose workflow run GitHub left queued: a bounded wait in the stage, no fix pass, no counted pass, then a Block naming the run", async () => {
+  const t0 = Date.now();
+  const { result, phases, checkReads } = await loop({ checkRuns: [], workflowRuns: [ciRun()], files });
   assert.equal(result.harness, undefined, "no fix pass was reached");
   assert.equal(result.passes, 0, "the wait is not a validation pass");
-  assert.equal(result.stuck?.deferrable, true);
-  assert.match(result.stuck.reason, /^GitHub has not started the required check\(s\) quality on a{7}: workflow run CI \(run 77\) queued 4\d min with no job started \(infrastructure, not this change\)$/);
-  assert.ok(!phases.some((l) => /fix run$/.test(l) && /red:/.test(l)), phases.join("\n"));
+  assert.match(result.stuck?.reason || "", /^GitHub has not started the required check\(s\) quality on a{7}: workflow run CI \(run 77\) queued 4\d min with no job started \(infrastructure, not this change\)$/);
+  assert.ok(phases.some((l) => /; waiting up to 0 min for GitHub to start it, no fix run$/.test(l)), phases.join("\n"));
+  assert.ok(Date.now() - t0 >= 40 && checkReads >= 3, "it waited in the stage, reading again");
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, stuck: result.stuck.reason } });
   assert.deepEqual(exit, { exit: "blocked", reason: result.stuck.reason });
 });
 
-test("a required check run left queued after its workflow run completed is GitHub's, not the change's", async () => {
-  const checkRuns = [{ id: 2, name: "quality", status: "queued", conclusion: null, check_suite: { id: 9 }, started_at: null }];
-  const { result } = await loop({ checkRuns, workflowRuns: [{ ...queuedRun, status: "completed", conclusion: "success", updated_at: new Date(Date.now() - 50 * min).toISOString() }] });
-  assert.equal(result.harness, undefined);
-  assert.equal(result.stuck.deferrable, true);
-  assert.match(result.stuck.reason, /^GitHub left the required check quality queued on a{7} after its workflow run CI \(run 77\) completed 50 min ago/);
+test("the in-stage wait is bounded by the stage's wall clock less the guard: none left, it Blocks at once", async () => {
+  const { result, phases } = await loop({ checkRuns: [], workflowRuns: [ciRun()], files }, { checks: { guardMs: undefined, stuckWaitMs: undefined } });
+  assert.match(result.stuck.reason, /^GitHub has not started/);
+  assert.ok(!phases.some((l) => /waiting up to/.test(l)), "30 s left is under the 5-minute guard");
 });
 
-test("locally the stage waits a check GitHub has not started out, and validates once it runs: no fix pass", async () => {
-  // GitHub starts the run once Factory has found it queued, and it goes green.
+test("a check GitHub starts during the wait is validated as usual: green, no fix pass", async () => {
   const green = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: new Date().toISOString() }];
-  let seenQueued = false;
-  const workflowRuns = () => ((seenQueued = true), [queuedRun]);
-  const { result, phases } = await loop({ checkRuns: () => (seenQueued ? green : []), workflowRuns }, { checks: { stuckWaitMs: 60_000 }, deadlineMs: 10 * min });
+  let seen = false;
+  const { result } = await loop({ checkRuns: () => (seen ? green : []), workflowRuns: () => ((seen = true), [ciRun()]), files }, { checks: { stuckWaitMs: 60_000 } });
   assert.equal(result.green, true);
   assert.equal(result.passes, 1);
-  assert.ok(phases.some((l) => /^GitHub has not started .*; waiting for GitHub to start it, no fix run$/.test(l)), phases.join("\n"));
 });
 
-test("checksNotStarted: decided on the runs' structure; a check still running, or never reported, is not GitHub's delay", () => {
-  const base = { sha: SHA, names: ["quality"], waitedMin: 15, now: Date.now() };
-  assert.match(checksNotStarted({ ...base, workflowRuns: [] }).reason, /^GitHub created no workflow run for a{7} in 15 min/);
-  assert.equal(checksNotStarted({ ...base, workflowRuns: [] }).deferrable, true);
-  const running = checksNotStarted({ ...base, checkRuns: [{ id: 1, name: "quality", status: "in_progress", check_suite: { id: 9 } }], workflowRuns: [{ ...queuedRun, status: "in_progress" }] });
-  assert.equal(running.deferrable, false);
-  assert.match(running.reason, /still in progress; no failing run to fix$/);
-  const unreported = checksNotStarted({ ...base, workflowRuns: [{ ...queuedRun, status: "completed" }] });
-  assert.equal(unreported.deferrable, false);
-  assert.match(unreported.reason, /never reported on a{7}/);
-  assert.equal(checksNotStarted({ ...base, workflowRuns: null, readError: "403" }).deferrable, false, "unread runs prove nothing");
+test("#72's other shapes: a required check run queued with no runner after its workflow run completed, or inside one still going", async () => {
+  const queued = [{ id: 2, name: "quality", status: "queued", conclusion: null, check_suite: { id: 9 }, started_at: null }];
+  const noRunner = { 2: { id: 2, status: "queued", runner_id: 0, runner_name: "" } };
+  const done = await loop({ checkRuns: queued, jobs: noRunner, workflowRuns: [ciRun({ status: "completed", conclusion: "success", updated_at: ago(50) })] });
+  assert.equal(done.result.harness, undefined);
+  assert.match(done.result.stuck.reason, /: quality queued after its workflow run CI \(run 77\) completed 50 min ago \(infrastructure/);
+  const going = await loop({ checkRuns: queued, jobs: noRunner, workflowRuns: [ciRun({ status: "in_progress" })] });
+  assert.match(going.result.stuck.reason, /: quality queued with no runner in workflow run CI \(run 77\) \(infrastructure/);
+  // A runner took it: it is running, not GitHub's delay, and Blocks at once with no wait.
+  const taken = await loop({ checkRuns: queued, jobs: { 2: { id: 2, status: "queued", runner_id: 4, runner_name: "r4" } }, workflowRuns: [ciRun({ status: "in_progress" })] });
+  assert.equal(taken.result.stuck.githubDelay, false);
+  assert.ok(!taken.phases.some((l) => /waiting up to/.test(l)));
 });
 
-test("checksWaitNext: bounded by tries and time on one head; a new head starts over", () => {
-  const t0 = Date.parse("2026-11-11T10:00:00Z");
-  const first = checksWaitNext(null, { head: SHA, startedAt: t0 - 15 * min, now: t0 });
-  assert.deepEqual(first, { head: SHA, since: new Date(t0 - 15 * min).toISOString(), tries: 1, retryAt: new Date(t0 + CHECKS_WAIT_BACKOFF_MS[0]).toISOString() });
-  let rec = first;
-  let now = t0;
-  for (let i = 2; i < CHECKS_WAIT_TRIES; i += 1) {
-    now += 30 * min;
-    rec = checksWaitNext(rec, { head: SHA, now });
-    assert.equal(rec.tries, i);
-    assert.ok(!rec.giveUp);
-  }
-  const last = checksWaitNext(rec, { head: SHA, now: now + 30 * min });
-  assert.equal(last.giveUp, true, `${CHECKS_WAIT_TRIES} stages on one head`);
-  assert.equal(checksWaitNext({ ...first, tries: 1 }, { head: SHA, now: Date.parse(first.since) + CHECKS_WAIT_MS }).giveUp, true, "or the time bound");
-  assert.equal(checksWaitNext(rec, { head: "b".repeat(40), now }).tries, 1, "another head is a new streak");
+test("a queued run is tied to the required check: another workflow's queued run, an approval wait or a wrong name Blocks at once", async () => {
+  const other = { id: 88, name: "Docs", status: "queued", conclusion: null, check_suite_id: 10, workflow_id: 6, path: ".github/workflows/docs.yml", created_at: ago(30) };
+  const docs = { ...files, ".github/workflows/docs.yml": "jobs:\n  docs:\n    runs-on: x\n" };
+  // CI produced no quality and completed; only Docs is queued: the wrong name, never a wait on Docs.
+  const unrelated = await loop({ checkRuns: [], workflowRuns: [ciRun({ status: "completed", conclusion: "success" }), other], files: docs });
+  assert.equal(unrelated.result.harness, undefined);
+  assert.match(unrelated.result.stuck.reason, /^required check\(s\) quality never reported on a{7}: .*check the required check names; no failing run to fix$/);
+  assert.ok(!unrelated.phases.some((l) => /waiting up to/.test(l)));
+  // No workflow file on the head names quality, and nothing older ran it: a queued run is not this check's.
+  const untied = await loop({ checkRuns: [], workflowRuns: [other], files: docs });
+  assert.match(untied.result.stuck.reason, /check the required check names/);
+  // A run waiting for a deployment approval is no GitHub delay.
+  const approval = await loop({ checkRuns: [], workflowRuns: [ciRun({ status: "waiting" })], files });
+  assert.match(approval.result.stuck.reason, /^required check\(s\) quality on a{7} wait for a deployment approval/);
+  // A check its workflow file does not name plainly (a reusable workflow) is tied by an older commit's run of it.
+  const reusable = await loop({ checkRuns: [], workflowRuns: [ciRun()], files: { ".github/workflows/ci.yml": "jobs:\n  call:\n    uses: ./.github/workflows/q.yml\n" }, older: { quality: [{ id: 5, name: "quality", check_suite: { id: 41 } }] }, suites: { 41: { id: 70, workflow_id: 5 } } });
+  assert.match(reusable.result.stuck.reason, /^GitHub has not started the required check\(s\) quality on a{7}: workflow run CI \(run 77\) queued/);
 });
 
-test("the checks-wait record: only Factory's own, cleared by a comment with no record line; the dispatcher holds it until retryAt", async () => {
-  const rec = { head: SHA, since: "2026-11-11T10:00:00.000Z", tries: 1, retryAt: "2026-11-11T10:10:00.000Z" };
-  const head = marker(7, "checks-wait");
-  const own = { user: BOT, body: `${head}\nFactory is waiting for GitHub.\n${checksWaitMarker(rec)}` };
-  setSelf(BOT.login);
-  try {
-    assert.deepEqual(checksWaitOf([own], 7), rec);
-    assert.equal(checksWaitOf([{ ...own, user: { login: "someone" } }], 7), null, "anyone can paste a marker");
-    assert.equal(checksWaitOf([{ ...own, body: `${head}\nFactory no longer waits.` }], 7), null);
-  } finally {
-    setSelf(null);
-  }
-  assert.equal(checksWaiting(rec, Date.parse(rec.retryAt) - 1), true);
-  assert.equal(checksWaiting(rec, Date.parse(rec.retryAt)), false);
+test("checksNotStarted: no workflow run at all is GitHub's; a check still running is not", async () => {
+  const { checksNotStarted } = await import("../scripts/lib/triage.mjs");
+  const none = checksNotStarted({ sha: SHA, names: ["quality"], workflowRuns: [], waitedMin: 15 });
+  assert.equal(none.githubDelay, true);
+  assert.match(none.reason, /quality on a{7}: no workflow run for it was created in 15 min/);
+  const running = checksNotStarted({ sha: SHA, names: ["quality"], checkRuns: [{ id: 1, name: "quality", status: "in_progress", check_suite: { id: 9 } }], workflowRuns: [ciRun({ status: "in_progress" })] });
+  assert.equal(running.githubDelay, false);
+  assert.match(running.reason, /CI \(run 77\) still in progress; no failing run to fix$/);
+  assert.equal(checksNotStarted({ sha: SHA, names: ["quality"], workflowRuns: null, readError: "403" }).githubDelay, false, "unread runs prove nothing");
+  assert.equal(checksNotStarted({ sha: SHA, names: ["quality"], checkRuns: [{ id: 1, name: "quality", status: "waiting", check_suite: { id: 9 } }], workflowRuns: [ciRun({ status: "in_progress" })] }).githubDelay, false, "a job waiting for an approval");
 });
 
-test("dispatch: on the Actions route a Queued Objective waiting on unstarted checks is not picked before its retry time, and a start-retry wake is armed for it", async () => {
-  const { dispatch } = await import("../scripts/dispatch.mjs");
-  const now = Date.now();
-  const rec = { head: SHA, since: new Date(now - 20 * min).toISOString(), tries: 1, retryAt: new Date(now + 10 * min).toISOString() };
-  const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }], body: "", updated_at: new Date(now).toISOString(), user: { login: "maintainer" } });
-  const comments = { 40: [{ id: 1, user: BOT, body: `${marker(40, "checks-wait")}\nwaiting\n${checksWaitMarker(rec)}` }] };
-  const realFetch = globalThis.fetch;
-  const saved = process.env.GITHUB_API_URL;
-  process.env.GITHUB_API_URL = "https://github.test";
-  setSelf(BOT.login);
-  globalThis.fetch = async (url, init = {}) => {
-    const u = new URL(url);
-    const method = init.method || "GET";
-    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-    const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
-    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [iss(40), iss(41)]);
-    if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json(comments[n] || []);
-    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([]);
-    if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
-    if (method !== "GET") return json({}, 200);
-    return json({ message: "Not Found" }, 404);
-  };
-  try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 10, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t", now: new Date(now), dryRun: true });
-    assert.deepEqual(r.ready, [41], JSON.stringify(r.skipped));
-    assert.match(r.skipped.find((x) => x.number === 40)?.reason || "", /^GitHub had not started the required checks on a{7}; next try after/);
-    assert.deepEqual(r.deadlines.filter((d) => d.issue === 40).map((d) => [d.kind, d.at]), [["start-retry", rec.retryAt]]);
-  } finally {
-    globalThis.fetch = realFetch;
-    if (saved === undefined) delete process.env.GITHUB_API_URL;
-    else process.env.GITHUB_API_URL = saved;
-    setSelf(null);
-  }
+test("after a triage rerun the wait in place still leaves out the runs the rerun replaced", async () => {
+  // The red: quality ran and failed. Triage reruns it; the rerun's job is queued with no runner and never starts.
+  const failed = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: ago(10), completed_at: ago(5) };
+  const rerun = { id: 2, name: "quality", status: "queued", conclusion: null, check_suite: { id: 9 }, started_at: null };
+  let rerunDone = false;
+  const triage = { red: async () => ((rerunDone = true), { rerun: true, ignoreIds: new Set([1]), jobs: ["quality"] }) };
+  const ran = { id: 1, conclusion: "failure", steps: [{ name: "test", conclusion: "failure" }], runner_id: 3, runner_name: "r3" };
+  const { result } = await loop({ checkRuns: () => (rerunDone ? [failed, rerun] : [failed]), jobs: { 1: ran, 2: { id: 2, status: "queued", runner_id: 0, runner_name: "" } }, workflowRuns: [ciRun({ status: "in_progress" })] }, { triage });
+  assert.equal(result.harness, undefined, "the replaced red never reaches a fix pass");
+  assert.match(result.stuck?.reason || "", /: quality queued with no runner in workflow run CI \(run 77\)/);
 });

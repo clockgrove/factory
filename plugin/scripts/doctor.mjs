@@ -210,20 +210,21 @@ export function appPermissionChecks(app) {
 /**
  * Local red-check triage reruns a flaky red's failed jobs, which needs the token's Actions write (LOCAL.md). A
  * fine-grained token's permissions cannot be listed, so doctor makes a dry rerun: it asks GitHub to rerun the failed
- * jobs of workflow run 0, which no repository has, so nothing can rerun. GitHub refuses it with 403 when the token lacks
- * Actions write, and looks the run up (404) only when it may. Any other answer leaves it unverified.
+ * jobs of workflow run 0, which no repository has, so nothing can rerun. A 403 is the token lacking Actions write: a
+ * warning with the fix. Any other answer (a 404 included, which a token with or without the permission may get)
+ * leaves it not verified, never a pass.
  */
 export async function rerunProbeCheck({ repo, token }) {
   const name = "triage rerun";
   const grant = "give the local token Actions read and write (LOCAL.md); without it GitHub refuses triage's rerun of a flaky red, which then goes to the fix pass or Blocks";
+  let status = "an accepted request";
   try {
     await rest(`repos/${repo.full}/actions/runs/0/rerun-failed-jobs`, { token, method: "POST", body: {} });
   } catch (e) {
     if (e.status === 403 && !e.rateLimited) return WARN(name, "red-check triage is on, but the token cannot rerun CI jobs: GitHub refused a dry rerun (403)", grant);
-    if (e.status === 404) return PASS(name, "the token may rerun failed CI jobs (a dry rerun of a run that does not exist reached the lookup: 404)");
-    return WARN(name, `not verified: GitHub answered a dry rerun with ${e.status || "no answer"}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
+    status = e.status || "no answer";
   }
-  return WARN(name, "not verified: GitHub accepted a dry rerun of a run that does not exist", "red-check triage's rerun needs the token's Actions read and write (LOCAL.md)");
+  return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
 }
 
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck }) {

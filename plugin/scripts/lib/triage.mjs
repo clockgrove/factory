@@ -17,6 +17,7 @@ import { cleanLog, jobLog, listComments, logWindow, rest } from "./github.mjs";
 import { log, mask } from "./inputs.mjs";
 import { gatewayKeyFile, keyDirExposedBy } from "./local.mjs";
 import { isSelf } from "./logic.mjs";
+import { parseYaml } from "./yaml.mjs";
 
 /** The default decision model: 23/23 single-job reds and every flaky one caught in Factory's offline replay (#2504). */
 export const TRIAGE_MODEL = "perplexity/pplx-decider-v1.2";
@@ -398,44 +399,115 @@ export const notStartedReason = (jobs) =>
 
 // ------------------------------------------------------------------ required checks GitHub has not started yet
 
-/** A workflow run or check run GitHub has created but not started: no job of it runs yet. */
-const UNSTARTED = ["queued", "waiting", "requested", "pending"];
+/** A workflow run or check run GitHub has created but not started. `waiting` is not one: it waits for an approval. */
+const UNSTARTED = ["queued", "requested", "pending"];
+/** The newest check run of `name` among `checkRuns`. */
+const latestRun = (checkRuns, name) => (checkRuns || []).filter((r) => r.name === name).sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id ?? 0) - (a.id ?? 0))[0];
+/** The check names a workflow file's jobs report: a job's literal `name`, else its id. A matrix job reports `name (…)`. */
+export function workflowChecks(text) {
+  try {
+    return Object.entries(parseYaml(String(text || ""))?.jobs || {}).map(([id, job]) => (typeof job?.name === "string" && !job.name.includes("${{") ? job.name : id));
+  } catch {
+    return [];
+  }
+}
+const reports = (check, name) => name === check || name.startsWith(`${check} (`);
+
+/**
+ * What checksNotStarted reads, on structure: the head's workflow runs; the Actions job of each required check run not
+ * started yet (whether a runner took it); and, for a required check with no check run on the head, the workflows that
+ * produce it (`producers`: name → workflow ids): a head workflow run whose file (at the head) has a job reporting that
+ * name, else the workflow of that check's run on an older commit (`history()`: commit ids, newest first, read only
+ * when needed), found through its check suite. `workflowRuns` null: they could not be read (`readError`).
+ */
+export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [] }) {
+  const actions = { token: actionsToken };
+  let workflowRuns;
+  try {
+    workflowRuns = (await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&per_page=100`, actions))?.workflow_runs || [];
+  } catch (e) {
+    return { workflowRuns: null, readError: String(e?.status || "error"), jobs: new Map(), producers: new Map() };
+  }
+  const jobs = new Map();
+  for (const n of names) {
+    const r = latestRun(checkRuns, n);
+    if (r && UNSTARTED.includes(r.status)) jobs.set(r.id, await rest(`repos/${repo.full}/actions/jobs/${r.id}`, actions).catch(() => null));
+  }
+  const producers = new Map();
+  const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
+  const missing = names.filter((n) => !latestRun(checkRuns, n));
+  if (missing.length) {
+    const seen = new Set();
+    for (const w of workflowRuns) {
+      if (seen.has(w.workflow_id) || !w.path) continue;
+      seen.add(w.workflow_id);
+      const path = String(w.path).replace(/@.*$/, "");
+      const text = await rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).catch(() => "");
+      for (const check of workflowChecks(text)) for (const n of missing) if (reports(check, n)) add(n, w.workflow_id);
+    }
+    const left = missing.filter((n) => !producers.has(n));
+    const older = left.length ? await history().catch(() => []) : [];
+    for (const n of left) {
+      for (const c of older) {
+        const run = (await rest(`repos/${repo.full}/commits/${c}/check-runs?check_name=${encodeURIComponent(n)}&filter=all&per_page=5`, { token }).catch(() => null))?.check_runs?.[0];
+        if (!run?.check_suite?.id) continue;
+        const w = (await rest(`repos/${repo.full}/actions/runs?check_suite_id=${run.check_suite.id}&per_page=1`, actions).catch(() => null))?.workflow_runs?.[0];
+        if (w?.workflow_id) {
+          add(n, w.workflow_id);
+          break;
+        }
+      }
+    }
+  }
+  return { workflowRuns, readError: "", jobs, producers };
+}
 
 /**
  * Why a wait on the required checks ended with none failed and some not finished (awaitChecks `timedOut` with no
- * completed failing run), read on structure from the head's check runs and its workflow runs. Returns {deferrable,
- * reason, runs}. Deferrable is GitHub not starting a required check, which no change can fix: a workflow run for the
- * head still queued (a check has no check run until its job starts), no workflow run and no required check run at all,
- * or a required check run still queued after its own workflow run completed. Anything else (a required check still
- * running, a workflow run that completed without it, workflow runs that could not be read: `workflowRuns` null) is not
- * GitHub's delay; it is still no red to fix. `now` and `waitedMin` only word the reason.
+ * completed failing run), from checkSources's reads. Returns {githubDelay, reason, runs}. githubDelay is GitHub not
+ * starting a required check, which no change can fix, each tied to that check: its check run still queued with no
+ * runner (in a workflow run still going, or one that completed: #72's two shapes), or, with no check run, the workflow
+ * that produces it queued on the head, or never created (as when the head has no workflow run at all). A check waiting
+ * for an approval (`waiting`), still running, or that no workflow on the head produces (a wrong check name) is none of
+ * GitHub's delay; a queued run of another workflow is not this check's. `now` and `waitedMin` only word the reason.
  */
-export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, waitedMin = 0, readError = "", now = Date.now() }) {
+export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), waitedMin = 0, readError = "", now = Date.now() }) {
   const short = String(sha).slice(0, 7);
-  const latest = (name) => checkRuns.filter((r) => r.name === name).sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id ?? 0) - (a.id ?? 0))[0];
-  const open = names.filter((n) => latest(n)?.status !== "completed");
   const list = (xs) => xs.join(", ");
   const mins = (t) => (Number.isFinite(Date.parse(t)) ? Math.max(0, Math.round((now - Date.parse(t)) / 60000)) : null);
   const label = (w) => `${w.name || "workflow"} (run ${w.id})`;
-  const infra = "infrastructure, not this change";
-  if (!Array.isArray(workflowRuns)) return { deferrable: false, runs: [], reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min, and its workflow runs could not be read${readError ? ` (${readError})` : ""}; no failing run to fix` };
-  const suite = new Map(workflowRuns.map((w) => [w.check_suite_id, w]));
-  // A required check run still queued after its workflow run completed: GitHub never gave it a runner.
-  const stalled = open.map((n) => [n, latest(n)]).filter(([, r]) => r && UNSTARTED.includes(r.status) && suite.get(r.check_suite?.id ?? r.suite)?.status === "completed");
-  if (stalled.length) {
-    const w = suite.get(stalled[0][1].check_suite?.id ?? stalled[0][1].suite);
-    const ago = mins(w.updated_at);
-    return { deferrable: true, runs: [w], reason: `GitHub left the required check ${list(stalled.map(([n]) => n))} queued on ${short} after its workflow run ${label(w)} completed${ago === null ? "" : ` ${ago} min ago`} (${infra})` };
+  const open = names.filter((n) => latestRun(checkRuns, n)?.status !== "completed");
+  if (!Array.isArray(workflowRuns)) return { githubDelay: false, runs: [], reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min, and its workflow runs could not be read${readError ? ` (${readError})` : ""}; no failing run to fix` };
+  const bySuite = new Map(workflowRuns.map((w) => [w.check_suite_id, w]));
+  const started = [];
+  const approval = [];
+  const running = [];
+  const unreported = [];
+  for (const n of open) {
+    const r = latestRun(checkRuns, n);
+    if (r) {
+      const w = bySuite.get(r.check_suite?.id ?? r.suite) || null;
+      const job = jobs.get(r.id);
+      if (r.status === "waiting") approval.push(n);
+      else if (UNSTARTED.includes(r.status) && !job?.runner_id && !job?.runner_name) {
+        const how = !w ? "with no runner" : w.status === "completed" ? `after its workflow run ${label(w)} completed${mins(w.updated_at) === null ? "" : ` ${mins(w.updated_at)} min ago`}` : `with no runner in workflow run ${label(w)}`;
+        started.push({ n, w, text: `${n} queued ${how}` });
+      } else running.push({ n, w });
+      continue;
+    }
+    const ids = producers.get(n);
+    const mine = ids ? workflowRuns.filter((w) => ids.has(w.workflow_id)) : [];
+    const queued = mine.filter((w) => UNSTARTED.includes(w.status));
+    if (queued.length) started.push({ n, w: queued[0], text: `workflow run ${label(queued[0])} queued ${mins(queued[0].created_at) ?? "?"} min with no job started` });
+    else if (mine.some((w) => w.status === "waiting")) approval.push(n);
+    else if (mine.some((w) => w.status !== "completed")) running.push({ n, w: mine.find((w) => w.status !== "completed") });
+    else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min` });
+    else unreported.push(n);
   }
-  const queued = workflowRuns.filter((w) => UNSTARTED.includes(w.status));
-  if (queued.length) {
-    const each = queued.slice(0, 3).map((w) => `${label(w)} queued ${mins(w.created_at) ?? "?"} min with no job started`);
-    return { deferrable: true, runs: queued, reason: `GitHub has not started the required check(s) ${list(open)} on ${short}: workflow run ${each.join("; ")}${queued.length > 3 ? ` and ${queued.length - 3} more` : ""} (${infra})` };
-  }
-  if (!workflowRuns.length && !open.some(latest)) return { deferrable: true, runs: [], reason: `GitHub created no workflow run for ${short} in ${waitedMin} min, so the required check(s) ${list(open)} never appeared (${infra})` };
-  const running = workflowRuns.filter((w) => w.status === "in_progress");
-  if (running.length) return { deferrable: false, runs: running, reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min: ${running.slice(0, 3).map(label).join(", ")} still in progress; no failing run to fix` };
-  return { deferrable: false, runs: [], reason: `required check(s) ${list(open)} never reported on ${short}: every workflow run for it completed without ${open.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
+  if (unreported.length) return { githubDelay: false, runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
+  if (approval.length) return { githubDelay: false, runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then re-apply the label; no failing run to fix` };
+  if (started.length) return { githubDelay: true, runs: started.map((x) => x.w).filter(Boolean), reason: `GitHub has not started the required check(s) ${list(started.map((x) => x.n))} on ${short}: ${started.map((x) => x.text).join("; ")} (infrastructure, not this change)` };
+  return { githubDelay: false, runs: running.map((x) => x.w).filter(Boolean), reason: `required check(s) ${list(open)} not finished on ${short} after ${waitedMin} min: ${list([...new Set(running.map((x) => (x.w ? label(x.w) : x.n)))])} still in progress; no failing run to fix` };
 }
 
 /**

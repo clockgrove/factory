@@ -16,7 +16,7 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, checksWaitOf, checksWaiting, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -450,27 +450,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // A Queued Objective whose last start the vendor refused for its quota waits out the backoff its record names
   // (launch.mjs). One named by hand (workflow_dispatch with an issue) does not wait.
   const deferred = {};
-  // Likewise, on every route, a Queued Objective whose work stage handed back its wait on required checks GitHub had not
-  // started (worker.mjs, logic.mjs checksWaitNext) waits for the retry time its checks-wait record names, then a
-  // `start-retry` wake ticks this dispatcher for it.
   // Read a few at a time, like the relations above.
-  if (!inputs.issue) {
+  if (sandbox && !inputs.issue) {
     await pooled(wanted, RELATION_READS, async (issue) => {
       if (NOT_READY_STATUSES.has(stateOf(issue, statuses[issue.number] ?? null))) return;
-      const comments = await listComments(repo, issue.number, opts).catch(() => []);
-      const record = sandbox ? sandboxRecord(comments, issue.number) : null;
+      const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
       if (quotaWaiting(record, now.getTime())) {
         deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
         due(issue.number, "quota", Date.parse(record.quota.retryAt));
-        return;
-      }
-      const wait = checksWaitOf(comments, issue.number);
-      if (checksWaiting(wait, now.getTime())) {
-        deferred[issue.number] = `GitHub had not started the required checks on ${wait.head.slice(0, 7)}; next try after ${new Date(Date.parse(wait.retryAt)).toISOString().slice(11, 16)}Z`;
-        due(issue.number, "start-retry", Date.parse(wait.retryAt));
       }
     });
-    watch.mark("deferred");
+    watch.mark("quota");
   }
 
   const picked = selectReady({

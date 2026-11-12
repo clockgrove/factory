@@ -19,8 +19,8 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { credentialEnv, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, setDraft } from "./lib/github.mjs";
 import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { REVIEW_LABEL, checksWaitNext, checksWaitOf, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, clearChecksWait, commitAuthor, deferForChecks, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -84,11 +84,7 @@ async function main() {
   const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
   let reentry = null;
-  // The checks-wait record an earlier stage left (logic.mjs checksWaitNext): read before the branch work, cleared when
-  // this stage ends any way but another deferral.
-  let checksWait = null;
   const finish = async (exit, reason) => {
-    if (checksWait && exit !== "deferred") await clearChecksWait(repo, issue, token, exit).catch((e) => log(`checks-wait record not cleared: ${e.message.slice(0, 120)}`));
     keeper.stop();
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
@@ -259,16 +255,6 @@ async function main() {
       log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);
     }
   }
-  // The dispatcher started this stage again because GitHub had not started the required checks on the branch's head
-  // (deferForChecks): with the branch still at that head, nothing is left for a harness to do; it validates again.
-  if (openPr) {
-    await progress.self().catch(() => null);
-    checksWait = checksWaitOf(await listComments(repo, issue, token).catch(() => []), issue);
-  }
-  const checksOnly = !rebaseMode && !!checksWait && checksWait.head === outbox.expected();
-  if (checksOnly) log(`validation retry: GitHub had not started the required checks on ${checksWait.head.slice(0, 7)} (try ${checksWait.tries + 1}); no harness run`);
-  // No harness runs: a clean rebase, or a validation retry.
-  const noHarness = (rebaseMode && !rebaseConflict) || checksOnly;
   const written = await installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel }, env: childBase });
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
   await markRunning(repo, issue, token);
@@ -328,14 +314,14 @@ async function main() {
   // The plan-time Question (lib/one-repo.mjs): a repository other than this one that the plan needs, unless a maintainer
   // has answered about it since a run asked (Factory's own record of the ask, in its progress comments). A rebase
   // send-back changes no plan.
-  const askedAt = rebaseMode || checksOnly ? {} : planAskedOf(await listComments(repo, issue, token).catch(() => []), { issue, self: await progress.self() });
+  const askedAt = rebaseMode ? {} : planAskedOf(await listComments(repo, issue, token).catch(() => []), { issue, self: await progress.self() });
   const answered = answeredRepos(askedAt, decisions);
   if (answered.size) log(`plan-time Question answered since it was asked: ${[...answered].join(", ")}`);
   // The mid-run stop counts any maintainer decision since the ask, naming the repository or not: until the harness has
   // re-planned with the answer, its plan.md (a copy of the plan comment, a first draft) may still carry the line, and
   // stopping there would ask again what the owner just answered. The end of the run decides with `answered` alone.
   const replied = answeredRepos(askedAt, decisions, { named: false });
-  const needsOf = (plan, seen = answered) => (rebaseMode || checksOnly ? {} : planNeedsOf(plan, { source: repo, label: inputs.objectiveLabel, answered: seen }));
+  const needsOf = (plan, seen = answered) => (rebaseMode ? {} : planNeedsOf(plan, { source: repo, label: inputs.objectiveLabel, answered: seen }));
   const prompt = buildPrompt({
     templatePath: TASK_CARD_TEMPLATE(PLUGIN_ROOT),
     harness: inputs.harness,
@@ -362,7 +348,7 @@ async function main() {
     if (restored.id) session.id = restored.id;
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
-  reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: checksOnly ? "a validation retry runs no session" : inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
+  reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
   await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
@@ -373,8 +359,8 @@ async function main() {
   // The plan.md the mid-run stop read (the hand-off tick), when it stopped the harness.
   let stoppedPlan = null;
   const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
-  if (noHarness) rec = { ok: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: `no harness run: ${checksOnly ? "validation retry" : "clean rebase"}`, harness: inputs.harness, model: inputs.model };
-  for (let attempt = 1; attempt <= 2 && !noHarness; attempt += 1) {
+  if (rebaseMode && !rebaseConflict) rec = { ok: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
+  for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
     await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);
     await io.render();
@@ -547,35 +533,10 @@ async function main() {
     }
   }
 
-  // Required checks GitHub has not started (validationLoop `stuck`, deferrable): nothing failed and nothing in the change
-  // can help. On GitHub's routes (the backend's gate) the wait goes to the dispatcher instead of holding this runner: the
-  // Objective goes back to Queued with a checks-wait record, and the stage the dispatcher starts at its retry time
-  // validates the same head with no harness. Past CHECKS_WAIT_TRIES stages or CHECKS_WAIT_MS it Blocks, naming the run.
-  let stuck = validation?.stuck?.reason || "";
-  // Only a run that delivered (or left no exit record) is deferred: the retry's exit is a delivery, so a Question or a
-  // Block the harness recorded is never set aside for it.
-  const ownExit = exitFromOut(io.files())?.exit ?? "delivered";
-  if (validation?.stuck?.deferrable && backend().gate.checksDefer && pr && ownExit === "delivered") {
-    const next = checksWaitNext(checksWait, { head: validation.sha, startedAt: validation.waitedFrom });
-    if (!next.giveUp) {
-      const deferred = await deferForChecks(repo, { issue, next, reason: stuck }, token).then(
-        () => true,
-        (e) => (log(`the wait could not be handed to the dispatcher: ${e.message.slice(0, 160)}; Blocking`), false),
-      );
-      if (deferred) {
-        checksWait = next;
-        const reason = `${stuck}; back to Queued, the dispatcher starts the stage again after ${next.retryAt.slice(11, 16)}Z`;
-        log(reason);
-        await finish("deferred", reason);
-        return;
-      }
-    } else stuck = `${stuck}; Factory waited ${Math.round(next.waitedMs / 60000)} min over ${next.tries} work stages for GitHub to start it`;
-  }
-
   // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
   // a run that had no harness (clean rebase) delivered by construction. A provider's refusal is not asked again.
   const refusal = rec?.refusal || validation?.harness?.refusal || null;
-  const asked = noHarness ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered: !!(rec?.unmetered || validation?.harness?.unmetered) });
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered: !!(rec?.unmetered || validation?.harness?.unmetered) });
   records.push(...asked.usage);
   if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // The question check may have turned QUESTION: items into assumptions: the PR body and plan comment follow pr.md and plan.md.
@@ -594,7 +555,7 @@ async function main() {
     harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck, triageRefused: validation.triageRefused, scope: validation.scope } : undefined,
+    validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, triageRefused: validation.triageRefused, scope: validation.scope } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     record: asked.record,
     recordBasis: asked.basis,

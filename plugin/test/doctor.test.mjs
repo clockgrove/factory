@@ -147,10 +147,12 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     assert.match(no.detail, /cannot rerun CI jobs: GitHub refused a dry rerun \(403\)/);
     assert.match(no.fix, /Actions read and write/);
     assert.deepEqual(asked, ["POST /repos/o/r/actions/runs/0/rerun-failed-jobs"], "run 0, which no repository has: nothing can rerun");
-    status = 404;
-    assert.equal((await rerunProbeCheck({ repo, token: "t" })).status, "PASS");
-    status = 500;
-    assert.match((await rerunProbeCheck({ repo, token: "t" })).detail, /^not verified/);
+    // GitHub may answer 404 for run 0 with or without the permission: never a pass.
+    for (status of [404, 500]) {
+      const r = await rerunProbeCheck({ repo, token: "t" });
+      assert.equal(r.status, "WARN", String(status));
+      assert.equal(r.detail, `not verified: GitHub answered a dry rerun with ${status}`);
+    }
     // Only a local doctor run with triage on probes; a stage's own checks never do. (Each run stops at its next read.)
     const probed = [];
     const probeRerun = async () => (probed.push(1), { status: "WARN", name: "triage rerun" });

@@ -11,7 +11,6 @@ import { copilotCreditUsd, finalText, runHarness, seedSessionTotal } from "./har
 import {
   addLabels,
   awaitChecks,
-  headWorkflowRuns,
   checkRuns,
   checksOn,
   collaboratorPermission,
@@ -32,6 +31,7 @@ import {
   findPr,
   findProject,
   getPr,
+  getRepo,
   getPrSettled,
   listComments,
   objectiveLabeledAt,
@@ -60,10 +60,10 @@ import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { RUNNER_SESSION_ROOT, capturedSession, holdSession } from "./claude-runner.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
-import { checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { allOnBase, baseFailureReason, evidenceText, redDetail } from "./reds.mjs";
-import { CHECKS_WAIT_MS, CHECKS_WAIT_TRIES, checksWaitMarker, HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -809,41 +809,43 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
-    const wait = (ignoreIds = null, capMs = Infinity) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     let r = await wait();
     const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
     if (r.conflict) return { green: false, conflict: true, command };
-    // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. Read against the
-    // head's workflow runs (triage.mjs checksNotStarted): GitHub not starting a required check is waited out here up to
-    // the backend's checksWaitMs (local), else handed back (`stuck`) for the stage to defer or Block; never a pass.
+    // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
+    // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
+    // on every route, up to CHECKS_WAIT_MS or the stage's wall clock less CHECKS_WAIT_GUARD_MS, the reads backing off;
+    // still not started, or anything else unfinished, it comes back as `stuck` and the stage Blocks with the reason.
     const unfinished = (x) => !x.green && x.timedOut && !x.failedRuns?.length;
-    const classify = async (x) => {
-      let workflowRuns = null;
-      let readError = "";
-      try {
-        workflowRuns = await headWorkflowRuns(checks.repo, sha, { token: checks.actionsToken || checks.token });
-      } catch (e) {
-        readError = String(e?.status || "error");
-      }
-      return checksNotStarted({ sha, names: checks.names, checkRuns: x.runs || [], workflowRuns, waitedMin: Math.round((Date.now() - waitedFrom) / 60000), readError });
+    const history = async () => {
+      // Older commits that ran the checks: the PR's last green head, then the default branch's newest.
+      const green = lastGreenHead(await rest(`repos/${checks.repo.full}/issues/${checks.prNumber}/comments?per_page=100`, { token: checks.token, paginate: true }).catch(() => []), checks.issue);
+      const branch = (await getRepo(checks.repo, { token: checks.token }).catch(() => null))?.default_branch;
+      const base = branch ? ((await rest(`repos/${checks.repo.full}/commits?sha=${encodeURIComponent(branch)}&per_page=3`, { token: checks.token }).catch(() => [])) || []).map((c) => c.sha) : [];
+      return [...(green ? [green] : []), ...base];
     };
-    // The wait's end, or {stuck} when it ended unfinished and stayed so through the backend's own wait.
-    const settle = async (x) => {
+    const classify = async (x) => {
+      const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history });
+      return checksNotStarted({ sha, names: checks.names, checkRuns: x.runs || [], ...read, waitedMin: Math.round((Date.now() - waitedFrom) / 60000) });
+    };
+    // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
+    const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;
       let stuck = await classify(x);
-      const until = waitedFrom + (checks.stuckWaitMs ?? backend().gate.checksWaitMs ?? 0);
-      while (stuck.deferrable && Date.now() < until && remainingMs(deadlineAt) > 5 * 60_000) {
-        if (onPhase) await onPhase(`${stuck.reason}; waiting for GitHub to start ${stuck.runs.length > 1 ? "them" : "it"}, no fix run`);
-        x = await wait(null, until - Date.now());
-        if (x.conflict || !unfinished(x)) return x;
-        stuck = await classify(x);
-      }
+      if (!stuck.githubDelay) return { stuck };
+      const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
+      if (capMs <= 0) return { stuck };
+      if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for GitHub to start ${stuck.runs.length > 1 ? "them" : "it"}, no fix run`);
+      x = await wait(ignoreIds, capMs, { appearMs: Infinity, maxPollMs: checks.maxPollMs ?? 5 * 60_000 });
+      if (x.conflict || !unfinished(x)) return x;
+      stuck = await classify(x);
       return { stuck };
     };
     r = await settle(r);
     if (r.conflict) return { green: false, conflict: true, command };
-    if (r.stuck) return { green: false, stuck: r.stuck, command, sha, waitedFrom };
+    if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
     // A required check whose job GitHub never started (no step, no runner: a billing lock, a spending limit, a runner
     // label nothing serves) is infrastructure no change can fix: no triage, no rerun, no fix pass; the stage Blocks.
     if (!r.green && !r.timedOut && r.failedRuns?.length) {
@@ -865,9 +867,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (t.refused) triaged = t.refused;
       if (t.rerun) {
         if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after the triage rerun`);
-        r = await settle(await wait(t.ignoreIds));
+        r = await settle(await wait(t.ignoreIds), t.ignoreIds);
         if (r.conflict) return { green: false, conflict: true, command };
-        if (r.stuck) return { green: false, stuck: r.stuck, command, sha, waitedFrom };
+        if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
         // Passing on a rerun is not proof of a flake (an intermittent defect passes too): said where a person reads it.
         if (r.green && onPhase) await onPhase(`triage rerun on ${sha.slice(0, 7)} turned green: ${(t.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
       }
@@ -886,12 +888,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       return { green: false, passes, lastOutput: "", command: v.command, usage, conflict: true };
     }
     // Required checks with nothing failed and some not finished (GitHub has not started them, or they still run): no
-    // red, so no fix pass, and the pass is not counted. The stage defers (worker.mjs) or Blocks with the reason.
+    // red, so no fix pass, and the pass is not counted. The stage Blocks with the reason.
     if (v.stuck) {
       passes -= 1;
       log(`${label}: ${v.stuck.reason}; no fix run`);
       if (onPhase) await onPhase(`${label}: ${v.stuck.reason}; no fix run`);
-      return { green: false, passes, lastOutput: "", command: v.command, usage, stuck: v.stuck, sha: v.sha, waitedFrom: v.waitedFrom };
+      return { green: false, passes, lastOutput: "", command: v.command, usage, stuck: v.stuck, sha: v.sha };
     }
     // A required job GitHub never started: infrastructure, not this change's, so no fix pass; the stage Blocks quoting GitHub.
     if (v.notStarted) {
@@ -992,6 +994,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}) };
 }
 
+/** The longest a stage waits, past its first wait, for required checks GitHub has not started (validationLoop). */
+export const CHECKS_WAIT_MS = 60 * 60_000;
+/** The stage's wall clock that wait leaves for what comes after it (the exit, the usage upload). */
+export const CHECKS_WAIT_GUARD_MS = 5 * 60_000;
 /** How much of a Blocked stage's last output its notice quotes (applyExit). */
 export const DETAIL_CHARS = 2500;
 /**
@@ -1165,26 +1171,6 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     return;
   }
   throw new Error(`unknown exit ${exit}`);
-}
-
-/**
- * A work stage hands its wait on required checks GitHub has not started to the dispatcher (logic.mjs checksWaitNext):
- * the checks-wait record goes on the issue, in one comment Factory updates, and the Objective goes back to Queued. The
- * dispatcher holds it until `next.retryAt` (its `start-retry` wake), and the stage it starts then validates the same
- * head with no harness (worker.mjs).
- */
-export async function deferForChecks(repo, { issue, next, reason }, { token }) {
-  const at = new Date(Date.parse(next.retryAt)).toISOString().slice(11, 16);
-  const body = `Factory is waiting for GitHub: ${sanitize(reason, { max: 600 })}. Nothing in the change can fix that, so no fix pass ran. The work stage runs again after ${at}Z (try ${next.tries + 1} of ${CHECKS_WAIT_TRIES}) and validates the same head; it Blocks if GitHub still has not started the checks ${Math.round(CHECKS_WAIT_MS / 3600_000)} hours after the first wait.\n${checksWaitMarker(next)}`;
-  await upsertComment(repo, issue, marker(issue, "checks-wait"), body, { token });
-  const project = await findProject(repo, { token }).catch(() => null);
-  await setStateLabel(repo, issue, null, { token });
-  await moveCard(project, repo, issue, "Queued", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
-}
-
-/** The checks-wait record cleared once a stage ends any other way: its comment says so and carries no record line. */
-export async function clearChecksWait(repo, issue, { token }, outcome) {
-  await upsertComment(repo, issue, marker(issue, "checks-wait"), `Factory no longer waits for GitHub to start the required checks: the work stage ended ${outcome}.`, { token });
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */

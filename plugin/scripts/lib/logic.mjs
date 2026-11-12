@@ -676,7 +676,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  harness:    {ok: boolean, error?: string, budgetExceeded?: boolean, timedOut?: boolean, died?: number, refusal?: object}
  *  pr:         {exists, draft, body} | null
  *  commits:    number of commits on the branch beyond the base
- *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, scope?: string (fixScopeReason)}
+ *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
+ *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -733,9 +734,13 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.baseFailure) return { exit: "blocked", reason: validation.baseFailure };
     // A required job GitHub never started (triage.mjs notStartedJobs): infrastructure, Blocked quoting GitHub's annotation.
     if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted };
+    // A wait that ended with no required check failed (triage.mjs checksNotStarted): no red at all, so never "validation red".
+    if (validation.stuck) return { exit: "blocked", reason: validation.stuck };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
     if (validation.scope) return { exit: "blocked", reason: validation.scope };
-    return { exit: "blocked", reason: `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}` };
+    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;
+    // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
+    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red };
   }
   if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
   if (record?.exit === "blocked") return workerBlocked(record);

@@ -492,10 +492,12 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * since the required check is usually an aggregate of the jobs that actually fail). `conflicted` (async, optional) is
  * asked on every poll; when it says yes the wait ends at once with `conflict: true` (a conflicting PR gets no runs).
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
- * as not there yet, so the wait lasts until the rerun's own runs finish.
+ * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
  */
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, onPoll = null, conflicted = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const started = Date.now();
+  // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
+  let pause = pollMs;
   let runs = [];
   let state = null;
   let conflict = false;
@@ -511,7 +513,8 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     if (state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
-    await sleep(pollMs);
+    await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));
+    pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
   }
   const timedOut = !state.done && !conflict;
   const failedRuns = runs.filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
@@ -519,7 +522,8 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
   for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${await jobLogTail(repo, r.id, { token })}`);
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map((r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null })), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */

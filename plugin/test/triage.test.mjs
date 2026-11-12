@@ -478,3 +478,94 @@ test("notStartedJobs: a job the token cannot read (403) is skipped, and the log 
   }
   assert.ok(said.includes("[factory] job 1 (quality) unreadable (403): never-started check skipped\n"), said.join(""));
 });
+
+// ------------------------------------------------------------------ a flaky red whose rerun GitHub refused (#74)
+
+const supplyChain = "AssertionError [ERR_ASSERTION]: 2 supply-chain failures: registry.npmjs.org ECONNRESET";
+// The failing job: its failure line, then unrelated stderr long enough to push it out of a tail, then GitHub's error.
+const failingLog = ["##[group]Run npm test", "ok 1 - lockfile parses", "# Subtest: supply-chain policy", `  ${supplyChain}`, ...Array.from({ length: 40 }, (_, i) => `ok ${i + 3} - an unrelated check printed its own stderr here, line ${i}`), "##[error]Process completed with exit code 1.", "##[group]Post job cleanup.", ...Array.from({ length: 30 }, (_, i) => `/usr/bin/git config --local --unset-all http.https://github.com/.extraheader ${i}`)].join("\n");
+// The required aggregate: no failure of its own, then actions/checkout's post-job cleanup.
+const aggregateLog = ['##[group]Run test "$RESULT" = success', 'test "$RESULT" = success', "##[error]Process completed with exit code 1.", "##[group]Post job cleanup.", ...Array.from({ length: 40 }, (_, i) => `[command]/usr/bin/git config --local --name-only --get-regexp core\\.sshCommand ${i}`)].join("\n");
+
+/** GitHub on fetch for a red head: check runs, jobs (with their workflow run), logs, and the rerun's answer. */
+async function withRed({ runs, jobs = {}, logs = {}, rerun = 403 }, fn) {
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (/\/commits\/[0-9a-f]+\/check-runs$/.test(u.pathname)) return json({ total_count: runs.length, check_runs: runs });
+    let m = /\/actions\/jobs\/(\d+)\/logs$/.exec(u.pathname);
+    if (m) return new Response(logs[m[1]] ?? "", { status: 200 });
+    m = /\/actions\/jobs\/(\d+)$/.exec(u.pathname);
+    if (m && jobs[m[1]]) return json(jobs[m[1]]);
+    if (/\/actions\/runs\/\d+$/.test(u.pathname)) return json({ status: "completed" });
+    if (method === "POST" && /\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(u.pathname)) return json({ message: "Resource not accessible by personal access token" }, rerun);
+    if (/\/issues\/\d+\/comments$/.test(u.pathname) || /\/pulls\/\d+\/files$/.test(u.pathname)) return json([]);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+}
+
+test("triage: a flaky verdict whose rerun GitHub refuses comes back with the verdicts, the failure lines and the refusal", async () => {
+  const repo = { owner: "acme", name: "app", full: "acme/app" };
+  const failedRuns = [{ id: 21, name: "test", conclusion: "failure", suite: 9, started_at: "2026-11-10T01:00:00Z", completed_at: "2026-11-10T01:05:00Z" }];
+  const decider = { decide: async () => ({ verdict: "flaky_or_infra", confidence: 0.99 }) };
+  await withRed({ runs: [], jobs: { 21: { id: 21, run_id: 500 } }, logs: { 21: failingLog } }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo, issue: 1, prNumber: 2, token: "t", decider });
+    const r = await t.red({ sha: "b".repeat(40), failedRuns, required: ["test"] });
+    assert.equal(r.rerun, false);
+    assert.deepEqual({ ...r.refused, jobs: r.refused.jobs.map(({ name, verdict, confidence, line }) => ({ name, verdict, confidence, line })) }, { status: 403, permission: true, rateLimited: false, where: "local", jobs: [{ name: "test", verdict: "flaky_or_infra", confidence: 0.99, line: supplyChain }] });
+  });
+});
+
+test("the last red, triaged flaky with its rerun refused, Blocks naming the verdict, the refusal and the remedy, quoting the failing job's own line first", async () => {
+  const { validationLoop, DETAIL_CHARS } = await import("../scripts/lib/session.mjs");
+  const { decideExit } = await import("../scripts/lib/logic.mjs");
+  const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
+  const sha = "c".repeat(40);
+  const repo = { owner: "acme", name: "app", full: "acme/app" };
+  const runs = [
+    { id: 31, name: "test", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-10T01:00:00Z", completed_at: "2026-11-10T01:05:00Z" },
+    { id: 32, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-10T01:05:10Z", completed_at: "2026-11-10T01:05:20Z" },
+  ];
+  const refused = { status: 403, permission: true, where: "local", jobs: [{ name: "test", verdict: "flaky_or_infra", confidence: 0.99, line: supplyChain, lines: [supplyChain] }] };
+  const result = await withRed({ runs, logs: { 31: failingLog, 32: aggregateLog } }, () =>
+    validationLoop({
+      checkout: "/nonexistent",
+      commands: [],
+      harness: "codex",
+      maxUsd: 0,
+      session: {},
+      taskCard: "",
+      env: process.env,
+      deadlineAt: Date.now() + 30_000,
+      // The red is on the last allowed pass: no fix pass follows it.
+      maxPasses: 0,
+      checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t" },
+      outbox: { push: async () => true, expected: () => sha },
+      triage: { red: async () => ({ rerun: false, refused }) },
+    }),
+  );
+  assert.equal(result.green, false);
+  assert.equal(result.harness, undefined);
+  assert.equal(result.triageRefused, refusedRerunText(refused));
+  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, command: result.command, triageRefused: result.triageRefused } });
+  assert.equal(exit.reason, "validation red after Factory's first pass (required checks quality on ccccccc); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label");
+  // What the Blocked notice quotes (applyExit keeps the last DETAIL_CHARS): the failing job's own line leads it.
+  const shown = result.lastOutput.slice(-2500);
+  assert.equal(DETAIL_CHARS, 2500);
+  assert.ok(shown.startsWith(`--- test: ${supplyChain}`), shown.slice(0, 300));
+  assert.ok(!/^--- quality/m.test(shown.split("\n\n")[0]), "the aggregate printed no failure of its own: it does not lead");
+  // On Actions the grant is the workflow's, and a refusal that is no 403 names no permission.
+  assert.match(refusedRerunText({ ...refused, where: "actions" }), /or give the workflow's work and review jobs `actions: write`, then/);
+  assert.match(refusedRerunText({ ...refused, status: 404, permission: false }), /refused the rerun \(404\); rerun the failed jobs on GitHub then re-apply the label$/);
+});

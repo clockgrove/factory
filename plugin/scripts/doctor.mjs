@@ -207,7 +207,27 @@ export function appPermissionChecks(app) {
   return out;
 }
 
-export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS }) {
+/**
+ * Local red-check triage reruns a flaky red's failed jobs, which needs the token's Actions write (LOCAL.md). A
+ * fine-grained token's permissions cannot be listed, so doctor makes a dry rerun: it asks GitHub to rerun the failed
+ * jobs of workflow run 0, which no repository has, so nothing can rerun. A 403 is the token lacking Actions write: a
+ * warning with the fix. Any other answer (a 404 included, which a token with or without the permission may get)
+ * leaves it not verified, never a pass.
+ */
+export async function rerunProbeCheck({ repo, token }) {
+  const name = "triage rerun";
+  const grant = "give the local token Actions read and write (LOCAL.md); without it GitHub refuses triage's rerun of a flaky red, which then goes to the fix pass or Blocks";
+  let status = "an accepted request";
+  try {
+    await rest(`repos/${repo.full}/actions/runs/0/rerun-failed-jobs`, { token, method: "POST", body: {} });
+  } catch (e) {
+    if (e.status === 403 && !e.rateLimited) return WARN(name, "red-check triage is on, but the token cannot rerun CI jobs: GitHub refused a dry rerun (403)", grant);
+    status = e.status || "no answer";
+  }
+  return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
+}
+
+export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
     out.push(FAIL("app token", "no installation token", "set FACTORY_APP_ID and FACTORY_APP_PRIVATE_KEY secrets and pass them as app_id / app_private_key"));
@@ -219,6 +239,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   else if (app?.appSlug) {
     out.push(...appPermissionChecks(app));
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
+  // Local red-check triage (a usable gateway key) reruns flaky reds with this token: doctor checks it may (not in a stage).
+  if (local && !job && token && triageKey({ inputs, env })) out.push(await probeRerun({ repo, token }));
 
   // The workflow as the default branch on GitHub has it (what the next run uses), not a local copy that may be behind.
   const repoData = await getRepo(repo, { token });
@@ -997,7 +1019,7 @@ async function main() {
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe })));
   results.push(...workerSecretChecks({ inputs, env }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
-  results.push(...(await githubChecks({ inputs, repo, token, app })));
+  results.push(...(await githubChecks({ inputs, repo, token, app, local })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local })));
   results.push(...(await runnerChecks({ inputs })));

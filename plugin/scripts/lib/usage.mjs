@@ -53,6 +53,16 @@ export function priceTokens(table, model, tokens) {
 }
 
 /**
+ * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` and
+ * `daily_usd` cannot stop them (Codex has no in-run cap; Factory checks dollars after each run) and only a budget on the
+ * provider's key does. Doctor and the stage's progress comment say it.
+ */
+export function unpricedCodex(harness, model, { gateway = false } = {}) {
+  if (harness !== "codex" || !model || codexRate(CODEX_PRICES, model)) return null;
+  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are unmetered, so max_usd and daily_usd cannot stop them; only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} does`;
+}
+
+/**
  * The basis of a Codex run that reported no token counts: no `turn.completed` (a refused request, a turn cut short). Its
  * spend is unknown, not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
  * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.

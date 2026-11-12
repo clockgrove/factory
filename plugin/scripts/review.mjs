@@ -21,6 +21,7 @@ import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, i
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { unpricedCodex } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
@@ -48,6 +49,7 @@ import {
   restoreTranscript,
   saveTranscript,
   saveAgentTranscript,
+  answerFreshAfter,
   crashed,
   holdScope,
   observe,
@@ -447,6 +449,13 @@ async function main() {
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: "resume policy is fresh" };
   await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  for (const m of new Set([inputs.reviewerModel, inputs.model].filter(Boolean))) {
+    const unpriced = unpricedCodex(inputs.harness, m, { gateway: !!inputs.codexGatewayKey });
+    if (unpriced) {
+      log(`warning: ${unpriced}`);
+      await progress(`unpriced: ${unpriced}`);
+    }
+  }
 
   // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
   // carries the marker; a head a human pushed or marked ready does not, so Factory's own
@@ -635,7 +644,7 @@ async function main() {
       reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
     }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
-    if (resumeAnswer && crashed(rec) && !mark(rec, rec).budgetExceeded) {
+    if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
       records.push(rec);
       log(`resumed session ${resumeAnswer.slice(0, 8)} failed (${rec.error}); answering fresh`);
       await progress("re-entry: resume failed; answering fresh");

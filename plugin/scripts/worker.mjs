@@ -19,6 +19,7 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { holdSecrets, log, mask, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -354,6 +355,11 @@ async function main() {
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
   await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  const unpriced = unpricedCodex(inputs.harness, inputs.model, { gateway: !!inputs.codexGatewayKey });
+  if (unpriced) {
+    log(`warning: ${unpriced}`);
+    await progress(`unpriced: ${unpriced}`);
+  }
   const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records)) : 0);
   let died = 0;
   let rec = null;

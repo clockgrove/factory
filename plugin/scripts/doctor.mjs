@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { CLI, GATEWAY_CODEX_URL, codexGatewayOf, credentialEnv, harnessCommand, hasApiCredential } from "./lib/harness.mjs";
+import { CLI, GATEWAY_CODEX_URL, codexGatewayOf, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
 import { input, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
@@ -20,7 +20,7 @@ import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { droppedDomains, readWorkflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
-import { parseUsage } from "./lib/usage.mjs";
+import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
@@ -65,11 +65,17 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
+    for (const m of new Set([inputs.model, inputs.reviewerModel].filter(Boolean))) {
+      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey });
+      if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
+    }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     const gateway = inputs.codexGatewayKey;
     if (gateway) {
       if (env.FACTORY_CODEX_GATEWAY_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_GATEWAY_KEY) out.push(WARN("codex credential", "FACTORY_CODEX_GATEWAY_KEY is a job-level variable", "pass it as the codex_gateway_key input so only the harness child sees it"));
       else out.push(PASS("codex credential", `FACTORY_CODEX_GATEWAY_KEY present, step-scoped: Codex runs through the Vercel AI Gateway${key ? "; CODEX_API_KEY is set too and goes unused (the gateway key wins)" : ""}`));
+      // Unused, but a job-level CODEX_API_KEY is still in the job's environment for every step.
+      if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable (unused: the gateway key wins)", "remove it from the job's env, or pass it as the codex_api_key input"));
       if (probe) out.push(await gatewayKeyProbe(gateway));
     } else if (!key) out.push(FAIL("codex credential", "no Codex credential: FACTORY_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set FACTORY_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
     else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
@@ -163,7 +169,8 @@ export async function probeHarness({ inputs, env = process.env }) {
     return FAIL(`${h} probe`, e.message, "see the credential line above");
   }
   const { cmd, args, stdin, env: extra } = harnessCommand({ harness: h, model: inputs.model, prompt: "Reply with the single word ok.", maxUsd: 0.5, gateway: codexGatewayOf(h, cred.env) });
-  const r = await exec(cmd, args, { env: { ...env, ...cred.env, ...extra }, input: stdin, timeoutMs: 180_000 });
+  // The job's env with every secret removed, then the one credential the harness runs on (as the worker's run gets it).
+  const r = await exec(cmd, args, { env: { ...scrubbedEnv(env), ...cred.env, ...extra }, input: stdin, timeoutMs: 180_000 });
   const rec = parseUsage(h, r.stdout, inputs.model || null, r.code ?? 1);
   if (rec.refusal) return FAIL(`${h} probe`, refusalReason(rec.refusal), "an Objective would Block on the same refusal: fix the credential's account or the model setting first");
   if (r.code !== 0 && !rec.ok) return FAIL(`${h} probe`, `exit ${r.code}: ${String(r.stderr).slice(-200).trim()}`, "check the credential and the CLI version");

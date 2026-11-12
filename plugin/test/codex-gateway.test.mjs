@@ -244,3 +244,75 @@ test("doctor: the gateway key is checked free against its Codex model list; eith
   assert.equal((await gatewayKeyProbe("vck_g", { fetchFn: async () => { throw new Error("offline"); } })).status, "WARN");
   assert.deepEqual(neededSecrets({ harness: "codex" }), ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]]);
 });
+
+// A fake codex in its own directory: a resume (`exec resume <id>`) is refused for a rotated pin, a fresh exec completes;
+// each call's resume flag and the env names it got are logged.
+function fakeCodex() {
+  const bin = mkdtempSync(join(tmpdir(), "factory-codex-review-"));
+  const log = join(bin, "calls.jsonl");
+  const refused = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000003"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "invalid_request_error", code: "invalid_encrypted_content", message: "m" }, status: 400 }) } })}\n`;
+  writeFileSync(join(bin, "pin.jsonl"), refused);
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.readFileSync(0, "utf8");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ resume: args[1] === "resume", env: Object.keys(process.env).sort() }) + "\\n");
+if (args[1] === "resume") { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "pin.jsonl"))}, "utf8")); process.exit(1); }
+process.stdout.write(fs.readFileSync(${JSON.stringify(join(fixtures, "codex-0.167-gateway-thread.jsonl"))}, "utf8"));
+`, { mode: 0o755 });
+  const calls = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  return { bin, calls };
+}
+
+test("no fresh prompt, no fallback: the exit-record ask's refused resume Blocks with the refusal instead of a context-free thread", async () => {
+  const { exitRecord } = await import("../scripts/lib/session.mjs");
+  const { bin, calls } = fakeCodex();
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    const env = { PATH: process.env.PATH, FACTORY_CODEX_GATEWAY_KEY: "vck_g", FACTORY_GATEWAY_SESSION: "factory-s" };
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the ask", resume: "00000000-0000-0000-0000-000000000003", maxUsd: 0, cwd: bin, env, timeoutMs: 60_000, label: "exit" });
+    assert.equal(rec.refusal?.code, "invalid_encrypted_content");
+    assert.equal(rec.resumeRefused, undefined);
+    assert.equal(calls().length, 1, "one call: no fresh thread without a fresh prompt");
+    const asked = await exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: "00000000-0000-0000-0000-000000000003", canResume: true }, cwd: bin, env, deadlineAt: Date.now() + 600_000, maxUsd: 0 });
+    assert.equal(asked.record.exit, "blocked");
+    assert.match(asked.record.reason, /^codex was refused by its provider \(HTTP 400 invalid_request_error invalid_encrypted_content\)/);
+    assert.deepEqual(calls().map((c) => c.resume), [true, true], "the exit-record ask resumed once and stopped");
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test("the review's answer pass runs at most twice: no second fresh run after runHarness already ran one for a refused resume", async () => {
+  const { answerFreshAfter, crashed } = await import("../scripts/lib/session.mjs");
+  const died = { ok: false, timedOut: false, budgetExceeded: false, stopped: false, signal: null, exitCode: 1, subtype: null, turns: 0 };
+  assert.equal(crashed(died), true);
+  assert.equal(answerFreshAfter("t-1", died), true, "a resumed answer pass that died runs fresh once");
+  assert.equal(answerFreshAfter("t-1", { ...died, resumeRefused: { session: "t-1" } }), false, "already fresh: that was the second run");
+  assert.equal(answerFreshAfter(null, died), false, "a fresh pass that died is not run again here");
+});
+
+test("doctor --probe runs the harness on a scrubbed env plus its one credential: no Factory key, no unused CODEX_API_KEY", async () => {
+  const { probeHarness } = await import("../scripts/doctor.mjs");
+  const { bin, calls } = fakeCodex();
+  const env = { PATH: `${bin}:${process.env.PATH}`, HOME: bin, AI_GATEWAY_API_KEY: "vck_factory", CODEX_API_KEY: "sk-unused", FACTORY_INPUT_AI_GATEWAY_API_KEY: "vck_factory", GH_TOKEN: "ghs_x" };
+  const out = await probeHarness({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g" }, env });
+  assert.equal(out.status, "PASS", out.detail);
+  const [call] = calls();
+  for (const k of ["AI_GATEWAY_API_KEY", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "CODEX_API_KEY", "GH_TOKEN"]) assert.ok(!call.env.includes(k), `${k} kept out`);
+  for (const k of ["FACTORY_CODEX_GATEWAY_KEY", "FACTORY_GATEWAY_SESSION", "PATH"]) assert.ok(call.env.includes(k), `${k} given`);
+});
+
+test("doctor: a job-level CODEX_API_KEY is warned beside the gateway key; an unpriced Codex model says max_usd cannot stop it", async () => {
+  const { credentialChecks } = await import("../scripts/doctor.mjs");
+  const { unpricedCodex } = await import("../scripts/lib/usage.mjs");
+  const env = { GITHUB_ACTIONS: "true", CODEX_API_KEY: "sk-c", FACTORY_INPUT_CODEX_GATEWAY_KEY: "vck_g" };
+  const checks = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g", codexApiKey: "" }, env });
+  assert.ok(checks.some((c) => c.status === "WARN" && /CODEX_API_KEY is a job-level variable/.test(c.detail)));
+  assert.ok(!checks.some((c) => c.name === "codex model"), "a priced model: no warning");
+  const unpriced = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "openai/gpt-5.5-pro", codexGatewayKey: "vck_g" }, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_GATEWAY_KEY: "vck_g" } });
+  assert.match(unpriced.find((c) => c.name === "codex model")?.detail ?? "", /^gpt-5\.5-pro has no row .* max_usd and daily_usd cannot stop them; only the AI Gateway key's budget does$/);
+  assert.equal(unpricedCodex("codex", "gpt-6.1-sol"), null);
+  assert.equal(unpricedCodex("claude", "anything"), null);
+});

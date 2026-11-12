@@ -411,14 +411,16 @@ const SERVICES_SAID = new Set();
 
 /**
  * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
- * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread, with
- * `freshPrompt` (the full prompt a fresh run needs; `prompt` when the caller gives none) and a log line. Never twice.
+ * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
+ * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
+ * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
+ * stands and the stage Blocks with it.
  */
 export async function runHarness(opts) {
   const rec = await runOnce(opts);
-  if (!opts.resume || !rec.pinRotated) return rec;
+  if (!opts.resume || !rec.pinRotated || typeof opts.freshPrompt !== "string" || !opts.freshPrompt) return rec;
   log(`${opts.label || "run"}: the provider refused to resume ${opts.resume.slice(0, 8)} (${rec.refusal ? refusalFields(rec.refusal) : "rotated credential"}): its thread was written through another credential; running a fresh thread once`);
-  const fresh = await runOnce({ ...opts, resume: null, prompt: opts.freshPrompt ?? opts.prompt });
+  const fresh = await runOnce({ ...opts, resume: null, prompt: opts.freshPrompt });
   return { ...fresh, resumeRefused: { session: opts.resume, ...(rec.refusal ? { status: rec.refusal.status, type: rec.refusal.type, code: rec.refusal.code } : {}) } };
 }
 

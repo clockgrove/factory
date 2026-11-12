@@ -589,6 +589,12 @@ const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
  * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. A
  * provider's refusal (usage.mjs providerRefusal) is no death: the harness answered, and the same request is refused again.
  */
+/**
+ * Whether the review's answer pass, resumed and dead, runs once more fresh: not after runHarness already ran it fresh for
+ * a refused resume (`resumeRefused`), so an answer pass runs at most twice.
+ */
+export const answerFreshAfter = (resumed, rec) => !!resumed && !rec.resumeRefused && crashed(rec);
+
 export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
 
 /**

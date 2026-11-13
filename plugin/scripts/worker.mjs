@@ -3,7 +3,7 @@
 //   node scripts/worker.mjs --repo OWNER/NAME --issue N [--checkout DIR] [--usage-dir DIR]
 // Steps: doctor's job checks; checkout factory/<issue> from the default branch;
 // write the plugin's skills and agent definitions into the checkout (git-excluded);
-// setup and offline install; render the task card and $FACTORY_IN, and launch the
+// setup and the lockfile's install; render the task card and $FACTORY_IN, and launch the
 // harness headless under a wall clock; read what it left in $FACTORY_OUT (lib/handoff.mjs),
 // push its commits and open or update the PR from pr.md, the plan comment from plan.md;
 // run the repository's validation as Factory's own pass (two at most, failures sent
@@ -272,7 +272,7 @@ async function main() {
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
   await markRunning(repo, issue, token);
 
-  // 4. setup and offline install: the model secrets never reach these.
+  // 4. setup and the lockfile's install (checkout.mjs installCommand): the model secrets never reach these.
   // A local Objective's first stage on a machine: a fresh clone and a cold install, reported apart from the run's own
   // setup so the bench does not count a one-time cost against every run (bench/lib/phases.mjs: firstSetup).
   const firstMs = Number(process.env.FACTORY_LOCAL_FIRST_SETUP_MS);

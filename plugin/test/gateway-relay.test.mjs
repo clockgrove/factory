@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CALL_LOG, EDITS_MAX_BYTES, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
+import { CALL_LOG, EDITS_MAX_BYTES, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
@@ -1074,5 +1075,35 @@ test("#142 review: no caller-shaped answer gets the estimate; the call log keeps
     for (const r of opened) await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the relay's upstream socket probes once a minute on a connection of its own, not the global agent's every second (#145)", async () => {
+  // Vercel's edge answers about 27 keepalive probes on a connection, then none: at the global agent's one a second, a
+  // call still silent ended with ETIMEDOUT about 38 s in. The setting that reaches the socket last is the one it keeps.
+  const set = new Map();
+  const original = net.Socket.prototype.setKeepAlive;
+  net.Socket.prototype.setKeepAlive = function (enable, delay) {
+    set.set(this, [enable, delay]);
+    return original.call(this, enable, delay);
+  };
+  let seen = null;
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req);
+    seen = { connection: req.headers.connection };
+    res.end("{}");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const up = await upstreamRequest(`http://127.0.0.1:${server.address().port}/v4/ai/image-model`, { method: "POST", headers: { "content-type": "application/json" }, body: Buffer.from("{}") });
+    for await (const _ of up.body);
+    // The one call in this test: each socket that got a keepalive ends with the relay's.
+    assert.ok(set.size >= 1, "the request's socket had its keepalive set");
+    for (const last of set.values()) assert.deepEqual(last, [true, UPSTREAM_KEEPALIVE_MS]);
+    assert.equal(UPSTREAM_KEEPALIVE_MS, 60_000);
+    assert.equal(seen.connection, "close", "a connection of its own, never a pooled one that probed every second");
+  } finally {
+    net.Socket.prototype.setKeepAlive = original;
+    await new Promise((r) => server.close(r));
   }
 });

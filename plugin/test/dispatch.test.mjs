@@ -669,7 +669,7 @@ test("local claim read: unread for over a day since the Objective began waiting 
   assert.match(dead.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's claim author could not be checked[^]*"cause":"factory"/);
 });
 
-test("claimedLocally: a runner job steps aside only for a marked claim whose author cannot be checked; a comments read that keeps failing fails the job, never a skip (#167)", async () => {
+test("claimedLocally: a runner job steps aside only for a marked claim whose author cannot be checked; a comments read that keeps failing is not claimed (#167)", async () => {
   const { BACKENDS } = await import("../scripts/lib/backend.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
   let failures = 0;
@@ -690,7 +690,7 @@ test("claimedLocally: a runner job steps aside only for a marked claim whose aut
   const claimed = (name = "app") => BACKENDS.actions.trigger.claimedLocally({ owner: "acme", name, full: `acme/${name}` }, 7, { token: "t" }, { pauseMs: 0 });
   try {
     failures = Infinity;
-    await assert.rejects(claimed(), (e) => e.status === 502, "a listing that keeps failing is GitHub's error, never 'held by a local loop'");
+    assert.equal(await claimed(), false, "a listing that keeps failing is no claim seen: an unlabelled Objective's runner job works it, never skips");
     failures = 1;
     assert.equal(await claimed(), false, "read again: no claim, the runner works it");
     comments = claim(new Date().toISOString());

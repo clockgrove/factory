@@ -288,6 +288,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
     if (p === "/issues" && method === "GET") return json(u.searchParams.get("labels") && state.labels.has(u.searchParams.get("labels")) ? [{ number: 7, state: "open", labels: [...state.labels].map((name) => ({ name })) }] : []);
     if (p === "/issues/7" && method === "GET") return fail("issue") ? json({ message: "Server Error" }, 502) : json({ number: 7, state: "open", labels: [...state.labels].map((name) => ({ name })) });
     const label = /^\/issues\/7\/labels\/(.+)$/.exec(p);
+    if ((label || p === "/issues/7/labels") && method !== "GET" && fail("labels")) return json({ message: "Server Error" }, 502);
     if (label && method === "DELETE") return state.labels.delete(decodeURIComponent(label[1])) ? json([]) : json({ message: "Not Found" }, 404);
     if (p === "/issues/7/labels" && method === "POST") {
       for (const l of JSON.parse(init.body).labels) state.labels.add(l);
@@ -550,4 +551,79 @@ test("serve: a review this loop owes is held from its own dispatch, so a day-old
   assert.ok(reviewed.includes(9), "the review runs");
   assert.ok(!run.labels.includes("factory:blocked"), "never Blocked as 'no local loop running its review'");
   assert.ok(!run.lines.some((l) => /no local loop running its review/.test(l)));
+});
+
+test("unstart: a GitHub failure while settling a failed start still records the backoff, so the loop reads it again; one no longer Running is let go (#167)", async () => {
+  const { START_BACKOFF_MS } = await import("../scripts/local.mjs");
+  let down = new Set(["comments", "issue"]);
+  const gh = claimGitHub({ fail: (kind) => down.has(kind) });
+  try {
+    const loop = await claimLoop();
+    let now = Date.parse("2026-11-13T08:00:00Z");
+    loop.clock = () => now;
+    loop.stage = async () => ({ code: 0, exit: "blocked", usd: 0, stage: "work" });
+    // The claim read and the issue read fail together: nothing changes, but the loop will read it again.
+    await loop.runObjective(7);
+    assert.ok(gh.labels.has("factory:running"));
+    assert.equal(loop.startFailures.get(7)?.recheck, true, "not stranded: a recheck is due after the backoff");
+    down = new Set();
+    now += START_BACKOFF_MS + 1000;
+    await loop.recheckStarts(new Map());
+    assert.ok(!gh.labels.has("factory:running"), "back to Queued");
+    // A person moved it out of Running while its claim stays unreadable: the loop lets it go, no read every tick.
+    gh.labels.add("factory:question");
+    down = new Set(["comments"]);
+    loop.startFailures.set(7, { count: 1, retryAt: now, recheck: true });
+    await loop.recheckStarts(new Map());
+    assert.ok(!loop.startFailures.has(7));
+  } finally {
+    gh.restore();
+  }
+});
+
+test("unstart: the third failed start keeps its count when the Block cannot be written, and Blocks on the next try (#167)", async () => {
+  let down = new Set();
+  const gh = claimGitHub({ fail: (kind) => down.has(kind) });
+  try {
+    const loop = await claimLoop();
+    let now = Date.parse("2026-11-13T08:00:00Z");
+    loop.clock = () => now;
+    loop.stage = async () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    };
+    loop.startFailures = new Map([[7, { count: 2, retryAt: now, recheck: false }]]);
+    // The Block's own writes fail (its labels): the entry stays, with a recheck, so the Objective is not stranded.
+    down = new Set(["labels"]);
+    await loop.runObjective(7);
+    assert.ok(!gh.labels.has("factory:blocked"));
+    assert.equal(loop.startFailures.get(7)?.count, 3);
+    assert.equal(loop.startFailures.get(7)?.recheck, true);
+    down = new Set();
+    await loop.runObjective(7);
+    assert.ok(gh.labels.has("factory:blocked"));
+    assert.ok(!loop.startFailures.has(7));
+  } finally {
+    gh.restore();
+  }
+});
+
+test("runObjective: a stage of this Objective still running on this machine is never doubled, and its claim is left alone (#167)", async () => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { STAGE_RECORD } = await import("../scripts/local.mjs");
+  const { processRecord } = await import("../scripts/lib/proc.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    let starts = 0;
+    loop.stage = async () => ((starts += 1), { code: 0, exit: "delivered", usd: 0, stage: "work" });
+    // An orphaned stage of an earlier serve: its record names a live process (this test's own).
+    mkdirSync(join(loop.ws(7), "usage-work-1"), { recursive: true });
+    writeFileSync(join(loop.ws(7), "usage-work-1", STAGE_RECORD), JSON.stringify(processRecord(process.pid)));
+    const r = await loop.runObjective(7);
+    assert.equal(r.exit, "skipped");
+    assert.equal(starts, 0);
+    assert.deepEqual(gh.writes, [], "no claim written or dropped");
+  } finally {
+    gh.restore();
+  }
 });

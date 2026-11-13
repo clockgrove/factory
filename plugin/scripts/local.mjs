@@ -1077,6 +1077,14 @@ export class Local {
 
   /** One Objective, start to delivered review (and, with `wait`, to merged). */
   async runObjective(issue, { wait = false } = {}) {
+    // A stage of this Objective still running on this machine (an earlier serve's, orphaned): never a second beside it,
+    // and its claim stays as it is.
+    this.reapHere(issue);
+    const live = liveStage(this.ws(issue));
+    if (live) {
+      log(`${liveStageLine(issue, live)}; not starting beside it`);
+      return { exit: "skipped" };
+    }
     try {
       return await this.withClaim(issue, () => this.work(issue, { wait }));
     } catch (e) {
@@ -1112,29 +1120,31 @@ export class Local {
     const failures = (this.startFailures ??= new Map());
     const count = (failures.get(issue)?.count ?? 0) + 1;
     const unknown = e.startFailed === "claim-read" || !!e.othersClaim;
-    const backoff = () => {
+    const backoff = (recheck = unknown) => {
       const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (count - 1), START_BACKOFF_MAX_MS);
-      failures.set(issue, { count, retryAt, recheck: unknown });
+      failures.set(issue, { count, retryAt, recheck });
       return new Date(retryAt).toISOString();
     };
     try {
       const data = await getIssue(this.repo, issue, this.opts);
-      if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
-        if (count >= START_FAILURES_BLOCK) {
-          failures.delete(issue);
-          await this.block(issue, "work", `could not start on this machine ${count} times in a row (${e.startFailed}${e.code ? `, ${e.code}` : ""}): ${error}. Fix the machine (disk space, the sandbox, the harness login), then re-apply the label.`);
-          if (!unknown) await dropClaim(this.repo, issue, this.holder, this.opts);
-          this.lapsed?.delete(issue);
-          return { ...out, exit: "blocked" };
-        }
-        if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
-        else {
-          await this.requeue(issue);
-          log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
-        }
+      if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
+        // No longer Running (a person moved it): nothing of this loop's to undo or read again.
+        failures.delete(issue);
+      } else if (count >= START_FAILURES_BLOCK) {
+        await this.block(issue, "work", `could not start on this machine ${count} times in a row (${e.startFailed}${e.code ? `, ${e.code}` : ""}): ${error}. Fix the machine (disk space, the sandbox, the harness login), then re-apply the label.`);
+        failures.delete(issue);
+        if (!unknown) await dropClaim(this.repo, issue, this.holder, this.opts);
+        this.lapsed?.delete(issue);
+        return { ...out, exit: "blocked" };
+      } else if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
+      else {
+        await this.requeue(issue);
+        log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
       }
     } catch (x) {
-      log(`#${issue}: could not put it back to Queued (${String(x?.message || x).slice(0, 120)}); its claim stays for this machine to resume`);
+      // GitHub failed here too (the issue read, the requeue or the Block): the Objective may still be Running, so this
+      // loop reads its claim again after the backoff and settles it then (recheckStarts).
+      log(`#${issue}: could not settle the failed start (${String(x?.message || x).slice(0, 120)}); this loop reads it again after ${backoff(true)}`);
     }
     this.lapsed?.delete(issue);
     return out;

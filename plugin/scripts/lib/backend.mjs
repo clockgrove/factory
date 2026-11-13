@@ -13,8 +13,9 @@ import { runnerDomains } from "./local.mjs";
 /**
  * A local loop holds the Objective while its claim's heartbeat is fresh. A claim that cannot be read or checked
  * (ClaimUnread) is read again a few times. A marked comment whose author still cannot be checked may be a live loop's,
- * so the runner job steps aside; a comments read that keeps failing throws GitHub's error, the job's transient-error
- * path, never a skip.
+ * so the runner job steps aside. A comments read that keeps failing counts as not claimed, as it always has: only an
+ * Objective without the factory:local label gets here (stepsAside), and a runner job that skipped it would leave it
+ * Running for the dispatcher to Block.
  */
 const claimedLocally = async (repo, issue, opts, { tries = 3, pauseMs = 2000 } = {}) => {
   for (let i = 1; ; i += 1) {
@@ -25,7 +26,10 @@ const claimedLocally = async (repo, issue, opts, { tries = 3, pauseMs = 2000 } =
         await new Promise((r) => setTimeout(r, pauseMs));
         continue;
       }
-      if (!e?.marked) throw e?.cause ?? e;
+      if (!e?.marked) {
+        process.stdout.write(`[factory] #${issue}: the local claim could not be read (${String(e?.message || e).slice(0, 160)}); not held by a local loop\n`);
+        return false;
+      }
       process.stdout.write(`[factory] #${issue}: a local claim's author cannot be checked (${String(e.message).slice(0, 160)}); stepping aside\n`);
       return true;
     }

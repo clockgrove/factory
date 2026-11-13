@@ -30,6 +30,8 @@ async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs 
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if (p === `/repos/${REPO.full}/commits/${SHA}/check-runs`) {
       const runs = at(checkRuns, (reads.checks += 1));
+      // null: this read fails on GitHub's side.
+      if (runs === null) return json({ message: "Server Error" }, 502);
       return json({ total_count: runs.length, check_runs: runs });
     }
     if (p === `/repos/${REPO.full}/commits/${OLD}/check-runs`) return json({ check_runs: older[u.searchParams.get("check_name")] || [] });
@@ -279,4 +281,68 @@ test("the workflow files are read once per stage, however often the wait is clas
   const r = await loop({ checkRuns: [], workflowRuns: [ciRun()], files: { ".github/workflows/ci.yml": CI }, workflows: oneWorkflow });
   assert.match(r.result.stuck.reason, /^GitHub has not started/);
   assert.equal(r.contentReads, 1);
+});
+
+test("a failed read of the check runs keeps the last good reading: the wait goes on to its own deadline, never read as nothing ran", async () => {
+  const running = [{ id: 3, name: "quality", status: "in_progress", conclusion: null, check_suite: { id: 9 }, started_at: ago(1) }];
+  const green = [{ ...running[0], status: "completed", conclusion: "success" }];
+  // Read 2 and 3 fail (past appearMs, 0 here); read 4 sees the check finish green.
+  const { result, checkReads } = await loop({ checkRuns: (n) => (n === 1 ? running : n < 4 ? null : green), workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 5000 } });
+  assert.equal(result.green, true, "the run was still going: a failed read is no proof that nothing ran");
+  assert.equal(result.passes, 1);
+  assert.equal(checkReads, 4);
+  // No read has succeeded since the wait began: it ends at appearMs as for nothing ran, never at the full timeout.
+  const t0 = Date.now();
+  const failing = await loop({ checkRuns: () => null, workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 60_000, stuckWaitMs: 0 } });
+  assert.ok(Date.now() - t0 < 5000, "it did not wait to the timeout");
+  assert.equal(failing.result.green, false);
+  assert.ok(failing.result.stuck, "Blocked as a wait with nothing failed");
+});
+
+test("a producing workflow run that ended startup_failure, or was cancelled before any job, Blocks at once naming that conclusion, not the check names", async () => {
+  for (const conclusion of ["startup_failure", "cancelled"]) {
+    const { result, phases } = await loop({ checkRuns: [], workflowRuns: [ciRun({ status: "completed", conclusion })], files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] });
+    assert.equal(result.harness, undefined, "no fix pass");
+    assert.equal(result.passes, 0);
+    assert.equal(result.stuck.kind, "ended");
+    assert.match(result.stuck.reason, new RegExp(`^required check\\(s\\) quality never reported on a{7}: workflow run CI \\(run 77\\) ended ${conclusion} before its job ran`));
+    assert.doesNotMatch(result.stuck.reason, /check the required check names/);
+    assert.match(result.stuck.reason, /rerun it on GitHub or fix the workflow, then re-apply the label; no failing run to fix$/);
+    assert.ok(!phases.some((l) => /waiting up to/.test(l)), "no wait for a run that has ended");
+    // GitHub could not start it: most often the workflow file, the repository's; a cancellation may be its own concurrency setting.
+    const cause = conclusion === "startup_failure" ? "setup" : "work";
+    assert.equal(result.stuck.cause, cause);
+    assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: 0, green: false, stuck: result.stuck.reason, stuckCause: result.stuck.cause } }), { exit: "blocked", reason: result.stuck.reason, cause });
+  }
+});
+
+test("a run that ended before its jobs is known as soon as every run on the head completed: no wait to the timeout when other checks reported", async () => {
+  const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success", check_suite: { id: 10 }, started_at: ago(2) }];
+  const runs = [ciRun({ status: "completed", conclusion: "startup_failure" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "success" })];
+  const t0 = Date.now();
+  const { result } = await loop({ checkRuns: lint, workflowRuns: runs, files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 60_000 } });
+  assert.ok(Date.now() - t0 < 5000, "the wait ended once every run had completed");
+  assert.equal(result.stuck.kind, "ended");
+  assert.equal(result.stuck.cause, "setup");
+  // A run still going is not that: the wait goes on (to its timeout here).
+  const going = await loop({ checkRuns: lint, workflowRuns: [runs[0], { ...runs[1], status: "in_progress", conclusion: null }], files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 50 } });
+  assert.ok(going.checkReads > 2, "it kept reading");
+});
+
+test("an unrelated run cancelled, or a producing run cancelled after its jobs started, never ends the wait early", async () => {
+  const workflows = [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }, { id: 6, path: ".github/workflows/lint.yml", state: "active" }];
+  // The reviewer's case: quality green, a required check of an outside app not reported yet, and the repository's own
+  // concurrency group cancelled an unrelated run on the head. The outside check has no producing workflow: wait on.
+  const quality = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2) }];
+  const runs = [ciRun({ status: "completed", conclusion: "success" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "cancelled" })];
+  const t0 = Date.now();
+  const outside = await loop({ checkRuns: quality, workflowRuns: runs, files, workflows }, { checks: { names: ["quality", "outside/check"], timeoutMs: 300, stuckWaitMs: 0 } });
+  assert.ok(Date.now() - t0 >= 300, "the wait went on to its timeout");
+  assert.notEqual(outside.result.stuck?.kind, "ended");
+  // quality's own run cancelled after a job of it ran (a check run in its suite): not before its jobs, so not `ended`.
+  const build = [{ id: 4, name: "build", status: "completed", conclusion: "cancelled", check_suite: { id: 9 }, started_at: ago(2) }];
+  const t1 = Date.now();
+  const late = await loop({ checkRuns: build, workflowRuns: [ciRun({ status: "completed", conclusion: "cancelled" })], files, workflows }, { checks: { timeoutMs: 300, stuckWaitMs: 0 } });
+  assert.ok(Date.now() - t1 >= 300, "the wait went on to its timeout");
+  assert.notEqual(late.result.stuck?.kind, "ended");
 });

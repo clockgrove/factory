@@ -90,7 +90,7 @@ export const triageKey = (opts) => triageKeyState(opts).key;
 let offSaid = false;
 
 /** What one failing job is asked about: the shape the replay measured, one job at a time. */
-export function triageInput({ repo, prNumber, sha, job, excerpt, files = [], maxFiles = 60 }) {
+export function triageInput({ repo, prNumber, sha, job, step = "", excerpt, files = [], maxFiles = 60 }) {
   const adds = files.reduce((n, f) => n + (f.additions || 0), 0);
   const dels = files.reduce((n, f) => n + (f.deletions || 0), 0);
   const names = files.slice(0, maxFiles).map((f) => f.filename);
@@ -99,6 +99,7 @@ export function triageInput({ repo, prNumber, sha, job, excerpt, files = [], max
     `Repository: ${repo}`,
     `Pull request: #${prNumber}, head ${String(sha).slice(0, 12)}`,
     `Failing CI job: ${job}`,
+    ...(step ? [`Failed step: ${step}`] : []),
     "",
     `Diff summary: ${files.length} files changed, ${adds} insertions(+), ${dels} deletions(-)`,
     "Files changed by the pull request:",
@@ -117,7 +118,8 @@ export const rerunWanted = (verdicts, min = MIN_CONFIDENCE) => verdicts.length >
 // Lines a test runner, compiler or tool prints for a failure itself: node --test (✖), Jest (●, FAIL, Expected/Received),
 // Vitest (×, FAIL), Playwright (✘, numbered titles), Mocha (numbered titles), TAP (not ok), Go (--- FAIL, panic), pytest
 // (FAILED, E), apt (E:), Rust (panicked, error[E…]), tsc and ESLint, any Error or Exception, and the network and
-// download failures infrastructure reds print.
+// download failures infrastructure reds print, Git LFS's included (its batch and smudge errors, also behind a tool's
+// `task:` prefix).
 const FAILURE = [
   /^[✖×✗✘●]\s+\S/u,
   /^\d+\)\s+\S/,
@@ -138,6 +140,8 @@ const FAILURE = [
   /^Failed to\b/,
   /^Unexpected HTTP response\b/,
   /^Error while\b/,
+  /(?:^|:\s)batch response: /,
+  /^Error downloading object: /,
 ];
 // The wrappers every red repeats whatever failed: the runner's annotation, npm, pnpm and yarn's exit lines, summaries.
 const BOILERPLATE = [/^##\[/, /^npm (?:error|ERR!)/, /ELIFECYCLE/, /^Error: Process completed with exit code/, /^error Command failed with exit code/, /^[✖×]\s+failing tests:?$/u, /^(?:FAIL|FAILED)\s*$/, /^Error: The process '.*' failed with exit code/];
@@ -345,6 +349,81 @@ export function jobsToTriage(failedRuns, required = [], sigs = new Map()) {
  */
 export const neverStarted = (job) => !!job && job.conclusion === "failure" && Array.isArray(job.steps) && job.steps.length === 0 && !job.runner_id && !job.runner_name;
 
+/** The first failed step of an Actions job that ran ({name, number, conclusion}, GitHub's `steps`), or null. */
+export const failedStep = (job) => (Array.isArray(job?.steps) ? (job.steps.find((x) => x?.conclusion === "failure") ?? null) : null);
+
+/**
+ * The names GitHub gives the checkout steps (`uses: actions/checkout@…`) of the workflow job reporting `jobName`: the
+ * step's `name`, else `Run <uses>`. `text` is the workflow file at the head; an unreadable one has none.
+ */
+export function checkoutSteps(text, jobName) {
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""));
+  } catch {
+    return new Set();
+  }
+  const out = new Set();
+  for (const [id, job] of Object.entries(doc?.jobs || {})) {
+    if (!reports(typeof job?.name === "string" ? job.name : id, jobName) || !Array.isArray(job?.steps)) continue;
+    for (const st of job.steps) {
+      const uses = typeof st?.uses === "string" ? st.uses.trim() : "";
+      if (/^actions\/checkout@/.test(uses)) out.add(typeof st.name === "string" ? st.name : `Run ${uses}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a job that ran failed only where no code of the change runs: "set-up" when its first failed step is GitHub's
+ * own first step (Set up job), "checkout" when it is a checkout step of its workflow (checkoutSteps, `workflow` the file
+ * at the head), and every other failed step is one of those too; else null (a `run:` step or anything else failed).
+ * Structure only: step numbers, conclusions and the workflow's `uses`, never the log.
+ */
+export function setupFailure(job, workflow = null) {
+  const steps = Array.isArray(job?.steps) ? job.steps : [];
+  const failed = steps.filter((x) => x?.conclusion === "failure");
+  if (!failed.length) return null;
+  let checkout = null;
+  const kind = (x) => (x.number === 1 ? "set-up" : (checkout ??= checkoutSteps(workflow, job.name)).has(x.name) ? "checkout" : null);
+  // Every step that did not pass or skip (a later step cancelled after a `continue-on-error` checkout included) must
+  // be the set-up or a checkout.
+  return steps.filter((x) => !["success", "skipped"].includes(x?.conclusion)).every(kind) ? kind(failed[0]) : null;
+}
+
+// What only the log says: whether the failed step's far side failed or could not be reached (an HTTP 5xx, a timeout,
+// a connection error), or the request itself was refused or names what is missing (a 4xx, an object that does not
+// exist, an invalid path, a submodule or .gitattributes problem: the change's or the repository's, never an outage).
+// The one place these words decide anything; serverSide reads only the failed step's lines.
+const SERVER_SIDE = [
+  /\bHTTP(?:\/[\d.]+)? 5\d\d\b/i,
+  /\[5\d\d\]/,
+  /\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out)\b/i,
+  /\bstatus(?: code)?:? 5\d\d\b/i,
+  /\btimed out\b|\bTimeout exceeded\b/i,
+  /\bE(?:TIMEDOUT|CONNRESET|CONNREFUSED|AI_AGAIN)\b/,
+  /\bCould not resolve host\b/i,
+  /\bconnection (?:reset|refused|timed out)\b/i,
+  /\bearly EOF\b|\bRPC failed\b|\bunexpected disconnect\b/i,
+];
+const CLIENT_SIDE = [
+  /\bHTTP(?:\/[\d.]+)? 4\d\d\b/i,
+  /\[4\d\d\]/,
+  /\b4\d\d (?:Bad Request|Unauthorized|Forbidden|Not Found)\b/i,
+  /\bstatus(?: code)?:? 4\d\d\b/i,
+  /\bdoes not exist\b/i,
+  /\bnot found\b/i,
+  /\binvalid path\b/i,
+  /\bsubmodule\b/i,
+  /\.gitattributes\b/,
+];
+
+/** Whether a job log's failed step (failingStep) says a server or network failure and nothing of a refused or missing request. */
+export function serverSide(text) {
+  const lines = failingStep(cleanLog(text).split("\n").map((l) => l.trim()).filter(Boolean));
+  return lines.some((l) => SERVER_SIDE.some((re) => re.test(l))) && !lines.some((l) => CLIENT_SIDE.some((re) => re.test(l)));
+}
+
 /** GitHub's own words on a check run, to quote: its first failure annotation's message, on one line. */
 const annotationText = (annotations) => {
   const list = Array.isArray(annotations) ? annotations : [];
@@ -399,6 +478,8 @@ export const notStartedReason = (jobs) =>
 
 // ------------------------------------------------------------------ required checks GitHub has not started yet
 
+/** A workflow run's conclusions that end it before its jobs run: GitHub could not start it, or it was cancelled. */
+export const ENDED_EARLY = ["startup_failure", "cancelled"];
 /** A workflow run or check run GitHub has created but not started. `waiting` is not one: it waits for an approval. */
 const UNSTARTED = ["queued", "requested", "pending"];
 /** The newest check run of `name` among `checkRuns`. */
@@ -541,7 +622,8 @@ const ACTIONS_APP = "github-actions";
  * workflow that produces it queued on the head, or never created (as when the head has no workflow run at all). The
  * reason names who has not started it: GitHub, a run `pending` behind the repository's own concurrency group, or the
  * service whose app owns the check run. Kinds that do not wait: `running` (a check still running), `approval` (a
- * deployment approval), `filtered` (its workflow's path filter skips this change), `unreported` (no workflow on the head
+ * deployment approval), `filtered` (its workflow's path filter skips this change), `ended` (every workflow run on the
+ * head that produces it ended `startup_failure`, or `cancelled` with no check run in its suite), `unreported` (no workflow on the head
  * produces it: a wrong check name) and `unread`. A queued run of another workflow is not this check's. `now` and
  * `waitedMin` only word the reason.
  */
@@ -559,6 +641,9 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
   const running = [];
   const unreported = [];
   const filtered = [];
+  const ended = [];
+  // A run that ended before its jobs ran: GitHub could not start it, or it was cancelled with no check run in its suite.
+  const early = (w) => w.status === "completed" && (w.conclusion === "startup_failure" || (w.conclusion === "cancelled" && !checkRuns.some((r) => (r.check_suite?.id ?? r.suite) === w.check_suite_id)));
   for (const n of open) {
     const r = latestRun(checkRuns, n);
     if (r) {
@@ -583,8 +668,16 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
     else if (mine.some((w) => w.status === "waiting")) approval.push(n);
     else if (mine.some((w) => w.status !== "completed")) running.push({ n, w: mine.find((w) => w.status !== "completed") });
     else if (ids && !mine.length && allSkip) filtered.push({ n, key: filter.key });
+    else if (mine.length && mine.every(early)) ended.push({ n, w: mine[0] });
     else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min${filter ? ` (its workflow's path filter, ${filter.key}, may skip this change)` : ""}` });
     else unreported.push(n);
+  }
+  // Its workflow run ended before the job that reports it existed: that run's conclusion, never the check's name, is why.
+  if (ended.length) {
+    const runs = [...new Set(ended.map((x) => x.w))];
+    // GitHub could not start a run: most often the workflow file on the default branch, the repository's (setup). A
+    // cancellation may be the repository's own concurrency setting: the work's.
+    return { waits: false, kind: "ended", cause: runs.some((w) => w.conclusion === "startup_failure") ? "setup" : "work", runs, reason: `required check(s) ${list(ended.map((x) => x.n))} never reported on ${short}: ${list(runs.map((w) => `workflow run ${label(w)} ended ${w.conclusion}`))} before ${ended.length > 1 ? "their jobs" : "its job"} ran${runs.some((w) => w.conclusion === "startup_failure") ? " (GitHub could not start the workflow: its file or GitHub's side, as the run's page says)" : ""}; rerun it on GitHub or fix the workflow, then re-apply the label; no failing run to fix` };
   }
   if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
   if (filtered.length) return { waits: false, kind: "filtered", runs: [], reason: `required check(s) ${list(filtered.map((x) => x.n))} never run on ${short}: ${list([...new Set(filtered.map((x) => x.key))])} of ${filtered.length > 1 ? "their workflows skips" : "its workflow skips"} this change, so GitHub starts no run for it; run the check on every change, or stop requiring it; no failing run to fix` };
@@ -602,21 +695,24 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
 
 /**
  * The Block reason's part for a red whose triage read every failing job as a flake or infrastructure and whose rerun
- * GitHub refused (`refusal`, from red()): triage's verdicts, the refusal, and what a person does about it. A 403 is the
+ * GitHub refused (`refusal`, from red()): triage's verdicts, the refusal, and what a person does about it; `unchanged`, the rerun of a head a fix
+ * pass left unchanged (again()), names no verdict; `earlier`, a refusal recorded before on the Objective. A 403 is the
  * token's missing Actions write: locally the repository token's, on Actions the workflow's `actions: write`.
  */
 export function refusedRerunText(refusal) {
   const jobs = (refusal?.jobs || []).map((j) => `${j.name}: ${j.verdict ?? "no verdict"}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""}`).join(", ");
   const status = refusal?.status ? String(refusal.status) : "error";
-  const why = refusal?.permission ? `${status}: the token cannot rerun jobs` : refusal?.rateLimited ? `${status}: rate limited` : status;
+  const why = refusal?.earlier ? "a rerun was refused earlier on this Objective" : refusal?.permission ? `${status}: the token cannot rerun jobs` : refusal?.rateLimited ? `${status}: rate limited` : status;
   const grant = refusal?.where === "actions" ? "give the workflow's work and review jobs `actions: write`" : "give the token Actions read and write";
-  return `red-check triage read it as a flake or infrastructure (${jobs}), but GitHub refused the rerun (${why}); rerun the failed jobs on GitHub${refusal?.permission ? `, or ${grant},` : ""} then re-apply the label`;
+  const what = refusal?.unchanged ? "GitHub refused the rerun of the failed jobs" : `red-check triage read it as a flake or infrastructure (${jobs}), but GitHub refused the rerun`;
+  return `${what} (${why}); rerun the failed jobs on GitHub${refusal?.permission || refusal?.earlier ? `, or ${grant},` : ""} then re-apply the label`;
 }
 
 /** The progress line for one triage: each job's verdict, confidence and signature, then what Factory does. */
 export function triageLine({ sha, model, jobs, outcome }) {
   const each = jobs.map((j) => {
     const sig = j.sig.id ? `${j.sig.id}${j.repeat ? ", seen before" : ""}${j.sig.line ? ` \`${j.sig.line.replace(/`/g, "'")}\`` : ""}` : "no failure line found";
+    if (j.infra) return `${j.name}: failed in its ${j.infra} step (${j.step}), no model asked [${sig}]`;
     return `${j.name}: ${j.verdict ?? `no verdict (${j.error || "?"})`}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""} [${sig}]`;
   });
   return `triage of the red on ${String(sha).slice(0, 7)} (${model}): ${each.join("; ")} → ${outcome}`;
@@ -627,22 +723,16 @@ export function triageLine({ sha, model, jobs, outcome }) {
  * (workflow-template.yml gives the work and review jobs actions: write), locally the repository token (Actions: read
  * and write). `progress` is the run's progressReporter. `red({sha, failedRuns, required})` returns {rerun, ignoreIds,
  * jobs}. Without a key (`off` is the code why) every red goes to the fix pass, and the first says so, once per stage.
+ * `again({sha, failedRuns})`, with or without a key: the failed jobs rerun once on a head a fix pass left unchanged,
+ * no model asked, unless the red reads as the change's (session.mjs validationLoop); returns {rerun, ignoreIds} or why
+ * not ({already}, {refused}, {skipped}).
+ * `infra({sha, failedRuns})`: whether every failed job failed on GitHub's side (set-up or checkout, a server or network
+ * failure, naming nothing the PR changes).
  */
 export function openTriage({ inputs, env = process.env, home = homedir(), repo, issue, prNumber, token, actionsToken = token, progress = null, decider = null }) {
   const { key, code } = decider ? { key: null, code: null } : triageKeyState({ inputs, env, home });
   const model = inputs?.triageModel || TRIAGE_MODEL;
-  if (!decider && !key) {
-    const red = async ({ failedRuns = [] } = {}) => {
-      if (!failedRuns.length || offSaid) return { rerun: false };
-      offSaid = true;
-      const line = `triage: off (${code}); fix pass`;
-      log(line);
-      if (progress) await progress(line);
-      return { rerun: false };
-    };
-    return { model, off: code, red };
-  }
-  mask(key);
+  if (key) mask(key);
   let ask = decider;
   // What this job recorded, on top of what earlier jobs left on the issue (read once, at the first red).
   let mine = mergeTriage();
@@ -655,70 +745,29 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     log(line);
     if (progress) await progress(line);
   };
-
-  const red = async ({ sha, failedRuns = [], required = [] }) => {
-    const no = { rerun: false };
-    if (!failedRuns.length) return no;
+  const known = async () => {
     if (!earlier) {
       // Factory's own login first: only its own progress comments' records count (triageOf).
       await progress?.self?.().catch(() => null);
       earlier = triageOf(await listComments(repo, issue, opts).catch(() => []), { issue });
     }
-    const known = mergeTriage(earlier, mine);
-    if (known.refused) {
-      await record(`triage: a rerun was refused earlier on this Objective (the token cannot rerun jobs: it needs Actions read and write); fix pass`, {});
-      return no;
-    }
-    if (known.reruns.has(sha)) {
-      await record(`triage: the failed jobs on ${sha.slice(0, 7)} were already rerun once; fix pass`, {});
-      return no;
-    }
-    if (failedRuns.length > MAX_JOBS) {
-      await record(`triage: ${failedRuns.length} failing jobs on ${sha.slice(0, 7)}, more than ${MAX_JOBS}; fix pass`, {});
-      return no;
-    }
-    // Only an Actions job can be rerun: each failing job must resolve to its workflow run, or nothing is asked.
-    const runIds = new Set();
+    return mergeTriage(earlier, mine);
+  };
+  // Each failing check run's Actions job, or the name of the first that is none (only an Actions job can be rerun).
+  const actionsJobs = async (failedRuns) => {
+    const jobs = new Map();
     for (const r of failedRuns) {
       const job = await rest(`repos/${repo.full}/actions/jobs/${r.id}`, actions).catch(() => null);
-      if (!job?.run_id) {
-        await record(`triage: ${r.name} is not an Actions job, so it cannot be rerun; fix pass`, {});
-        return no;
-      }
-      runIds.add(job.run_id);
+      if (!job?.run_id) return { notActions: r.name, jobs };
+      jobs.set(r.id, job);
     }
-    const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
-    const names = changedNames(files);
-    ask ??= await openDecider({ key, model });
-    const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
-    const sigs = new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))]));
-    const picked = jobsToTriage(failedRuns, required, sigs);
-    const jobs = await Promise.all(
-      picked.map(async (r) => {
-        const text = texts.get(r.id);
-        const sig = sigs.get(r.id);
-        const repeat = !!sig.id && known.sigs.has(sig.id);
-        // A failure already rerun once (on any head of this Objective) is not asked again: rerunning it hides a defect.
-        if (repeat) return { name: r.name, sig, repeat, verdict: null, confidence: null, error: "already rerun once" };
-        // A failure that names what the PR changed could be the change's own intermittent defect: never rerun to green.
-        const named = namesChange(sig, names);
-        if (named) return { name: r.name, sig, repeat, verdict: null, confidence: null, error: `its failure names ${named}, which the PR changes` };
-        const v = await ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, excerpt: logWindow(cleanLog(text), 4000), files }), TRIAGE_QUESTION);
-        return { name: r.name, sig, repeat, ...v };
-      }),
-    );
-    if (!rerunWanted(jobs)) {
-      await record(triageLine({ sha, model, jobs, outcome: "fix pass" }), {});
-      return no;
-    }
-    // Rerun-failed-jobs needs each workflow run completed; a run still going after ten minutes is left to the fix pass.
-    for (const id of runIds) {
-      const done = await waitRunCompleted(repo, id, actions);
-      if (!done) {
-        await record(triageLine({ sha, model, jobs, outcome: `fix pass (workflow run ${id} did not complete)` }), {});
-        return no;
-      }
-    }
+    return { jobs };
+  };
+  // The failed jobs of each workflow run rerun once. Returns null when rerun, else the refusal (recorded) or the run not
+  // completed (its line for the caller to record). `outcome(why)` words the line.
+  const rerunRuns = async (runIds, outcome) => {
+    // Rerun-failed-jobs needs each workflow run completed; a run still going after ten minutes is left alone.
+    for (const id of runIds) if (!(await waitRunCompleted(repo, id, actions))) return { incomplete: id, line: outcome(`workflow run ${id} did not complete`) };
     for (const id of runIds) {
       try {
         await rest(`repos/${repo.full}/actions/runs/${id}/rerun-failed-jobs`, { ...actions, method: "POST", body: {} });
@@ -729,17 +778,163 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         // A throttled call (rate limit) is no refusal: this red goes to the fix pass, and a later one may ask again.
         const refused = (e.status === 403 || e.status === 404) && !e.rateLimited;
         const why = refused && e.status === 403 ? ", no permission to rerun jobs (Actions: write)" : "";
-        await record(triageLine({ sha, model, jobs, outcome: `fix pass (the rerun was refused: ${e.status || "error"}${why})` }), refused ? { refused: true } : {});
-        // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
-        // verdict and failure line, and the refusal.
-        const refusal = { status: e.status || null, permission: refused && e.status === 403, rateLimited: !!e.rateLimited, where: env.GITHUB_ACTIONS ? "actions" : "local", jobs: jobs.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) };
-        return { rerun: false, refused: refusal };
+        await record(outcome(`the rerun was refused: ${e.status || "error"}${why}`), refused ? { refused: true } : {});
+        return { refusal: { status: e.status || null, permission: refused && e.status === 403, rateLimited: !!e.rateLimited, where: env.GITHUB_ACTIONS ? "actions" : "local" } };
       }
     }
+    return null;
+  };
+  // A job's workflow file at the head, read once per workflow run: what tells its checkout steps apart (setupFailure).
+  const workflows = new Map();
+  const workflowOf = (sha, job) => {
+    if (!workflows.has(job.run_id)) {
+      workflows.set(
+        job.run_id,
+        rest(`repos/${repo.full}/actions/runs/${job.run_id}`, actions)
+          .then((run) => (run?.path ? rest(`repos/${repo.full}/contents/${String(run.path).replace(/@.*$/, "")}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }) : ""))
+          .then(String, () => ""),
+      );
+    }
+    return workflows.get(job.run_id);
+  };
+
+  // This process's triage answers by head (red()), so again() never reruns a red the model read as the change's.
+  const asked = new Map();
+  // The failing jobs' logs and signatures and what the PR changes (job logs are read once per job: github.mjs jobLog).
+  const readRed = async (failedRuns) => {
+    const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+    const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
+    return { files, names: changedNames(files), texts, sigs: new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))])) };
+  };
+  // A job that failed on GitHub's side: only in its set-up or checkout (setupFailure), its failed step saying a server
+  // or network failure (serverSide), and its failure naming nothing the PR changes. Returns the kind, or null.
+  const githubSide = async (sha, job, text, sig, names) => {
+    const step = failedStep(job);
+    if (!step || !serverSide(text) || namesChange(sig, names)) return null;
+    return setupFailure(job, step.number === 1 ? null : await workflowOf(sha, job));
+  };
+
+  const offRed = async ({ failedRuns = [] } = {}) => {
+    if (!failedRuns.length || offSaid) return { rerun: false };
+    offSaid = true;
+    const line = `triage: off (${code}); fix pass`;
+    log(line);
+    if (progress) await progress(line);
+    return { rerun: false };
+  };
+
+  const red = async ({ sha, failedRuns = [], required = [] }) => {
+    const no = { rerun: false };
+    if (!failedRuns.length) return no;
+    const seen = await known();
+    if (seen.refused) {
+      await record(`triage: a rerun was refused earlier on this Objective (the token cannot rerun jobs: it needs Actions read and write); fix pass`, {});
+      return no;
+    }
+    if (seen.reruns.has(sha)) {
+      await record(`triage: the failed jobs on ${sha.slice(0, 7)} were already rerun once; fix pass`, {});
+      return no;
+    }
+    if (failedRuns.length > MAX_JOBS) {
+      await record(`triage: ${failedRuns.length} failing jobs on ${sha.slice(0, 7)}, more than ${MAX_JOBS}; fix pass`, {});
+      return no;
+    }
+    const { notActions, jobs: actionsJob } = await actionsJobs(failedRuns);
+    if (notActions) {
+      await record(`triage: ${notActions} is not an Actions job, so it cannot be rerun; fix pass`, {});
+      return no;
+    }
+    const runIds = new Set([...actionsJob.values()].map((j) => j.run_id));
+    const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+    const names = changedNames(files);
+    ask ??= await openDecider({ key, model });
+    const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
+    const sigs = new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))]));
+    const picked = jobsToTriage(failedRuns, required, sigs);
+    const jobs = await Promise.all(
+      picked.map(async (r) => {
+        const text = texts.get(r.id);
+        const sig = sigs.get(r.id);
+        const job = actionsJob.get(r.id);
+        const step = failedStep(job)?.name || "";
+        // GitHub's side (githubSide): no code of the change ran and the far side failed, so no model is asked and nothing
+        // a rerun could hide; rerun once on this head like a flake. Any other checkout failure is asked like any red.
+        const infra = await githubSide(sha, job, text, sig, names);
+        if (infra) return { name: r.name, sig, repeat: false, step, infra, verdict: "flaky_or_infra", confidence: 1 };
+        const repeat = !!sig.id && seen.sigs.has(sig.id);
+        // A failure already rerun once (on any head of this Objective) is not asked again: rerunning it hides a defect.
+        if (repeat) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: "already rerun once" };
+        // A failure that names what the PR changed could be the change's own intermittent defect: never rerun to green.
+        const named = namesChange(sig, names);
+        if (named) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: `its failure names ${named}, which the PR changes` };
+        const v = await ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, step, excerpt: logWindow(cleanLog(text), 4000), files }), TRIAGE_QUESTION);
+        return { name: r.name, sig, repeat, step, ...v };
+      }),
+    );
+    asked.set(sha, jobs);
+    if (!rerunWanted(jobs)) {
+      await record(triageLine({ sha, model, jobs, outcome: "fix pass" }), {});
+      return no;
+    }
+    const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})` }));
+    if (failed?.line) await record(failed.line, {});
+    // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
+    // verdict and failure line, and the refusal.
+    if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, jobs: jobs.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) } };
+    if (failed) return no;
     await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun" }), { reruns: [sha], sigs: jobs.map((j) => j.sig.id).filter(Boolean) });
     return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: jobs.map((j) => j.name) };
   };
-  return { model, red };
+
+  // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
+  // failed jobs are rerun once for that head (the same once-per-head record as red()), no model asked, only when nothing
+  // says the change caused the red: no change_caused verdict on this head, no failure naming what the PR changes, no
+  // failure signature already rerun on the Objective, and each job either answered by the model on this head or failed
+  // on GitHub's side. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
+  const again = async ({ sha, failedRuns = [] }) => {
+    const short = String(sha).slice(0, 7);
+    if (!failedRuns.length) return { rerun: false, skipped: "no failed job" };
+    if (failedRuns.length > MAX_JOBS) return { rerun: false, skipped: `${failedRuns.length} failing jobs, more than ${MAX_JOBS}` };
+    const seen = await known();
+    if (seen.refused) return { rerun: false, refused: { earlier: true, unchanged: true, where: env.GITHUB_ACTIONS ? "actions" : "local" } };
+    if (seen.reruns.has(sha)) return { rerun: false, already: true };
+    const caused = (asked.get(sha) || []).filter((j) => j.verdict === "change_caused");
+    if (caused.length) return { rerun: false, skipped: `triage read it as caused by the change: ${caused.map((j) => `${j.name} ${typeof j.confidence === "number" ? j.confidence.toFixed(2) : ""}`.trim()).join(", ")}` };
+    const { notActions, jobs } = await actionsJobs(failedRuns);
+    if (notActions) return { rerun: false, skipped: `${notActions} is not an Actions job, so it cannot be rerun` };
+    const { texts, sigs, names } = await readRed(failedRuns);
+    // The model's answers on this head, by job: a job it gave no verdict (triage off, an error, a timeout) is rerun only
+    // when it failed on GitHub's side (githubSide).
+    const answered = new Set((asked.get(sha) || []).filter((j) => j.verdict).map((j) => j.name));
+    for (const r of failedRuns) {
+      const sig = sigs.get(r.id);
+      if (sig.id && seen.sigs.has(sig.id)) return { rerun: false, skipped: `the failure of ${r.name} was already rerun once on this Objective` };
+      const named = namesChange(sig, names);
+      if (named) return { rerun: false, skipped: `the failure of ${r.name} names ${named}, which the PR changes` };
+      if (!answered.has(r.name) && !(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sig, names))) return { rerun: false, skipped: `${r.name} has no triage verdict and did not fail on GitHub's side` };
+    }
+    const line = (outcome) => `triage: the fix pass committed nothing, so the red on ${short} is unchanged → ${outcome}`;
+    const failed = await rerunRuns(new Set([...jobs.values()].map((j) => j.run_id)), line);
+    if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, unchanged: true } };
+    if (failed) {
+      await record(failed.line, {});
+      return { rerun: false, skipped: `workflow run ${failed.incomplete} did not complete` };
+    }
+    await record(line("failed jobs rerun once, no model asked"), { reruns: [sha], sigs: [...sigs.values()].map((x) => x.id).filter(Boolean) });
+    return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: failedRuns.map((r) => r.name) };
+  };
+  // Whether every failed job failed on GitHub's side (githubSide): its set-up or checkout only, a server or network
+  // failure, naming nothing the PR changes.
+  const infra = async ({ sha, failedRuns = [] }) => {
+    if (!failedRuns.length) return false;
+    const { notActions, jobs } = await actionsJobs(failedRuns);
+    if (notActions) return false;
+    const { texts, sigs, names } = await readRed(failedRuns);
+    for (const r of failedRuns) if (!(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sigs.get(r.id), names))) return false;
+    return true;
+  };
+  if (!decider && !key) return { model, off: code, red: offRed, again, infra };
+  return { model, red, again, infra };
 }
 
 async function waitRunCompleted(repo, id, { token, timeoutMs = 10 * 60_000, pollMs = 20_000 }) {

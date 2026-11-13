@@ -729,7 +729,9 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  pr:         {exists, draft, body} | null
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
- *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason)}
+ *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
+ *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
+ *              committed nothing on a red head: session.mjs unchangedBlock)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -789,7 +791,10 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // A required job GitHub never started (triage.mjs notStartedJobs): infrastructure, Blocked quoting GitHub's annotation.
     if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted, cause: "outage" };
     // A wait that ended with no required check failed (triage.mjs checksNotStarted): no red at all, so never "validation red".
-    if (validation.stuck) return { exit: "blocked", reason: validation.stuck, cause: "factory" };
+    // Its cause is the wait's own when it has one (a run that ended startup_failure: outage), else Factory's.
+    if (validation.stuck) return { exit: "blocked", reason: validation.stuck, cause: Object.hasOwn(BLOCK_CAUSES, validation.stuckCause ?? "") ? validation.stuckCause : "factory" };
+    // A fix pass that committed nothing left the same red (session.mjs unchangedBlock): said as such, never a second red.
+    if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
     const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;

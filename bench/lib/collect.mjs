@@ -30,14 +30,42 @@ export const REVIEW_ARTIFACT = (issue) => `factory-usage-${issue}-review`;
  * The Objectives worth a row: issues with the label that closed at or after
  * `since` (ISO date), plus open ones carrying a Factory state label (Blocked,
  * Question, In review, Running), so the misses that never merged are rows too.
+ * With `since`, also every issue whose label was removed at or after it (a
+ * parked Objective, waiting on other work) and that Factory picked up then (a
+ * state label applied at or after `since`): it ran and cost money, whatever its
+ * labels are now, after the labelled ones.
  */
 export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all" } = {}) {
   const query = [`labels=${encodeURIComponent(label)}`, `state=${state}`, since ? `since=${encodeURIComponent(since)}` : null, "sort=updated", "direction=desc", PER_PAGE].filter(Boolean).join("&");
   const issues = await api(`repos/${repoFull}/issues?${query}`, { paginate: true });
-  return issues
-    .filter((i) => !i.pull_request)
-    .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
-    .map((i) => i.number);
+  const numbers = new Set(
+    issues
+      .filter((i) => !i.pull_request)
+      .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
+      .map((i) => i.number),
+  );
+  if (since) for (const n of await parkedSince(api, repoFull, { since, label, skip: new Set(issues.map((i) => i.number)) })) numbers.add(n);
+  return [...numbers];
+}
+
+/**
+ * Issues that lost `label` at or after `since` and gained a Factory state label at or after it. The candidates are the
+ * issues updated at or after `since` that do not carry the label now (removing it updates the issue), less `skip`;
+ * only each candidate's own events are read. The reads scale with the issues touched in the window, never with the
+ * repository's PR and event traffic, and no ceiling cuts the list short.
+ */
+export async function parkedSince(api, repoFull, { since, label = OBJECTIVE_LABEL, skip = new Set() }) {
+  const from = Date.parse(since);
+  const touched = await api(`repos/${repoFull}/issues?state=all&since=${encodeURIComponent(since)}&${PER_PAGE}`, { paginate: true });
+  const candidates = touched.filter((i) => !i.pull_request && !skip.has(i.number) && !labelNames(i).includes(label)).map((i) => i.number);
+  const out = [];
+  for (const n of candidates) {
+    const events = (await api(`repos/${repoFull}/issues/${n}/events?${PER_PAGE}`, { paginate: true })).filter((e) => Date.parse(e.created_at) >= from);
+    const removed = events.some((e) => e.event === "unlabeled" && e.label?.name === label);
+    const started = events.some((e) => e.event === "labeled" && STATE_LABELS.includes(e.label?.name));
+    if (removed && started) out.push(n);
+  }
+  return out;
 }
 
 /** This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name their run. */

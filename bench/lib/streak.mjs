@@ -112,3 +112,52 @@ export async function tagTime(api, repo, tag) {
   const commit = await api(`repos/${repo}/commits/${encodeURIComponent(tag)}`);
   return commit?.commit?.committer?.date ?? null;
 }
+
+/**
+ * The pooled streak across repositories (docs/PLAN.md, the 1.0 bar): every finished row of every repository, in the
+ * order they ended, on any harness; a walk-away merge (verdict ok) extends it and any miss resets it. `rows` carry
+ * their `repository`. Returns `{from, current, best, finished, walkAway, sequence: [{repository, issue, harness,
+ * endedAt, ok, why}], inFlight: [{repository, issue}], before: [{repository, issue}]}`.
+ */
+export function pooledStreak(rows, { from }) {
+  const out = { from, current: 0, best: 0, finished: 0, walkAway: 0, sequence: [], inFlight: [], before: [] };
+  const finished = [];
+  for (const r of rows) {
+    const id = { repository: r.repository, issue: r.issue };
+    if (from && ms(r.walkAway?.since) < ms(from)) out.before.push(id);
+    else if (endedAt(r)) finished.push({ r, end: endedAt(r) });
+    else out.inFlight.push(id);
+  }
+  finished.sort((a, b) => ms(a.end) - ms(b.end) || String(a.r.repository).localeCompare(String(b.r.repository)) || a.r.issue - b.r.issue);
+  for (const { r, end } of finished) {
+    const v = verdict(r);
+    out.finished += 1;
+    if (v.ok) {
+      out.walkAway += 1;
+      out.current += 1;
+      out.best = Math.max(out.best, out.current);
+    } else out.current = 0;
+    out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: v.ok, why: v.why });
+  }
+  return out;
+}
+
+const ref = (x) => `${x.repository}#${x.issue}`;
+
+/** The pooled streak as Markdown: one line of totals, then the sequence it counted, oldest first. */
+export function pooledTable(result, { repositories = [], tag = null } = {}) {
+  const head = ["Current streak", "Best", "Walk-away / finished", "In flight"];
+  const lines = [
+    `Pooled streak across ${repositories.join(", ")} from ${tag ? `${tag} (${result.from})` : result.from}: consecutive walk-away merges on any harness, in the order they ended; any miss on any repository resets it.`,
+    "",
+    `| ${head.join(" | ")} |`,
+    `| ${head.map(() => "---").join(" | ")} |`,
+    `| ${[result.current, result.best, `${result.walkAway} / ${result.finished}`, result.inFlight.length ? result.inFlight.map(ref).join(", ") : "none"].map(cell).join(" | ")} |`,
+  ];
+  if (result.sequence.length) {
+    lines.push("", "Pooled, oldest first:");
+    for (const x of result.sequence) lines.push(`- ${ref(x)} (${x.harness}) ${x.endedAt}: ${x.ok ? "yes" : `no: ${cell(x.why)}`}`);
+  }
+  if (result.before.length) lines.push("", `Left out (clock started before ${tag ?? result.from}): ${result.before.map(ref).join(", ")}`);
+  return `${lines.join("\n")}\n`;
+}

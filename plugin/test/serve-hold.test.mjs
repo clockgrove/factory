@@ -1,6 +1,10 @@
+import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
 
@@ -303,7 +307,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
 /** A loop with this machine's holder id and no waits between claim reads. */
 async function claimLoop(holderPid = process.pid) {
   const { holderId, machineIdentity } = await import("../scripts/local.mjs");
-  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, claimSettleMs: 0, baseEnv: () => ({}) });
+  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", dev: mkdtempSync(join(tmpdir(), "claims-")), opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, claimSettleMs: 0, baseEnv: () => ({}) });
 }
 
 for (const [stage, end, how] of [

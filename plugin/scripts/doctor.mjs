@@ -1140,7 +1140,7 @@ export function localDatabaseChecks({ checkout, env = process.env, wf = readWork
   const darwin = os === "darwin";
   if (pick("FACTORY_LOCAL_DB") === "1") {
     if (!darwin) return [PASS("local database", "FACTORY_LOCAL_DB=1: each validation command gets a throwaway Postgres")];
-    return [WARN("local database", "FACTORY_LOCAL_DB=1 is set, but it is for Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it, and a run with it in this shell does not start", "unset FACTORY_LOCAL_DB on macOS (in this shell and the workflow env) and list only the validation commands that need no database in FACTORY_LOCAL_VALIDATION")];
+    return [WARN("local database", "FACTORY_LOCAL_DB=1 is set, but it is for Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it, and a run with it set (in this shell or the workflow env) does not start", "unset FACTORY_LOCAL_DB on macOS (in this shell and the workflow env) and list only the validation commands that need no database in FACTORY_LOCAL_VALIDATION")];
   }
   const signals = databaseSignals(checkout, wf);
   if (!signals.length) return [];

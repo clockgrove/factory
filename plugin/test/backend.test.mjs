@@ -570,6 +570,16 @@ test("the outer sandbox: host sockets unreadable, the harness's settings, MCP co
   assert.ok(guards.includes("/u/c/pkg"), "a release in its home would run too");
 });
 
+test("macOS refuses FACTORY_LOCAL_DB=1 at start, set in the shell or in the workflow's env (#161)", async () => {
+  const { preflight } = await import("../scripts/local.mjs");
+  const refused = (o) => preflight("claude", "o/r", "t", "", o).filter((p) => /^FACTORY_LOCAL_DB runs on Linux and WSL2 only/.test(p));
+  assert.equal(refused({ os: "darwin", env: { FACTORY_LOCAL_DB: "1" }, wf: {} }).length, 1, "from the shell");
+  assert.equal(refused({ os: "darwin", env: {}, wf: { FACTORY_LOCAL_DB: "1" } }).length, 1, "from the workflow file");
+  assert.equal(refused({ os: "darwin", env: { FACTORY_LOCAL_DB: "" }, wf: { FACTORY_LOCAL_DB: "1" } }).length, 0, "the shell wins, as in baseEnv");
+  assert.equal(refused({ os: "darwin", env: {}, wf: {} }).length, 0, "off");
+  assert.equal(refused({ os: "linux", env: {}, wf: { FACTORY_LOCAL_DB: "1" } }).length, 0, "Linux runs it");
+});
+
 test("local Copilot runs only inside the outer sandbox: serve refuses a host where it does not start, and a stage that finds it off Blocks", async () => {
   const { preflight, copilotOuterReason, Local } = await import("../scripts/local.mjs");
   const refused = (problems) => problems.filter((p) => /runs Copilot only inside the outer sandbox/.test(p));

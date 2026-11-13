@@ -141,8 +141,9 @@ export function repoFromRemote(url) {
  * Why local mode cannot start here, one line each. `outer` is lib/local.mjs outerProbe: Copilot runs locally only inside
  * the outer sandbox, since its own sandbox applies its file policy only best-effort, so on a host where that does not
  * start (macOS, or Linux without what its sandbox's network needs) local Copilot is refused before any claim.
+ * `wf` is the workflow's settings and `env` this shell's, which wins (as in baseEnv); `os` is the platform.
  */
-export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe } = {}) {
+export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform() } = {}) {
   const problems = [];
   if (!["claude", "codex", "copilot"].includes(harness)) problems.push(`unknown harness ${harness}`);
   for (const bin of ["git", "gh", harness]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
@@ -159,7 +160,8 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   problems.push(...startProblems);
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
-  if (platform() === "darwin" && (process.env.FACTORY_LOCAL_DB || "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
+  // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
+  if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
   if (harness === "copilot" && (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && !startProblems.length))) {
     // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
@@ -261,7 +263,7 @@ export class Local {
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
     this.copilotToken = this.harness === "copilot" ? copilotToken() : "";
-    const problems = preflight(this.harness, this.repoFull, this.token, this.copilotToken);
+    const problems = preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf });
     // The Factory App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
     // notice token over its IPC channel (stage()), and nothing else, env or file, carries the key or the token.
     const { app, problem } = localApp(process.env, homedir(), this.harness);

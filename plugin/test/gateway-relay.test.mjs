@@ -1107,3 +1107,65 @@ test("the relay's upstream socket probes once a minute on a connection of its ow
     await new Promise((r) => server.close(r));
   }
 });
+
+test("a 5xx saying no generation ran (503 service_unavailable_error) with no generation id costs $0 and is no unknown cost; other 5xx keep the lookup, else the estimate (#148)", async () => {
+  // The answer the gateway gave an adopter's two decision-model calls (perplexity/pplx-decider-v1.2), in about 800 ms.
+  const unavailable = { status: 503, body: { error: { message: "Service temporarily unavailable", type: "service_unavailable_error" } } };
+  const answers = {
+    unavailable,
+    // The same type naming its generation: looked up.
+    unavailableWithId: { ...unavailable, headers: { "x-generation-id": "gen_UNAVAILID00001" } },
+    internal: { status: 500, body: { error: { message: "boom", type: "internal_server_error" } } },
+    // The type anywhere but `error.type` says nothing.
+    topLevel: { status: 503, body: { type: "service_unavailable_error", message: "m" } },
+  };
+  const gw = await fakeGateway({
+    "/v4/ai/decision-model": (body) => answers[JSON.parse(body || "{}").mode] ?? { body: { answers: {}, providerMetadata: { gateway: { cost: "0.002", generationId: "gen_DECIDE000001" } } } },
+    "/v1/generation": (_b, req) => ({ body: { data: { total_cost: req.url.includes("gen_UNAVAILID00001") ? 0.003 : 0.002 } } }),
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-unavailable-"));
+  const opened = [];
+  const open = async (sub, extra = {}) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 10, origin: gw.origin, lookupDelaysMs: [1], ...extra });
+    opened.push(r);
+    r.beginPass(10);
+    return r;
+  };
+  const decide = (r, mode) => call(r.socketPath, { token: r.token, path: "/v4/ai/decision-model", body: JSON.stringify({ mode }) });
+  try {
+    // Twice in a row, then relaying goes on and the next call is priced.
+    const usage = join(dir, "usage");
+    const a = await open("a", { callLog: join(usage, CALL_LOG) });
+    assert.equal((await decide(a, "unavailable")).status, 503, "the worker gets the gateway's answer");
+    assert.equal((await decide(a, "unavailable")).status, 503);
+    assert.equal((await decide(a, "ok")).status, 200, "not shut");
+    const pa = await a.endPass();
+    assert.deepEqual([pa.usd, pa.calls, pa.estimated, pa.unpriced, pa.shut], [0.002, 1, 0, 0, null]);
+    assert.deepEqual([a.totals().failed, a.totals().failClosed], [2, false]);
+    const lines = readFileSync(join(usage, CALL_LOG), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((l) => [l.status, l.basis, l.usd, l.type ?? null]), [
+      [503, "unavailable", 0, "service_unavailable_error"],
+      [503, "unavailable", 0, "service_unavailable_error"],
+      [200, "reported", 0.002, null],
+    ]);
+    // internal_server_error with no generation id: the estimate, as before.
+    const b = await open("b");
+    assert.equal((await decide(b, "internal")).status, 500);
+    const pb = await b.endPass();
+    assert.deepEqual([pb.usd, pb.estimated], [0.25, 1]);
+    // service_unavailable_error naming its generation: looked up.
+    const c = await open("c");
+    assert.equal((await decide(c, "unavailableWithId")).status, 503);
+    const pc = await c.endPass();
+    assert.deepEqual([pc.usd, pc.calls, pc.estimated], [0.003, 1, 0]);
+    // The type at the top level of the body: an unknown cost, the estimate.
+    const d = await open("d");
+    assert.equal((await decide(d, "topLevel")).status, 503);
+    const pd = await d.endPass();
+    assert.deepEqual([pd.usd, pd.estimated], [0.25, 1]);
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -18,7 +18,7 @@ import { mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv } from "./lib/harness.mjs";
+import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -71,7 +71,7 @@ import {
   mergeReadyOne,
   unreadNow,
 } from "./lib/session.mjs";
-import { usdText } from "./lib/logic.mjs";
+import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -249,6 +249,8 @@ async function main() {
   let reentry = null;
   const finish = async (exit, reason) => {
     keeper.stop();
+    // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
+    const known = await stageSpendSoFar().catch(() => null);
     // Totals once the relay has closed: every call in flight is priced by then.
     await closeWorkerRelay(relay);
     const workerKey = relay ? relay.totals() : null;
@@ -266,7 +268,11 @@ async function main() {
     }
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
-    if (spendInProgress()) progress.spend(usage.usd, usage.workerKeyUsd ? { workerKeyUsd: usage.workerKeyUsd } : null);
+    // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
+    if (spendInProgress()) {
+      const line = stageSpendLine(usage, { records, known });
+      progress.spend(line.usd, line.parts);
+    }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
     setOutput("exit", exit);
     setOutput("reason", reason || "");
@@ -545,7 +551,7 @@ async function main() {
     await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
   }
   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
-  const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
+  const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,

@@ -5,9 +5,9 @@
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { backend } from "./backend.mjs";
+import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { copilotCreditUsd, finalText, runHarness, seedSessionTotal } from "./harness.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, runHarness, seedSessionTotal, stageSpendSoFar } from "./harness.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -354,6 +354,27 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     if (s.checkout !== checkout) return { id: null, from: src.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
     if (!s.files.every(plainRelative)) return { id: null, from: src.name, reason: "the saved session lists a name Factory will not use" };
     for (const rel of s.files) if (!existsSync(join(dir, "transcript", rel))) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
+    // Locally the live session is resumed when it is in place, and it may hold passes of a later stage that was killed
+    // before it wrote a result.json: that stage's last persisted total for the session is the seed, so the passes its
+    // spend line already counts are not counted again here. Factory wrote it; it wins over the saved copy's.
+    if (fromStageDirs && !agentUser()) {
+      const root = sessionRoot(harness);
+      if (s.files.every((rel) => existsSync(join(root, rel)))) {
+        let later = laterSessionTotal(workDir, { harness, id: s.id, after: src.at });
+        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Factory's reading was
+        // priced from its table. The lower of the two: a seed above the session's own total would make the next pass's
+        // total read as no running total at all (usage.mjs sinceSession), and count the whole session again.
+        if (later && harness === "claude") {
+          const main = s.files.find((rel) => rel.split("/").at(-1) === `${s.id}.jsonl`);
+          const own = main && lstatSync(join(root, main)).isFile() ? transcriptTotal(readFileSync(join(root, main), "utf8")) : null;
+          if (own && typeof later.usd === "number" && own.usd < later.usd) later = { ...later, usd: own.usd };
+        }
+        if (later) {
+          seedSessionTotal(s.id, later);
+          if (later.children && typeof later.children === "object") for (const [id, t] of Object.entries(later.children)) if (plainThread(id) && t?.tokens) seedSessionTotal(id, t);
+        }
+      }
+    }
     // Claude reports a resumed session's cost as its running total: the first pass here counts only its own share.
     if (harness === "claude") {
       const main = s.files.find((rel) => rel.split("/").at(-1) === `${s.id}.jsonl`);
@@ -395,6 +416,30 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     return { id: s.id, from: src.name, reason: "" };
   }
   return { id: null, from: null, reason: last };
+}
+
+/**
+ * Local mode: session `id`'s running total from the newest stage directory that recorded one after `after` (ms) and
+ * has no result.json of its own (a stage killed before its end, harness.mjs SESSION_TOTALS_FILE); null when none.
+ */
+export function laterSessionTotal(workDir, { harness, id, after }) {
+  if (!workDir || !existsSync(workDir)) return null;
+  const found = [];
+  for (const n of readdirSync(workDir)) {
+    if (!/^usage-(work|review)-/.test(n) || existsSync(join(workDir, n, "result.json"))) continue;
+    const f = join(workDir, n, SESSION_TOTALS_FILE);
+    try {
+      if (!lstatSync(f).isFile()) continue;
+      const at = statSync(f).mtimeMs;
+      if (at <= after) continue;
+      const rec = JSON.parse(readFileSync(f, "utf8"));
+      const t = rec?.harness === harness ? rec.totals?.[id] : null;
+      if (t && typeof t === "object" && (typeof t.usd === "number" || t.tokens)) found.push({ at, t });
+    } catch {
+      // none here
+    }
+  }
+  return found.sort((a, b) => b.at - a.at)[0]?.t ?? null;
 }
 
 /** Local mode: the Objective's earlier stage directories, newest first. */
@@ -718,7 +763,13 @@ export const progressRunId = (env = process.env) =>
 /** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "" }) {
+/**
+ * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
+ * progress.spend records the final figure, so a stage that dies (killed, the machine restarted) still leaves the spend
+ * Factory last knew: marked `usdLowerBound`, or `usdUpperBound` when part of it is priced at the table's dearest rates.
+ * Null when the stage records no spend in its progress comment (backend.mjs spendInProgress), or for a `--here` run.
+ */
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null }) {
   const lines = [];
   const links = [];
   const started = Date.now();
@@ -735,15 +786,29 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const write = async () => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, spend, spendParts, read, triage, asked });
+    const live = spend === null && soFar ? await soFar().catch(() => null) : null;
+    // Not final: a lower bound, or, with a reading at the price table's dearest rates, an estimate marked as such.
+    const counted = spend === null && Number.isFinite(live?.usd);
+    const interim = counted ? { spend: live.usd, spendParts: live.estimated ? { usdUpperBound: true } : { usdLowerBound: true } } : { spend, spendParts };
+    const tail = progressTail({ harness, model, ...interim, read, triage, asked });
     const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
     lastWrite = Date.now();
-    await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
+    const wrote = await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).then(
+      () => true,
+      (e) => {
+        log(`progress: ${e.message.slice(0, 120)}`);
+        return false;
+      },
+    );
+    // Only a line that landed says what was counted: the session totals it counted are recorded after it, never before.
+    if (wrote && counted) live.commit?.();
   };
   const progress = async (phase) => {
     // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.
     lines.push(`- ${clock(Date.now())} ${sanitize(phase, { max: 2000 })}`);
     status = "";
+    // A status write still in flight lands first, so it never overwrites this one (the final spend line with it).
+    await writing;
     await write();
   };
   /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
@@ -755,7 +820,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
       writing = null;
     });
   };
-  /** A run with no usage artifact (local mode) records its dollars here, where any dispatcher can sum them. */
+  /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
@@ -1224,7 +1289,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,
-    basis: merged.basis,
+    // With a relayed worker key the dollars are the harness's plus the key's, and the basis says so: added once already.
+    basis: kb.fields.workerKeyUsd > 0 ? `${merged.basis}; plus ${kb.fields.workerKeyUsd} USD through the relayed worker key (workerKeyUsd), included in usd` : merged.basis,
     started: records[0]?.started ?? merged.started ?? null,
     ended: records.at(-1)?.ended ?? merged.ended ?? null,
     runs: records.length,
@@ -1248,6 +1314,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,
     // The saved session's running total as Factory last read it (runHarness), for the stage that restores it (clampTotal).
+    // Not this stage's spend: it is one session's total as its harness reports it, so it spans every earlier stage that
+    // ran the session, leaves out the other sessions this stage ran (a reviewer's own, a fresh thread), a Codex session's
+    // sub-agent threads (each in `children`) and the worker key, and after a pass with no total stays at the last one.
     sessionTotal: lineageTotal(session?.id, records),
     // Counted by the dispatcher from the progress comment's spend line, not from this record (dispatch.mjs todaysSpend).
     ...(spendInProgress ? { spendInProgress: true } : {}),

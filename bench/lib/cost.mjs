@@ -261,6 +261,10 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // Factory's spend line (no usage artifact): the worker's own dollars, whatever the harness; never repriced.
       part.usd = num(rec.usd);
       part.basis = rec.basis ?? "factory:spend line";
+      // A stage that did not finish, or whose harness reported no dollars: what Factory last knew, a lower bound.
+      if (rec.usdLowerBound) out.usdLowerBound = true;
+      // A pass priced live at the table's dearest rates (a model with no price row): an estimate, not a lower bound.
+      if (rec.usdUpperBound) out.usdEstimated = true;
     } else if (rec.harness === "claude") {
       part.usd = num(rec.usd);
       part.basis = rec.basis && /harness-reported/.test(rec.basis) ? rec.basis : part.usd === null ? "unmetered: no total_cost_usd" : "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
@@ -338,8 +342,10 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.unit = "usd";
     out.priceTableDate = null;
     out.note = null;
-    out.basis = priced.length ? `${partial}factory:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : "unmetered: no usage artifact and no factory:spend line";
+    out.basis = priced.length ? `${partial}factory:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)${out.usdLowerBound ? "; a lower bound (a stage did not finish, or its harness reported no dollars)" : ""}${out.usdEstimated ? "; includes an estimate at the price table's dearest rates (a model with no price row)" : ""}` : "unmetered: no usage artifact and no factory:spend line";
   } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
+  // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.
+  if (out.workerKeyUsd > 0 && out.usd !== null) out.basis += `; includes ${out.workerKeyUsd} USD through a relayed worker key`;
   out.vendor = vendorOf(parts);
   out.vendorUsd = out.vendor?.usd ?? null;
   out.totalUsd = out.usd === null && out.vendorUsd === null ? null : round4((out.usd ?? 0) + (out.vendorUsd ?? 0));

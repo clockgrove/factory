@@ -76,13 +76,14 @@ export function priceStage(table, model, tokens, subAgents = []) {
 }
 
 /**
- * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` and
- * `daily_usd` cannot stop them (Codex has no in-run cap; Factory checks dollars after each run) and only a budget on the
- * provider's key does. Doctor and the stage's progress comment say it.
+ * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` cannot
+ * stop them (Codex has no in-run cap; Factory checks dollars after each run), and `daily_usd` counts them only at an
+ * estimate (the stage's spend line, priced at the table's dearest rates, harness.mjs stageSpendSoFar); only a budget on
+ * the provider's key bounds them. Doctor and the stage's progress comment say it.
  */
 export function unpricedCodex(harness, model, { gateway = false } = {}) {
   if (harness !== "codex" || !model || codexRate(CODEX_PRICES, model)) return null;
-  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are unmetered, so max_usd and daily_usd cannot stop them; only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} does`;
+  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are unmetered, so max_usd cannot stop them and daily_usd counts them only from a local or sandbox stage's spend line, at an estimate (the table's dearest rates); only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} bounds them`;
 }
 
 /**

@@ -323,7 +323,7 @@ test("doctor: a job-level CODEX_API_KEY is warned beside the gateway key; an unp
   assert.ok(checks.some((c) => c.status === "WARN" && /CODEX_API_KEY is a job-level variable/.test(c.detail)));
   assert.ok(!checks.some((c) => c.name === "codex model"), "a priced model: no warning");
   const unpriced = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "openai/gpt-5.5-pro", codexGatewayKey: "vck_g" }, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_GATEWAY_KEY: "vck_g" } });
-  assert.match(unpriced.find((c) => c.name === "codex model")?.detail ?? "", /^gpt-5\.5-pro has no row .* max_usd and daily_usd cannot stop them; only the AI Gateway key's budget does$/);
+  assert.match(unpriced.find((c) => c.name === "codex model")?.detail ?? "", /^gpt-5\.5-pro has no row .* max_usd cannot stop them and daily_usd counts them only from a local or sandbox stage's spend line, at an estimate \(the table's dearest rates\); only the AI Gateway key's budget bounds them$/);
   assert.equal(unpricedCodex("codex", "gpt-6.1-sol"), null);
   assert.equal(unpricedCodex("claude", "anything"), null);
 });

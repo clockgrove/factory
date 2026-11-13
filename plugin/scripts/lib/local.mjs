@@ -1518,10 +1518,11 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
  * `ripgrep`: nestedGitScanScript's path (writeNestedGitScan).
- * `relayDir`: the stage's gateway relay directory (worker-relay.mjs localRelayDir): its socket stays reachable inside, for the
- * forwarder Factory's bwrap shim starts in each command's sandbox (relay-shim.mjs); never writable.
+ * `relaySocketDir`: the directory of the stage's gateway relay socket (worker-relay.mjs relaySocketDir): the one socket
+ * directory that stays reachable inside, for the forwarder Factory's bwrap shim starts in each command's sandbox
+ * (relay-shim.mjs); never writable.
  */
-export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null, ripgrep = null } = {}) {
+export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relaySocketDir = null, ripgrep = null } = {}) {
   const own = harnessHomes(harness, env, home);
   const isOwn = (p) => own.some((o) => p === o || p.startsWith(`${o}/`));
   // ~/.claude.json holds the developer's MCP servers: read-only, not a writable path.
@@ -1532,7 +1533,7 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
     // install: the harness's own release directory, readable where a credential store holds it (Codex's installer puts
     // it in ~/.codex, denied when CODEX_HOME is elsewhere).
     filesystem: {
-      denyRead: [...credentialPaths(home).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relayDir ? [relayDir] : [])] })],
+      denyRead: [...credentialPaths(home).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
       denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install],

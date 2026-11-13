@@ -216,6 +216,11 @@ export const SLOW_UNKNOWN_FLOOR_USD = 1;
  * holds each later failure for this long at most, not for its lookup's two minutes.
  */
 export const HOLD_MAX_MS = 15_000;
+/**
+ * The longest path a Unix socket may have, in bytes: 108 on Linux and 104 on macOS (sun_path), less the closing NUL.
+ * openRelay refuses a longer one with this reason, not the kernel's EINVAL.
+ */
+export const UNIX_SOCKET_PATH_MAX = process.platform === "darwin" ? 103 : 107;
 /** The per-call log, in the stage's usage directory (no sandbox writes there): one JSON line per call. */
 export const CALL_LOG = "relay-calls.jsonl";
 /** The most lines the call log takes; past them, one closing line counts the calls left out. */
@@ -518,11 +523,12 @@ function eventReader() {
  * Start the relay for `key`. `dir`: a directory only Factory's user writes, where the socket goes (made 700, or 711 when
  * `group` is given, the agent's group, which then owns the socket at 660 through `chgrp`, an async (path, group) =>
  * void that throws when it cannot). `tcp`: also listen on 127.0.0.1 (no sandbox). `maxUsd`: the stage's max_usd (0 or
- * less: no cap). `editsMaxBytes`: an image edit's body cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other
- * limits and delays). Returns the relay: {url, port, tcpPort, socketPath, dir, token, probeId, beginPass(budget),
- * endPass(), totals(), close()}.
+ * less: no cap). `socketDir`: where the socket goes, when not in `dir` (worker-relay.mjs relaySocketDir: a short
+ * directory the caller made, mode 700); its path must fit UNIX_SOCKET_PATH_MAX. `editsMaxBytes`: an image edit's body
+ * cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other limits and delays). Returns the relay: {url, port,
+ * tcpPort, socketPath, dir, socketDir, token, probeId, beginPass(budget), endPass(), totals(), close()}.
  */
-export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
+export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -1126,7 +1132,9 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, group ? 0o711 : 0o700);
-  const socketPath = join(dir, `relay-${randomBytes(6).toString("hex")}.sock`);
+  const socketPath = join(socketDir ?? dir, `relay-${randomBytes(6).toString("hex")}.sock`);
+  const bytes = Buffer.byteLength(socketPath);
+  if (bytes > UNIX_SOCKET_PATH_MAX) throw new Error(`its socket's path would be ${bytes} bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket (${socketPath})`);
   rmSync(socketPath, { force: true });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -1160,6 +1168,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     tcpPort,
     socketPath,
     dir,
+    socketDir: socketDir ?? dir,
     token,
     probeId,
     /**

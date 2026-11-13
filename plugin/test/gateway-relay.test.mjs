@@ -1,15 +1,15 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { CALL_LOG, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
+import { CALL_LOG, UNIX_SOCKET_PATH_MAX, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
-import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
+import { RELAY_SOCKET_ROOT, closeWorkerRelay, localRelayDir, makeSocketDir, openWorkerRelay, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
 import { maxUsdReached, usdText } from "../scripts/lib/logic.mjs";
 import { harnessOuterSettings } from "../scripts/lib/local.mjs";
@@ -382,10 +382,119 @@ test("worker relay: a machine without socat Blocks with the key out of the shell
   assert.deepEqual(noSocat.masked, [KEY], "the key stays in the stage's mask list");
 });
 
-test("local mode: the outer sandbox keeps the relay's directory readable (never writable)", () => {
-  const s = harnessOuterSettings({ harness: "codex", writable: ["/w"], relayDir: "/u/relay", env: {} });
-  assert.ok(!s.filesystem.denyRead.some((p) => "/u/relay".startsWith(p)));
-  assert.ok(!s.filesystem.allowWrite.includes("/u/relay"));
+test("local mode: the outer sandbox keeps the relay socket's directory reachable (never writable), and hides another stage's socket", { skip: process.platform !== "linux" && "reads /proc/net/unix" }, async () => {
+  const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
+  const servers = [];
+  try {
+    // Two stages' sockets, bound: this stage's directory is kept; the other's socket is hidden, as any host socket is.
+    const [mine, other] = ["a", "b"].map((u) => makeSocketDir(relaySocketDir(`/u/${u}`, { root })));
+    for (const d of [mine, other]) {
+      const srv = net.createServer();
+      await new Promise((r) => srv.listen(join(d, "relay-x.sock"), r));
+      servers.push(srv);
+    }
+    const s = harnessOuterSettings({ harness: "codex", writable: ["/w"], relaySocketDir: mine, env: {} });
+    assert.ok(!s.filesystem.denyRead.some((p) => join(mine, "relay-x.sock").startsWith(p)), "this stage's socket stays reachable");
+    assert.ok(s.filesystem.denyRead.includes(join(other, "relay-x.sock")), "another stage's socket is hidden");
+    assert.ok(!s.filesystem.allowWrite.some((p) => mine.startsWith(p)), "never writable");
+  } finally {
+    for (const srv of servers) await new Promise((r) => srv.close(r));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the relay's socket goes in a short directory of the stage's own: made 700 in a 700 parent of this user's, a link, a file or a directory open to others refused; a path over the limit Blocks with that reason (#182)", async () => {
+  // Its place: /tmp/factory-relay-<uid>/<12 hex of the usage directory>, the same however long the usage directory is.
+  const uid = process.getuid();
+  const long = join("/home/someone/projects/an-adopter-with-a-long-checkout-path", ".factory", "81", "usage-review-2026-11-13T05-00-00-000Z");
+  assert.match(relaySocketDir(long), new RegExp(`^${realpathSync(RELAY_SOCKET_ROOT)}/factory-relay-${uid}/[0-9a-f]{12}$`));
+  assert.equal(relaySocketDir(long), relaySocketDir(`${long}/`), "one directory per usage directory");
+  assert.notEqual(relaySocketDir(long), relaySocketDir(`${long}x`));
+  assert.ok(Buffer.byteLength(join(relaySocketDir(long), "relay-0123456789ab.sock")) <= UNIX_SOCKET_PATH_MAX);
+  assert.ok(Buffer.byteLength(join(localRelayDir(long), "relay-0123456789ab.sock")) > UNIX_SOCKET_PATH_MAX, "where the socket was, this path is over the limit");
+
+  const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
+  try {
+    const dir = relaySocketDir("/u/x", { root });
+    assert.equal(makeSocketDir(dir), dir);
+    for (const d of [dirname(dir), dir]) assert.equal(statSync(d).mode & 0o777, 0o700);
+    assert.equal(makeSocketDir(dir), dir, "this user's own, made before: used");
+    // The parent open to others, a link, a file: refused, never used.
+    chmodSync(dirname(dir), 0o755);
+    assert.throws(() => makeSocketDir(dir), /factory-relay-\d+ is open to other users \(mode 755\)/);
+    rmSync(dirname(dir), { recursive: true, force: true });
+    mkdirSync(join(root, "elsewhere"), { mode: 0o700 });
+    symlinkSync(join(root, "elsewhere"), dirname(dir));
+    assert.throws(() => makeSocketDir(dir), /is not a directory \(a link or a file stands there\)/);
+    rmSync(dirname(dir), { force: true });
+    writeFileSync(dirname(dir), "x");
+    assert.throws(() => makeSocketDir(dir), /is not a directory/);
+    rmSync(dirname(dir), { force: true });
+
+    // A socket path still over the limit: the stage Blocks before the run, naming the limit, with nothing left behind.
+    const deep = join(root, "d".repeat(80));
+    mkdirSync(deep);
+    const shell = { [RELAYED_NAME]: KEY };
+    const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, socketRoot: deep });
+    assert.equal(r.relay, null);
+    assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket`));
+    assert.ok(!(RELAYED_NAME in r.shell), "the key is out of the shell");
+    assert.ok(!existsSync(relaySocketDir(join(root, "u"), { root: deep })), "its directory removed");
+    await assert.rejects(openRelay({ key: KEY, dir: join(root, "x".repeat(120)) }), /its socket's path would be \d+ bytes, over this system's limit/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a long checkout path: the relay starts, a call through Factory's forwarder in a command's sandbox is relayed, and the socket's directory goes with the stage (#182)", { skip: (!existsSync("/usr/bin/socat") && "needs socat") || (process.platform === "win32" && "unix") }, async () => {
+  const gw = await fakeGateway({ [IMAGE]: priced(0.04), "/v1/generation": { body: { data: { total_cost: 0.04 } } } });
+  const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
+  const dir = mkdtempSync(join(tmpdir(), "relay-long-"));
+  // A bubblewrap stand-in: runs what follows the options' separator, in this namespace (the forwarder, then the command).
+  const fake = join(dir, "fake-bwrap");
+  writeFileSync(fake, '#!/bin/bash\nwhile [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n', { mode: 0o755 });
+  // The checkout an adopter's run had, and longer: the old socket's path would have been over the limit.
+  const usageDir = join(dir, "an-adopter-whose-checkout-path-is-long", ".factory", "81", "usage-review-2026-11-13T05-00-00-000Z");
+  assert.ok(Buffer.byteLength(join(localRelayDir(usageDir), "relay-0123456789ab.sock")) > UNIX_SOCKET_PATH_MAX);
+  const shell = { [RELAYED_NAME]: KEY };
+  const open = (o) => openRelay({ ...o, origin: gw.origin, lookupDelaysMs: [1] });
+  let opened = null;
+  try {
+    opened = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? fake : "/usr/bin/socat"), open, socketRoot: root });
+    assert.equal(opened.blocked, null, opened.blocked);
+    const relay = opened.relay;
+    assert.equal(dirname(relay.socketPath), relaySocketDir(usageDir, { root }));
+    assert.ok(Buffer.byteLength(relay.socketPath) <= UNIX_SOCKET_PATH_MAX);
+    assert.equal(statSync(relay.socketPath).mode & 0o777, 0o600);
+    assert.equal(relay.dir, localRelayDir(usageDir), "the shims stay in the usage directory");
+    relay.beginPass(5);
+    // A command in a sandbox with its own network: Factory's shim starts the forwarder before it, and its call to the
+    // relay's address carries the run's token, never the key.
+    const script = `fetch(process.env.FACTORY_GATEWAY_URL + "${IMAGE}", { method: "POST", headers: { authorization: "Bearer " + process.env.AI_GATEWAY_API_KEY, "content-type": "application/json", "ai-model-id": "recraft/recraft-v4.1-flash" }, body: "{}" }).then(async (r) => { console.log(r.status); process.exit(0); }, (e) => { console.log("failed " + e.message); process.exit(1); })`;
+    // In a process group of its own: the forwarder's socat goes with it afterwards, as it goes with a sandbox's namespace.
+    const child = spawn(join(relay.shimDir, "bwrap"), ["--unshare-net", "--", process.execPath, "-e", script], { env: { PATH: "/usr/bin:/bin", FACTORY_GATEWAY_URL: relay.url, AI_GATEWAY_API_KEY: opened.shell[RELAYED_NAME] }, detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.on("data", (c) => (out += c));
+    const code = await new Promise((r) => child.on("exit", r));
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      // the group is gone
+    }
+    assert.deepEqual([code, out.trim()], [0, "200"]);
+    assert.equal(gw.seen.find((x) => x.url === IMAGE)?.auth, `Bearer ${KEY}`, "the gateway got the key; the command had only the token");
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.pings], [0.04, 1, 1], "priced, and the forwarder's ping counted");
+    await closeWorkerRelay(relay);
+    opened = null;
+    assert.ok(!existsSync(relaySocketDir(usageDir, { root })), "the socket's directory goes with the stage");
+    assert.ok(!existsSync(localRelayDir(usageDir)));
+  } finally {
+    if (opened?.relay) await closeWorkerRelay(opened.relay);
+    await gw.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a relay probe that finds no forwarder Blocks with a fixed reason: no key handed over, nothing run", async () => {

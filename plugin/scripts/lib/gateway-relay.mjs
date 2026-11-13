@@ -518,10 +518,11 @@ function eventReader() {
  * Start the relay for `key`. `dir`: a directory only Factory's user writes, where the socket goes (made 700, or 711 when
  * `group` is given, the agent's group, which then owns the socket at 660 through `chgrp`, an async (path, group) =>
  * void that throws when it cannot). `tcp`: also listen on 127.0.0.1 (no sandbox). `maxUsd`: the stage's max_usd (0 or
- * less: no cap). Returns the relay: {url, port, tcpPort, socketPath, dir, token, probeId, beginPass(budget), endPass(),
- * totals(), close()}.
+ * less: no cap). `editsMaxBytes`: an image edit's body cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other
+ * limits and delays). Returns the relay: {url, port, tcpPort, socketPath, dir, token, probeId, beginPass(budget),
+ * endPass(), totals(), close()}.
  */
-export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
+export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -811,11 +812,13 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       return refusal(res, 402, GATEWAY_REFUSED_MORE, { gateway: s.gatewayRefused });
     };
     if (billable && s.gatewayRefused) return gatewayRefused();
-    // A body its declared length puts over the cap is refused before it is read or waits.
+    // The body's cap: its route's, an image edit's editsMaxBytes. One its declared length puts over it is refused before
+    // it is read or waits.
+    const maxBytes = route.family === "image" ? editsMaxBytes : route.maxBytes;
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > route.maxBytes) {
+    if (Number.isFinite(declared) && declared > maxBytes) {
       record({ method: req.method, path: req.url, status: 413, refused: "size" });
-      return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+      return refusal(res, 413, `a request over ${maxBytes} bytes is not relayed`);
     }
     // With a cap on, a billable call waits its turn before its body is read, and only a few may wait. The body's deadline
     // stops while it waits (a few image edits queued behind each other take minutes) and starts again once it is read.
@@ -840,9 +843,9 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     try {
       for await (const c of req) {
         size += c.length;
-        if (size > route.maxBytes) {
+        if (size > maxBytes) {
           free();
-          return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+          return refusal(res, 413, `a request over ${maxBytes} bytes is not relayed`);
         }
         chunks.push(c);
       }

@@ -35,7 +35,7 @@ export const REVIEW_ARTIFACT = (issue) => `factory-usage-${issue}-review`;
  * state label applied at or after `since`): it ran and cost money, whatever its
  * labels are now, after the labelled ones.
  */
-export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all", maxEventPages = EVENT_PAGES } = {}) {
+export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all" } = {}) {
   const query = [`labels=${encodeURIComponent(label)}`, `state=${state}`, since ? `since=${encodeURIComponent(since)}` : null, "sort=updated", "direction=desc", PER_PAGE].filter(Boolean).join("&");
   const issues = await api(`repos/${repoFull}/issues?${query}`, { paginate: true });
   const numbers = new Set(
@@ -44,34 +44,28 @@ export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_L
       .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
       .map((i) => i.number),
   );
-  if (since) for (const n of await parkedSince(api, repoFull, { since, label, maxPages: maxEventPages })) numbers.add(n);
+  if (since) for (const n of await parkedSince(api, repoFull, { since, label, skip: new Set(issues.map((i) => i.number)) })) numbers.add(n);
   return [...numbers];
 }
 
-/** The most pages of repository issue events read back to `since` (100 each): past it the listing fails, never shortens. */
-export const EVENT_PAGES = 50;
-
 /**
- * Issues that lost `label` at or after `since` and gained a Factory state label at or after it: the repository's issue
- * events, newest first, read page by page only back to `since` (at most `maxPages` pages). One read of the label
- * history for the whole repository, never one timeline per issue. Throws when `since` lies beyond `maxPages`.
+ * Issues that lost `label` at or after `since` and gained a Factory state label at or after it. The candidates are the
+ * issues updated at or after `since` that do not carry the label now (removing it updates the issue), less `skip`;
+ * only each candidate's own events are read. The reads scale with the issues touched in the window, never with the
+ * repository's PR and event traffic, and no ceiling cuts the list short.
  */
-export async function parkedSince(api, repoFull, { since, label = OBJECTIVE_LABEL, maxPages = EVENT_PAGES }) {
+export async function parkedSince(api, repoFull, { since, label = OBJECTIVE_LABEL, skip = new Set() }) {
   const from = Date.parse(since);
-  const removed = new Set();
-  const started = new Set();
-  for (let page = 1; ; page++) {
-    if (page > maxPages) throw new Error(`more than ${maxPages * 100} issue events in ${repoFull} since ${since}: the label history was not read to the end; score with a later --since`);
-    const events = (await api(`repos/${repoFull}/issues/events?${PER_PAGE}&page=${page}`)) || [];
-    for (const e of events) {
-      if (!(Date.parse(e.created_at) >= from) || !e.issue || e.issue.pull_request) continue;
-      const name = e.label?.name;
-      if (e.event === "unlabeled" && name === label) removed.add(e.issue.number);
-      if (e.event === "labeled" && STATE_LABELS.includes(name)) started.add(e.issue.number);
-    }
-    if (events.length < 100 || !(Date.parse(events.at(-1).created_at) >= from)) break;
+  const touched = await api(`repos/${repoFull}/issues?state=all&since=${encodeURIComponent(since)}&${PER_PAGE}`, { paginate: true });
+  const candidates = touched.filter((i) => !i.pull_request && !skip.has(i.number) && !labelNames(i).includes(label)).map((i) => i.number);
+  const out = [];
+  for (const n of candidates) {
+    const events = (await api(`repos/${repoFull}/issues/${n}/events?${PER_PAGE}`, { paginate: true })).filter((e) => Date.parse(e.created_at) >= from);
+    const removed = events.some((e) => e.event === "unlabeled" && e.label?.name === label);
+    const started = events.some((e) => e.event === "labeled" && STATE_LABELS.includes(e.label?.name));
+    if (removed && started) out.push(n);
   }
-  return [...removed].filter((n) => started.has(n));
+  return out;
 }
 
 /** This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name their run. */

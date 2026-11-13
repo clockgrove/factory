@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EVENT_PAGES, humanWorkflowRuns, listObjectives } from "../lib/collect.mjs";
+import { humanWorkflowRuns, listObjectives } from "../lib/collect.mjs";
 import { loadPrices } from "../lib/cost.mjs";
 import { drillRecord, humanActions, p1Escapes, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
 import { pooledStreak, pooledTable, streaks, streakTable, tagTime, verdict } from "../lib/streak.mjs";
@@ -414,32 +414,29 @@ test("sandbox stages: the record's launches are read merged as the plugin reads 
   assert.deepEqual(launchesOf(comments, 48, self), [{ stage: "work", run: "9", event: "pull_request", at: Date.parse("2031-03-02T03:00:00Z") }]);
 });
 
-test("listObjectives: an issue whose label was removed after --since, once Factory took it, is listed; the event history is read only back to --since", async () => {
+test("listObjectives: an issue whose label was removed after --since, once Factory took it, is listed; only unlabelled issues touched since --since have their events read", async () => {
   const SINCE = "2031-03-01T00:00:00Z";
-  const ev = (event, name, issue, created_at, extra = {}) => ({ event, label: { name }, created_at, issue: { number: issue, ...extra } });
-  const page1 = [
-    ev("unlabeled", "factory:objective", 77, "2031-03-04T00:00:00Z"), // parked: started below, label removed later
-    ev("unlabeled", "factory:objective", 78, "2031-03-04T00:00:00Z"), // removed before Factory ever took it
-    ev("unlabeled", "factory:objective", 79, "2031-03-04T00:00:00Z", { pull_request: {} }),
-    ev("labeled", "factory:blocked", 77, "2031-03-03T00:00:00Z"),
-    ev("labeled", "factory:running", 77, "2031-03-02T00:00:00Z"),
-    ...Array.from({ length: 95 }, (_, i) => ev("labeled", "P2", 200 + i, "2031-03-02T00:00:00Z")),
-  ];
-  // The second page crosses --since: events older than it are not read as removals, and no third page is asked for.
-  const page2 = [ev("labeled", "factory:running", 80, "2031-03-01T01:00:00Z"), ev("unlabeled", "factory:objective", 80, "2031-02-20T00:00:00Z"), ev("unlabeled", "factory:objective", 81, "2031-02-20T00:00:00Z"), ev("labeled", "factory:running", 81, "2031-02-19T00:00:00Z")];
+  const ev = (event, name, created_at) => ({ event, label: { name }, created_at });
+  const labelled = [{ number: 42, state: "closed", closed_at: "2031-03-02T00:00:00Z", labels: [{ name: "factory:objective" }] }, { number: 43, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }] }, { number: 44, state: "open", labels: [{ name: "factory:objective" }] }];
+  const touched = [...labelled, { number: 77, state: "open", labels: [{ name: "P2" }] }, { number: 78, state: "open", labels: [] }, { number: 79, state: "open", labels: [], pull_request: {} }, { number: 80, state: "closed", labels: [] }, { number: 81, state: "open", labels: [] }];
+  const events = {
+    77: [ev("labeled", "factory:objective", "2031-03-01T10:00:00Z"), ev("labeled", "factory:running", "2031-03-02T00:00:00Z"), ev("labeled", "factory:blocked", "2031-03-03T00:00:00Z"), ev("unlabeled", "factory:objective", "2031-03-04T00:00:00Z")], // parked
+    78: [ev("labeled", "factory:objective", "2031-03-01T10:00:00Z"), ev("unlabeled", "factory:objective", "2031-03-04T00:00:00Z")], // removed before Factory took it
+    80: [ev("labeled", "factory:running", "2031-02-19T00:00:00Z"), ev("unlabeled", "factory:objective", "2031-02-20T00:00:00Z"), ev("labeled", "P2", "2031-03-02T00:00:00Z")], // all before --since
+    81: [],
+  };
   const calls = [];
   const api = async (path) => {
     calls.push(path);
-    if (path.startsWith(`repos/${REPO}/issues?`)) return [{ number: 42, state: "closed", closed_at: "2031-03-02T00:00:00Z", labels: [{ name: "factory:objective" }] }, { number: 43, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }] }, { number: 44, state: "open", labels: [{ name: "factory:objective" }] }];
-    const page = Number(/[?&]page=(\d+)/.exec(path)?.[1]);
-    return { 1: page1, 2: page2 }[page] ?? [];
+    if (path.startsWith(`repos/${REPO}/issues?labels=`)) return labelled;
+    if (path.startsWith(`repos/${REPO}/issues?state=all&since=`)) return touched;
+    const n = Number(/issues\/(\d+)\/events/.exec(path)?.[1]);
+    return events[n] ?? [];
   };
   assert.deepEqual(await listObjectives(api, REPO, { since: SINCE }), [42, 43, 77]);
-  assert.deepEqual(calls.slice(1), [`repos/${REPO}/issues/events?per_page=100&page=1`, `repos/${REPO}/issues/events?per_page=100&page=2`]);
-  // A history longer than the page bound fails, never lists short.
-  const full = async (path) => (path.includes("/events?") ? Array.from({ length: 100 }, () => ev("labeled", "P2", 1, "2031-03-02T00:00:00Z")) : []);
-  await assert.rejects(listObjectives(full, REPO, { since: SINCE, maxEventPages: 2 }), /more than 200 issue events/);
-  assert.ok(EVENT_PAGES >= 10);
+  // Labelled issues and pull requests have no events read: one call per unlabelled issue touched in the window.
+  assert.deepEqual(calls.slice(2), [77, 78, 80, 81].map((n) => `repos/${REPO}/issues/${n}/events?per_page=100`));
+  assert.equal(calls[1], `repos/${REPO}/issues?state=all&since=${encodeURIComponent(SINCE)}&per_page=100`);
 });
 
 test("a parked Objective is a row: stopped when Blocked, in flight when its Question waits, never a walk-away", () => {

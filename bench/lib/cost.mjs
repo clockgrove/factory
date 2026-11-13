@@ -1,6 +1,6 @@
 // Dollars per Objective, with the unit and basis per harness (PLAN.md, "Job
 // one and how 0.6 is measured"). The input is the usage artifact the worker
-// job uploads (`factory-usage-<issue>`, and `factory-usage-<issue>-review-<n>`
+// job uploads (`factory-usage-<issue>`, and `factory-usage-<issue>-review`
 // for the reviewer pass): its normalized `result.json` (action/scripts/lib/
 // usage.mjs: {harness, model, usd, tokens, basis, started, ended, runs,
 // passes, exit, reason, credential, turns, priceTableDate}). A raw Claude
@@ -8,7 +8,7 @@
 // JSONL (`events.jsonl`) is accepted too, for runs made outside the Action.
 //
 //   claude   unit usd      total_cost_usd, modelUsage (sub-agents included)
-//   codex    unit tokens   priced from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
+//   codex    unit usd      tokens priced from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
 //   copilot  unit usd      AI credits from --usage-output-file at the run's $/credit (GitHub: $0.01), premium requests beside
 //
 // A count a harness does not report is null, never zero.

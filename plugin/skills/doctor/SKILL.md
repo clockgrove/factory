@@ -11,7 +11,7 @@ Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fi
 node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup] [--local]
 ```
 
-The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, in their own shell; without one every GitHub line FAILs with "no installation token". `--probe` makes the one-call harness probe; `--run-setup` executes the repository's `setup` command instead of only finding it. `--local` adds local mode's checks: a repository that uses Postgres needs `FACTORY_LOCAL_DB=1` there. The list below is what the script checks.
+The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, in their own shell. Without one, doctor checks the secrets by name and reads GitHub with the user's `gh` login; inside a job, every GitHub line FAILs with "no installation token". `--probe` makes the one-call harness probe; `--run-setup` executes the repository's `setup` command instead of only finding it. `--local` adds local mode's checks: a repository that uses Postgres needs `FACTORY_LOCAL_DB=1` there. The list below is what the script checks.
 
 ## Credentials
 
@@ -29,7 +29,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## Repository
 
-- `setup` is present (runs clean with `--run-setup`); each validation command names a script in `package.json` or a binary that exists; the lockfile installs offline; the protected paths exist and cover every repository file the `setup` command names (it runs beside the App's key; a file those read, such as a `Makefile` for `make setup` or `package.json` for `npm run setup`, is not detected, so protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
+- `setup` is present (runs clean with `--run-setup`); each validation command names a script in `package.json` or a binary that exists; a lockfile is recognised (or `install` is set); the protected paths exist and cover every repository file the `setup` command names (it runs beside the App's key; a file those read, such as a `Makefile` for `make setup` or `package.json` for `npm run setup`, is not detected, so protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
 
 ## Runner
 

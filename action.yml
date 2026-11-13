@@ -96,7 +96,7 @@ inputs:
     description: The npm version of the harness CLI to install on the runner; `latest` by default.
     required: false
   allowed_domains:
-    description: Hosts Claude Code's sandboxed commands may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains). The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
+    description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains). The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
     required: false
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).

@@ -13,6 +13,8 @@ Spawn the `implementer` agent definition the job wrote into the checkout (`.clau
 
 Give each implementer one checklist item and nothing more: the item's text, the files it owns, the acceptance entries it serves, the relevant lines of the issue and of the repository instructions, and the one command that proves the item (a focused test, not the whole suite). Tell it the files it may not touch. Ask for a short report: files changed, the command run, its result, anything it assumed. Read the diff it produced before accepting it.
 
+Where an item speaks a protocol, a file format, a codec or a provider's API, use the official SDK or a maintained library whose licence the repository can take; write that code yourself only when none fits (no library, a licence that does not fit, an unwanted install script or native binary, byte-for-byte deterministic output). Name the choice, or what you looked at and why it did not fit, under Assumptions in plan.md.
+
 An implementer that fails twice on the same item is a planning fault: re-read the item, split it or re-scope it in `$FACTORY_OUT/plan.md`, and try again yourself or with a new implementer.
 
 ## Run disjoint items at the same time

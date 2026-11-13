@@ -29,3 +29,7 @@ The last part and an Objective in one PR are judged against every entry, never d
 
 - `acceptance` has one `{entry, met, path, line, evidence}` per acceptance entry of the issue, plus `"deferred": true` on an entry deferred to a later part ("Split parts").
 - `comments` holds `{path, line, entry, body}` and may be empty, but every entry not met and not deferred has one.
+
+## SDK first
+
+The implement-split skill has the worker use the official SDK or a maintained library for a protocol, a file format, a codec or a provider's API, and write that code by hand only when none fits (no library, a licence that does not fit, an unwanted install script or native binary, byte-for-byte deterministic output), naming the choice or the reason under Assumptions. Hand-written code of that kind is a finding, citing that rule, when neither the PR body's Assumptions nor a repository decision names the SDK or library it uses or why none fits.

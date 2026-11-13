@@ -34,6 +34,7 @@ Before writing a comment, find the body's answer to it (an assumption, a checkli
 - A recorded decision contradicted by the code.
 - An assumption in the plan or body that changes behaviour a user, a caller or another package can observe, and that no line of the issue permits. Flag it with the prefix `Assumption, behaviour-changing:`, say what observable behaviour it changes, and quote the issue words it conflicts with or state that no acceptance entry, context line or recorded decision covers the choice. An assumption whose body entry cites issue, plan or decision text that permits it is not a finding; check that citation first; most rebutted findings were this.
 - Where the repository has a design checklist or checklist questions of its own: load reference.md, "Repository checklists".
+- Hand-written protocol, format, codec or provider-API code: reference.md, "SDK first".
 - A protected path touched, or an undone item not listed under Undone.
 
 On a split part the prompt says is not the last, an entry the PR body assigns to a later part is deferred, not a finding: reference.md, "Split parts".

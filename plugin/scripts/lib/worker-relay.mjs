@@ -2,9 +2,9 @@
 // RELAYED_NAME), wherever the stage runs. The key stays in this process; the worker's shell gets the relay's token in its
 // place and the relay's address in FACTORY_GATEWAY_URL (harness.mjs). Never falls back to handing the key over: where the
 // relay cannot reach the harness's commands, the stage Blocks before the run.
-import { randomBytes } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { backend } from "./backend.mjs";
 import { prepareFactoryHome } from "./claude-runner.mjs";
 import { CALL_LOG, GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
@@ -33,6 +33,47 @@ export function dropSharedCopilotRelay(runnerDir = RELAY_RUNNER_DIR) {
 export const localRelayDir = (usageDir) => join(usageDir, "relay");
 
 /**
+ * Where the relay's socket goes when its directory is under the stage's usage directory (locally, and in a developer's
+ * own session): a short directory of the stage's own, `/tmp/factory-relay-<uid>/<12 hex>`. A Unix socket's path is
+ * limited (107 bytes on Linux, 103 on macOS) and the usage directory's grows with the checkout's path, the issue and the
+ * stage's name. Its name is a hash of the usage directory, so local mode's outer sandbox, written before the relay opens,
+ * names it as the one socket directory it keeps reachable (local.mjs harnessOuterSettings), as it named the relay
+ * directory before. No sandbox writes /tmp: the outer one writes only its allowed paths, and the harnesses' own write
+ * the checkout and the stage's temp directory.
+ */
+export const RELAY_SOCKET_ROOT = "/tmp";
+export function relaySocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT } = {}) {
+  let base = root;
+  try {
+    // macOS: /tmp is a link to /private/tmp; the socket's path is the real one.
+    base = realpathSync(root);
+  } catch {
+    // made below, or refused there
+  }
+  return join(base, `factory-relay-${uid}`, createHash("sha256").update(resolve(usageDir)).digest("hex").slice(0, 12));
+}
+
+/**
+ * Make relaySocketDir's directory and its parent, each a real directory of this user's alone (mode 700): the parent is
+ * in a directory every user writes, so one that is a link, a file, another user's or open to others is refused (throws,
+ * naming which and why), never used. Once it is this user's own, /tmp's sticky bit keeps others from replacing it.
+ */
+export function makeSocketDir(dir, { uid = process.getuid?.() ?? 0 } = {}) {
+  for (const d of [dirname(dir), dir]) {
+    try {
+      mkdirSync(d, { mode: 0o700 });
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw new Error(`${d} could not be made (${e?.code || e?.message || e})`);
+    }
+    const st = lstatSync(d);
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${d} is not a directory (a link or a file stands there)`);
+    if (st.uid !== uid) throw new Error(`${d} belongs to another user`);
+    if (st.mode & 0o077) throw new Error(`${d} is open to other users (mode ${(st.mode & 0o777).toString(8)})`);
+  }
+  return dir;
+}
+
+/**
  * The worker secrets an AI Gateway key must not reach as they are: any but RELAYED_NAME itself whose NAME is it in
  * another case, or whose value has a gateway key's shape (GATEWAY_KEY_SHAPE), whatever its NAME. Such a key is only ever
  * relayed, under RELAYED_NAME; under another name it is withheld. Names only.
@@ -44,9 +85,9 @@ export const unrelayedGatewayKeys = (shell = {}) => Object.entries(shell).filter
  * {shell, relay, blocked, masked}: `shell` with the token in the key's place and any other gateway-shaped key withheld
  * (unrelayedGatewayKeys); `blocked` a reason when the key cannot be relayed here (the key is then out of `shell`, and the
  * caller Blocks before any run); `masked` the values the stage masks in what it saves (the key, which `shell` no longer
- * holds).
+ * holds). `socketRoot`: where relaySocketDir's directory goes (RELAY_SOCKET_ROOT; a test sets its own).
  */
-export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR, copilotHome = COPILOT_RUNNER_HOME }) {
+export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR, copilotHome = COPILOT_RUNNER_HOME, socketRoot = RELAY_SOCKET_ROOT }) {
   if (inputs.harness === "copilot" && agentUser() && backend(env).name !== "local") dropSharedCopilotRelay(runnerDir);
   const withheld = unrelayedGatewayKeys(shell || {});
   const masked = withheld.map((n) => shell[n]);
@@ -83,11 +124,21 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
       if (r.code !== 0) throw new Error(`the relay's socket could not be handed to ${g}'s group: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 160) || `exit ${r.code}`}`);
     };
   } else dir = local ? localRelayDir(usageDir) : join(usageDir, "relay");
+  // Under the usage directory the socket's path could pass its limit: it goes in a short directory of its own.
+  let socketDir = null;
+  if (!(agent && !local)) {
+    try {
+      socketDir = makeSocketDir(relaySocketDir(usageDir, { root: socketRoot }));
+    } catch (e) {
+      return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: ${String(e?.message || e).slice(0, 200)}` });
+    }
+  }
   let relay;
   try {
-    relay = await open({ key, dir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, callLog: join(usageDir, CALL_LOG), log });
+    relay = await open({ key, dir, socketDir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, callLog: join(usageDir, CALL_LOG), log });
   } catch (e) {
-    return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 200)}` });
+    if (socketDir) rmSync(socketDir, { recursive: true, force: true });
+    return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 240)}` });
   }
   // Claude Code and Codex: the relay's shim first on their PATH. Copilot: its own shim (copilot-runner.mjs bwrapShim),
   // already first on its PATH, hands each call to the relay's, which adds Copilot's extra options (copilotRelayExtra).
@@ -106,11 +157,12 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   return out({ shell: { ...rest, [RELAYED_NAME]: relay.token }, relay, blocked: null });
 }
 
-/** Close the stage's relay, when there is one: its socket, shim and directory removed. */
+/** Close the stage's relay, when there is one: its socket, shim and directories removed. */
 export async function closeWorkerRelay(relay) {
   if (!relay) return;
   setActiveRelay(null);
   await relay.close().catch(() => {});
   rmSync(relay.dir, { recursive: true, force: true });
+  if (relay.socketDir && relay.socketDir !== relay.dir) rmSync(relay.socketDir, { recursive: true, force: true });
   if (relay.copilotShim) rmSync(dirname(relay.copilotShim), { recursive: true, force: true });
 }

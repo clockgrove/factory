@@ -1,6 +1,6 @@
 // A running harness pass's own spend, read live from its stream (#97, Kirk's decision on the review's budget doubling):
 // the gateway relay's cap draws on one budget shared with it, so model spend plus key spend in a pass cannot pass what
-// max_usd left by more than about one call.
+// max_usd left by more than about two calls (gateway-relay.mjs: the call in flight, and one estimate below its record).
 // - Claude Code: each assistant message's usage (stream-json; a message's later lines carry its latest totals), priced
 //   from claude-prices.json (an unlisted model at the table's dearest row, never low).
 // - Codex: its stream reports usage once per turn (`turn.completed`), and a pass is often one turn, so the thread's own

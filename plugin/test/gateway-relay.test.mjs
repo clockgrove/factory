@@ -7,7 +7,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CALL_LOG, EDITS_MAX_BYTES, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
+import { CALL_LOG, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
@@ -206,10 +206,11 @@ test("relay pricing: the larger of reported and looked up; a forged echo, an unk
     assert.equal((await call(relay.socketPath, { token: relay.token, path: "/v4/ai/decision-model" })).status, 200);
     pass = await relay.endPass();
     // A complete answer with no cost at the top level and no generation: its route and shape are the caller's choice, so
-    // it never gets the estimate; the gateway shuts at once (#142).
-    assert.deepEqual([pass.unpriced, pass.estimated, pass.usd, pass.shut], [1, 0, 0, { calls: 1, why: "the answer named no cost and no generation", complete: true }]);
+    // it never passes as an unknown cost; the gateway shuts at once (#142). It was billed, so it is booked at the estimate
+    // all the same: the dearest call priced so far ($0.50).
+    assert.deepEqual([pass.unpriced, pass.estimated, pass.usd, pass.shut], [1, 1, 0.5, { calls: 1, why: "the answer named no cost and no generation", complete: true }]);
     const rec = addKeySpend({ usd: 1, tokens: {} }, pass);
-    assert.deepEqual([rec.budgetExceeded, rec.usdUpperBound], [true, undefined], "the shutdown ends the pass over budget: the stage Blocks");
+    assert.deepEqual([rec.budgetExceeded, rec.usdUpperBound, rec.usdLowerBound], [true, true, true], "the shutdown ends the pass over budget: the stage Blocks");
     relay.beginPass(100);
     assert.equal((await call(relay.socketPath, { token: relay.token })).status, 403, "and every later call is refused");
     assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 403, "the model list too");
@@ -539,12 +540,19 @@ test("the re-review's minors: unbilled only for known refusals, a stream's cost 
     g.beginPass(100);
     const first = call(g.socketPath, { token: g.token, body: '{"wait":true}' });
     await new Promise((r) => setTimeout(r, 100));
-    const queued = Array.from({ length: 10 }, () => call(g.socketPath, { token: g.token }).then((x) => x.status));
+    const answers = [];
+    const queued = Array.from({ length: 10 }, () =>
+      call(g.socketPath, { token: g.token }).then((x) => {
+        answers.push(x);
+        return x.status;
+      }),
+    );
     await new Promise((r) => setTimeout(r, 100));
     const ended = g.endPass();
     hold();
     const statuses = await Promise.all(queued);
     assert.equal(statuses.filter((x) => x === 429).length, 2, "8 wait; the 9th and 10th get 429");
+    assert.ok(answers.filter((x) => x.status === 429).every((x) => x.headers["retry-after"] === String(RELAY_RETRY_AFTER_S.waiting)), "with a Retry-After, so a client's own retry waits for the queue");
     assert.ok(statuses.every((x) => x === 429 || x === 403), `the queue is refused at the pass's end: ${statuses}`);
     assert.equal((await first).status, 200);
     const pass = await ended;
@@ -555,7 +563,8 @@ test("the re-review's minors: unbilled only for known refusals, a stream's cost 
     const b = await mk("b", 5);
     for (const live of [() => Promise.reject(new Error("rollout unreadable")), () => Number.NaN, () => "1", () => undefined]) {
       b.beginPass(5, live);
-      assert.equal((await call(b.socketPath, { token: b.token })).status, 503);
+      const refused = await call(b.socketPath, { token: b.token });
+      assert.deepEqual([refused.status, refused.headers["retry-after"]], [503, String(RELAY_RETRY_AFTER_S.live)]);
       await b.endPass();
     }
     b.beginPass(5, () => 0.5);
@@ -733,7 +742,7 @@ test("image edits (#129): the recorded multipart and JSON requests pass byte for
     const unknown = await send(relay.socketPath, { path: EDITS, headers: { ...m.headers, authorization: `Bearer ${relay.token}` }, body: Buffer.from(m.body, "base64") });
     assert.equal(unknown.status, 200);
     const after = await relay.endPass();
-    assert.deepEqual([after.usd, after.calls, after.unpriced, after.estimated, after.shut?.complete], [0, 0, 1, 0, true], "unknown cost: never $0, never an estimate");
+    assert.deepEqual([after.usd, after.calls, after.unpriced, after.estimated, after.shut?.complete], [0.25, 1, 1, 1, true], "unknown cost: never $0; the gateway shuts, and the answer is booked at the estimate");
     assert.equal(relay.totals().failed, 1, "the refused one is not billed");
     assert.equal(relay.totals().failClosed, true);
   } finally {
@@ -888,7 +897,7 @@ test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs 
   for (const d of [null, "quota_for_entity_exceeded", [real], { error: { type: "rate_limit_exceeded" } }, { type: "payment_required" }, { data: real }]) assert.equal(gatewayRefusalOf(d), null, JSON.stringify(d));
 });
 
-test("a failed call is priced where it can be, a cost still unknown is booked at an upper bound once and shuts the gateway the second time; each call is one line of the call log (#142)", async () => {
+test("a failed call is priced where it can be; a cost still unknown is booked at an upper bound and relaying goes on; a run of them with no priced call between them shuts the gateway, each booked; each call is one line of the call log (#142, #163)", async () => {
   const looked = { gen_abcdef12: 0.4, gen_FAIL500ID0001: 0.3, gen_FAIL503HDR001: 0.2 };
   const gw = await fakeGateway({
     [IMAGE]: (body) => {
@@ -914,7 +923,8 @@ test("a failed call is priced where it can be, a cost still unknown is booked at
   const opened = [];
   try {
     const usage = join(dir, "usage");
-    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], callLog: join(usage, CALL_LOG), log: (l) => lines.push(l) });
+    // A run's minute set to 0 here: six in a row shut it at once (the minute has a test of its own).
+    const relay = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: 0, callLog: join(usage, CALL_LOG), log: (l) => lines.push(l) });
     opened.push(relay);
     const go = (mode) => call(relay.socketPath, { token: relay.token, body: JSON.stringify({ mode }) });
     relay.beginPass(100);
@@ -930,46 +940,65 @@ test("a failed call is priced where it can be, a cost still unknown is booked at
     const rec = addKeySpend({ usd: 2, tokens: {} }, pass);
     assert.deepEqual([rec.usdUpperBound, rec.budgetExceeded], [true, undefined]);
     assert.ok(lines.some((l) => /a call's cost could not be determined \(the answer broke off: .+; no generation id\); booked \$0\.4000 against max_usd, an upper bound/.test(l)), lines.join("\n"));
-    // The second unknown cost in the stage shuts the gateway: a 5xx whose type would say "before any model ran" on a 4xx.
+    // More unknown costs do not shut the gateway while a priced call comes between them: four in a row (a 5xx whose type
+    // would say "before any model ran" on a 4xx), each booked at the estimate, then a priced call, which ends the run.
     relay.beginPass(100);
-    assert.equal((await go("premodel5xx")).status, 500);
+    for (let i = 1; i <= 4; i++) assert.equal((await go("premodel5xx")).status, 500);
+    assert.equal((await go("ok")).status, 200, "still relaying after four unknown costs in a row");
     pass = await relay.endPass();
-    assert.deepEqual([pass.unpriced, pass.shut], [1, { calls: 2, why: "the gateway answered 500 (model_not_found); no generation id" }]);
-    assert.ok(lines.some((l) => /a second call could not be priced .*gateway relay shut: 2 calls in this stage could not be priced/.test(l)));
+    assert.deepEqual([pass.usd, pass.calls, pass.estimated, pass.unpriced, pass.shut], [2, 5, 4, 0, null], "4 estimates at $0.40 and the priced call");
+    // Six in a row with no priced call between them: the sixth shuts the gateway, and is booked at the estimate too.
+    relay.beginPass(100);
+    for (let i = 1; i <= UNKNOWN_STREAK_SHUT; i++) assert.equal((await go("premodel5xx")).status, 500, "the worker gets the gateway's answer, the sixth time too");
+    pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.estimated, pass.unpriced, pass.shut], [2.4, 6, 1, { calls: 6, why: "the gateway answered 500 (model_not_found); no generation id" }], "all six booked, the one that shut it included");
+    assert.deepEqual([addKeySpend({ usd: 1, tokens: {} }, pass).budgetExceeded], [true], "the shutdown ends the pass over budget: the stage Blocks");
+    assert.ok(lines.some((l) => /^gateway relay shut: 6 calls in a row could not be priced \(the gateway answered 500 \(model_not_found\); no generation id\): the pass ends over budget/.test(l)), lines.join("\n"));
     relay.beginPass(100);
     const shut = await go("ok");
     assert.equal(shut.status, 403);
-    assert.match(JSON.parse(shut.text).error.message, /gateway relay shut: 2 calls in this stage could not be priced/);
+    assert.match(JSON.parse(shut.text).error.message, /gateway relay shut: 6 calls in a row could not be priced/);
     await relay.endPass();
     const totals = relay.totals();
-    assert.deepEqual([totals.estimated, totals.estimatedUsd, totals.failClosed, totals.callLog?.file], [1, 0.4, true, CALL_LOG]);
+    assert.deepEqual([totals.estimated, totals.estimatedUsd, totals.failClosed, totals.callLog?.file], [11, 4.4, true, CALL_LOG], "the two looked-up failures are no estimates any more");
     // The call log: one line per call, the model from its header, no key and no body; only Factory's user reads it.
     const log = readFileSync(join(usage, CALL_LOG), "utf8");
     assert.ok(!log.includes(KEY) && !log.includes("boom") && !log.includes('"mode"') && !log.includes("aG"), "no key, no body, no gateway message");
     assert.equal(statSync(join(usage, CALL_LOG)).mode & 0o777, 0o600);
     const calls = log.trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(totals.callLog.lines, calls.length);
-    const sent = calls.filter((c) => !c.reconciled);
+    // A call's own line, and a later line (`reconciled`) when its generation's record settled what it was booked at.
+    const sent = calls.filter((c) => !("reconciled" in c));
     assert.deepEqual(sent.map((c) => [c.status, c.basis ?? c.refused, c.usd ?? null]), [
       [200, "reported", 0.4],
-      [500, "lookup", 0.3],
-      [503, "lookup", 0.2],
+      // A failed call that names its generation: the estimate at once, its record's cost on a line of its own.
+      [500, "estimate", 0.4],
+      [503, "estimate", 0.4],
       [409, "refused", 0],
       [200, "estimate", 0.4],
       [200, "reported", 0.4],
-      [500, "shut", null],
+      ...Array.from({ length: 4 }, () => [500, "estimate", 0.4]),
+      [200, "reported", 0.4],
+      ...Array.from({ length: 5 }, () => [500, "estimate", 0.4]),
+      [500, "shut", 0.4],
       [403, "shut", null],
     ]);
+    assert.deepEqual(calls.filter((c) => "reconciled" in c).map((c) => [c.id, c.basis, c.usd, c.reconciled]).sort(), [
+      ["gen_FAIL500ID0001", "lookup", 0.3, -0.1],
+      ["gen_FAIL503HDR001", "lookup", 0.2, -0.2],
+    ]);
     assert.ok(sent.every((c) => c.t && c.method === "POST" && c.path === IMAGE));
-    assert.ok(sent.slice(0, 7).every((c) => c.model === "recraft/recraft-v4.1-flash"), "the model from its header");
+    assert.ok(sent.slice(0, -1).every((c) => c.model === "recraft/recraft-v4.1-flash"), "the model from its header");
     assert.deepEqual([sent[1].id, sent[2].id, sent[3].type], ["gen_FAIL500ID0001", "gen_FAIL503HDR001", "model_not_found"]);
+    assert.match(sent[1].unpriced, /^the gateway answered 500 \(internal_server_error\); generation gen_FAIL500ID0001 is looked up$/);
     assert.match(sent[4].unpriced, /^the answer broke off: /);
-    // result.json: the dollars an upper bound (the estimate) and a lower bound (the second unknown), the relay's summary.
+    // result.json: the dollars an upper bound (the estimates) and, the gateway shut, a lower bound; the relay's summary.
     writeUsage(usage, { harness: "claude", model: "m", records: [rec], passes: 1, exit: "blocked", reason: "r", credentialBasis: "x", workerKey: totals });
     const result = JSON.parse(readFileSync(join(usage, "result.json"), "utf8"));
-    assert.deepEqual([result.usdUpperBound, result.usdLowerBound, result.workerKey.estimated, result.workerKey.shut.calls, result.workerKey.callLog.file], [true, true, 1, 2, CALL_LOG]);
+    assert.deepEqual([result.usdUpperBound, result.usdLowerBound, result.workerKey.estimated, result.workerKey.shut.calls, result.workerKey.callLog.file], [true, true, 11, 6, CALL_LOG]);
 
-    // The estimate counts toward the live cap: a pass with $0.25 left is at its cap after one unknown cost.
+    // The estimate counts toward the live cap: a pass with $0.25 left is at its cap after one unknown cost (an image call,
+    // with none priced yet on its route: booked at $1.00).
     const near = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1] });
     opened.push(near);
     near.beginPass(0.25);
@@ -978,7 +1007,7 @@ test("a failed call is priced where it can be, a cost still unknown is booked at
     assert.equal(capped.status, 402);
     assert.equal(JSON.parse(capped.text).error.type, "factory_max_usd");
     const np = await near.endPass();
-    assert.deepEqual([np.usd, np.estimated, np.capped], [0.25, 1, true]);
+    assert.deepEqual([np.usd, np.estimated, np.capped], [IMAGE_UNKNOWN_FLOOR_USD, 1, true]);
   } finally {
     for (const r of opened) await r.close();
     await gw.close();
@@ -993,9 +1022,9 @@ test("a failed call is priced where it can be, a cost still unknown is booked at
 
 test("a stage the relay shut Blocks naming the shutdown; only an actual max_usd overrun reads \"dollar cap reached\" (#142)", () => {
   const shut = { calls: 2, why: "the call failed after it was sent: ECONNRESET; no generation id" };
-  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Factory's max_usd was not reached");
-  assert.equal(withRelayShut("dollar cap reached", shut, true), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); dollar cap reached");
-  assert.equal(withRelayShut("the look-dev stalled", shut), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); the look-dev stalled");
+  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Factory's max_usd was not reached");
+  assert.equal(withRelayShut("dollar cap reached", shut, true), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); dollar cap reached");
+  assert.equal(withRelayShut("the look-dev stalled", shut), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); the look-dev stalled");
   assert.equal(withRelayShut("dollar cap reached", null), "dollar cap reached", "no shutdown: the reason stands");
   assert.match(stageBlockReason("dollar cap reached", { shut, gatewayRefused: { type: "insufficient_funds", message: "no credits" } }), /^AI Gateway refused: insufficient_funds \(no credits\); gateway relay shut: 2 calls/);
   // max_usd in fact reached: the spend at the cap, the relay's refusal at it, a harness's own cap. A pass ended over budget
@@ -1027,23 +1056,25 @@ test("#142 review: no caller-shaped answer gets the estimate; the call log keeps
   };
   try {
     // Major 1: a cheap call, then a complete answer the relay cannot price. The caller chose its route and shape, so it
-    // never gets the $0.25 estimate: the gateway shuts at once, and the Block names it.
+    // never passes as an unknown cost with relaying going on: the gateway shuts at once, and the Block names it. The
+    // answer was billed, so the shutdown books it at the estimate ($0.25).
     const a = await open({ dir: join(dir, "a") });
     a.beginPass(10);
     assert.equal((await call(a.socketPath, { token: a.token })).status, 200);
     assert.equal((await call(a.socketPath, { token: a.token, body: '{"mode":"nocost"}' })).status, 200);
     assert.equal((await call(a.socketPath, { token: a.token })).status, 403, "shut at once");
     const pa = await a.endPass();
-    assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.complete], [0.01, 0, 1, true]);
+    assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.complete], [0.26, 1, 1, true]);
     const ta = a.totals();
     assert.equal(stageBlockReason("dollar cap reached", ta, maxUsdReached(10, [addKeySpend({ usd: 1 }, pa)], ta)), "gateway relay shut: a complete answer could not be priced (the answer named no cost and no generation); Factory's max_usd was not reached");
 
-    // Minor 3: a pre-model type at the top level of a 4xx body says nothing: an unknown cost, the estimate ($0.25 floor).
+    // Minor 3: a pre-model type at the top level of a 4xx body says nothing: an unknown cost, the estimate (an image call
+    // with none priced on its route: $1.00).
     const b = await open({ dir: join(dir, "b") });
     b.beginPass(10);
     assert.equal((await call(b.socketPath, { token: b.token, body: '{"mode":"toplevel"}' })).status, 409);
     const pb = await b.endPass();
-    assert.deepEqual([pb.usd, pb.estimated], [0.25, 1]);
+    assert.deepEqual([pb.usd, pb.estimated], [IMAGE_UNKNOWN_FLOOR_USD, 1]);
 
     // Major 2: the call log.
     const usage = join(dir, "usage");
@@ -1116,8 +1147,10 @@ test("a 5xx saying no generation ran (503 service_unavailable_error) with no gen
     // The same type naming its generation: looked up.
     unavailableWithId: { ...unavailable, headers: { "x-generation-id": "gen_UNAVAILID00001" } },
     internal: { status: 500, body: { error: { message: "boom", type: "internal_server_error" } } },
-    // The type anywhere but `error.type` says nothing.
+    // The gateway's other error shape: the type at the top level of a body with no `error` object (as its 402 has it).
     topLevel: { status: 503, body: { type: "service_unavailable_error", message: "m" } },
+    // A type nested anywhere else says nothing.
+    nested: { status: 503, body: { data: { type: "service_unavailable_error" }, error: { message: "m" } } },
   };
   const gw = await fakeGateway({
     "/v4/ai/decision-model": (body) => answers[JSON.parse(body || "{}").mode] ?? { body: { answers: {}, providerMetadata: { gateway: { cost: "0.002", generationId: "gen_DECIDE000001" } } } },
@@ -1153,18 +1186,778 @@ test("a 5xx saying no generation ran (503 service_unavailable_error) with no gen
     assert.equal((await decide(b, "internal")).status, 500);
     const pb = await b.endPass();
     assert.deepEqual([pb.usd, pb.estimated], [0.25, 1]);
-    // service_unavailable_error naming its generation: looked up.
+    // service_unavailable_error naming its generation: booked at the estimate, which its record's cost then replaces.
     const c = await open("c");
     assert.equal((await decide(c, "unavailableWithId")).status, 503);
     const pc = await c.endPass();
     assert.deepEqual([pc.usd, pc.calls, pc.estimated], [0.003, 1, 0]);
-    // The type at the top level of the body: an unknown cost, the estimate.
-    const d = await open("d");
+    // The type at the top level of a body with no `error` object: read there too, $0.
+    const d = await open("d", { callLog: join(dir, "d-usage", CALL_LOG) });
     assert.equal((await decide(d, "topLevel")).status, 503);
     const pd = await d.endPass();
-    assert.deepEqual([pd.usd, pd.estimated], [0.25, 1]);
+    assert.deepEqual([pd.usd, pd.estimated, d.totals().failed], [0, 0, 1]);
+    assert.deepEqual(
+      readFileSync(join(dir, "d-usage", CALL_LOG), "utf8").trim().split("\n").map((l) => JSON.parse(l)).map((l) => [l.status, l.basis, l.usd, l.type]),
+      [[503, "unavailable", 0, "service_unavailable_error"]],
+    );
+    // Nested elsewhere: an unknown cost, the estimate.
+    const e = await open("e");
+    assert.equal((await decide(e, "nested")).status, 503);
+    const pe = await e.endPass();
+    assert.deepEqual([pe.usd, pe.estimated], [0.25, 1]);
   } finally {
     for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- #163: the failure policy ---
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The call log's lines. */
+const logLines = (file) =>
+  readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+/** A port on this machine's loopback that refuses connections (checked, not assumed, before it is used). */
+async function refusedPort() {
+  const port = await new Promise((resolve) => {
+    const srv = net.createServer().listen(0, "127.0.0.1", () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+  for (let i = 0; i < 100; i++) {
+    const refused = await new Promise((resolve) => {
+      const c = net.connect(port, "127.0.0.1");
+      c.on("connect", () => {
+        c.destroy();
+        resolve(false);
+      });
+      c.on("error", () => resolve(true));
+    });
+    if (refused) return port;
+    await sleep(20);
+  }
+  throw new Error("no refusing port");
+}
+/** A TCP peer that takes a connection, reads its first bytes and resets: `seen.bytes` is what reached it. */
+async function resettingPeer() {
+  const seen = { bytes: 0, connections: 0 };
+  const srv = net.createServer((sock) => {
+    seen.connections += 1;
+    sock.on("error", () => {});
+    sock.on("data", (d) => {
+      seen.bytes += d.length;
+      sock.destroy();
+    });
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  return { port: srv.address().port, seen, close: () => new Promise((r) => srv.close(r)) };
+}
+const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+/** One request whose answer may be cut off part-way: resolves with what came once the connection closes. */
+function callUntilClosed(socketPath, { path, token, body = "{}" }) {
+  return new Promise((resolve) => {
+    let text = "";
+    const req = http.request({ socketPath, method: "POST", path, headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "ai-language-model-id": "openai/gpt-5" } }, (res) => {
+      res.on("data", (c) => (text += c));
+      res.on("error", () => {});
+      res.on("close", () => resolve({ status: res.statusCode, text }));
+    });
+    req.on("error", () => resolve({ status: null, text }));
+    req.end(body);
+  });
+}
+
+test("a call that never left this machine costs $0 and is no unknown cost, by the socket's state; one that may have been sent is (#163)", async () => {
+  const closed = await refusedPort();
+  const peer = await resettingPeer();
+  // upstreamRequest's own facts. Refused: the socket never connected.
+  const refused = await upstreamRequest(`http://127.0.0.1:${closed}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
+  assert.deepEqual([refused.code, refused.unsent, refused.relayTimeout], ["ECONNREFUSED", true, false]);
+  // Reset during the TLS handshake: connected, never secure, so none of the request was encrypted or sent.
+  const handshake = await upstreamRequest(`https://127.0.0.1:${peer.port}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
+  assert.deepEqual([handshake.unsent, peer.seen.bytes > 0], [true, true], "the peer saw the handshake's first bytes only");
+  // Reset after the request was written: it may have been sent.
+  const sent = await upstreamRequest(`http://127.0.0.1:${peer.port}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
+  assert.deepEqual([sent.code, sent.unsent], ["ECONNRESET", false]);
+  // A socket handed over already connected (here a pooled one; a proxy's tunnel is the same) may carry the request at
+  // once: never `unsent`, whatever happens next.
+  let cut = false;
+  const sockets = new Set();
+  const keeping = http.createServer((req, res) => {
+    sockets.add(req.socket);
+    if (cut) return req.socket.destroy();
+    req.resume();
+    req.on("end", () => res.end("{}"));
+  });
+  await new Promise((r) => keeping.listen(0, "127.0.0.1", r));
+  const kept = `http://127.0.0.1:${keeping.address().port}/v1/models`;
+  await new Promise((resolve, reject) => http.get(kept, (res) => res.resume().on("end", resolve)).on("error", reject));
+  await sleep(20);
+  cut = true;
+  const pooled = await upstreamRequest(kept, { method: "GET", headers: {} }).catch((e) => e);
+  assert.deepEqual([sockets.size, pooled.unsent], [1, false], "the same connection carried both requests");
+  // The relay's own timer is told from a peer's reset by upstreamRequest, not by the error's text: before the answer's
+  // headers (`relayTimeout`), and in its body (`timedOut()`).
+  // A peer that never answers one route, and answers another's headers and then nothing.
+  const silent = http.createServer((req, res) => {
+    if (req.url === "/v1/embeddings") res.writeHead(200, { "content-type": "application/json" }).write('{"data":');
+  });
+  await new Promise((r) => silent.listen(0, "127.0.0.1", r));
+  const quiet = `http://127.0.0.1:${silent.address().port}`;
+  const noHeaders = await upstreamRequest(`${quiet}/v1/chat/completions`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 80 }).catch((e) => e);
+  assert.deepEqual([noHeaders.relayTimeout, noHeaders.unsent], [true, false]);
+  const stalled = await upstreamRequest(`${quiet}/v1/embeddings`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 80 });
+  assert.equal(stalled.timedOut(), false);
+  let ended = null;
+  try {
+    for await (const _ of stalled.body);
+  } catch (e) {
+    ended = e;
+  }
+  assert.ok(ended && stalled.timedOut(), "the body's end was the relay's timer");
+  assert.equal(sent.relayTimeout, false, "a peer's reset is not");
+
+  const dir = mkdtempSync(join(tmpdir(), "relay-unsent-"));
+  const opened = [];
+  const open = async (sub, origin, extra = {}) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 25, origin, lookupDelaysMs: [1], callLog: join(dir, sub, "usage", CALL_LOG), ...extra });
+    opened.push(r);
+    r.beginPass(25);
+    return r;
+  };
+  try {
+    // Through the relay: more never-sent calls than would shut it, each $0, the worker told it may try again.
+    const a = await open("a", `http://127.0.0.1:${closed}`);
+    for (let i = 0; i <= UNKNOWN_STREAK_SHUT; i++) {
+      const r = await call(a.socketPath, { token: a.token });
+      assert.equal(r.status, 502);
+      assert.match(JSON.parse(r.text).error.message, /could not be reached \(ECONNREFUSED\): the call never left this machine, so nothing was billed/);
+    }
+    const pa = await a.endPass();
+    assert.deepEqual([pa.usd, pa.calls, pa.estimated, pa.unpriced, pa.shut], [0, 0, 0, 0, null]);
+    assert.deepEqual([a.totals().failed, a.totals().failClosed], [UNKNOWN_STREAK_SHUT + 1, false]);
+    const unsent = logLines(join(dir, "a", "usage", CALL_LOG));
+    assert.ok(unsent.length === UNKNOWN_STREAK_SHUT + 1 && unsent.every((l) => l.status === null && l.basis === "unsent" && l.usd === 0 && l.why === "the call never left this machine: ECONNREFUSED"), JSON.stringify(unsent[0]));
+    // The same over TLS, reset in the handshake.
+    const b = await open("b", `https://127.0.0.1:${peer.port}`);
+    assert.equal((await call(b.socketPath, { token: b.token })).status, 502);
+    assert.deepEqual([(await b.endPass()).usd, logLines(join(dir, "b", "usage", CALL_LOG))[0].basis], [0, "unsent"]);
+    // Sent, then reset before any answer: its cost is unknown, so the estimate.
+    const c = await open("c", `http://127.0.0.1:${peer.port}`);
+    const failed = await call(c.socketPath, { token: c.token });
+    assert.equal(failed.status, 502);
+    assert.match(JSON.parse(failed.text).error.message, /the AI Gateway call failed \(ECONNRESET\)$/);
+    const pc = await c.endPass();
+    assert.deepEqual([pc.usd, pc.estimated], [IMAGE_UNKNOWN_FLOOR_USD, 1], "an image call, none priced on its route yet");
+    assert.equal(logLines(join(dir, "c", "usage", CALL_LOG))[0].unpriced, "the call failed after it was sent: ECONNRESET; no generation id");
+    // The relay's own timer, in the call log: `timeout`, before the headers and in the body.
+    const d = await open("d", quiet, { upstreamTimeoutMs: 80 });
+    assert.equal((await call(d.socketPath, { token: d.token, path: "/v1/chat/completions" })).status, 502);
+    await call(d.socketPath, { token: d.token, path: "/v1/embeddings" }).catch(() => null);
+    await d.endPass();
+    assert.deepEqual(logLines(join(dir, "d", "usage", CALL_LOG)).map((l) => l.unpriced), ["the call failed after it was sent: timeout; no generation id", "the answer broke off: timeout; no generation id"]);
+  } finally {
+    for (const r of opened) await r.close();
+    await peer.close();
+    keeping.closeAllConnections();
+    silent.closeAllConnections();
+    await new Promise((r) => keeping.close(r));
+    await new Promise((r) => silent.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a complete answer priced only by its lookup: a lookup that itself fails is tried on, honouring Retry-After, and shuts the relay only past its bound; \"no record\" shuts it at once; the answer is booked either way (#163)", async () => {
+  // What the lookup answers for each generation, try by try (the last answer repeats).
+  const plan = {
+    gen_LOOKUPBLIP0001: [{ status: 500 }, { status: 429, headers: { "retry-after": "0.2" } }, { cost: 0.03 }],
+    gen_LOOKUPDOWN0002: [{ status: 503 }],
+    gen_LOOKUPNONE0003: [{ status: 404 }],
+    gen_LOOKUPMIXED004: [{ status: 500 }, { status: 404 }],
+  };
+  const tries = {};
+  const gw = await fakeGateway({
+    "/v1/chat/completions": (body) => ({ body: { id: JSON.parse(body).id, choices: [] } }),
+    "/v1/generation": (_b, req) => {
+      const id = new URL(req.url, "http://x").searchParams.get("id");
+      const seen = (tries[id] ||= []);
+      const step = plan[id][Math.min(seen.length, plan[id].length - 1)];
+      seen.push(Date.now());
+      return step.cost !== undefined ? { body: { data: { total_cost: step.cost } } } : { status: step.status, headers: step.headers, body: { error: "x" } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-lookup-"));
+  const opened = [];
+  // Two usual tries a millisecond apart, further tries every 5 ms, none starting past 400 ms. Each relay in a short directory
+  // of its own (a Unix socket's path is short).
+  const answer = async (id) => {
+    const sub = String(opened.length);
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1, 1], lookupRetryMs: 5, lookupOutageMs: 400, callLog: join(dir, sub, "usage", CALL_LOG) });
+    opened.push(r);
+    r.beginPass(25);
+    const started = Date.now();
+    const res = await call(r.socketPath, { token: r.token, path: "/v1/chat/completions", body: JSON.stringify({ id }) });
+    assert.equal(res.status, 200);
+    const next = await call(r.socketPath, { token: r.token, path: "/v1/chat/completions", body: JSON.stringify({ id }) });
+    const pass = await r.endPass();
+    return { pass, next: next.status, ms: Date.now() - started, line: logLines(join(dir, sub, "usage", CALL_LOG))[0] };
+  };
+  try {
+    // The lookup failed twice (a 500, then a 429 asking for 200 ms) and then gave the cost: priced, the relay open.
+    const blip = await answer("gen_LOOKUPBLIP0001");
+    assert.deepEqual([blip.pass.unpriced, blip.pass.shut, blip.next, blip.line.basis, blip.line.usd], [0, null, 200, "lookup", 0.03]);
+    const t = tries.gen_LOOKUPBLIP0001;
+    assert.ok(t[2] - t[1] >= 190, `the try after the 429 waited its Retry-After (${t[2] - t[1]} ms)`);
+    // The lookup failed for the whole bound: only then does the gateway shut, and the answer is booked at the estimate.
+    const down = await answer("gen_LOOKUPDOWN0002");
+    assert.deepEqual([down.pass.usd, down.pass.estimated, down.pass.unpriced, down.pass.shut, down.next], [0.25, 1, 1, { calls: 1, why: "the gateway reported no cost and the lookup of its generation's cost kept failing", complete: true }, 403]);
+    assert.ok(tries.gen_LOOKUPDOWN0002.length > 4 && down.ms >= 350, `tried on for its bound (${tries.gen_LOOKUPDOWN0002.length} tries, ${down.ms} ms)`);
+    assert.deepEqual([down.line.basis, down.line.usd, down.line.id], ["shut", 0.25, "gen_LOOKUPDOWN0002"]);
+    // Every try answered "no record": the gateway shuts after the usual tries, as before, the answer booked.
+    const none = await answer("gen_LOOKUPNONE0003");
+    assert.deepEqual([none.pass.usd, none.pass.unpriced, none.pass.shut, tries.gen_LOOKUPNONE0003.length], [0.25, 1, { calls: 1, why: "the gateway reported no cost and its generation's record never came", complete: true }, 2]);
+    // One try failed, then "no record": one more try, whose "no record" is the answer.
+    const mixed = await answer("gen_LOOKUPMIXED004");
+    assert.deepEqual([mixed.pass.shut?.why, tries.gen_LOOKUPMIXED004.length], ["the gateway reported no cost and its generation's record never came", 3]);
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stream that ends cleanly with an error event and no finish is a failed call: the estimate, never the shutdown a complete answer gets (#163)", async () => {
+  const failed = [{ type: "stream-start", warnings: [] }, { type: "text-delta", id: "0", delta: "par" }, { type: "error", error: { message: "Overloaded", type: "overloaded_error" } }];
+  const gw = await fakeGateway({
+    "/v4/ai/language-model": (body) => {
+      const mode = JSON.parse(body || "{}").mode;
+      if (mode === "error") return { type: "text/event-stream", body: sse(failed) };
+      if (mode === "errorWithId") return { type: "text/event-stream", headers: { "x-generation-id": "gen_ERRSTREAM0001" }, body: sse(failed) };
+      // No finish and no error: a complete answer that names no cost.
+      if (mode === "noFinish") return { type: "text/event-stream", body: sse(failed.slice(0, 2)) };
+      return { type: "text/event-stream", body: sse([{ type: "stream-start" }, { type: "finish", finishReason: "stop", providerMetadata: { gateway: { cost: "0.002" } } }]) };
+    },
+    "/v1/generation": (_b, req) => (req.url.includes("gen_ERRSTREAM0001") ? { body: { data: { total_cost: 0.004 } } } : { status: 404, body: {} }),
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-errstream-"));
+  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], callLog: join(dir, "usage", CALL_LOG) });
+  const go = (mode) => call(relay.socketPath, { token: relay.token, path: "/v4/ai/language-model", body: JSON.stringify({ mode }) });
+  try {
+    relay.beginPass(25);
+    assert.equal((await go("error")).status, 200, "the worker gets the stream, its error event included");
+    assert.equal((await go("errorWithId")).status, 200);
+    assert.equal((await go("ok")).status, 200, "not shut");
+    let pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.estimated, pass.unpriced, pass.shut], [0.256, 3, 1, 0, null], "the estimate, its record's 0.004 for the one that named a generation, and the priced call");
+    const lines = logLines(join(dir, "usage", CALL_LOG));
+    assert.deepEqual(lines.filter((l) => !("reconciled" in l)).map((l) => [l.status, l.basis, l.usd]), [[200, "estimate", 0.25], [200, "estimate", 0.25], [200, "reported", 0.002]]);
+    assert.equal(lines[0].unpriced, "the stream carried an error event and no finish; no generation id");
+    assert.deepEqual(lines.filter((l) => "reconciled" in l).map((l) => [l.id, l.basis, l.usd, l.reconciled]), [["gen_ERRSTREAM0001", "lookup", 0.004, -0.246]]);
+    // A stream with neither is a complete answer the relay cannot price: the shutdown, as before, now booked.
+    relay.beginPass(25);
+    assert.equal((await go("noFinish")).status, 200);
+    pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.unpriced, pass.shut], [0.25, 1, { calls: 1, why: "the answer named no cost and no generation", complete: true }]);
+  } finally {
+    await relay.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("smaller cases: a stream cut after its finish event keeps its reported cost; a refusal that names a generation is looked up aside; a redirect is $0; an answer over the size cap is priced by its header's generation; a pass that ended while the live spend was read sends nothing (#163)", async () => {
+  const records = { gen_abcdef12: 0.04, gen_CUTAFTERFIN01: 0.02, gen_REFUSEDGEN001: 0.01, gen_BIGANSWER0001: 0.04 };
+  const big = { images: ["a".repeat(300)] };
+  const gw = await fakeGateway({
+    "/v4/ai/language-model": { type: "text/event-stream", headers: { "x-generation-id": "gen_CUTAFTERFIN01" }, drop: sse([{ type: "stream-start" }, { type: "finish", finishReason: "stop", providerMetadata: { gateway: { cost: "0.012", generationId: "gen_CUTAFTERFIN01" } } }]) },
+    [IMAGE]: (body) => {
+      const mode = JSON.parse(body || "{}").mode;
+      if (mode === "refusedWithId") return { status: 429, headers: { "x-generation-id": "gen_REFUSEDGEN001" }, body: { error: { type: "rate_limit_exceeded", message: "slow down" } } };
+      if (mode === "redirect") return { status: 307, headers: { location: "/elsewhere" }, body: "" };
+      if (mode === "bigWithId") return { headers: { "x-generation-id": "gen_BIGANSWER0001" }, body: big };
+      if (mode === "big") return { body: big };
+      return priced(0.04);
+    },
+    "/v1/generation": (_b, req) => {
+      const usd = records[new URL(req.url, "http://x").searchParams.get("id")];
+      return usd === undefined ? { status: 404, body: {} } : { body: { data: { total_cost: usd } } };
+    },
+  });
+  const modelCalls = () => gw.seen.filter((r) => !r.url.startsWith("/v1/generation")).length;
+  const dir = mkdtempSync(join(tmpdir(), "relay-smaller-"));
+  const opened = [];
+  const open = async (sub, extra = {}) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], callLog: join(dir, sub, "usage", CALL_LOG), ...extra });
+    opened.push(r);
+    return r;
+  };
+  const go = (r, mode) => call(r.socketPath, { token: r.token, body: JSON.stringify({ mode }) });
+  try {
+    const a = await open("a");
+    a.beginPass(25);
+    // Cut after the finish event that carried the cost: booked as reported, and the larger looked-up cost still counts.
+    const cut = await callUntilClosed(a.socketPath, { token: a.token, path: "/v4/ai/language-model" });
+    assert.equal(cut.status, 200);
+    // A 429 that names a generation: $0 as any refusal, and what its record says is booked.
+    assert.equal((await go(a, "refusedWithId")).status, 429);
+    // More redirects than unknown costs would shut it for: never followed, $0 each.
+    for (let i = 0; i <= UNKNOWN_STREAK_SHUT; i++) assert.equal((await go(a, "redirect")).status, 307);
+    const pa = await a.endPass();
+    assert.deepEqual([pa.usd, pa.calls, pa.estimated, pa.unpriced, pa.shut], [0.03, 1, 0, 0, null], "0.02 for the stream (looked up over the 0.012 it reported) and 0.01 for the refusal's generation");
+    assert.deepEqual([a.totals().failed, a.totals().failClosed], [UNKNOWN_STREAK_SHUT + 2, false]);
+    const lines = logLines(join(dir, "a", "usage", CALL_LOG));
+    assert.deepEqual(lines.filter((l) => !("reconciled" in l)).map((l) => [l.status, l.basis, l.usd]), [[200, "reported", 0.012], [429, "refused", 0], ...Array.from({ length: UNKNOWN_STREAK_SHUT + 1 }, () => [307, "redirect", 0])]);
+    assert.match(lines[0].why, /^the answer broke off after its finish event: /);
+    assert.deepEqual(lines.filter((l) => "reconciled" in l).map((l) => [l.id, l.usd, l.reconciled]).sort(), [["gen_CUTAFTERFIN01", 0.02, 0.008], ["gen_REFUSEDGEN001", 0.01, 0.01]]);
+
+    // An answer over the size the relay keeps to price (64 bytes here): its header's generation prices it; with none
+    // it is a complete answer the relay cannot price, and the gateway shuts, the answer booked at the estimate.
+    const b = await open("b", { maxPricedBytes: 64 });
+    b.beginPass(25);
+    assert.equal((await go(b, "bigWithId")).status, 200);
+    assert.equal((await go(b, "big")).status, 200);
+    const pb = await b.endPass();
+    assert.deepEqual([pb.usd, pb.estimated, pb.unpriced, pb.shut], [0.29, 1, 1, { calls: 1, why: "the answer was too large to read its cost", complete: true }]);
+    assert.deepEqual(logLines(join(dir, "b", "usage", CALL_LOG)).map((l) => [l.status, l.basis, l.usd, l.id ?? null]), [[200, "lookup", 0.04, "gen_BIGANSWER0001"], [200, "shut", 0.25, null]]);
+
+    // The pass ends while a call waits for the harness's live spend: its totals were given, so the call is refused.
+    const c = await open("c");
+    c.beginPass(25, async () => {
+      await sleep(150);
+      return 0;
+    });
+    const before = modelCalls();
+    const waiting = go(c, "ok");
+    await sleep(30);
+    const pc = await c.endPass();
+    assert.deepEqual([pc.usd, pc.calls], [0, 0]);
+    assert.equal((await waiting).status, 403);
+    assert.deepEqual([modelCalls() - before, c.totals().usd, c.totals().calls], [0, 0, 0], "never sent");
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- #163 review: the money and walk-away sequences ---
+
+const LANG = "/v4/ai/language-model";
+/** A language model's answer that reports its cost and names no generation (no lookup). */
+const cheap = (usd) => ({ body: { content: [], providerMetadata: { gateway: { cost: String(usd) } } } });
+const edge502 = { status: 502, type: "text/html", body: "<html><body>502 Bad Gateway</body></html>" };
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+/** A client that retries as the AI SDK does: three attempts on a 408, 409, 429 or 5xx, waiting `waits` between them. */
+async function retrying(once, waits) {
+  for (let i = 0; ; i++) {
+    const r = await once();
+    if (!(r.status === 408 || r.status === 409 || r.status === 429 || r.status >= 500) || i >= waits.length) return r;
+    await sleep(waits[i]);
+  }
+}
+/** A call whose client hangs up after `afterMs`, before any answer: resolves once its connection is gone. */
+function callThenHangUp(socketPath, { token, path = LANG, body = "{}", afterMs }) {
+  return new Promise((resolve) => {
+    const req = http.request({ socketPath, method: "POST", path, headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "ai-language-model-id": "openai/gpt-5" } }, (res) => {
+      res.resume();
+      res.on("close", () => resolve(res.statusCode));
+    });
+    req.on("error", () => resolve(null));
+    req.end(body);
+    setTimeout(() => req.destroy(), afterMs);
+  });
+}
+/** A promise and the function that settles it. */
+const gate = () => {
+  let open = null;
+  const p = new Promise((r) => (open = r));
+  return { p, open };
+};
+
+test("a blip never shuts the relay: one, three or six clients' retries through one blip, or three clients' through two; each failed attempt is booked, and the next call is relayed (#163)", async () => {
+  // At 1:20: the AI SDK's waits of 2 s and 4 s are 100 ms and 200 ms, a blip of about four seconds is 220 ms, and the
+  // minute a run of unknown costs must last before it shuts the relay is 3 s.
+  assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT, FAST_ERROR_MS], [6, 60_000, 6, 3_000]);
+  let downUntil = 0;
+  let failed = 0;
+  const gw = await fakeGateway({
+    [LANG]: () => {
+      if (Date.now() < downUntil) {
+        failed += 1;
+        return edge502;
+      }
+      return cheap(0.04);
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-blip-"));
+  const opened = [];
+  try {
+    for (const [clients, blips] of [
+      [1, 1],
+      [3, 1],
+      [6, 1],
+      [3, 2],
+    ]) {
+      failed = 0;
+      const r = await openRelay({ key: KEY, dir: join(dir, `${clients}-${blips}`), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: UNKNOWN_WINDOW_MS / 20 });
+      opened.push(r);
+      r.beginPass(25);
+      const once = () => call(r.socketPath, { token: r.token, path: LANG });
+      for (let b = 0; b < blips; b++) {
+        downUntil = Date.now() + 220;
+        const finals = await Promise.all(Array.from({ length: clients }, () => retrying(once, [100, 200])));
+        assert.deepEqual(finals.map((x) => x.status), Array.from({ length: clients }, () => 200), `${clients} client(s) rode blip ${b + 1} out`);
+        assert.equal((await once()).status, 200, "the next call is relayed");
+      }
+      const p = await r.endPass();
+      assert.ok(failed >= clients * blips, `${failed} attempts failed`);
+      assert.deepEqual([p.usd, p.estimated, p.unpriced, p.shut, r.totals().failClosed], [round6(failed * 0.25 + (clients + 1) * blips * 0.04), failed, 0, null, false], `${clients} client(s), ${blips} blip(s): each failed attempt at $0.25, and the priced calls`);
+      if (clients >= 3) assert.ok(failed >= UNKNOWN_STAGE_SHUT, `${failed} fast error statuses in the stage did not shut the relay`);
+    }
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a gateway that stays down shuts the relay once a run of unknown costs is six calls long and has lasted its minute; every call in it is booked (#163)", async () => {
+  const gw = await fakeGateway({ [LANG]: edge502 });
+  const dir = mkdtempSync(join(tmpdir(), "relay-down-"));
+  // The minute at 250 ms here.
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: 250 });
+  const go = () => call(r.socketPath, { token: r.token, path: LANG });
+  try {
+    r.beginPass(25);
+    // Six failures in a few milliseconds: six in a row, but not for long enough.
+    for (let i = 0; i < UNKNOWN_STREAK_SHUT; i++) assert.equal((await go()).status, 502);
+    assert.equal(r.totals().failClosed, false, "six in a row within a few milliseconds is no outage");
+    // Still failing once the run has lasted its minute: the seventh shuts it.
+    await sleep(300);
+    assert.equal((await go()).status, 502, "the worker gets the gateway's answer");
+    assert.equal((await go()).status, 403, "and the next call is refused");
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.estimated, p.unpriced, p.shut], [1.75, 7, 1, { calls: 7, why: "the gateway answered 502; no generation id" }], "all seven booked, the one that shut it included");
+    assert.equal(relayShutText(p.shut), "gateway relay shut: 7 calls in a row could not be priced (the gateway answered 502; no generation id)");
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("six failed calls in a stage that may have been billed shut the relay though cheap priced calls come between them; an image call is booked at $1.00 until one on its route is priced (#163)", async () => {
+  let n = 0;
+  const gw = await fakeGateway({
+    // Odd calls priced at $0.01; even ones cut after they were sent (billed, in the review's story, $5 each, no id).
+    [LANG]: () => ((n += 1) % 2 ? cheap(0.01) : { drop: '{"content":[' }),
+    [IMAGE]: (body) => (JSON.parse(body || "{}").mode === "ok" ? priced(0.04) : { drop: '{"images":["aG' }),
+    "/v1/generation": { body: { data: { total_cost: 0.04 } } },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-stage-"));
+  const opened = [];
+  const open = async (sub) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 200, origin: gw.origin, lookupDelaysMs: [1] });
+    opened.push(r);
+    r.beginPass(200);
+    return r;
+  };
+  try {
+    const a = await open("a");
+    for (let i = 1; i <= 2 * UNKNOWN_STAGE_SHUT; i++) await callUntilClosed(a.socketPath, { token: a.token, path: LANG });
+    assert.equal((await call(a.socketPath, { token: a.token, path: LANG })).status, 403, "shut at the sixth");
+    const pa = await a.endPass();
+    assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.calls, pa.shut?.stage], [1.56, 6, 1, 6, true], "6 estimates at $0.25 and 6 priced calls at $0.01");
+    assert.match(relayShutText(pa.shut), /^gateway relay shut: 6 calls in this stage could not be priced \(the answer broke off: [A-Za-z_]+; no generation id\)$/);
+
+    // The image floor: $1.00 before any image call is priced, then the dearest call so far (at least $0.25).
+    const b = await open("b");
+    const image = (mode) => call(b.socketPath, { token: b.token, body: JSON.stringify({ mode }) }).catch(() => null);
+    await image("drop");
+    assert.equal(b.totals().usd, IMAGE_UNKNOWN_FLOOR_USD);
+    await image("ok");
+    await image("drop");
+    const pb = await b.endPass();
+    assert.deepEqual([pb.usd, pb.estimated], [round6(IMAGE_UNKNOWN_FLOOR_USD + 0.04 + 0.25), 2]);
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a record for an older call does not end a run of newer unknown costs (#163)", async () => {
+  const record = gate();
+  const gw = await fakeGateway({
+    [LANG]: (body) => (JSON.parse(body || "{}").mode === "slowid" ? { status: 500, headers: { "x-generation-id": "gen_OLDERCALL00001" }, body: { error: { type: "internal_server_error", message: "x" } } } : edge502),
+    "/v1/generation": async () => {
+      await record.p;
+      return { body: { data: { total_cost: 0.3 } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-older-"));
+  // A run's minute set to 0: six in a row shut it.
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: 0 });
+  try {
+    r.beginPass(25);
+    assert.equal((await call(r.socketPath, { token: r.token, path: LANG, body: '{"mode":"slowid"}' })).status, 500);
+    for (let i = 1; i < UNKNOWN_STREAK_SHUT; i++) assert.equal((await call(r.socketPath, { token: r.token, path: LANG })).status, 502);
+    // The older call's record comes: it is priced, and the five unknown costs sent after it still stand in a row.
+    record.open();
+    await sleep(100);
+    assert.equal(r.totals().estimated, UNKNOWN_STREAK_SHUT - 1, "the older call's estimate was replaced by its record");
+    assert.equal(r.totals().failClosed, false);
+    assert.equal((await call(r.socketPath, { token: r.token, path: LANG })).status, 502);
+    assert.equal(r.totals().failClosed, true, "the sixth unknown cost in a row shut it");
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.shut?.calls, p.shut?.stage], [round6(0.3 + 5 * 0.25 + 0.3), UNKNOWN_STREAK_SHUT, undefined], "the run shut it: the record's $0.30; five estimates at $0.25 before it came, the sixth at the dearest call so far, $0.30");
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with a cap, one failed call at a time waits for its record: the estimate frees the turn, a second such call holds it, and the cap is passed by about two calls (#163)", async () => {
+  let records = gate();
+  let n = 0;
+  const gw = await fakeGateway({
+    // Every call fails after it was billed $3, naming its generation; the records come when the test says.
+    [LANG]: (body) => (JSON.parse(body || "{}").mode === "ok" ? cheap(0.4) : { status: 500, headers: { "x-generation-id": `gen_BILLEDFAIL${String((n += 1)).padStart(4, "0")}` }, body: { error: { type: "internal_server_error", message: "x" } } }),
+    "/v1/generation": async () => {
+      await records.p;
+      return { body: { data: { total_cost: 3 } } };
+    },
+  });
+  const modelCalls = () => gw.seen.filter((x) => x.url === LANG).length;
+  const dir = mkdtempSync(join(tmpdir(), "relay-onewait-"));
+  const opened = [];
+  const open = async (sub, maxUsd, budget) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd, origin: gw.origin, lookupDelaysMs: [1] });
+    opened.push(r);
+    r.beginPass(budget);
+    return r;
+  };
+  try {
+    // The estimate frees the turn: the next call goes while the record is still to come.
+    const a = await open("a", 25, 25);
+    const go = (r, mode = "fail") => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
+    assert.equal((await go(a)).status, 500);
+    assert.equal((await go(a, "ok")).status, 200, "relayed while the failed call's record is still to come");
+    assert.deepEqual([a.totals().usd, a.totals().estimated], [0.65, 1]);
+    records.open();
+    const pa = await a.endPass();
+    assert.deepEqual([pa.usd, pa.estimated], [3.4, 0], "the record's $3 in the estimate's place");
+
+    // $2 left, every call billed $3. The first is booked at $0.25, so the second is sent; it fails too, and holds the
+    // turn until the first's record comes ($3): then the cap is reached, and no third call is sent.
+    records = gate();
+    n = 0;
+    const b = await open("b", 2, 2);
+    const before = modelCalls();
+    const statuses = [];
+    setTimeout(() => records.open(), 300);
+    for (let i = 0; i < 6; i++) statuses.push((await go(b)).status);
+    assert.deepEqual(statuses, [500, 500, 402, 402, 402, 402]);
+    assert.equal(modelCalls() - before, 2, "two calls reached the gateway");
+    const pb = await b.endPass();
+    assert.deepEqual([pb.usd, pb.estimated, pb.capped], [6, 0, true], "both records booked: $6 against $2 left, two calls' cost");
+
+    // With no cap nothing is checked against a standing estimate: failed calls go side by side, their lookups too.
+    records = gate();
+    const c = await open("c", 0, 0);
+    const sentBefore = modelCalls();
+    for (let i = 0; i < 3; i++) assert.equal((await go(c)).status, 500);
+    assert.equal(modelCalls() - sentBefore, 3, "all three sent while their records were still to come");
+    records.open();
+    const pc = await c.endPass();
+    assert.deepEqual([pc.usd, pc.estimated], [9, 0]);
+  } finally {
+    records.open();
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a call whose client hung up while it waited is never sent: waiting for the live spend, or for its turn (#163)", async () => {
+  const records = gate();
+  const gw = await fakeGateway({
+    [LANG]: (body) => (JSON.parse(body || "{}").mode === "fail" ? { status: 500, headers: { "x-generation-id": "gen_HELDTURN00001" }, body: { error: { type: "internal_server_error", message: "x" } } } : cheap(0.1)),
+    "/v1/generation": async () => {
+      await records.p;
+      return { body: { data: { total_cost: 0.2 } } };
+    },
+  });
+  const modelCalls = () => gw.seen.filter((x) => x.url === LANG).length;
+  const dir = mkdtempSync(join(tmpdir(), "relay-gone-"));
+  const opened = [];
+  try {
+    // Waiting for the harness's live spend (200 ms); the client goes at 50 ms.
+    const a = await openRelay({ key: KEY, dir: join(dir, "a"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], callLog: join(dir, "a-usage", CALL_LOG) });
+    opened.push(a);
+    a.beginPass(25, async () => {
+      await sleep(200);
+      return 0;
+    });
+    await callThenHangUp(a.socketPath, { token: a.token, afterMs: 50 });
+    await sleep(300);
+    assert.equal(modelCalls(), 0, "never sent");
+    assert.equal(a.totals().refused.gone, 1);
+    assert.deepEqual(logLines(join(dir, "a-usage", CALL_LOG)).map((l) => [l.status, l.refused]), [[null, "gone"]]);
+    assert.deepEqual([(await a.endPass()).usd, a.totals().calls], [0, 0]);
+
+    // Waiting for its turn behind a failed call that holds it until another's record comes; the client goes meanwhile.
+    const b = await openRelay({ key: KEY, dir: join(dir, "b"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1] });
+    opened.push(b);
+    b.beginPass(25);
+    const fail = () => call(b.socketPath, { token: b.token, path: LANG, body: '{"mode":"fail"}' });
+    assert.equal((await fail()).status, 500);
+    assert.equal((await fail()).status, 500, "the second holds the turn until the first's record comes");
+    await callThenHangUp(b.socketPath, { token: b.token, afterMs: 100 });
+    records.open();
+    const pb = await b.endPass();
+    assert.equal(modelCalls(), 2, "the call whose client went was never sent");
+    assert.deepEqual([pb.usd, pb.calls], [0.4, 2]);
+  } finally {
+    records.open();
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pass's end waits for the lookups a bounded time: an estimate still standing then stays booked, and its record is never read (#163)", async () => {
+  const records = gate();
+  let lookups = 0;
+  const gw = await fakeGateway({
+    [LANG]: { status: 500, headers: { "x-generation-id": "gen_LATERECORD001" }, body: { error: { type: "internal_server_error", message: "x" } } },
+    "/v1/generation": async () => {
+      lookups += 1;
+      await records.p;
+      return { body: { data: { total_cost: 4 } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-endpass-"));
+  // The lookups get 200 ms at the pass's end here (five minutes in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1, 20, 20], endPassLookupMs: 200, callLog: join(dir, "usage", CALL_LOG) });
+  try {
+    r.beginPass(25);
+    assert.equal((await call(r.socketPath, { token: r.token, path: LANG })).status, 500);
+    const started = Date.now();
+    const p = await r.endPass();
+    const waited = Date.now() - started;
+    assert.ok(waited >= 150 && waited < 2000, `the pass's end waited ${waited} ms`);
+    assert.deepEqual([p.usd, p.estimated, p.unpriced], [0.25, 1, 0], "the estimate stands, booked");
+    const line = logLines(join(dir, "usage", CALL_LOG)).find((l) => "reconciled" in l);
+    assert.deepEqual([line.basis, line.usd, line.unpriced], ["estimate", 0.25, "the gateway answered 500 (internal_server_error); generation gen_LATERECORD001 had no record when the pass ended"]);
+    // The record comes afterwards: never read, and nothing changes.
+    const tried = lookups;
+    records.open();
+    await sleep(150);
+    assert.deepEqual([r.totals().usd, r.totals().estimated, lookups], [0.25, 1, tried]);
+  } finally {
+    records.open();
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failure that ran long upstream is booked at least $1.00, and counts toward the stage's six; a fast error status does not (#163)", async () => {
+  const gw = await fakeGateway({
+    [LANG]: async (body) => {
+      const mode = JSON.parse(body || "{}").mode;
+      if (mode === "slow") await sleep(150);
+      return { status: 500, body: { error: { type: "internal_server_error", message: "x" } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-slow-"));
+  // A fast error status within 100 ms here, a slow failure past 100 ms (3 s and 30 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 100, callLog: join(dir, "usage", CALL_LOG) });
+  const go = (mode) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
+  try {
+    assert.deepEqual([SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD], [30_000, 1]);
+    r.beginPass(100);
+    // Fast error statuses, more than the stage's six with a priced call never coming: the run's minute is not reached.
+    for (let i = 0; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go("fast")).status, 500);
+    assert.equal(r.totals().failClosed, false, "fast error statuses do not count toward the stage's six");
+    // Slow 5xx: each may have been billed, each booked at least $1.00; the sixth shuts the relay.
+    for (let i = 1; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go("slow")).status, 500);
+    assert.equal((await go("fast")).status, 403, "shut at the sixth slow failure");
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.estimated, p.shut?.calls, p.shut?.stage], [round6((UNKNOWN_STAGE_SHUT + 1) * 0.25 + UNKNOWN_STAGE_SHUT * SLOW_UNKNOWN_FLOOR_USD), 2 * UNKNOWN_STAGE_SHUT + 1, UNKNOWN_STAGE_SHUT, true]);
+    const usd = logLines(join(dir, "usage", CALL_LOG)).filter((l) => l.status === 500).map((l) => l.usd);
+    assert.deepEqual(usd, [...Array.from({ length: UNKNOWN_STAGE_SHUT + 1 }, () => 0.25), ...Array.from({ length: UNKNOWN_STAGE_SHUT }, () => 1)]);
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with a cap, a failed call holds the turn for another's record a bounded time, then goes on booked as a failure that names no generation (#163)", async () => {
+  let n = 0;
+  const gw = await fakeGateway({
+    // Every call fails naming its generation, and no record ever comes (404).
+    [LANG]: () => ({ status: 500, headers: { "x-generation-id": `gen_NORECORD${String((n += 1)).padStart(6, "0")}` }, body: { error: { type: "internal_server_error", message: "x" } } }),
+    "/v1/generation": { status: 404, body: { error: "not_found" } },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-hold-"));
+  // The record is looked for over 600 ms; a hold lasts 100 ms at most (15 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [200, 200, 200], holdMaxMs: 100, callLog: join(dir, "usage", CALL_LOG) });
+  const go = () => call(r.socketPath, { token: r.token, path: LANG });
+  try {
+    assert.equal(HOLD_MAX_MS, 15_000);
+    r.beginPass(25);
+    assert.equal((await go()).status, 500, "the first: its estimate waits for its record");
+    assert.equal((await go()).status, 500, "the second holds the turn for the first's record");
+    const started = Date.now();
+    assert.equal((await go()).status, 500);
+    const waited = Date.now() - started;
+    assert.ok(waited >= 80 && waited < 400, `the third waited about the hold's 100 ms, not the first's lookup (${waited} ms)`);
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.estimated, p.unpriced], [0.75, 3, 0]);
+    const lines = logLines(join(dir, "usage", CALL_LOG));
+    const second = lines.find((l) => l.id === "gen_NORECORD000002" && !("reconciled" in l));
+    assert.deepEqual([second.basis, second.usd, second.unpriced], ["estimate", 0.25, "the gateway answered 500 (internal_server_error); generation gen_NORECORD000002 not looked up: another failed call's record was still awaited"]);
+    assert.ok(!lines.some((l) => l.id === "gen_NORECORD000002" && "reconciled" in l), "never looked up");
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run counts it, never the stage's six; a slow one counts (#163)", async () => {
+  assert.deepEqual([408, 409, 500, 502, 503, 504, 529, 400, 402, 424, 499].map(FAST_ERROR_STATUS), [true, true, true, true, true, true, true, false, false, false, false]);
+  const gw = await fakeGateway({
+    [LANG]: async (body) => {
+      const { status, slow } = JSON.parse(body || "{}");
+      if (slow) await sleep(150);
+      return { status, body: { error: { message: "x" } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-fast4xx-"));
+  // A fast error status within 100 ms here (3 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100 });
+  const go = (status, slow = false) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ status, slow }) });
+  try {
+    r.beginPass(100);
+    // Fast 408s and 409s, more than the stage's six: the run's minute is not reached, and they are no stage count.
+    for (let i = 0; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go(i % 2 ? 409 : 408)).status, i % 2 ? 409 : 408);
+    assert.equal(r.totals().failClosed, false, "fast 408s and 409s do not count toward the stage's six");
+    // Slow ones may have been billed: the sixth shuts the relay.
+    for (let i = 1; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go(408, true)).status, 408);
+    const p = await r.endPass();
+    assert.deepEqual([p.estimated, p.shut?.calls, p.shut?.stage], [2 * UNKNOWN_STAGE_SHUT + 1, UNKNOWN_STAGE_SHUT, true]);
+  } finally {
+    await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
   }

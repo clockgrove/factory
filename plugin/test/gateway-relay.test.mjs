@@ -1465,9 +1465,11 @@ test("a complete answer priced only by its lookup: a lookup that itself fails is
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-lookup-"));
   const opened = [];
-  // Two usual tries a millisecond apart, further tries every 5 ms, for 150 ms at most.
+  // Two usual tries a millisecond apart, further tries every 5 ms, for 150 ms at most. Each relay in a short directory
+  // of its own (a Unix socket's path is short).
   const answer = async (id) => {
-    const r = await openRelay({ key: KEY, dir: join(dir, id), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1, 1], lookupRetryMs: 5, lookupOutageMs: 150, callLog: join(dir, id, "usage", CALL_LOG) });
+    const sub = String(opened.length);
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1, 1], lookupRetryMs: 5, lookupOutageMs: 150, callLog: join(dir, sub, "usage", CALL_LOG) });
     opened.push(r);
     r.beginPass(25);
     const started = Date.now();
@@ -1475,7 +1477,7 @@ test("a complete answer priced only by its lookup: a lookup that itself fails is
     assert.equal(res.status, 200);
     const next = await call(r.socketPath, { token: r.token, path: "/v1/chat/completions", body: JSON.stringify({ id }) });
     const pass = await r.endPass();
-    return { pass, next: next.status, ms: Date.now() - started, line: logLines(join(dir, id, "usage", CALL_LOG))[0] };
+    return { pass, next: next.status, ms: Date.now() - started, line: logLines(join(dir, sub, "usage", CALL_LOG))[0] };
   };
   try {
     // The lookup failed twice (a 500, then a 429 asking for 200 ms) and then gave the cost: priced, the relay open.

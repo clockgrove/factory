@@ -134,7 +134,10 @@ async function run() {
     setTimeout(() => child?.kill("SIGKILL"), 30_000).unref();
   }
   // A signal to the stage (a shutdown, a closed session) ends its child the same way: nothing of the agent's outlives it.
-  for (const s of ["SIGTERM", "SIGHUP"]) process.on(s, () => end("signal", `${s}: ending the ${stage}`));
+  // Once the child has exited the stage is ending anyway, and its end keeps its own cause.
+  let exited = false;
+  const onSignal = (s) => (exited ? log(`${s}: the ${stage} has ended already; finishing`) : end("signal", `${s}: ending the ${stage}`));
+  for (const s of ["SIGTERM", "SIGHUP"]) process.on(s, () => onSignal(s));
   // The watchdog: the stage's wall clock plus a grace, never later than 3 minutes before the vendor ends the session,
   // then the child is ended; the stage still packs and says it ended. Armed now on the session, again at the fork.
   let watchdog = null;
@@ -231,7 +234,12 @@ async function run() {
       env: { ...env, ...secrets, FACTORY_APP_TOKEN: tokens.write, ...(tokens.read ? { FACTORY_READ_TOKEN: tokens.read } : {}), GITHUB_ACTIONS: "true", ...files, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: tmp, FACTORY_STAGE_SANDBOX: "1", FACTORY_USAGE_DIR: usageDir, FACTORY_TIMEOUT_MINUTES: String(minutes) },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
-    code = await new Promise((resolve) => child.on("exit", (c, sig) => resolve(c ?? (sig ? 128 : 1))));
+    code = await new Promise((resolve) =>
+      child.on("exit", (c, sig) => {
+        exited = true;
+        resolve(c ?? (sig ? 128 : 1));
+      }),
+    );
     log(`${stage} exited ${code}${killed ? ` (ended by the stage: ${killed})` : ""}`);
     if (killed) await afterKill({ why: killed, stage, repo, issue, prNumber, opts, env, usageDir, secrets: [...given] });
   } catch (e) {

@@ -462,8 +462,6 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
 /** The files in a stage's usage directory that name its live harness runs (exec's `record`), for a later start to reap. */
 export const groupRecordName = (pid) => `harness-group-${pid}.json`;
 export const GROUP_RECORD = /^harness-group-\d+\.json$/;
-/** The signals that stop a process with a live `group` run: its groups go first (stopGroups). */
-export const STOP_SIGNALS = ["SIGTERM", "SIGHUP", "SIGINT"];
 /** This process's live `group` runs: leader pid → {tag, record}. */
 const GROUPS = new Map();
 let trapped = false;
@@ -486,6 +484,45 @@ const probe = (target) => {
   }
 };
 
+/** Linux: the fields of /proc/<pid>/stat after the command name (index 0 is field 3, the state), or null. */
+function procStat(pid) {
+  try {
+    const text = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return text.slice(text.lastIndexOf(")") + 2).split(" ");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When process `pid` started, as a string that differs for another process given the same pid: Linux's start time in
+ * clock ticks since boot (/proc/<pid>/stat field 22), elsewhere `ps -o lstart=`. Null when it cannot be read.
+ */
+export function startTime(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return procStat(pid)?.[19] ?? null;
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** A process as Factory names it in a record: its pid, start time and boot (sameProcess checks one). */
+export const processRecord = (pid = process.pid) => ({ pid, start: startTime(pid), boot: bootId() });
+
+/**
+ * Whether the process a record names is still that process: this boot, alive, and started when recorded. Null when that
+ * cannot be told (alive, but its start time unreadable or unrecorded): a caller then signals nothing.
+ */
+export function sameProcess(rec) {
+  const pid = Number(rec?.pid);
+  if (!Number.isInteger(pid) || pid <= 1 || rec.boot !== bootId() || !probe(pid)) return false;
+  const now = startTime(pid);
+  if (!now || !rec.start) return null;
+  return now === String(rec.start);
+}
+
 /** Whether process `pid` carries FACTORY_RUN_TAG=`tag` in its environment (Linux /proc; elsewhere `ps eww`). */
 function carriesTag(pid, tag) {
   const mark = `FACTORY_RUN_TAG=${tag}`;
@@ -503,13 +540,36 @@ function carriesTag(pid, tag) {
   }
 }
 
+/** Whether a live process in process group `pgid` carries the run's tag, which every process the run starts inherits. */
+function groupCarriesTag(pgid, tag) {
+  let members = [];
+  if (process.platform === "linux") {
+    try {
+      members = readdirSync("/proc").filter((p) => /^\d+$/.test(p) && procStat(p)?.[2] === String(pgid)).map(Number);
+    } catch {
+      return false;
+    }
+  } else {
+    try {
+      members = execFileSync("ps", ["-A", "-o", "pid=,pgid="], { encoding: "utf8" }).split("\n").map((l) => l.trim().split(/\s+/).map(Number)).filter(([, g]) => g === pgid).map(([p]) => p);
+    } catch {
+      return false;
+    }
+  }
+  return members.some((p) => carriesTag(p, tag));
+}
+
+/** The signals that stop a process with a live `group` run (its groups go first: stopGroups), or a local loop. */
+export const STOP_SIGNALS = ["SIGTERM", "SIGHUP", "SIGINT"];
+
 function trackGroup(pid, tag, recordDir) {
   const record = recordDir ? join(recordDir, groupRecordName(pid)) : null;
   GROUPS.set(pid, { tag, record });
   // A record names the run for the next start, should this process die without stopping it (SIGKILL, a crash).
   if (record) {
     try {
-      writeFileSync(record, JSON.stringify({ pid, tag, owner: process.pid, boot: bootId() }), { mode: 0o600 });
+      const owner = processRecord();
+      writeFileSync(record, JSON.stringify({ pid, start: startTime(pid), tag, owner: owner.pid, ownerStart: owner.start, boot: owner.boot }), { mode: 0o600 });
     } catch {
       // no record: the signal path below still stops it
     }
@@ -548,10 +608,10 @@ function stopGroups(sig) {
 
 /**
  * Stop the harness run a dead stage recorded in `file` (exec's `record`), then remove the record. Nothing is signalled
- * unless the record is this boot's and its owner (the stage) is gone; then the group is killed only when it is still the
- * run's: its leader alive and carrying the run's tag, or its leader gone while the group lives (no process takes a pid
- * that names a live group, so that group is the run's). Every process carrying the tag goes too. Never a match on
- * command lines. Returns whether anything was signalled.
+ * unless the record is this boot's and its owner stage is gone (sameProcess: a pid reused since does not keep it). The
+ * group is killed only when a live process in it carries the run's tag; when its leader is alive it must also be the
+ * process recorded. Every process carrying the tag goes too. Whatever cannot be checked on this platform is not
+ * signalled; never a match on command lines. Returns whether anything was signalled.
  */
 export function reapRecorded(file) {
   let rec = null;
@@ -561,16 +621,16 @@ export function reapRecorded(file) {
     return false;
   }
   const pid = Number(rec?.pid);
-  const owner = Number(rec?.owner);
   const tag = typeof rec?.tag === "string" && /^[0-9a-f]{24}$/.test(rec.tag) ? rec.tag : null;
   if (!tag || !Number.isInteger(pid) || pid <= 1 || rec.boot !== bootId()) {
     rmSync(file, { force: true });
     return false;
   }
-  // A live owner is a stage still running: its own stop path ends its run.
-  if (Number.isInteger(owner) && owner > 1 && probe(owner)) return false;
+  // A live owner is a stage still running (its own stop path ends its run); one that cannot be told is left too.
+  if (sameProcess({ pid: rec.owner, start: rec.ownerStart, boot: rec.boot }) !== false) return false;
   let hit = false;
-  if ((probe(pid) ? carriesTag(pid, tag) : true) && probe(-pid)) {
+  const leader = probe(pid) ? sameProcess(rec) === true : true;
+  if (leader && groupCarriesTag(pid, tag)) {
     try {
       process.kill(-pid, "SIGKILL");
       hit = true;

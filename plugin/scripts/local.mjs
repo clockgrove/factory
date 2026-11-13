@@ -29,7 +29,7 @@ import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLin
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { localRelayDir } from "./lib/worker-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
-import { GROUP_RECORD, STOP_SIGNALS, exec, reapRecorded, whichSync } from "./lib/proc.mjs";
+import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
@@ -328,6 +328,46 @@ export function reapLeftRuns(ws) {
     for (const f of files) if (reapRecorded(join(ws, d, f))) n += 1;
   }
   return n;
+}
+
+/** The file in a stage's usage directory that names its process while it runs (proc.mjs processRecord). */
+export const STAGE_RECORD = "stage-process.json";
+
+/**
+ * The pid of a stage of this Objective still running on this machine (its loop died while it lives, say), or null. A
+ * stage counts as running when its record's process is still that process, or cannot be told apart from it.
+ */
+export function liveStage(ws) {
+  let dirs = [];
+  try {
+    dirs = readdirSync(ws).filter((d) => d.startsWith("usage-"));
+  } catch {
+    return null;
+  }
+  for (const d of dirs) {
+    const file = join(ws, d, STAGE_RECORD);
+    let rec = null;
+    try {
+      rec = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (sameProcess(rec) !== false) return rec.pid;
+    rmSync(file, { force: true });
+  }
+  return null;
+}
+
+/** A GitHub read, tried `tries` times with a growing wait; then an error that names it and says nothing was started. */
+async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
+  for (let i = 1; ; i += 1) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= tries) throw new Error(`${what} failed ${tries} times (${String(e?.message || e).slice(0, 160)}); nothing was started, run it again`);
+      await new Promise((r) => setTimeout(r, waitMs * i));
+    }
+  }
 }
 
 export class Local {
@@ -650,8 +690,7 @@ export class Local {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
-    const reaped = reapLeftRuns(this.ws(issue));
-    if (reaped) log(`#${issue}: stopped ${reaped} harness run(s) an earlier stage left running on this machine`);
+    this.reapHere(issue);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const usageDir = join(this.ws(issue), `usage-${name}-${stamp}`);
     mkdirSync(usageDir, { recursive: true });
@@ -708,6 +747,8 @@ export class Local {
       // This process posts what the stage leaves too: none of those values.
       holdSecrets([...parseSecretValues(values).values()]);
       const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, FACTORY_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
+      // Named while it runs, so a later start on this machine never runs a second stage beside it (liveStage).
+      if (child.pid) writeFileSync(join(usageDir, STAGE_RECORD), JSON.stringify(processRecord(child.pid)), { mode: 0o600 });
       child.stdio[3].on("error", () => {});
       child.stdio[3].end(this.token);
       if (this.notice) serveNotices(child, this.notice);
@@ -721,6 +762,7 @@ export class Local {
       child.on("close", (code) => {
         for (const r of relays) r.end();
         this.children.delete(child);
+        rmSync(join(usageDir, STAGE_RECORD), { force: true });
         let result = null;
         try {
           result = JSON.parse(readFileSync(join(usageDir, "result.json"), "utf8"));
@@ -760,17 +802,44 @@ export class Local {
    * (the work in flight, wound down) or 30 s pass.
    */
   stopOnSignals(settled) {
-    let stopping = false;
+    let stoppedAt = 0;
     const stop = async (sig) => {
-      if (stopping) return;
-      stopping = true;
+      const code = 128 + (osConstants.signals[sig] || 2);
+      // A second signal, not the echo of the first (Ctrl-C reaches the front end and this process at once), ends it now.
+      if (stoppedAt) {
+        if (Date.now() - stoppedAt > 1_000) process.exit(code);
+        return;
+      }
+      stoppedAt = Date.now();
       this.stopping = true;
-      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away)`);
+      for (const wake of this.wakers || []) wake();
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.resolve(settled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
-      process.exit(128 + (osConstants.signals[sig] || 2));
+      process.exit(code);
     };
     for (const s of STOP_SIGNALS) process.on(s, () => void stop(s));
+  }
+
+  /** Wait `ms`, or less when this loop is told to stop. */
+  pause(ms) {
+    if (this.stopping) return Promise.resolve();
+    this.wakers ??= new Set();
+    return new Promise((r) => {
+      const done = () => {
+        clearTimeout(t);
+        this.wakers.delete(done);
+        r();
+      };
+      const t = setTimeout(done, ms);
+      this.wakers.add(done);
+    });
+  }
+
+  /** Stop the harness runs a dead stage of the Objective left on this machine (reapLeftRuns), and say so. */
+  reapHere(issue) {
+    const reaped = reapLeftRuns(this.ws(issue));
+    if (reaped) log(`#${issue}: stopped ${reaped} harness run(s) an earlier stage left running on this machine`);
   }
 
   /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. */
@@ -839,6 +908,13 @@ export class Local {
       if (running.has(issue)) continue;
       const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
       if (data?.state !== "closed") continue;
+      // A harness a dead stage left goes first: its record is in the directory removed below. A stage still running is left.
+      this.reapHere(issue);
+      const live = liveStage(join(root, name));
+      if (live) {
+        log(`#${issue}: closed, but a stage of it still runs on this machine (pid ${live}); its directory stays until it ends`);
+        continue;
+      }
       // Of .factory only <issue>/claude-project is writable from a sandbox (claudeProjectLink); rmSync removes a link, never its target, so nothing planted there is followed.
       rmSync(join(root, name), { recursive: true, force: true });
       // And the link to its Claude Code project, if a stage made one (lib/local.mjs claudeProjectLink).
@@ -849,6 +925,12 @@ export class Local {
 
   /** Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions. */
   async resume(issue) {
+    this.reapHere(issue);
+    const live = liveStage(this.ws(issue));
+    if (live) {
+      log(`#${issue}: a stage of it still runs on this machine (pid ${live}) though its loop is gone; not resuming beside it (stop it with kill ${live}, which pauses it)`);
+      return { exit: "skipped" };
+    }
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
     // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
@@ -886,12 +968,20 @@ export class Local {
 
   /**
    * `factory run <issue>`: the stage the Objective's state calls for (stageFor, as serve's resume): its review, its merge
-   * (followed with `wait`, else named), or else its work. `gh`: the GitHub reads (a test's own).
+   * (followed with `wait`, else named), or else its work. Refused, with nothing started, for a closed issue, a stage of
+   * it still running on this machine, or a GitHub read that keeps failing (retried first): never a work pass on a branch
+   * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
    */
-  async runIssue(issue, { wait = false, gh = { findPr, getIssue } } = {}) {
-    const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
-    const next = stageFor({ pr, issue: await gh.getIssue(this.repo, issue, this.opts).catch(() => null) }) ?? "work";
-    if (next !== "work") log(`#${issue}: PR #${pr.number} ${next === "review" ? "waits for its review; starting there" : "is reviewed and waits for its merge"}`);
+  async runIssue(issue, { wait = false, gh = { findPr, getIssue }, waitMs = 2_000 } = {}) {
+    this.reapHere(issue);
+    const live = liveStage(this.ws(issue));
+    if (live) throw new Error(`#${issue}: a stage of it still runs on this machine (pid ${live}), from a loop that is gone; stop it (kill ${live}, which pauses it) or let it end, then run again`);
+    const data = await retried(`reading issue #${issue}`, () => gh.getIssue(this.repo, issue, this.opts), { waitMs });
+    if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
+    const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });
+    const next = stageFor({ pr, issue: data }) ?? "work";
+    if (next === "review") log(`#${issue}: PR #${pr.number} waits for its review; starting there`);
+    if (next === "merge") log(`#${issue}: PR #${pr.number} has no review pending (reviewed, or waiting for its rebase); ${wait ? "following it to its merge" : "nothing to run here"}`);
     if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
     if (next === "merge") {
       if (!wait) return { exit: "delivered" };
@@ -1015,7 +1105,7 @@ export class Local {
     // App has no Actions permission), the merge pass judges a queue check by that time bound only (session.mjs hangsOn).
     const hungMs = queue ? await queueBoundMs(this.repo, this.opts) : null;
     const cache = {};
-    while (Date.now() < until) {
+    while (Date.now() < until && !this.stopping) {
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
@@ -1049,8 +1139,9 @@ export class Local {
         log(`#${issue}: PR #${prNumber} closed without a merge`);
         return false;
       }
-      await new Promise((r) => setTimeout(r, pollMs));
+      await this.pause(pollMs);
     }
+    if (this.stopping) return false;
     log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(timeoutMs / 60000)} min`);
     log((await this.pendingMergeLine(issue)) || `#${issue}: PR #${prNumber} is merged or closed`);
     return false;

@@ -192,11 +192,13 @@ export const UNKNOWN_WINDOW_MS = 60_000;
  */
 export const UNKNOWN_STAGE_SHUT = 6;
 /**
- * A failed call is a fast error status, not one that may have been billed, when it is a whole HTTP 5xx answer that came
- * within this long of sending (the edge's 502, 503 or 504 in a blip takes a second or less). A reset after sending, a
- * broken or truncated answer, a timeout or a slow 5xx is what a billed failure looks like.
+ * A failed call is a fast error status, not one that may have been billed, when it is a whole HTTP answer with a status
+ * a client retries (408, 409 or 5xx: FAST_ERROR_STATUS) that came within this long of sending: the edge's 502, 503 or
+ * 504 in a blip takes a second or less, and an answer that fast ran no model. A reset after sending, a broken or
+ * truncated answer, a timeout or a slow error status is what a billed failure looks like.
  */
 export const FAST_ERROR_MS = 10_000;
+export const FAST_ERROR_STATUS = (status) => status === 408 || status === 409 || (status >= 500 && status < 600);
 /**
  * A failed call that ran this long upstream before it ended ran a model: its estimate is at least SLOW_UNKNOWN_FLOOR_USD
  * on any route, as an image call's is.
@@ -988,10 +990,10 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       const headerId = typeof o.headerId === "string" && GEN_ID.test(o.headerId) ? o.headerId : null;
       const call = { method: req.method, path: req.url, model };
       // The call's place in the order, when its answer ended, and its route: for the run of unknown costs and the estimate.
-      // `fast`: a whole 5xx answer within fastErrorMs of sending, a fast error status (UNKNOWN_STAGE_SHUT). `slow`: it ran
-      // past slowFailureMs upstream (SLOW_FAILURE_MS).
+      // `fast`: a whole 408, 409 or 5xx answer within fastErrorMs of sending, a fast error status (UNKNOWN_STAGE_SHUT).
+      // `slow`: it ran past slowFailureMs upstream (SLOW_FAILURE_MS).
       const upstreamMs = typeof o.upstreamMs === "number" ? o.upstreamMs : 0;
-      const ctx = { seq, at: Date.now(), path: req.url, fast: !o.sentError && !o.broken && !o.overflow && o.status >= 500 && o.status < 600 && upstreamMs <= fastErrorMs, slow: upstreamMs > slowFailureMs };
+      const ctx = { seq, at: Date.now(), path: req.url, fast: !o.sentError && !o.broken && !o.overflow && FAST_ERROR_STATUS(o.status) && upstreamMs <= fastErrorMs, slow: upstreamMs > slowFailureMs };
       // Never sent: the request cannot have left this machine (upstreamRequest `unsent`: its socket never connected, or
       // never finished its TLS handshake), so the gateway saw nothing and billed nothing. $0, and no unknown cost.
       if (o.sentError && o.unsent) {

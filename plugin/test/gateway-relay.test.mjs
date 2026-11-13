@@ -7,7 +7,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CALL_LOG, EDITS_MAX_BYTES, FAST_ERROR_MS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
+import { CALL_LOG, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
@@ -1927,6 +1927,35 @@ test("with a cap, a failed call holds the turn for another's record a bounded ti
     const second = lines.find((l) => l.id === "gen_NORECORD000002" && !("reconciled" in l));
     assert.deepEqual([second.basis, second.usd, second.unpriced], ["estimate", 0.25, "the gateway answered 500 (internal_server_error); generation gen_NORECORD000002 not looked up: another failed call's record was still awaited"]);
     assert.ok(!lines.some((l) => l.id === "gen_NORECORD000002" && "reconciled" in l), "never looked up");
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run counts it, never the stage's six; a slow one counts (#163)", async () => {
+  assert.deepEqual([408, 409, 500, 502, 503, 504, 529, 400, 402, 424, 499].map(FAST_ERROR_STATUS), [true, true, true, true, true, true, true, false, false, false, false]);
+  const gw = await fakeGateway({
+    [LANG]: async (body) => {
+      const { status, slow } = JSON.parse(body || "{}");
+      if (slow) await sleep(150);
+      return { status, body: { error: { message: "x" } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-fast4xx-"));
+  // A fast error status within 100 ms here (10 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100 });
+  const go = (status, slow = false) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ status, slow }) });
+  try {
+    r.beginPass(100);
+    // Fast 408s and 409s, more than the stage's six: the run's minute is not reached, and they are no stage count.
+    for (let i = 0; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go(i % 2 ? 409 : 408)).status, i % 2 ? 409 : 408);
+    assert.equal(r.totals().failClosed, false, "fast 408s and 409s do not count toward the stage's six");
+    // Slow ones may have been billed: the sixth shuts the relay.
+    for (let i = 1; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go(408, true)).status, 408);
+    const p = await r.endPass();
+    assert.deepEqual([p.estimated, p.shut?.calls, p.shut?.stage], [2 * UNKNOWN_STAGE_SHUT + 1, UNKNOWN_STAGE_SHUT, true]);
   } finally {
     await r.close();
     await gw.close();

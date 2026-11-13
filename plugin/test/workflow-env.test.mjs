@@ -58,6 +58,21 @@ test("local mode takes only settings from the workflow file; any other FACTORY_*
   assert.deepEqual(workflowEnvChecks(kept), [], "settings alone: nothing to say");
 });
 
+test("local mode leaves the cloud-sandbox route's own workflow setting out of every stage without warning about it (#179)", () => {
+  const wf = { FACTORY_MODEL: "claude-opus-5-5", FACTORY_SANDBOX_VCPUS: "4", FACTORY_NOT_A_SETTING: "x" };
+  const { kept, dropped, otherRoute } = workflowSettings(wf);
+  assert.deepEqual(kept, { FACTORY_MODEL: "claude-opus-5-5" });
+  assert.deepEqual(otherRoute, ["FACTORY_SANDBOX_VCPUS"], "setup writes it for the cloud-sandbox route");
+  assert.deepEqual(dropped, ["FACTORY_NOT_A_SETTING"], "an unknown name is still dropped and warned about");
+  const base = Local.prototype.baseEnv.call({ wf: kept, harness: "claude" });
+  assert.ok(!("FACTORY_SANDBOX_VCPUS" in base) || process.env.FACTORY_SANDBOX_VCPUS, "never reaches a stage from the workflow");
+  const [warn, more] = workflowEnvChecks(wf);
+  assert.equal(more, undefined);
+  assert.match(warn.detail, /FACTORY_NOT_A_SETTING/);
+  assert.doesNotMatch(warn.detail, /FACTORY_SANDBOX_VCPUS/);
+  assert.deepEqual(workflowEnvChecks({ FACTORY_MODEL: "m", FACTORY_SANDBOX_VCPUS: "4" }), [], "a cloud-route workflow: nothing to say");
+});
+
 test("scrubbedEnv removes Factory's control variables from every child, and keeps what children are given on purpose (#119)", () => {
   const given = Object.fromEntries([...FACTORY_CONTROL_KEYS, ...FACTORY_CHILD_KEYS].map((k) => [k, "v"]));
   const e = scrubbedEnv({ ...given, FACTORY_MODEL: "m", PATH: "/usr/bin" });

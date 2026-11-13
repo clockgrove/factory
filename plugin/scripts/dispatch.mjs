@@ -112,7 +112,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // reads beside them stay clear of GitHub's secondary rate limit. A rate-limited one leaves its issue unpicked this tick.
   let relationSource = "body lines";
   await pooled(wanted, RELATION_READS, async (issue) => {
-    const rel = await blockedByRelations(repo, issue.number, opts).catch((e) => {
+    // A rate limit is this tick's to skip (a retry wake follows), not the client's to wait out.
+    const rel = await blockedByRelations(repo, issue.number, { ...opts, noRateWait: true }).catch((e) => {
       if (!e.rateLimited) throw e;
       issue.relationsUnread = true;
       log(`#${issue.number}: blocked-by relations rate limited (HTTP ${e.status}); not picked this tick`);

@@ -4,6 +4,10 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseBlockedBy, pooled, priorityOf, selectReady, stateOf, sumSpend } from "../scripts/lib/logic.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
+
+// The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 const issue = (number, labels = [], body = "", extra = {}) => ({ number, labels: labels.map((name) => ({ name })), body, ...extra });
 

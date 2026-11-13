@@ -2,6 +2,10 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decideExit } from "../scripts/lib/logic.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
+
+// The fakes here fail some GitHub reads on purpose: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 // #72: a required check GitHub never started is no red: no fix pass, no counted pass, a bounded wait in the stage, and
 // then a Block naming the stuck run, never "validation red".
@@ -286,11 +290,13 @@ test("the workflow files are read once per stage, however often the wait is clas
 test("a failed read of the check runs keeps the last good reading: the wait goes on to its own deadline, never read as nothing ran", async () => {
   const running = [{ id: 3, name: "quality", status: "in_progress", conclusion: null, check_suite: { id: 9 }, started_at: ago(1) }];
   const green = [{ ...running[0], status: "completed", conclusion: "success" }];
-  // Read 2 and 3 fail (past appearMs, 0 here); read 4 sees the check finish green.
-  const { result, checkReads } = await loop({ checkRuns: (n) => (n === 1 ? running : n < 4 ? null : green), workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 5000 } });
+  // Reads 2 and 3 of the wait fail (past appearMs, 0 here), each through every one of the client's tries (#168), so the
+  // failure reaches the wait rather than being hidden by a retry; read 4 sees the check finish green.
+  const T = RETRY.tries;
+  const { result, checkReads } = await loop({ checkRuns: (n) => (n === 1 ? running : n <= 1 + 2 * T ? null : green), workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 5000 } });
   assert.equal(result.green, true, "the run was still going: a failed read is no proof that nothing ran");
   assert.equal(result.passes, 1);
-  assert.equal(checkReads, 4);
+  assert.equal(checkReads, 2 + 2 * T, "two whole failed reads, then the green one");
   // No read has succeeded since the wait began: it ends at appearMs as for nothing ran, never at the full timeout.
   const t0 = Date.now();
   const failing = await loop({ checkRuns: () => null, workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 60_000, stuckWaitMs: 0 } });

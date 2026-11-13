@@ -680,7 +680,8 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   const tokens = await mintTokens(inputs, repo, { read: !gate && ev.kind !== "comment" });
   inputs.appPrivateKey = "";
   watch.mark("mint");
-  const opts = { token: tokens.write };
+  // A five-minute job: a rate limit is thrown at once and handled as today, never waited out per call (#168).
+  const opts = { token: tokens.write, noRateWait: true };
   const ctx = await readContext({ repo, n, ev, inputs, opts, readEventTime: !gate, runId, eventAt });
   watch.mark("read");
   if (!gate && ev.kind === "swept") Object.assign(seen, { swept: true, repo, n, opts, runId, marker: !!withoutOwnMarker(ctx.record, { run: runId }) });

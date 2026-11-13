@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { KEEP_LAUNCHES, RETRY_WAKE_MS, START_LOST_MS, START_RETRY_MS, WAKE_KINDS, WAKE_MAX_SLEEP_S, WAKE_SLACK_MS, failedSince, inFlightUntil, launchDecision, marker, nextUtcMidnight, nextWake, parseWake, sandboxMarkerLine, sandboxRecordOf, setSelf, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, SWEEP_WAKE_KINDS, wakeFiresAt, wakeKinds } from "../scripts/lib/logic.mjs";
 import { recordBody, writeSandboxRecord } from "../scripts/launch.mjs";
 import { BASE, BOT, REPO, githubStore } from "./fixtures/github-records.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
+
+// The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 const T = Date.parse("2026-11-10T12:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();

@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { claudeSandboxChecks, credentialChecks, workflowText } from "../scripts/doctor.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
+
+// The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 const repo = { full: "o/r", owner: "o", name: "r" };
 const wf = (pin) => `on: issues\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${pin}\n`;

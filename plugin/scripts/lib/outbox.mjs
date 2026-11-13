@@ -14,7 +14,8 @@ import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
-import { heldSecrets, secretForms } from "./inputs.mjs";
+import { RETRY } from "./github.mjs";
+import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
@@ -64,6 +65,32 @@ export function gitError(stderr) {
 }
 /** Where GitHub reads workflows from: a token without the Workflows permission may not create or update a file here. */
 const WORKFLOWS = ".github/workflows/";
+
+/**
+ * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
+ * Text is the only signal git gives here (no exit code tells a dropped connection from a refusal), so the list is kept
+ * this short and in this one place. An HTTP 4xx other than 429 (GIT_REFUSED) is a refusal and wins over it.
+ */
+const GIT_TRANSPORT = /returned error: (5\d\d|429)|RPC failed; (HTTP (5\d\d|429)|curl \d+)|Could not resolve host|Failed to connect to|Connection (timed out|reset|refused)|Operation timed out|Network is unreachable|the remote end hung up unexpectedly|unexpected disconnect|early EOF|gnutls_handshake|SSL_ERROR_SYSCALL|SSL_read|HTTP\/2 stream \d+ was not closed cleanly|dial tcp|connection reset by peer|i\/o timeout|TLS handshake timeout|no such host|Server error/i;
+const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4(?!29)\d\d\b/i;
+
+/**
+ * Whether a failed git network command (fetch, ls-remote, push, lfs push) failed in transport, so it may go again. A push
+ * whose porcelain has a line for `ref` was answered (refused or done) and is never transport, whatever else it says.
+ */
+export function gitTransport(r, ref = null) {
+  if (!r || r.code === 0 || r.timedOut || r.code == null) return false;
+  if (ref && String(r.stdout).split("\n").some((l) => l.split("\t")[1]?.endsWith(`:${ref}`))) return false;
+  const text = `${r.stdout}\n${r.stderr}`;
+  return !GIT_REFUSED.test(text) && GIT_TRANSPORT.test(text);
+}
+
+/**
+ * The bound on one git network command's retries: four tries (waits of 2, 4, 8 s, each spread by up to 30%) within a
+ * minute and the stage's real end. The outbox's `deadlineAt` is the work's deadline; the stage keeps 15 minutes after it
+ * for its exit (session.mjs deadline), and a push made then (a timed-out stage's last) is a normal one.
+ */
+export const GIT_RETRY = { tries: 4, maxWaitMs: 60_000, exitReserveMs: 15 * 60_000 };
 
 /**
  * Run `cmd` and stream its stdout into a new file (O_EXCL, O_NOFOLLOW), at most `cap` bytes. Resolves
@@ -225,6 +252,30 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (r.code !== 0) throw new Error(`git ${args[0]} in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || r.code}`);
     return r.stdout.trim();
   };
+  // The stage's real end: its work deadline plus the exit's reserve (GIT_RETRY).
+  const stageEnd = () => (Number.isFinite(Number(deadlineAt)) ? Number(deadlineAt) + GIT_RETRY.exitReserveMs : Infinity);
+  /**
+   * A git network command in the mirror, sent again on a transport failure (gitTransport) within GIT_RETRY and the
+   * stage's end. `landed()`, asked after each wait, says the earlier try took effect after all (a push whose answer was
+   * lost): then it is not sent again. Each retry is logged once with its try number; git's text is not logged here.
+   */
+  const net = async (what, args, { ref = null, landed = null } = {}) => {
+    const end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
+    for (let n = 1; ; n += 1) {
+      const r = await git(args);
+      if (r.code === 0 || n >= GIT_RETRY.tries || !gitTransport(r, ref)) return r;
+      const wait = Math.round(RETRY.baseMs * 2 ** (n - 1) * (0.7 + 0.6 * RETRY.random()));
+      if (RETRY.now() + wait > end) return r;
+      log(`git ${what}: a network failure (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
+      await RETRY.sleep(wait);
+      if (landed && (await landed().catch(() => false))) return { ...r, code: 0, landed: true };
+    }
+  };
+  const netMust = async (what, args) => {
+    const r = await net(what, args);
+    if (r.code !== 0) throw new Error(`git ${args[0]} in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || r.code}`);
+    return r.stdout.trim();
+  };
   // A git command as the agent, in its checkout and its sandbox.
   // Replace refs and grafts are ignored there too, so the bundle carries the real history.
   const agentGitEnv = { ...agentEnv, GIT_NO_REPLACE_OBJECTS: "1", GIT_TERMINAL_PROMPT: "0" };
@@ -234,22 +285,22 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   await must(["config", "remote.origin.url", remote]);
   /** GitHub's head of a branch, read from the server (never a remote-tracking ref), or "" when it does not exist. */
   const serverHead = async (ref) => {
-    const r = await git(["ls-remote", "origin", `refs/heads/${ref}`]);
+    const r = await net("ls-remote", ["ls-remote", "origin", `refs/heads/${ref}`]);
     if (r.code !== 0) throw new Error(`the branch on GitHub could not be read: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
     return /^([0-9a-f]{40,64})\t/m.exec(r.stdout)?.[1] ?? "";
   };
   // git cannot hold factory/<issue> beside factory/<issue>/<anything> (a ref is a file or a directory, not both): an
   // earlier tool's branches under that name block every push. Found here, before any harness spend.
-  const under = await git(["ls-remote", "--heads", "origin", `${branch}/*`]);
+  const under = await net("ls-remote", ["ls-remote", "--heads", "origin", `${branch}/*`]);
   const colliding = under.code === 0 ? under.stdout.split("\n").map((l) => l.split("\t")[1]).filter(Boolean).map((r) => r.replace(/^refs\/heads\//, "")) : [];
   if (colliding.length) {
     const e = new Error(`branch ${branch} cannot be created: ${colliding.join(", ")} exist${colliding.length > 1 ? "" : "s"} on origin (delete or rename them)`);
     e.code = "ref-collision";
     throw e;
   }
-  await must(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
+  await netMust("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
   let expected = await serverHead(branch);
-  if (expected) await must(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  if (expected) await netMust("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
   // The default branch's head as Factory last fetched it: the stage's start, moved on by box.refresh (a re-fetch) and by
   // catchUp (the tip it merged into the branch). Either way it is a head GitHub's default branch had.
   let base = await must(["rev-parse", `refs/remotes/origin/${defaultBranch}`]);
@@ -408,7 +459,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * stage counts from (delta, the fix-pass fence, behind) moves with it; `start` (what this stage answers for) does not.
    */
   box.refresh = async () => {
-    await must(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
+    await netMust("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
     base = await must(["rev-parse", `refs/remotes/origin/${defaultBranch}`]);
     box.base = base;
     return base;
@@ -625,7 +676,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const has = async (c) => (await git(["cat-file", "-e", `${c}^{commit}`])).code === 0;
     let tip = now;
     if (!(await has(now))) {
-      if ((await git(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/factory/default-now`])).code !== 0) return { head };
+      if ((await net("fetch", ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/factory/default-now`])).code !== 0) return { head };
       // It moved again between the read and the fetch: the fetched head, then.
       if (!(await has(now))) tip = (await git(["rev-parse", "--verify", "-q", "refs/factory/default-now^{commit}"])).stdout.trim();
     }
@@ -889,7 +940,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const pin = lfsPinArgs(remote);
       if (!pin.length) return refuse("the remote has no https Git LFS endpoint to pin the media upload to", { lfs: true });
       for (let k = 0; k < media.objects.length; k += 100) {
-        const up = await git([...pin, "lfs", "push", "--object-id", "origin", ...media.objects.slice(k, k + 100).map((o) => o.oid)]);
+        // An upload of objects GitHub already holds sends nothing, so a batch goes again whole.
+        const up = await net("lfs push", [...pin, "lfs", "push", "--object-id", "origin", ...media.objects.slice(k, k + 100).map((o) => o.oid)]);
         if (up.code !== 0) {
           const out = `${up.stdout}\n${up.stderr}`;
           const quota = lfsQuotaLine(out);
@@ -898,8 +950,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       }
     }
     const lease = `--force-with-lease=refs/heads/${branch}:${expected}`;
-    const r = await git(["push", "--no-verify", "--porcelain", lease, "origin", `refs/heads/incoming:refs/heads/${branch}`]);
-    if (r.code !== 0) {
+    // A push whose answer was lost may have landed: GitHub's head being this commit says so, and it is not sent again
+    // (the lease would refuse it as stale). One its porcelain line reports done (exit non-zero for a later step) is read back.
+    const r = await net("push", ["push", "--no-verify", "--porcelain", lease, "origin", `refs/heads/incoming:refs/heads/${branch}`], { ref: `refs/heads/${branch}`, landed: async () => (await serverHead(branch)) === head });
+    // A retry the lease refused because an earlier try landed meanwhile: GitHub's head is the checked one, so it is pushed.
+    const done = String(r.stdout).split("\n").some((l) => /^[ +*=-]\t/.test(l) && l.split("\t")[1]?.endsWith(`:refs/heads/${branch}`)) || (r.code !== 0 && (await serverHead(branch).catch(() => "")) === head);
+    if (r.code !== 0 && !done) {
       const out = String(`${r.stdout}\n${r.stderr}`).split("\n");
       // GitHub's own text (the remote's URL, its `remote:` lines, ruleset or push-protection messages) is for the job
       // log only: the Blocked reason is Factory's fixed text and codes (pushRefusal).
@@ -909,12 +965,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       if (out.some((l) => workflowScopeRefused(l, branch))) return refuse(workflowScopeReason({ branch, defaultBranch, ...(await workflowDrift(head).catch(() => ({}))) }));
       return refuse(pushRefusal({ branch, out, code: r.code }));
     }
-    // GitHub's head must now be exactly the commit Factory checked.
+    // GitHub's head must now be exactly the commit Factory checked. Its reads lag a push at times: five reads over about
+    // 30 s (each ls-remote retried on its own network failures); past the stage's real end, still the first three.
     let now = "";
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 5; i += 1) {
       now = await serverHead(branch).catch(() => "");
-      if (now === head) break;
-      await new Promise((res) => setTimeout(res, 2000));
+      const wait = RETRY.baseMs * 2 ** i;
+      if (now === head || i === 4 || (i >= 2 && RETRY.now() + wait > stageEnd())) break;
+      await RETRY.sleep(wait);
     }
     if (now !== head) return refuse(`after the push GitHub's ${branch} is ${now.slice(0, 7) || "missing"}, not the checked ${head.slice(0, 7)}`);
     expected = head;

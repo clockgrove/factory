@@ -2,11 +2,11 @@
 // local loop off each other's Objectives, the sandbox the harness and Factory's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir, platform as osPlatform, uptime } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer } from "./logic.mjs";
@@ -633,6 +633,158 @@ export const credentialPaths = (home = homedir()) => CREDENTIAL_PATHS.map((p) =>
  */
 export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, ".git", "config"), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
 
+/**
+ * Linux: the ripgrep srt and Claude Code's sandbox run to find the names they write-protect below the working directory
+ * (their `ripgrep` setting, #154). It runs the real one and leaves out the lines whose first protected name, as the
+ * sandbox reads it, is a nested repository's .git (`.git`, exactly, below the top level), so a nested checkout's hooks and
+ * config are not bound read-only and a resumed stage can remove and replace the checkout. Those binds guarded nothing:
+ * they cover only a repository that exists when a command starts, and only one directly in the working directory, so a
+ * command could always make a new one, hooks and all. Nothing outside a sandbox runs git in a nested repository
+ * (Factory's git and every harness's run in the clone, with no fsmonitor and no submodule entered: harnessGitEnv), and
+ * the clone's own git internals stay unwritable by gitGuards. Every other name the scan finds stays protected.
+ * It fails closed: whenever ripgrep fails or the filter cannot finish (an error, a timeout's TERM), it prints ripgrep's
+ * whole list unfiltered and exits non-zero, so the sandbox binds everything listed, nested .git included; a shortened
+ * list never goes out. ripgrep's stderr passes through (srt denies the directories it could not read).
+ */
+// srt's names that end a path's search for its protected name (sandbox-runtime 0.0.81 linuxGetMandatoryDenyPaths),
+// matched as it does: by path component, case-folded with toLowerCase.
+const SCAN_DIR_NAMES = [".vscode", ".idea", ".claude/commands", ".claude/agents", ".git/hooks", ".git/config", ".git/HEAD"].map((n) => n.toLowerCase().split("/"));
+/** Whether the scan leaves `line` out: below `root`, a plain path whose first protected name is `.git` below the top. */
+export function nestedGitLine(line, root) {
+  if (!line.startsWith(`${root}/`)) return false;
+  const seg = line.slice(root.length + 1).split("/");
+  if (seg.some((x) => x === "" || x === "." || x === "..")) return false;
+  const lower = seg.map((x) => x.toLowerCase());
+  for (let i = 0; i < seg.length; i++) for (const name of SCAN_DIR_NAMES) if (name.every((c, k) => lower[i + k] === c)) return i >= 1 && seg[i] === ".git";
+  return false;
+}
+export const nestedGitScanScript = (realRg) => `"use strict";
+// Factory: ripgrep for the sandboxes' scan of protected names (lib/local.mjs nestedGitScanScript). Fails closed: on any
+// failure, ripgrep's whole list unfiltered and a non-zero exit, which the sandbox reads as a failed scan and still binds.
+const { spawn } = require("child_process");
+const { writeSync } = require("fs");
+const { isAbsolute } = require("path");
+const SCAN_DIR_NAMES = ${JSON.stringify(SCAN_DIR_NAMES)};
+${nestedGitLine.toString()}
+const args = process.argv.slice(2);
+const root = args[args.length - 1] || "";
+const chunks = [];
+let over = false;
+let said = false;
+const put = (fd, text) => {
+  const buf = Buffer.isBuffer(text) ? text : Buffer.from(text || "");
+  for (let off = 0; off < buf.length; ) {
+    try { off += writeSync(fd, buf, off); } catch (e) { if (e.code !== "EAGAIN") throw e; }
+  }
+};
+const out = (text, code) => {
+  if (over) return;
+  over = true;
+  try { put(1, text); } catch { code = 2; }
+  process.exit(code);
+};
+const raw = () => Buffer.concat(chunks).toString("utf8");
+// Node exits 1 on an uncaught error, which the sandbox would read as "none found": any error is a failed scan instead.
+process.on("uncaughtException", () => out(raw(), 2));
+// ripgrep in a process group of its own, so what it started goes with it; in this script's directory, which no sandbox
+// may write, never the scanned one: a version manager's shim reads its tool versions from its working directory.
+const child = spawn(${JSON.stringify(realRg)}, args, { cwd: isAbsolute(root) ? __dirname : undefined, stdio: ["ignore", "pipe", "pipe"], detached: true });
+// Killed (the sandbox's scan timeout): ripgrep goes too, and the whole lines it gave so far go out unfiltered.
+const stop = () => { try { process.kill(-child.pid, "SIGKILL"); } catch {} const t = raw(); out(t.slice(0, t.lastIndexOf("\\n") + 1), 2); };
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, stop);
+child.stdout.on("data", (c) => chunks.push(c));
+// ripgrep's stderr passes through (srt denies the directories it could not read); any of it makes a "none found" a failure.
+child.stderr.on("data", (c) => { said = true; try { put(2, c); } catch {} });
+child.on("error", () => out(raw(), 2));
+child.on("close", (code) => {
+  if (code === 1 && !said) return out("", 1);
+  if (code !== 0) return out(raw(), 2);
+  let kept;
+  try {
+    const t = raw();
+    kept = t.split("\\n").filter((l, i, a) => (i === a.length - 1 ? l !== "" : true) && !nestedGitLine(l, root)).map((l) => l + "\\n").join("");
+  } catch { return out(raw(), 2); }
+  out(kept, 0);
+});
+`;
+
+/**
+ * The wrapper the sandboxes run: from the scan's own directory when the scanned one is absolute (as srt and Claude Code
+ * give it), node on scan.cjs; the real ripgrep, unfiltered, when that node can no longer run (a version manager removed
+ * it mid-stage), so every name stays protected.
+ */
+export const nestedGitScanWrapper = (dir, node, js, realRg) => `#!/bin/sh
+# Factory: the sandboxes' scan (lib/local.mjs nestedGitScanScript), or the real ripgrep unfiltered when node cannot run.
+for t do :; done
+case "$t" in /*) cd ${shq(dir)} 2>/dev/null ;; esac
+[ -x ${shq(node)} ] && [ -r ${shq(js)} ] && exec ${shq(node)} ${shq(js)} "$@"
+exec ${shq(realRg)} "$@"
+`;
+
+/** A shell word for `x`: single-quoted. */
+const shq = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
+/** Whether `p` is one of `dirs` or lies under one, by path; no link followed. */
+const under = (p, dirs) => dirs.some((d) => p === d || p.startsWith(`${d}/`));
+
+/**
+ * The `rg` a PATH lookup finds, as an absolute path whose links are not followed (a version manager's shim picks the tool
+ * by the name it is called with): a relative PATH entry is taken from `cwd`. Null when none.
+ */
+export function ripgrepOnPath(env = process.env, cwd = process.cwd()) {
+  for (const d of String(env.PATH || "").split(":").filter(Boolean)) {
+    const p = resolve(cwd, d, "rg");
+    const st = statSync(p, { throwIfNoEntry: false });
+    if (st?.isFile() && st.mode & 0o111) return p;
+  }
+  return null;
+}
+
+/**
+ * nestedGitScanScript and its wrapper written in `dir` (made owner-only), then the wrapper run once over a throwaway tree,
+ * from a directory whose `.tool-versions` names a ripgrep that does not exist: the wrapper's path, for the `ripgrep`
+ * setting of srt and Claude Code. `rg` is never resolved through its links, and is refused when it, or what it links
+ * to, lies in one of `writable` (the clone and every directory a sandbox may write). Throws (code "sandbox-scan") unless
+ * the scan returns a nested rc file and the top-level .git, and none of a nested repository's .git, exit 0.
+ */
+export function writeNestedGitScan(dir, rg = ripgrepOnPath(), { node = process.execPath, writable = [] } = {}) {
+  const fail = (why) => Object.assign(new Error(`the sandbox's scan for protected paths does not work here: ${why}`), { code: "sandbox-scan" });
+  if (!rg) throw fail("rg (ripgrep) is not on PATH");
+  if (!isAbsolute(rg)) throw fail(`rg is not an absolute path: ${rg}`);
+  let real = rg;
+  try {
+    real = realpathSync(rg);
+  } catch {
+    // checked by running it, below
+  }
+  if (under(rg, writable) || under(real, writable)) throw fail(`${rg} lies where a sandbox may write`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const js = join(dir, "scan.cjs");
+  writeFileSync(js, nestedGitScanScript(rg), { mode: 0o644 });
+  chmodSync(js, 0o644);
+  const p = join(dir, "rg");
+  writeFileSync(p, nestedGitScanWrapper(dir, node, js, rg), { mode: 0o755 });
+  chmodSync(p, 0o755);
+  // The test tree in `dir`, which no sandbox may write; the wrapper started there, beside a `.tool-versions` that a shim
+  // reading its working directory would fail on.
+  const t = mkdtempSync(join(dir, "check-"));
+  try {
+    for (const f of [".git/HEAD", "sub/.bashrc", "dep/.git/HEAD", "dep/.git/config", "dep/.git/hooks/pre-commit"]) {
+      mkdirSync(dirname(join(t, f)), { recursive: true });
+      writeFileSync(join(t, f), "");
+    }
+    writeFileSync(join(t, ".tool-versions"), "ripgrep 0.0.0-factory-absent\n");
+    // As srt starts it: the wrapper itself (/bin/sh runs it, as its first line says), with the scanned directory last.
+    const r = spawnSync("/bin/sh", [p, "--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { cwd: t, encoding: "utf8", timeout: 30_000 });
+    const got = String(r.stdout || "").split("\n").filter(Boolean).sort();
+    const want = [join(t, ".git", "HEAD"), join(t, "sub", ".bashrc")];
+    if (r.status !== 0 || want.some((w) => !got.includes(w)) || got.some((g) => g.startsWith(`${join(t, "dep", ".git")}/`))) throw fail(`a check over a test tree gave exit ${r.status ?? r.signal}, ${got.length} paths (${String(r.stderr || "").trim().split("\n").at(-1)?.slice(0, 200) || "no error"})`);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+  return p;
+}
+
 /** The model credentials Claude Code's sandbox unsets before every command it runs, on every route (harness.mjs passes all of SHELL_SECRET_KEYS). */
 export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
 
@@ -645,7 +797,7 @@ export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
  * directory and `addDirs` (acceptEdits). Local mode, the Actions runner and the cloud sandbox VM
  * use it alike (claudeRunnerSettings).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV } = {}) {
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV, ripgrep = null } = {}) {
   // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
@@ -664,6 +816,8 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
       // The model's credential (and any other the harness holds) is not in a command's environment.
       credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
+      // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+      ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
     },
     // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
     // false), which is what confines it; without the rule, gh writes and commands with variables would need a
@@ -846,10 +1000,12 @@ export function copilotTmpdir(local, env = {}) {
 }
 
 /** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
-export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [] } = {}) {
+export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [], ripgrep = null } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
     filesystem: { denyRead: [...credentialPaths(home), "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP] },
+    // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+    ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
 }
 
@@ -1323,10 +1479,11 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
 /**
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
+ * `ripgrep`: nestedGitScanScript's path (writeNestedGitScan).
  * `relayDir`: the stage's gateway relay directory (worker-relay.mjs localRelayDir): its socket stays reachable inside, for the
  * forwarder Factory's bwrap shim starts in each command's sandbox (relay-shim.mjs); never writable.
  */
-export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null } = {}) {
+export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null, ripgrep = null } = {}) {
   const own = harnessHomes(harness, env, home);
   const isOwn = (p) => own.some((o) => p === o || p.startsWith(`${o}/`));
   // ~/.claude.json holds the developer's MCP servers: read-only, not a writable path.
@@ -1345,6 +1502,8 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.
     ...(bwrapPath ? { bwrapPath } : {}),
+    // The scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+    ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
 }
 
@@ -1369,7 +1528,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, claudeEnv: s.claudeEnv || null, readable: s.readable || [], addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, claudeEnv: s.claudeEnv || null, ripgrep: s.ripgrep || null, readable: s.readable || [], addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
 }
 
 /**

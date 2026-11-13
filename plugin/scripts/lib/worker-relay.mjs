@@ -7,7 +7,7 @@ import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { backend } from "./backend.mjs";
 import { prepareFactoryHome } from "./claude-runner.mjs";
-import { GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
+import { CALL_LOG, GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
 import { nameLabel } from "./worker-secrets.mjs";
 import { holdSecrets, log } from "./inputs.mjs";
 import { SAFE_PATH, agentUser, exec, whichSync } from "./proc.mjs";
@@ -85,7 +85,7 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   } else dir = local ? localRelayDir(usageDir) : join(usageDir, "relay");
   let relay;
   try {
-    relay = await open({ key, dir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, log });
+    relay = await open({ key, dir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, callLog: join(usageDir, CALL_LOG), log });
   } catch (e) {
     return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 200)}` });
   }

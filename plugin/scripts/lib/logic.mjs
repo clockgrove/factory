@@ -756,6 +756,13 @@ export const EXITS = ["delivered", "question", "blocked"];
 /** Whether a job's dollar cap is spent: max_usd set and the runs so far at or past it (no cap when max_usd is 0). */
 export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records) >= maxUsd;
 
+/**
+ * Whether Factory's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
+ * shut, gateway-relay.mjs): the spend at the cap, the relay's refusal at it (`relayTotals.capped`), or a harness's own cap
+ * (Claude Code's error_max_budget_usd, Copilot's start refused under its credit floor).
+ */
+export const maxUsdReached = (maxUsd, records, relayTotals = null) => capReached(maxUsd, records) || !!relayTotals?.capped || records.some((r) => r?.subtype === "error_max_budget_usd" || r?.error === "dollar cap reached");
+
 /** The exit line's dollars: the figure, else "unmetered" with why (its basis), so no reader takes it for a missing price. */
 export const usdText = (usage) => (typeof usage?.usd === "number" ? `${usage.usd}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unmetered"}, worker key ${usage.workerKeyUsd})` : ""}` : `unmetered${/^unmetered: ./.test(usage?.basis || "") ? ` (${usage.basis.slice("unmetered: ".length)})` : ""}`);
 

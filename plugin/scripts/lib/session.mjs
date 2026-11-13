@@ -1114,7 +1114,7 @@ function lineageTotal(id, records) {
 /** Write usage/result.json and return the merged record. */
 /**
  * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
- * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price, the AI Gateway's own budget or credits refusal as `gatewayRefused`).
+ * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price, the AI Gateway's own budget or credits refusal as `gatewayRefused`, a call booked at its upper-bound estimate, the relay's shutdown and its per-call log as `callLog`).
  * Empty when no relay ran.
  */
 export function keyBreakdown(records, workerKey = null) {
@@ -1131,7 +1131,7 @@ export function keyBreakdown(records, workerKey = null) {
     fields: {
       workerKeyUsd: keyUsd,
       harnessUsd: total === null ? null : Math.round(Math.max(0, total - keyUsd) * 1e6) / 1e6,
-      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), refused: workerKey.refused } } : {}),
+      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), ...(workerKey.estimated ? { estimated: workerKey.estimated, estimatedUsd: workerKey.estimatedUsd } : {}), ...(workerKey.shut ? { shut: workerKey.shut } : {}), ...(workerKey.callLog ? { callLog: workerKey.callLog } : {}), refused: workerKey.refused } } : {}),
     },
   };
 }
@@ -1176,8 +1176,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(spendInProgress ? { spendInProgress: true } : {}),
     // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
     ...kb.fields,
-    // A relayed call whose cost could not be determined: the dollars are a lower bound.
+    // A relayed call whose cost could not be determined: the dollars are a lower bound. One booked at its upper-bound
+    // estimate (gateway-relay.mjs): an upper bound.
     ...(workerKey?.unpriced ? { usdLowerBound: true } : {}),
+    ...(workerKey?.estimated ? { usdUpperBound: true } : {}),
   };
   // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
   const stored = redactSecrets(result);

@@ -647,6 +647,7 @@ export function mergeUsage(records) {
   for (const r of live.slice(1)) {
     out.usd = spend(r.usd) === null && out.usd === null ? null : (out.usd ?? 0) + (spend(r.usd) ?? 0);
     out.usdLowerBound = out.usdLowerBound || r.usdLowerBound;
+    out.usdUpperBound = out.usdUpperBound || r.usdUpperBound;
     out.tokens.input = add(out.tokens.input, r.tokens.input);
     out.tokens.output = add(out.tokens.output, r.tokens.output);
     out.tokens.cached = add(out.tokens.cached, r.tokens.cached);

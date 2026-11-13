@@ -7,7 +7,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CALL_LOG, EDITS_MAX_BYTES, IMAGE_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
+import { CALL_LOG, EDITS_MAX_BYTES, FAST_ERROR_MS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
@@ -1579,15 +1579,14 @@ const gate = () => {
   return { p, open };
 };
 
-test("a blip never shuts the relay, through one client's retries or three clients' at once: each failed attempt is booked, and the next call is relayed (#163)", async () => {
+test("a blip never shuts the relay: one, three or six clients' retries through one blip, or three clients' through two; each failed attempt is booked, and the next call is relayed (#163)", async () => {
   // At 1:20: the AI SDK's waits of 2 s and 4 s are 100 ms and 200 ms, a blip of about four seconds is 220 ms, and the
   // minute a run of unknown costs must last before it shuts the relay is 3 s.
-  assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT], [6, 60_000, 12]);
+  assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT, FAST_ERROR_MS], [6, 60_000, 6, 10_000]);
   let downUntil = 0;
   let failed = 0;
   const gw = await fakeGateway({
     [LANG]: () => {
-      downUntil ||= Date.now() + 220;
       if (Date.now() < downUntil) {
         failed += 1;
         return edge502;
@@ -1598,21 +1597,28 @@ test("a blip never shuts the relay, through one client's retries or three client
   const dir = mkdtempSync(join(tmpdir(), "relay-blip-"));
   const opened = [];
   try {
-    for (const clients of [1, 3]) {
-      downUntil = 0;
+    for (const [clients, blips] of [
+      [1, 1],
+      [3, 1],
+      [6, 1],
+      [3, 2],
+    ]) {
       failed = 0;
-      const r = await openRelay({ key: KEY, dir: join(dir, String(clients)), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: UNKNOWN_WINDOW_MS / 20 });
+      const r = await openRelay({ key: KEY, dir: join(dir, `${clients}-${blips}`), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: UNKNOWN_WINDOW_MS / 20 });
       opened.push(r);
       r.beginPass(25);
       const once = () => call(r.socketPath, { token: r.token, path: LANG });
-      const finals = await Promise.all(Array.from({ length: clients }, () => retrying(once, [100, 200])));
-      assert.deepEqual(finals.map((x) => x.status), Array.from({ length: clients }, () => 200), `${clients} client(s) rode the blip out`);
-      assert.equal((await once()).status, 200, "the next call is relayed");
+      for (let b = 0; b < blips; b++) {
+        downUntil = Date.now() + 220;
+        const finals = await Promise.all(Array.from({ length: clients }, () => retrying(once, [100, 200])));
+        assert.deepEqual(finals.map((x) => x.status), Array.from({ length: clients }, () => 200), `${clients} client(s) rode blip ${b + 1} out`);
+        assert.equal((await once()).status, 200, "the next call is relayed");
+      }
       const p = await r.endPass();
-      assert.ok(failed >= clients, `${failed} attempts failed`);
-      assert.deepEqual([p.usd, p.estimated, p.unpriced, p.shut, r.totals().failClosed], [round6(failed * 0.25 + (clients + 1) * 0.04), failed, 0, null, false], `${clients} client(s): each failed attempt at $0.25, and the priced calls`);
+      assert.ok(failed >= clients * blips, `${failed} attempts failed`);
+      assert.deepEqual([p.usd, p.estimated, p.unpriced, p.shut, r.totals().failClosed], [round6(failed * 0.25 + (clients + 1) * blips * 0.04), failed, 0, null, false], `${clients} client(s), ${blips} blip(s): each failed attempt at $0.25, and the priced calls`);
+      if (clients >= 3) assert.ok(failed >= UNKNOWN_STAGE_SHUT, `${failed} fast error statuses in the stage did not shut the relay`);
     }
-    assert.ok(failed >= UNKNOWN_STREAK_SHUT, `three clients' blip was ${failed} unknown costs in a row, and did not shut the relay`);
   } finally {
     for (const r of opened) await r.close();
     await gw.close();
@@ -1645,7 +1651,7 @@ test("a gateway that stays down shuts the relay once a run of unknown costs is s
   }
 });
 
-test("twelve unknown costs in a stage shut the relay though cheap priced calls come between them; an image call is booked at $1.00 until one on its route is priced (#163)", async () => {
+test("six failed calls in a stage that may have been billed shut the relay though cheap priced calls come between them; an image call is booked at $1.00 until one on its route is priced (#163)", async () => {
   let n = 0;
   const gw = await fakeGateway({
     // Odd calls priced at $0.01; even ones cut after they were sent (billed, in the review's story, $5 each, no id).
@@ -1664,10 +1670,10 @@ test("twelve unknown costs in a stage shut the relay though cheap priced calls c
   try {
     const a = await open("a");
     for (let i = 1; i <= 2 * UNKNOWN_STAGE_SHUT; i++) await callUntilClosed(a.socketPath, { token: a.token, path: LANG });
-    assert.equal((await call(a.socketPath, { token: a.token, path: LANG })).status, 403, "shut at the twelfth");
+    assert.equal((await call(a.socketPath, { token: a.token, path: LANG })).status, 403, "shut at the sixth");
     const pa = await a.endPass();
-    assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.calls, pa.shut?.stage], [3.12, 12, 1, 12, true], "12 estimates at $0.25 and 12 priced calls at $0.01");
-    assert.match(relayShutText(pa.shut), /^gateway relay shut: 12 calls in this stage could not be priced \(the answer broke off: [A-Za-z_]+; no generation id\)$/);
+    assert.deepEqual([pa.usd, pa.estimated, pa.unpriced, pa.shut?.calls, pa.shut?.stage], [1.56, 6, 1, 6, true], "6 estimates at $0.25 and 6 priced calls at $0.01");
+    assert.match(relayShutText(pa.shut), /^gateway relay shut: 6 calls in this stage could not be priced \(the answer broke off: [A-Za-z_]+; no generation id\)$/);
 
     // The image floor: $1.00 before any image call is priced, then the dearest call so far (at least $0.25).
     const b = await open("b");
@@ -1688,7 +1694,7 @@ test("twelve unknown costs in a stage shut the relay though cheap priced calls c
 test("a record for an older call does not end a run of newer unknown costs (#163)", async () => {
   const record = gate();
   const gw = await fakeGateway({
-    [LANG]: (body) => (JSON.parse(body || "{}").mode === "slowid" ? { status: 500, headers: { "x-generation-id": "gen_OLDERCALL00001" }, body: { error: { type: "internal_server_error", message: "x" } } } : { drop: '{"content":[' }),
+    [LANG]: (body) => (JSON.parse(body || "{}").mode === "slowid" ? { status: 500, headers: { "x-generation-id": "gen_OLDERCALL00001" }, body: { error: { type: "internal_server_error", message: "x" } } } : edge502),
     "/v1/generation": async () => {
       await record.p;
       return { body: { data: { total_cost: 0.3 } } };
@@ -1700,16 +1706,16 @@ test("a record for an older call does not end a run of newer unknown costs (#163
   try {
     r.beginPass(25);
     assert.equal((await call(r.socketPath, { token: r.token, path: LANG, body: '{"mode":"slowid"}' })).status, 500);
-    for (let i = 1; i < UNKNOWN_STREAK_SHUT; i++) await callUntilClosed(r.socketPath, { token: r.token, path: LANG });
+    for (let i = 1; i < UNKNOWN_STREAK_SHUT; i++) assert.equal((await call(r.socketPath, { token: r.token, path: LANG })).status, 502);
     // The older call's record comes: it is priced, and the five unknown costs sent after it still stand in a row.
     record.open();
     await sleep(100);
     assert.equal(r.totals().estimated, UNKNOWN_STREAK_SHUT - 1, "the older call's estimate was replaced by its record");
     assert.equal(r.totals().failClosed, false);
-    await callUntilClosed(r.socketPath, { token: r.token, path: LANG });
+    assert.equal((await call(r.socketPath, { token: r.token, path: LANG })).status, 502);
     assert.equal(r.totals().failClosed, true, "the sixth unknown cost in a row shut it");
     const p = await r.endPass();
-    assert.deepEqual([p.usd, p.shut?.calls], [round6(0.3 + 5 * 0.25 + 0.3), UNKNOWN_STREAK_SHUT], "the record's $0.30; five estimates at $0.25 before it came, the sixth at the dearest call so far, $0.30");
+    assert.deepEqual([p.usd, p.shut?.calls, p.shut?.stage], [round6(0.3 + 5 * 0.25 + 0.3), UNKNOWN_STREAK_SHUT, undefined], "the run shut it: the record's $0.30; five estimates at $0.25 before it came, the sixth at the dearest call so far, $0.30");
   } finally {
     await r.close();
     await gw.close();
@@ -1857,6 +1863,71 @@ test("a pass's end waits for the lookups a bounded time: an estimate still stand
     assert.deepEqual([r.totals().usd, r.totals().estimated, lookups], [0.25, 1, tried]);
   } finally {
     records.open();
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failure that ran long upstream is booked at least $1.00, and counts toward the stage's six; a fast error status does not (#163)", async () => {
+  const gw = await fakeGateway({
+    [LANG]: async (body) => {
+      const mode = JSON.parse(body || "{}").mode;
+      if (mode === "slow") await sleep(150);
+      return { status: 500, body: { error: { type: "internal_server_error", message: "x" } } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-slow-"));
+  // A fast error status within 100 ms here, a slow failure past 100 ms (10 s and 30 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 100, callLog: join(dir, "usage", CALL_LOG) });
+  const go = (mode) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
+  try {
+    assert.deepEqual([SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD], [30_000, 1]);
+    r.beginPass(100);
+    // Fast error statuses, more than the stage's six with a priced call never coming: the run's minute is not reached.
+    for (let i = 0; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go("fast")).status, 500);
+    assert.equal(r.totals().failClosed, false, "fast error statuses do not count toward the stage's six");
+    // Slow 5xx: each may have been billed, each booked at least $1.00; the sixth shuts the relay.
+    for (let i = 1; i <= UNKNOWN_STAGE_SHUT; i++) assert.equal((await go("slow")).status, 500);
+    assert.equal((await go("fast")).status, 403, "shut at the sixth slow failure");
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.estimated, p.shut?.calls, p.shut?.stage], [round6((UNKNOWN_STAGE_SHUT + 1) * 0.25 + UNKNOWN_STAGE_SHUT * SLOW_UNKNOWN_FLOOR_USD), 2 * UNKNOWN_STAGE_SHUT + 1, UNKNOWN_STAGE_SHUT, true]);
+    const usd = logLines(join(dir, "usage", CALL_LOG)).filter((l) => l.status === 500).map((l) => l.usd);
+    assert.deepEqual(usd, [...Array.from({ length: UNKNOWN_STAGE_SHUT + 1 }, () => 0.25), ...Array.from({ length: UNKNOWN_STAGE_SHUT }, () => 1)]);
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with a cap, a failed call holds the turn for another's record a bounded time, then goes on booked as a failure that names no generation (#163)", async () => {
+  let n = 0;
+  const gw = await fakeGateway({
+    // Every call fails naming its generation, and no record ever comes (404).
+    [LANG]: () => ({ status: 500, headers: { "x-generation-id": `gen_NORECORD${String((n += 1)).padStart(6, "0")}` }, body: { error: { type: "internal_server_error", message: "x" } } }),
+    "/v1/generation": { status: 404, body: { error: "not_found" } },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-hold-"));
+  // The record is looked for over 600 ms; a hold lasts 100 ms at most (15 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [200, 200, 200], holdMaxMs: 100, callLog: join(dir, "usage", CALL_LOG) });
+  const go = () => call(r.socketPath, { token: r.token, path: LANG });
+  try {
+    assert.equal(HOLD_MAX_MS, 15_000);
+    r.beginPass(25);
+    assert.equal((await go()).status, 500, "the first: its estimate waits for its record");
+    assert.equal((await go()).status, 500, "the second holds the turn for the first's record");
+    const started = Date.now();
+    assert.equal((await go()).status, 500);
+    const waited = Date.now() - started;
+    assert.ok(waited >= 80 && waited < 400, `the third waited about the hold's 100 ms, not the first's lookup (${waited} ms)`);
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.estimated, p.unpriced], [0.75, 3, 0]);
+    const lines = logLines(join(dir, "usage", CALL_LOG));
+    const second = lines.find((l) => l.id === "gen_NORECORD000002" && !("reconciled" in l));
+    assert.deepEqual([second.basis, second.usd, second.unpriced], ["estimate", 0.25, "the gateway answered 500 (internal_server_error); generation gen_NORECORD000002 not looked up: another failed call's record was still awaited"]);
+    assert.ok(!lines.some((l) => l.id === "gen_NORECORD000002" && "reconciled" in l), "never looked up");
+  } finally {
     await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });

@@ -52,6 +52,8 @@ const OUTER_SAID = new Set();
 export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer sandbox, which does not start on this host";
 /** The Blocked reason when Copilot's outer sandbox stopped starting after serve began: fixed text, no probe output. */
 export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
+/** The Blocked reason when the sandboxes' scan for protected paths fails its check at a stage's start (lib/local.mjs writeNestedGitScan). */
+export const sandboxScanReason = "local mode: the sandboxes' scan for protected paths (ripgrep, sandbox-scan) failed its check on this machine; the local loop's log says why; check that `rg` on PATH runs";
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
 function parse(argv) {
@@ -399,7 +401,7 @@ export class Local {
     // it (factory-db is in its bin), none may write it.
     // Linux: the ripgrep srt and Claude Code's sandbox scan with, which leaves a nested checkout's .git writable, so a resumed
     // stage can replace one (lib/local.mjs nestedGitScanScript). In the usage directory, which no sandbox may write: srt and
-    // Claude Code run it outside their sandboxes.
+    // Claude Code run it outside their sandboxes. Checked as it is written; a failed check Blocks (sandboxScanReason).
     const ripgrep = platform() === "linux" ? writeNestedGitScan(join(usageDir, "scan")) : null;
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, readOnly: [usageDir], ripgrep }), null, 2));
     // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
@@ -588,9 +590,10 @@ export class Local {
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropOwned(stageTmp);
-      if (e.code !== "outer-sandbox") throw e;
+      const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason }[e.code];
+      if (!reason) throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
-      await this.block(issue, name, copilotOuterReason);
+      await this.block(issue, name, reason);
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
     return new Promise((done) => {

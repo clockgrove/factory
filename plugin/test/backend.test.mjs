@@ -452,35 +452,104 @@ test("Copilot's outer sandbox: bwrap gets the host's /dev/net/tun after srt's fr
   assert.deepEqual(argv(none, args), args);
 });
 
-test("the sandboxes' scan (#154): a nested repository's .git is left out of ripgrep's list, all else and its exit code kept; srt, Claude Code and the outer sandbox get it, the clone's git guards stay", async () => {
-  const { claudeLocalSettings, gitGuards, harnessOuterSettings, srtSettings, writeNestedGitScan } = await import("../scripts/lib/local.mjs");
-  const { mkdtempSync, writeFileSync: write, statSync } = await import("node:fs");
+// A stand-in for ripgrep that lists every file below its last argument, as `rg --files` does; exits $CODE when set after
+// printing $EXTRA lines (then sleeping $SLEEP seconds), so a test can make it fail, hang or add names.
+const FAKE_RG = `#!/bin/sh
+for t do :; done
+find "$t" -type f | sort
+[ -n "$EXTRA" ] && printf '%s\\n' "$EXTRA"
+echo "rg: some/dir: Permission denied" >&2
+[ -n "$SLEEP" ] && sleep "$SLEEP"
+exit "\${CODE:-0}"
+`;
+
+test("the sandboxes' scan (#154): ripgrep's list less the lines whose first protected name is a nested .git; exit code and stderr kept; fails closed with the whole list", async () => {
+  const { nestedGitLine, writeNestedGitScan } = await import("../scripts/lib/local.mjs");
+  const { mkdtempSync, mkdirSync, writeFileSync: write, statSync, readFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const { spawnSync } = await import("node:child_process");
-  const { join } = await import("node:path");
+  const { spawnSync, spawn } = await import("node:child_process");
+  const { join, dirname } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
-  // A stand-in for the real ripgrep: prints the lines in $LIST, a line on stderr, and exits $CODE.
   const fake = join(dir, "real-rg");
-  write(fake, '#!/bin/sh\nprintf "%s" "$LIST"\necho "rg: some/dir: Permission denied" >&2\nexit "$CODE"\n', { mode: 0o755 });
+  write(fake, FAKE_RG, { mode: 0o755 });
   const scan = writeNestedGitScan(join(dir, "scan"), fake);
   assert.equal(statSync(scan).mode & 0o777, 0o755);
-  const r = "/w/clone";
-  const kept = [`${r}/.git/HEAD`, `${r}/.git/config`, `${r}/.git/hooks/pre-commit`, `${r}/.bashrc`, `${r}/sub/.bashrc`, `${r}/sub/.vscode/settings.json`, `${r}/sub/.claude/commands/x.md`, `${r}/sub/.mcp.json`, `${r}/x/../.git/hooks/y`, `/elsewhere/dep/.git/config`, `${r}-other/dep/.git/HEAD`];
-  const dropped = [`${r}/dep/.git/HEAD`, `${r}/dep/.git/config`, `${r}/dep/.git/hooks/pre-commit`, `${r}/vendor/dep/.git/hooks/x`, `${r}/Dep/.GIT/config`];
-  const run = (code) => spawnSync(scan, ["--files", "--max-depth", "4", "--iglob", "**/.git/config", r], { encoding: "utf8", env: { ...process.env, LIST: [...kept, ...dropped].join("\n") + "\n", CODE: String(code) } });
-  for (const code of [0, 1, 2]) {
-    const out = run(code);
-    assert.equal(out.status, code, "ripgrep's exit code: the sandbox reads 0 as found, 1 as none, else a failed scan");
-    assert.deepEqual(out.stdout.split("\n").filter(Boolean), kept);
-    assert.match(out.stderr, /Permission denied/, "ripgrep's stderr passes through (srt denies the directories it could not read)");
+  assert.equal(statSync(join(dir, "scan")).mode & 0o777, 0o700);
+  const r = join(dir, "clone");
+  const kept = [".git/HEAD", ".git/config", ".git/hooks/pre-commit", ".bashrc", "sub/.bashrc", "sub/.vscode/settings.json", "sub/.claude/commands/x.md", "sub/.mcp.json", "c/.vscode/.git/x", "Dep/.GIT/config", "d/.gİt/hooks/x", "e/.git/.bashrc"];
+  const dropped = ["dep/.git/HEAD", "dep/.git/config", "dep/.git/hooks/pre-commit", "vendor/dep/.git/hooks/x", "f/.git/config/.bashrc"];
+  for (const f of [...kept, ...dropped]) {
+    mkdirSync(dirname(join(r, f)), { recursive: true });
+    write(join(r, f), "");
   }
-  // Each sandbox Factory configures runs it, and still write-protects the clone's own git internals by path.
+  const paths = (xs) => xs.map((f) => join(r, f)).sort();
+  const run = (env = {}) => spawnSync(scan, ["--files", "--max-depth", "4", r], { encoding: "utf8", env: { ...process.env, ...env } });
+  const ok = run();
+  assert.equal(ok.status, 0);
+  assert.deepEqual(ok.stdout.split("\n").filter(Boolean).sort(), paths(kept));
+  assert.match(ok.stderr, /Permission denied/, "ripgrep's stderr passes through (srt denies the directories it could not read)");
+  // Lines that are not plain paths below the scanned directory are kept as they are.
+  for (const l of [`${r}/x/../.git/hooks/y`, `${r}//dep/.git/HEAD`, `/elsewhere/dep/.git/config`, `${r}-other/dep/.git/HEAD`]) assert.equal(nestedGitLine(l, r), false, l);
+  const none = run({ CODE: "1" });
+  assert.equal(none.status, 1, "none found: ripgrep's 1");
+  // A failed ripgrep: the whole list, nested .git included, and a failed scan's exit, which srt still binds.
+  for (const code of ["2", "7"]) {
+    const bad = run({ CODE: code });
+    assert.equal(bad.status, 2);
+    assert.deepEqual(bad.stdout.split("\n").filter(Boolean).sort(), paths([...kept, ...dropped]));
+  }
+  // The filter itself failing (here made to throw by a preload): the whole list and exit 2, never a shortened list.
+  const preload = join(dir, "break-filter.cjs");
+  write(preload, 'String.prototype.split = function () { throw new Error("filter broken"); };\n');
+  const broken = run({ NODE_OPTIONS: `--require ${preload}` });
+  assert.equal(broken.status, 2);
+  assert.deepEqual(broken.stdout.split("\n").filter(Boolean).sort(), paths([...kept, ...dropped]));
+  // Killed mid-scan (the sandbox's timeout sends TERM): ripgrep goes too, and its whole lines so far go out unfiltered, exit 2.
+  const child = spawn(scan, ["--files", r], { env: { ...process.env, SLEEP: "30" } });
+  let out = "";
+  child.stdout.on("data", (c) => (out += c));
+  setTimeout(() => child.kill("SIGTERM"), 1000);
+  const t0 = Date.now();
+  const code = await new Promise((done) => child.on("close", (c) => done(c)));
+  assert.ok(Date.now() - t0 < 10_000, "the timeout bounds the scan: the sleeping ripgrep did not hold it open");
+  assert.equal(code, 2);
+  assert.deepEqual(out.split("\n").filter(Boolean).sort(), paths([...kept, ...dropped]));
+  assert.match(readFileSync(scan, "utf8"), new RegExp(`^#!/bin/sh\\nexec '${process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' `), "node by absolute path");
+});
+
+test("the sandboxes' scan (#154): a ripgrep shim that dispatches on its name works; a ripgrep that does not answer is refused as it is written", async () => {
+  const { writeNestedGitScan } = await import("../scripts/lib/local.mjs");
+  const { mkdtempSync, mkdirSync, writeFileSync: write, symlinkSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
+  // A version manager's binary: ripgrep only when called as `rg`, an error otherwise; its shim a link named rg.
+  const manager = join(dir, "manager");
+  write(manager, `#!/bin/sh\n[ "$(basename "$0")" = rg ] || { echo "error: unexpected argument '$1'" >&2; exit 2; }\n${FAKE_RG.split("\n").slice(1).join("\n")}`, { mode: 0o755 });
+  mkdirSync(join(dir, "shims"));
+  symlinkSync(manager, join(dir, "shims", "rg"));
+  const scan = writeNestedGitScan(join(dir, "scan"), join(dir, "shims", "rg"));
+  assert.match(readFileSync(join(dir, "scan", "scan.cjs"), "utf8"), new RegExp(JSON.stringify(join(dir, "shims", "rg")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the PATH entry as found, never resolved");
+  assert.ok(scan);
+  // The manager itself (what resolving the link gives): the check fails and the stage Blocks with sandbox-scan.
+  assert.throws(() => writeNestedGitScan(join(dir, "scan2"), manager), (e) => e.code === "sandbox-scan" && /does not work here/.test(e.message));
+  // No rg at all.
+  assert.throws(() => writeNestedGitScan(join(dir, "scan3"), null), (e) => e.code === "sandbox-scan");
+});
+
+test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from the stage's FACTORY_LOCAL_SANDBOX) get it; the clone's git guards stay", async () => {
+  const { claudeLocalSettings, gitGuards, harnessOuterSettings, localSandbox, srtSettings } = await import("../scripts/lib/local.mjs");
+  const { harnessCommand } = await import("../scripts/lib/harness.mjs");
+  const r = "/w/clone";
+  const scan = "/w/.factory/1/usage/scan/rg";
   const srt = srtSettings({ clone: r, home: "/h", ripgrep: scan });
   assert.deepEqual(srt.ripgrep, { command: scan });
-  const claude = claudeLocalSettings({ clone: r, home: "/h", ripgrep: scan });
-  assert.deepEqual(claude.sandbox.ripgrep, { command: scan });
   const outer = harnessOuterSettings({ harness: "claude", clone: r, home: "/h", ripgrep: scan });
   assert.deepEqual(outer.ripgrep, { command: scan });
+  const local = localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ clone: r, addDirs: [], domains: ["github.com"], readOnly: [], ripgrep: scan }) });
+  const c = harnessCommand({ harness: "claude", prompt: "", local });
+  const claude = JSON.parse(c.args[c.args.indexOf("--settings") + 1]);
+  assert.deepEqual(claude.sandbox.ripgrep, { command: scan });
   for (const deny of [srt.filesystem.denyWrite, claude.sandbox.filesystem.denyWrite, outer.filesystem.denyWrite]) for (const g of gitGuards(r)) assert.ok(deny.includes(g), g);
   // Without it (macOS, a runner) each keeps its own scan.
   assert.equal(srtSettings({ clone: r, home: "/h" }).ripgrep, undefined);
@@ -644,6 +713,15 @@ test("local Copilot runs only inside the outer sandbox: serve refuses a host whe
   assert.equal(r.exit, "blocked");
   assert.deepEqual(blocked, [[8, "work", copilotOuterReason]]);
   assert.doesNotMatch(copilotOuterReason, /slirp4netns|\/home|\/tmp|\n/, "no probe output or local path reaches GitHub");
+  // The sandboxes' scan failing its check as the stage starts (#154): Blocked with its own fixed text, cause setup (block()).
+  const { sandboxScanReason } = await import("../scripts/local.mjs");
+  blocked.length = 0;
+  local.stageEnv = () => {
+    throw Object.assign(new Error("the sandbox's scan for protected paths does not work here: rg: /home/x/bin/rg failed"), { code: "sandbox-scan" });
+  };
+  assert.equal((await local.stage(8, "work", "worker.mjs", [])).exit, "blocked");
+  assert.deepEqual(blocked, [[8, "work", sandboxScanReason]]);
+  assert.doesNotMatch(sandboxScanReason, /\/home|\/tmp|\n/, "no local path reaches GitHub");
   local.stageEnv = () => {
     throw new Error("other");
   };

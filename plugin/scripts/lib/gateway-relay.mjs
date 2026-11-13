@@ -21,8 +21,8 @@
 //   generation seconds after the answer); with no reported cost the call waits for the lookup. A request body echoed
 //   into a response (a tool's schema, a tool call's input) is never read. A failed call (an error status, a broken
 //   answer) is looked up by the generation it names, if any; a refusal before any model ran (the gateway's known 4xx, or
-//   its error type for one, PRE_MODEL_ERRORS) is $0. A cost still unknown is never $0 (Kirk, #142): the stage's first is
-//   booked at an upper bound (the dearest call priced so far, at least $0.25) and relaying goes on; the second shuts the
+//   its error type for one, PRE_MODEL_ERRORS; a 5xx saying no generation ran, UNAVAILABLE_ERRORS) is $0. A cost still
+//   unknown is never $0 (Kirk, #142): the stage's first is booked at an upper bound (the dearest call priced so far, at least $0.25) and relaying goes on; the second shuts the
 //   gateway for the stage (the pass ends over budget, so the stage Blocks, and every later call is refused).
 // - The call log: one line per call in the stage's usage directory (CALL_LOG), no body and no key.
 // - The cap: calls are relayed only while a harness pass runs, one billable call at a time, each only once the calls
@@ -116,6 +116,14 @@ export const GATEWAY_REFUSALS = new Set(["quota_for_entity_exceeded", "insuffici
  * or the gateway's own (`internal_server_error`) may come after a model ran: not these.
  */
 export const PRE_MODEL_ERRORS = new Set(["authentication_error", "invalid_request_error", "rate_limit_exceeded", "model_not_found", "not_found", "forbidden", "customer_verification_required"]);
+/**
+ * The 5xx error types for a call no generation ran for (#148): the gateway or its provider had no capacity
+ * (`service_unavailable_error`: the gateway's 503, "provider capacity or gateway service unavailable" in Vercel's AI
+ * Gateway reference), a provider overloaded (`overloaded_error`, Anthropic's, through `/v1/messages`) or rate limited
+ * (`rate_limit_exceeded`, the gateway's; `rate_limit_error`, Anthropic's). With such a type at `error.type` and no
+ * generation id in the body or header, the call costs $0 and is no unknown cost; with an id it is looked up.
+ */
+export const UNAVAILABLE_ERRORS = new Set(["service_unavailable_error", "overloaded_error", "rate_limit_exceeded", "rate_limit_error"]);
 /** The least a call whose cost stays unknown is booked at (Kirk, #142): it, or the dearest call priced so far, the larger. */
 export const UNKNOWN_COST_FLOOR_USD = 0.25;
 /** The per-call log, in the stage's usage directory (no sandbox writes there): one JSON line per call. */
@@ -720,6 +728,12 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
         if (type && o.status >= 400 && o.status < 500 && PRE_MODEL_ERRORS.has(type)) {
           s.failed += 1;
           return { usd: 0, basis: "refused", type };
+        }
+        // A 5xx saying no generation ran (the gateway or its provider unavailable, overloaded or rate limited, at
+        // `error.type`), naming no generation: $0, and no unknown cost toward the gateway's shutdown.
+        if (type && o.status >= 500 && UNAVAILABLE_ERRORS.has(type) && !errorGenerationId(o.doc, typeof o.headerId === "string" ? o.headerId : null)) {
+          s.failed += 1;
+          return { usd: 0, basis: "unavailable", type };
         }
         // Else its generation, when the answer names one (its body or the x-generation-id header), is looked up.
         const why = o.sentError ? `the call failed after it was sent: ${o.error}` : o.broken ? `the answer broke off: ${o.broken}` : o.overflow ? "the error answer was too large to read" : `the gateway answered ${o.status}${type ? ` (${type})` : ""}`;

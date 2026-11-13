@@ -8,14 +8,14 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { humanWorkflowRuns } from "../lib/collect.mjs";
+import { EVENT_PAGES, humanWorkflowRuns, listObjectives } from "../lib/collect.mjs";
 import { loadPrices } from "../lib/cost.mjs";
 import { drillRecord, humanActions, p1Escapes, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
-import { streaks, streakTable, tagTime, verdict } from "../lib/streak.mjs";
+import { pooledStreak, pooledTable, streaks, streakTable, tagTime, verdict } from "../lib/streak.mjs";
 import { appendScorecard } from "../score.mjs";
 import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
 import { progressTail } from "../../plugin/scripts/lib/session.mjs";
-import { cleanMerge, localMerge, OPERATOR, questionAnswered, REPO } from "./fixtures/github.mjs";
+import { blocked, cleanMerge, localMerge, OPERATOR, questionAnswered, REPO } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const prices = loadPrices();
@@ -412,4 +412,97 @@ test("sandbox stages: the record's launches are read merged as the plugin reads 
     { id: 2, user: app, body: `${marker(48, "stage", claim)}\n${sandboxMarkerLine({ state: "running", at: "2031-03-02T03:01:00Z", launch: { stage: "work", ok: true, run: "9", cue: "stint-1", event: "pull_request", eventAt: "2031-03-02T03:00:00Z" } })}` },
   ];
   assert.deepEqual(launchesOf(comments, 48, self), [{ stage: "work", run: "9", event: "pull_request", at: Date.parse("2031-03-02T03:00:00Z") }]);
+});
+
+test("listObjectives: an issue whose label was removed after --since, once Factory took it, is listed; the event history is read only back to --since", async () => {
+  const SINCE = "2031-03-01T00:00:00Z";
+  const ev = (event, name, issue, created_at, extra = {}) => ({ event, label: { name }, created_at, issue: { number: issue, ...extra } });
+  const page1 = [
+    ev("unlabeled", "factory:objective", 77, "2031-03-04T00:00:00Z"), // parked: started below, label removed later
+    ev("unlabeled", "factory:objective", 78, "2031-03-04T00:00:00Z"), // removed before Factory ever took it
+    ev("unlabeled", "factory:objective", 79, "2031-03-04T00:00:00Z", { pull_request: {} }),
+    ev("labeled", "factory:blocked", 77, "2031-03-03T00:00:00Z"),
+    ev("labeled", "factory:running", 77, "2031-03-02T00:00:00Z"),
+    ...Array.from({ length: 95 }, (_, i) => ev("labeled", "P2", 200 + i, "2031-03-02T00:00:00Z")),
+  ];
+  // The second page crosses --since: events older than it are not read as removals, and no third page is asked for.
+  const page2 = [ev("labeled", "factory:running", 80, "2031-03-01T01:00:00Z"), ev("unlabeled", "factory:objective", 80, "2031-02-20T00:00:00Z"), ev("unlabeled", "factory:objective", 81, "2031-02-20T00:00:00Z"), ev("labeled", "factory:running", 81, "2031-02-19T00:00:00Z")];
+  const calls = [];
+  const api = async (path) => {
+    calls.push(path);
+    if (path.startsWith(`repos/${REPO}/issues?`)) return [{ number: 42, state: "closed", closed_at: "2031-03-02T00:00:00Z", labels: [{ name: "factory:objective" }] }, { number: 43, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }] }, { number: 44, state: "open", labels: [{ name: "factory:objective" }] }];
+    const page = Number(/[?&]page=(\d+)/.exec(path)?.[1]);
+    return { 1: page1, 2: page2 }[page] ?? [];
+  };
+  assert.deepEqual(await listObjectives(api, REPO, { since: SINCE }), [42, 43, 77]);
+  assert.deepEqual(calls.slice(1), [`repos/${REPO}/issues/events?per_page=100&page=1`, `repos/${REPO}/issues/events?per_page=100&page=2`]);
+  // A history longer than the page bound fails, never lists short.
+  const full = async (path) => (path.includes("/events?") ? Array.from({ length: 100 }, () => ev("labeled", "P2", 1, "2031-03-02T00:00:00Z")) : []);
+  await assert.rejects(listObjectives(full, REPO, { since: SINCE, maxEventPages: 2 }), /more than 200 issue events/);
+  assert.ok(EVENT_PAGES >= 10);
+});
+
+test("a parked Objective is a row: stopped when Blocked, in flight when its Question waits, never a walk-away", () => {
+  const OWNER_ = { login: "maintainer", type: "User" };
+  const park = (c, at) => {
+    c.issue.labels = [];
+    c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:objective" }, actor: OWNER_, created_at: at });
+    return c;
+  };
+  const stopped = score(park(blocked(70), "2031-03-02T05:00:00Z"));
+  assert.deepEqual([stopped.parked, stopped.exit, stopped.walkAway.value], [true, "blocked", false]);
+  const waiting = blocked(71);
+  waiting.issueTimeline = waiting.issueTimeline.map((e) => (e.label?.name === "factory:blocked" ? { ...e, label: { name: "factory:question" } } : e));
+  waiting.issueComments = waiting.issueComments.slice(0, 1);
+  const asked = score(park(waiting, "2031-03-02T05:00:00Z"));
+  assert.deepEqual([asked.parked, asked.exit, asked.walkAway.value], [true, "question", false]);
+  const s = streaks([stopped, asked], { from: "2031-02-28T00:00:00Z" });
+  assert.deepEqual(s.harnesses.unknown.sequence.map((x) => [x.issue, x.ok]), [[70, false]]);
+  assert.deepEqual(s.harnesses.unknown.inFlight, [71]);
+  const p = pooledStreak([stopped, asked], { from: "2031-02-28T00:00:00Z" });
+  assert.deepEqual([p.finished, p.inFlight], [1, [{ repository: REPO, issue: 71 }]]);
+  // A labelled Objective is not parked.
+  assert.equal(score(blocked(72)).parked, false);
+});
+
+test("pooledStreak: two repositories' rows in the order they ended, any harness; any miss resets it", () => {
+  const A = "acme/widgets";
+  const B = "acme/gadgets";
+  const at = (d) => `2031-03-${String(d).padStart(2, "0")}T00:00:00Z`;
+  const r = (repository, issue, day, over = {}) => row(issue, { repository, mergedAt: at(day), ...over });
+  const rows = [
+    r(A, 1, 2),
+    r(B, 1, 3, { harness: "codex" }), // the same issue number in another repository is its own entry
+    r(A, 2, 4, { harness: null, walkAway: { value: false, since: at(1), reason: "first human action: comment", unseen: [] } }),
+    r(B, 2, 5, { harness: "copilot" }),
+    r(A, 3, 6),
+    r(B, 3, 7, { harness: null }), // unknown harness, clean: it still extends the pooled streak
+    r(A, 4, 8, { exit: "in review", mergedAt: null }),
+    r(B, 4, 9, { walkAway: { value: true, since: "2031-02-20T00:00:00Z", unseen: [] } }),
+  ];
+  const p = pooledStreak(rows, { from: "2031-02-28T00:00:00Z" });
+  assert.deepEqual(p.sequence.map((x) => [x.repository, x.issue, x.harness, x.ok]), [[A, 1, "claude", true], [B, 1, "codex", true], [A, 2, "unknown", false], [B, 2, "copilot", true], [A, 3, "claude", true], [B, 3, "unknown", true]]);
+  assert.deepEqual([p.current, p.best, p.walkAway, p.finished], [3, 3, 5, 6]);
+  assert.deepEqual(p.inFlight, [{ repository: A, issue: 4 }]);
+  assert.deepEqual(p.before, [{ repository: B, issue: 4 }]);
+  const md = pooledTable(p, { repositories: [A, B], tag: "v9.9.9" });
+  assert.match(md, /^Pooled streak across acme\/widgets, acme\/gadgets from v9\.9\.9/);
+  assert.match(md, /^\| 3 \| 3 \| 5 \/ 6 \| acme\/widgets#4 \|$/m);
+  assert.match(md, /^- acme\/widgets#2 \(unknown\) 2031-03-04T00:00:00Z: no: first human action: comment$/m);
+  assert.match(md, /Left out \(clock started before v9\.9\.9\): acme\/gadgets#4/);
+});
+
+test("score.mjs: several --repo values need --streak and --since, and take no issue-keyed option", () => {
+  const fail = (args) => {
+    try {
+      execFileSync("node", [join(BENCH, "score.mjs"), ...args], { encoding: "utf8", stdio: "pipe" });
+      return 0;
+    } catch (e) {
+      return [e.status, e.stderr];
+    }
+  };
+  assert.deepEqual(fail(["--repo", "a/x", "--repo", "b/y", "--since", "v9.9.9"])[0], 64);
+  const [code, err] = fail(["--repo", "a/x", "--repo", "b/y", "--streak", "--since", "v9.9.9", "--issue", "3"]);
+  assert.equal(code, 64);
+  assert.match(err, /--issue takes one --repo/);
 });

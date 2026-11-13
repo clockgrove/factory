@@ -8,11 +8,15 @@
  *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed factory:objective issue
  *
  *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0     consecutive walk-away merges per harness from a tag
+ *   node bench/score.mjs --streak --repo A/X --repo B/Y --since v0.9.0  each repository's streak, then the pooled streak
+ *                                                                        across them (any harness, in the order they ended)
  *
  *   --since DATE|TAG       a date, or a Factory tag (its Release's time, read from --factory)
  *   --streak               print the streak per harness instead of the row table: Objectives whose clock started at or
  *                          after --since, in the order they ended; any human input (a hand-started or re-run Factory
  *                          workflow run included), a Blocked card, an unmerged end or a later P1 escape breaks it
+ *   --repo OWNER/NAME      the repository; give it more than once with --streak and --since for the pooled streak
+ *                          (then --issue, --usage, --minutes, --read, --md, --snapshot and --replay are not taken)
  *   --factory OWNER/NAME   the repository --since TAG is read from (default clockgrove/factory)
  *   --workflow FILE        the adopter's Factory workflow file (default factory.yml): a person's dispatch or re-run of it is input
  *   --usage DIR            result.json / events.jsonl files to read instead of
@@ -58,7 +62,7 @@ import { collectObjective, listObjectives, recordingApi, snapshotApi, usageDirFo
 import { loadPrices } from "./lib/cost.mjs";
 import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
 import { markdownTable, OBJECTIVE_LABEL, scoreObjective, STALL_MINUTES } from "./lib/objective.mjs";
-import { streaks, streakTable, tagTime } from "./lib/streak.mjs";
+import { pooledStreak, pooledTable, streaks, streakTable, tagTime } from "./lib/streak.mjs";
 import { existsSync as fileExists } from "node:fs";
 
 /** An escape's identity: the `owner/name#N` it names (a hand-filled string may add words around it), else itself. */
@@ -90,7 +94,7 @@ export function appendScorecard(standing, rows) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { values } = parseArgs({
     options: {
-      repo: { type: "string" },
+      repo: { type: "string", multiple: true },
       issue: { type: "string", multiple: true },
       since: { type: "string" },
       streak: { type: "boolean" },
@@ -129,8 +133,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       usage(`--replay: ${error.message}`);
     }
   }
-  const repo = values.repo ?? snapshot?.repository;
-  if (!repo || !/^[^/]+\/[^/]+$/.test(repo)) usage("Give --repo OWNER/NAME");
+  const repos = [...new Set(values.repo ?? (snapshot?.repository ? [snapshot.repository] : []))];
+  if (!repos.length || repos.some((r) => !/^[^/]+\/[^/]+$/.test(r))) usage("Give --repo OWNER/NAME");
+  const pooled = repos.length > 1;
+  if (pooled) {
+    if (!values.streak || !values.since) usage("Several --repo values give the pooled streak: add --streak and --since TAG");
+    const issueKeyed = ["issue", "usage", "minutes", "read", "md", "snapshot", "replay"].filter((k) => values[k] !== undefined);
+    if (issueKeyed.length) usage(`--${issueKeyed[0]} takes one --repo`);
+  }
+  const repo = repos[0];
   const issues = (values.issue ?? (snapshot?.issues ? snapshot.issues.map(String) : [])).map((n) => Number(n));
   if (issues.some((n) => !Number.isSafeInteger(n) || n <= 0)) usage("--issue takes issue numbers");
   if (!issues.length && !values.since) usage("Give --issue N (one or more) or --since DATE");
@@ -186,25 +197,32 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   };
 
   const rows = [];
+  const byRepo = {};
   let sinceAt = values.since && !sinceTag ? new Date(values.since).toISOString() : null;
   try {
     if (sinceTag) {
       sinceAt = await tagTime(api, factoryRepo, sinceTag);
       if (!sinceAt) usage(`--since ${sinceTag}: no such tag in ${factoryRepo}`);
     }
-    const numbers = issues.length ? issues : await listObjectives(api, repo, { since: sinceAt, label });
-    if (!numbers.length) {
-      process.stderr.write(`no ${label} issue in ${repo} closed${values.since ? ` since ${values.since}` : ""}, Blocked, Question, In review or Running\n`);
-      process.exit(65);
+    for (const repo of repos) {
+      const numbers = issues.length ? issues : await listObjectives(api, repo, { since: sinceAt, label });
+      if (!numbers.length) {
+        process.stderr.write(`no ${label} issue in ${repo} closed${values.since ? ` since ${values.since}` : ""}, Blocked, Question, In review, Running or parked\n`);
+        if (!pooled) process.exit(65);
+      }
+      byRepo[repo] = [];
+      for (const issue of numbers) {
+        const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue, numbers.length) ?? (usageDir ? [] : null), jobs: !values["no-jobs"], graphql, app: values.app ?? null, ...(values.workflow ? { workflow: values.workflow } : {}) }));
+        // --usage decides on a replay too: an issue without its own directory has none, whatever the snapshot stored.
+        if (usageDir && snapshot) collected.usage = usageFor(issue, numbers.length) ?? [];
+        collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
+        if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
+        const row = scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills, app: values.app ?? null, stallMinutes });
+        rows.push(row);
+        byRepo[repo].push(row);
+      }
     }
-    for (const issue of numbers) {
-      const collected = snapshot?.collected?.[issue] ?? (await collectObjective(api, repo, issue, { download, usage: usageFor(issue, numbers.length) ?? (usageDir ? [] : null), jobs: !values["no-jobs"], graphql, app: values.app ?? null, ...(values.workflow ? { workflow: values.workflow } : {}) }));
-      // --usage decides on a replay too: an issue without its own directory has none, whatever the snapshot stored.
-      if (usageDir && snapshot) collected.usage = usageFor(issue, numbers.length) ?? [];
-      collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
-      if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
-      rows.push(scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills, app: values.app ?? null, stallMinutes }));
-    }
+    if (!rows.length) process.exit(65);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exit(70);
@@ -215,9 +233,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     writeFileSync(values.snapshot, `${JSON.stringify({ repository: repo, issues: rows.map((r) => r.issue), calls: rest, collected: __collected }, null, 2)}\n`);
   }
   const md = markdownTable(rows);
-  const streak = values.streak ? streaks(rows, { from: sinceAt }) : null;
+  const streak = values.streak && !pooled ? streaks(rows, { from: sinceAt }) : null;
+  // Several repositories: each one's streak per harness, then the pooled streak across them.
+  const perRepo = pooled ? Object.fromEntries(repos.map((r) => [r, streaks(byRepo[r], { from: sinceAt })])) : null;
+  const pool = pooled ? pooledStreak(rows, { from: sinceAt }) : null;
   if (values.md) writeFileSync(values.md, md);
   if (streak) process.stdout.write(streakTable(streak, { repository: repo, tag: sinceTag }));
+  else if (pooled) process.stdout.write([...repos.map((r) => streakTable(perRepo[r], { repository: r, tag: sinceTag })), pooledTable(pool, { repositories: repos, tag: sinceTag })].join("\n"));
   else if (!values.md) process.stdout.write(md);
   if (values.append) {
     let standing = null;
@@ -226,7 +248,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     writeFileSync(values.append, `${JSON.stringify(appendScorecard(standing, rows), null, 2)}\n`);
     process.stderr.write(`${values.append}: ${rows.length} row(s) merged into the standing scorecard\n`);
   }
-  const json = `${JSON.stringify({ version: 1, repository: repo, scoredAt: new Date().toISOString(), rows, ...(streak ? { streak: { tag: sinceTag, ...streak } } : {}) }, null, 2)}\n`;
+  const json = pooled
+    ? `${JSON.stringify({ version: 1, repositories: repos, scoredAt: new Date().toISOString(), rows, streak: { tag: sinceTag, pooled: pool, repositories: perRepo } }, null, 2)}\n`
+    : `${JSON.stringify({ version: 1, repository: repo, scoredAt: new Date().toISOString(), rows, ...(streak ? { streak: { tag: sinceTag, ...streak } } : {}) }, null, 2)}\n`;
   if (values.out) {
     mkdirSync(dirname(resolve(values.out)), { recursive: true });
     writeFileSync(values.out, json);

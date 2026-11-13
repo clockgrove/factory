@@ -30,14 +30,48 @@ export const REVIEW_ARTIFACT = (issue) => `factory-usage-${issue}-review`;
  * The Objectives worth a row: issues with the label that closed at or after
  * `since` (ISO date), plus open ones carrying a Factory state label (Blocked,
  * Question, In review, Running), so the misses that never merged are rows too.
+ * With `since`, also every issue whose label was removed at or after it (a
+ * parked Objective, waiting on other work) and that Factory picked up then (a
+ * state label applied at or after `since`): it ran and cost money, whatever its
+ * labels are now, after the labelled ones.
  */
-export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all" } = {}) {
+export async function listObjectives(api, repoFull, { since, label = OBJECTIVE_LABEL, state = "all", maxEventPages = EVENT_PAGES } = {}) {
   const query = [`labels=${encodeURIComponent(label)}`, `state=${state}`, since ? `since=${encodeURIComponent(since)}` : null, "sort=updated", "direction=desc", PER_PAGE].filter(Boolean).join("&");
   const issues = await api(`repos/${repoFull}/issues?${query}`, { paginate: true });
-  return issues
-    .filter((i) => !i.pull_request)
-    .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
-    .map((i) => i.number);
+  const numbers = new Set(
+    issues
+      .filter((i) => !i.pull_request)
+      .filter((i) => (i.state === "closed" ? !since || Date.parse(i.closed_at ?? i.updated_at) >= Date.parse(since) : labelNames(i).some((n) => STATE_LABELS.includes(n))))
+      .map((i) => i.number),
+  );
+  if (since) for (const n of await parkedSince(api, repoFull, { since, label, maxPages: maxEventPages })) numbers.add(n);
+  return [...numbers];
+}
+
+/** The most pages of repository issue events read back to `since` (100 each): past it the listing fails, never shortens. */
+export const EVENT_PAGES = 50;
+
+/**
+ * Issues that lost `label` at or after `since` and gained a Factory state label at or after it: the repository's issue
+ * events, newest first, read page by page only back to `since` (at most `maxPages` pages). One read of the label
+ * history for the whole repository, never one timeline per issue. Throws when `since` lies beyond `maxPages`.
+ */
+export async function parkedSince(api, repoFull, { since, label = OBJECTIVE_LABEL, maxPages = EVENT_PAGES }) {
+  const from = Date.parse(since);
+  const removed = new Set();
+  const started = new Set();
+  for (let page = 1; ; page++) {
+    if (page > maxPages) throw new Error(`more than ${maxPages * 100} issue events in ${repoFull} since ${since}: the label history was not read to the end; score with a later --since`);
+    const events = (await api(`repos/${repoFull}/issues/events?${PER_PAGE}&page=${page}`)) || [];
+    for (const e of events) {
+      if (!(Date.parse(e.created_at) >= from) || !e.issue || e.issue.pull_request) continue;
+      const name = e.label?.name;
+      if (e.event === "unlabeled" && name === label) removed.add(e.issue.number);
+      if (e.event === "labeled" && STATE_LABELS.includes(name)) started.add(e.issue.number);
+    }
+    if (events.length < 100 || !(Date.parse(events.at(-1).created_at) >= from)) break;
+  }
+  return [...removed].filter((n) => started.has(n));
 }
 
 /** This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name their run. */

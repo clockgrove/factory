@@ -683,6 +683,9 @@ export function scoreObjective(collected, opts = {}) {
   const actions = humanActions(collected, since, { bots, label });
   const waiting = waitingMinutes(collected.issueTimeline, since, merged?.merged_at ?? null);
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
+  // Parked: open, its label removed after Factory took it (it waits on other work). Its exit still says where it
+  // stopped; it is never a walk-away (not merged) and the streak counts it only once it ended (lib/streak.mjs endedAt).
+  const parked = issue.state === "open" && !missing.includes("label event") && Array.isArray(issue.labels) && !issue.labels.some((l) => (typeof l === "string" ? l : l?.name) === label);
 
   const factoryLocal = localFactoryActions(collected);
   const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !factoryLocal(e.at, e.by, "body edit")) ?? null;
@@ -794,6 +797,7 @@ export function scoreObjective(collected, opts = {}) {
     harnessMixed: ran.mixed,
     model: cost.model,
     exit,
+    parked,
     pr: (merged ?? open ?? pulls[0])?.number ?? null,
     mergedAt: merged?.merged_at ?? null,
     mergedBy: merged?.merged_by?.login ?? null,
@@ -845,7 +849,7 @@ export function markdownTable(rows) {
     const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
     const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
-    const cells = [`#${r.issue}`, r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
+    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];

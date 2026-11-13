@@ -49,6 +49,11 @@ const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8",
 const onPath = (bin) => whichSync(bin) !== null;
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
+/** After a failed start, this loop holds the Objective this long, doubling per failure up to the cap (Local.unstart). */
+export const START_BACKOFF_MS = 5 * 60_000;
+export const START_BACKOFF_MAX_MS = 60 * 60_000;
+/** The failed starts in a row of one Objective on one loop that Block it, with the error, rather than un-mark it again. */
+export const START_FAILURES_BLOCK = 3;
 export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer sandbox, which does not start on this host";
 /** The Blocked reason when Copilot's outer sandbox stopped starting after serve began: fixed text, no probe output. */
 export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
@@ -774,7 +779,7 @@ export class Local {
         stream.on("data", r.push);
         return r;
       });
-      child.on("close", (code) => {
+      child.on("close", (code, signal) => {
         for (const r of relays) r.end();
         this.children.delete(child);
         rmSync(join(usageDir, STAGE_RECORD), { force: true });
@@ -785,7 +790,7 @@ export class Local {
           // no record: the child failed before writing one
         }
         dropOwned(stageTmp);
-        done({ code, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir });
+        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile });
       });
     });
   }
@@ -803,11 +808,11 @@ export class Local {
    * which drops it on every exit, never starts here), so serve does not pick it again. `key`: the Blocked comment a
    * repeat of the same condition updates.
    */
-  async block(issue, name, reason, { key = null, gh = { findPr, removeLabel, applyExit } } = {}) {
+  async block(issue, name, reason, { key = null, cause = "setup", gh = { findPr, removeLabel, applyExit } } = {}) {
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     if (pr) await gh.removeLabel(this.repo, pr.number, REVIEW_LABEL, this.opts).catch((e) => log(`#${issue} review label: ${e.message.slice(0, 120)}`));
-    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause: "setup", notify: inputs.notify, stage: name }, this.opts);
+    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause, notify: inputs.notify, stage: name }, this.opts);
   }
 
   /**
@@ -857,40 +862,121 @@ export class Local {
     if (reaped) log(`#${issue}: stopped ${reaped} harness run(s) an earlier stage left running on this machine`);
   }
 
-  /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. */
+  /**
+   * This issue's claim, read up to `tries` times: a read that fails or cannot check its author (lib/local.mjs ClaimUnread)
+   * is read again after a pause, never taken for "no claim". Throws the last ClaimUnread when every read failed.
+   */
+  async readClaim(issue, tries = 3) {
+    for (let i = 1; ; i += 1) {
+      try {
+        return await localClaim(this.repo, issue, this.opts);
+      } catch (e) {
+        if (i >= tries) throw e;
+        await new Promise((r) => setTimeout(r, this.claimRetryMs ?? 2000));
+      }
+    }
+  }
+
+  /**
+   * Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. A stage
+   * that ends with an exit record drops it. One that ends without (killed, crashed, threw) keeps it and this loop
+   * resumes it once (pausedHere); a second such end in a row Blocks it here with the stage's exit and log (lapse). A
+   * claim that cannot be read or written is a failed start (`startFailed`, runObjective's unstart).
+   */
   async withClaim(issue, fn) {
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
       return { exit: "skipped" };
     }
-    const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
-    if (held?.fresh && held.holder !== this.holder && !deadHereHolder(held.holder)) {
+    let held;
+    try {
+      held = await this.readClaim(issue);
+    } catch (e) {
+      // Who holds it is unknown: nothing about the Objective may change on this (unstart).
+      throw Object.assign(e, { startFailed: "claim-read" });
+    }
+    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder);
+    if (others && held.fresh) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
       return { exit: "skipped" };
     }
-    await writeClaim(this.repo, issue, this.holder, this.opts);
+    try {
+      await writeClaim(this.repo, issue, this.holder, this.opts);
+    } catch (e) {
+      throw Object.assign(e, { startFailed: "claim", othersClaim: others });
+    }
     // Two loops writing at once: the comment's last writer holds it, and the other steps aside. A short random wait
     // lets both writes land before either reads back, so both cannot read their own.
-    await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
-    const mine = await localClaim(this.repo, issue, this.opts).catch(() => null);
+    await new Promise((r) => setTimeout(r, this.claimSettleMs ?? 1500 + Math.floor(Math.random() * 1500)));
+    let mine;
+    try {
+      mine = await this.readClaim(issue);
+    } catch (e) {
+      // Unread is no answer: the claim written carries this loop's id, so it stays, goes stale, and pausedHere resumes it.
+      log(`#${issue}: the claim could not be read back (${String(e.message).slice(0, 160)}); it stays, and this loop resumes the Objective once it is stale`);
+      return { exit: "skipped" };
+    }
     if (mine?.holder !== this.holder) {
       log(`#${issue}: another local loop claimed it first; leaving it alone`);
       return { exit: "skipped" };
     }
     const beat = setInterval(() => writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`)), HEARTBEAT_MS);
+    let result = null;
+    let failure = null;
     try {
-      return await fn();
+      result = await fn();
+      return result;
+    } catch (e) {
+      failure = e;
+      throw e;
     } finally {
       clearInterval(beat);
-      // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it.
-      if (!this.stopping) await dropClaim(this.repo, issue, this.holder, this.opts);
+      // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it. A failed
+      // start is unstart's to settle.
+      if (!this.stopping && !failure?.startFailed) {
+        // Only a stage's own end (or a throw) without an exit record lapses; anything else that ends (a merge followed
+        // and not merged yet) releases the claim as an exit does.
+        if (!result?.exit && (failure || result?.stage)) await this.lapse(issue, result, failure);
+        else {
+          this.lapsed?.delete(issue);
+          await dropClaim(this.repo, issue, this.holder, this.opts);
+        }
+      }
+    }
+  }
+
+  /**
+   * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
+   * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
+   * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. The count is
+   * this loop's memory: another serve on the machine resumes the Objective afresh.
+   */
+  async lapse(issue, result, failure) {
+    const stage = result?.stage || "work";
+    const how = failure ? `threw (${String(failure?.message || failure).slice(0, 200)})` : `ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})`;
+    const where = result?.log ? `; its log on this machine: ${result.log}` : "";
+    const lapsed = (this.lapsed ??= new Map());
+    if (!lapsed.has(issue)) {
+      lapsed.set(issue, 1);
+      log(`#${issue}: the ${stage} stage ${how}; the claim stays and this loop resumes it once${where}`);
+      return;
+    }
+    lapsed.delete(issue);
+    log(`#${issue}: the ${stage} stage ${how} again; Blocking it${where}`);
+    try {
+      await this.block(issue, stage, `the ${stage} stage ${how} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory" });
+      await dropClaim(this.repo, issue, this.holder, this.opts);
+    } catch (e) {
+      log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
     }
   }
 
   /**
    * Running or In-review Objectives a loop on this machine held when it went away (serve stopped, the machine slept or
-   * restarted): ours to resume, at once when that loop's process is gone, else once its heartbeat is stale.
+   * restarted): ours to resume, at once when that loop's process is gone, else once its heartbeat is stale. One of this
+   * loop's own counts too: at once when its stage ended here with no exit record (its one resume, lapse), else once
+   * stale (its read-back after claiming failed).
    */
   async pausedHere(running) {
     const out = [];
@@ -900,7 +986,8 @@ export class Local {
       if (running.has(issue.number) || out.includes(issue.number)) continue;
       if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
-      if (c && sameMachineHolder(c.holder) && c.holder !== this.holder && (!c.fresh || deadHereHolder(c.holder))) out.push(issue.number);
+      if (!c || !sameMachineHolder(c.holder)) continue;
+      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
     }
     return out;
   }
@@ -949,8 +1036,16 @@ export class Local {
       this.saidLive.add(`${issue}:${live.pid}`);
       return { exit: "skipped" };
     }
-    const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
-    const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+    // Both reads answer, or nothing changes: a failed one is no "nothing left", so the claim stays for the next tick.
+    let pr;
+    let data;
+    try {
+      pr = await findPr(this.repo, `factory/${issue}`, this.opts);
+      data = await getIssue(this.repo, issue, this.opts);
+    } catch (e) {
+      log(`#${issue}: its PR or issue could not be read (${String(e.message).slice(0, 120)}); the claim stays and the next tick tries again`);
+      return { exit: "skipped" };
+    }
     // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
     // send-back rebase) runs again; anything else (reviewed, waiting in the merge queue) needs nothing here.
     const next = stageFor({ pr, issue: data });
@@ -959,6 +1054,7 @@ export class Local {
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});
+    this.lapsed?.delete(issue);
     return { exit: "skipped" };
   }
 
@@ -980,8 +1076,111 @@ export class Local {
   }
 
   /** One Objective, start to delivered review (and, with `wait`, to merged). */
-  runObjective(issue, { wait = false } = {}) {
-    return this.withClaim(issue, () => this.work(issue, { wait }));
+  async runObjective(issue, { wait = false } = {}) {
+    try {
+      return await this.withClaim(issue, () => this.work(issue, { wait }));
+    } catch (e) {
+      if (!e?.startFailed) throw e;
+      return this.unstart(issue, e);
+    }
+  }
+
+  /**
+   * The Objectives whose last start on this loop failed, still in their backoff: issue -> the reason serve's dispatch
+   * holds it with (localHeld), so it is not picked, nor marked Running, before its backoff ends. This loop's memory only.
+   */
+  startHolds(now = (this.clock ?? Date.now)()) {
+    const out = {};
+    for (const [n, f] of this.startFailures ?? []) if (now < f.retryAt) out[n] = `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+    return out;
+  }
+
+  /**
+   * A start that failed before its work stage ran (the claim, the clone, prepareClone, a directory): the real error is
+   * logged and the Objective goes back to Queued, its claim dropped, rather than sitting Running for the dispatcher to
+   * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS), so a
+   * machine-level fault (disk full, a broken sandbox) neither Blocks every queued Objective in turn nor relabels them
+   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error (cause `setup`).
+   * When the claim could not be read, or was another loop's, who holds it is unknown: nothing changes now, and after the
+   * backoff this loop reads the claim again (recheckStarts). Only an Objective still labelled Running is un-marked or
+   * Blocked; otherwise, or on a failed read, the claim stays, goes stale and this loop resumes it (pausedHere).
+   */
+  async unstart(issue, e) {
+    const out = { code: null, exit: null, usd: null, usageDir: null, startFailed: e.startFailed };
+    const error = String(e?.message || e).replaceAll(homedir(), "~").slice(0, 300);
+    log(`#${issue}: could not start (${e.startFailed}): ${error}`);
+    const failures = (this.startFailures ??= new Map());
+    const count = (failures.get(issue)?.count ?? 0) + 1;
+    const unknown = e.startFailed === "claim-read" || !!e.othersClaim;
+    const backoff = () => {
+      const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (count - 1), START_BACKOFF_MAX_MS);
+      failures.set(issue, { count, retryAt, recheck: unknown });
+      return new Date(retryAt).toISOString();
+    };
+    try {
+      const data = await getIssue(this.repo, issue, this.opts);
+      if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
+        if (count >= START_FAILURES_BLOCK) {
+          failures.delete(issue);
+          await this.block(issue, "work", `could not start on this machine ${count} times in a row (${e.startFailed}${e.code ? `, ${e.code}` : ""}): ${error}. Fix the machine (disk space, the sandbox, the harness login), then re-apply the label.`);
+          if (!unknown) await dropClaim(this.repo, issue, this.holder, this.opts);
+          this.lapsed?.delete(issue);
+          return { ...out, exit: "blocked" };
+        }
+        if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
+        else {
+          await this.requeue(issue);
+          log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
+        }
+      }
+    } catch (x) {
+      log(`#${issue}: could not put it back to Queued (${String(x?.message || x).slice(0, 120)}); its claim stays for this machine to resume`);
+    }
+    this.lapsed?.delete(issue);
+    return out;
+  }
+
+  /** Back to Queued: the Running label off, the card to Queued, this loop's claim dropped. */
+  async requeue(issue) {
+    await setStateLabel(this.repo, issue, null, this.opts);
+    const project = await findProject(this.repo, this.opts).catch(() => null);
+    if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
+    await dropClaim(this.repo, issue, this.holder, this.opts);
+  }
+
+  /**
+   * Each tick: the Objectives whose start failed on a claim this loop could not read, or another loop's, read again once
+   * their backoff ends. No live claim of another loop's: back to Queued, for the next pick. A fresh one: that loop has
+   * it, and this loop lets it go. Unread again: another failed start (the count goes up; the third Blocks).
+   */
+  async recheckStarts(running) {
+    const now = (this.clock ?? Date.now)();
+    for (const [n, f] of [...(this.startFailures ?? [])]) {
+      if (!f.recheck || now < f.retryAt || running.has(n)) continue;
+      let c;
+      try {
+        c = await this.readClaim(n);
+      } catch (e) {
+        await this.unstart(n, Object.assign(e, { startFailed: "claim-read" }));
+        continue;
+      }
+      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder)) {
+        this.startFailures.delete(n);
+        log(`#${n}: another local loop holds it (${c.holder}); leaving it alone`);
+        continue;
+      }
+      f.recheck = false;
+      try {
+        const data = await getIssue(this.repo, n, this.opts);
+        if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) {
+          await this.requeue(n);
+          log(`#${n}: its claim reads free now; back to Queued for the next pick`);
+        }
+      } catch (x) {
+        f.recheck = true;
+        log(`#${n}: could not put it back to Queued (${String(x?.message || x).slice(0, 120)}); tried again next tick`);
+      }
+    }
   }
 
   /**
@@ -1025,7 +1224,12 @@ export class Local {
 
   /** The work stage, then its review: in a claim this loop holds. */
   async work(issue, { wait = false } = {}) {
-    const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]);
+    // The stage only rejects before its process starts: a failed start (runObjective).
+    const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]).catch((e) => {
+      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { startFailed: "work" });
+    });
+    // The stage started: this loop's count of failed starts for it is over.
+    this.startFailures?.delete(issue);
     log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
     if (work.exit !== "delivered") return work;
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
@@ -1213,6 +1417,8 @@ export class Local {
         await this.cleanup(running).catch((e) => log(`cleanup: ${e.message.slice(0, 160)}`));
       }
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
+      // Failed starts whose holder was unknown: read their claims again once their backoff ends.
+      await this.recheckStarts(running).catch((e) => log(`start recheck: ${e.message.slice(0, 160)}`));
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
       const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
       for (const n of resumes) {
@@ -1221,7 +1427,9 @@ export class Local {
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
       const reviews = pending.slice(0, Math.max(0, limit - running.size));
-      const localHeld = Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"]));
+      // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
+      // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
+      const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
       const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {

@@ -9,7 +9,7 @@ import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
-import { isSelf, knownWriter, marker, pinnedMaintainer } from "./logic.mjs";
+import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
 import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
@@ -34,26 +34,64 @@ export const isLocal = (env = process.env) => env.FACTORY_LOCAL === "1";
 /** The claim comment Factory writes, read back by structure: which loop holds it and its last heartbeat. */
 export const claimBody = (holder, at = new Date()) => `Running in local mode (${holder}).\nholder: ${holder}\nheartbeat: ${at.toISOString()}`;
 
-export function parseClaim(body, now = Date.now()) {
-  const at = /^heartbeat: (\S+)$/m.exec(body || "")?.[1];
-  const t = at ? Date.parse(at) : NaN;
-  if (Number.isNaN(t)) return null;
+/**
+ * A claim body read by structure. Its age is GitHub's `updatedAt` for the comment when given (a heartbeat rewrites
+ * it), so a machine whose clock is off never reads as stale or fresh by its own clock; else the heartbeat line.
+ */
+export function parseClaim(body, now = Date.now(), updatedAt = null) {
+  const written = /^heartbeat: (\S+)$/m.exec(body || "")?.[1];
+  if (Number.isNaN(written ? Date.parse(written) : NaN)) return null;
+  const at = updatedAt && !Number.isNaN(Date.parse(updatedAt)) ? updatedAt : written;
+  const t = Date.parse(at);
   const holder = /^holder: (\S+)$/m.exec(body)?.[1] ?? null;
-  return { holder, heartbeat: at, fresh: now - t < CLAIM_FRESH_MS && t - now < CLAIM_SKEW_MS };
+  // GitHub's own time cannot be forged; one a little ahead of this reader's clock is this reader's skew.
+  const ahead = at === updatedAt ? false : t - now >= CLAIM_SKEW_MS;
+  return { holder, heartbeat: at, fresh: now - t < CLAIM_FRESH_MS && !ahead };
+}
+
+/**
+ * A claim that could not be read or verified this time: no answer, never "no claim" (it only delays a Block). `marked`:
+ * a marked comment was seen and only its author could not be checked (else the comments read failed). `updatedAt`:
+ * GitHub's last update of the newest such comment by Factory's own login or by a person GitHub shows with push access
+ * (an outsider's look-alike never delays a Block), or null.
+ */
+export class ClaimUnread extends Error {
+  constructor(message, { cause = null, marked = false, updatedAt = null } = {}) {
+    super(message);
+    this.code = "claim-unread";
+    this.cause = cause;
+    this.marked = marked;
+    this.updatedAt = updatedAt;
+  }
 }
 
 /**
  * The issue's local claim, or null; `fresh` says whether its loop is alive. A local loop writes it as its developer, so
  * only Factory's own login or a person whose push access is known (the writer list, a pinned maintainer) counts, never
- * an author association, and only with the marker on the comment's first line.
+ * an author association, and only with the marker on the comment's first line. Throws ClaimUnread when the comments
+ * cannot be read, or when a marked comment's author cannot be checked because the writer list or Factory's own login
+ * is unknown: as the live-job listing (github.mjs activeWorkIssues), no read is ever taken for "none".
  */
 export async function localClaim(repo, issue, opts, now = Date.now()) {
   const mark = claimMarker(issue);
-  await primeWriters(repo, opts);
+  const writersKnown = await primeWriters(repo, opts);
   const verified = (x) => isSelf(x) || knownWriter(x?.user?.login) === true || pinnedMaintainer(x?.user);
-  const c = (await listComments(repo, issue, opts)).find((x) => (x.body || "").startsWith(mark) && x?.user?.type !== "Bot" && verified(x));
-  if (!c) return null;
-  const parsed = parseClaim(c.body, now);
+  let comments;
+  try {
+    comments = await listComments(repo, issue, opts);
+  } catch (e) {
+    throw new ClaimUnread(`#${issue}'s comments could not be read (${e.status || String(e.message).slice(0, 80)})`, { cause: e });
+  }
+  const marked = comments.filter((x) => (x.body || "").startsWith(mark) && x?.user?.type !== "Bot");
+  const c = marked.find(verified);
+  if (!c) {
+    if (marked.length && (!writersKnown || !selfLogin())) {
+      const updatedAt = marked.filter(trustedAuthor).map((x) => x.updated_at).filter((t) => !Number.isNaN(Date.parse(t))).sort().at(-1) ?? null;
+      throw new ClaimUnread(`#${issue}'s claim author could not be checked (the writer list or Factory's own login is unread)`, { marked: true, updatedAt });
+    }
+    return null;
+  }
+  const parsed = parseClaim(c.body, now, c.updated_at);
   return parsed ? { ...parsed, commentId: c.id } : null;
 }
 

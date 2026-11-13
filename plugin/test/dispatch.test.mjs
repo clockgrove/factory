@@ -516,3 +516,217 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
   assert.equal(BACKENDS.local.trigger.asPerson, true);
   assert.equal(BACKENDS.actions.trigger.asPerson, false);
 });
+
+/**
+ * One dispatcher tick on the Action's route over factory:local Objectives (#167). `open`: the open issues; `timeline(n)`:
+ * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
+ * `writers`: the collaborators read, or a status to fail it with.
+ */
+async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {} }) {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const writes = [];
+  const realFetch = globalThis.fetch;
+  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
+  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
+    if (method !== "GET" && !u.pathname.endsWith("/graphql")) writes.push(`${method} ${u.pathname.replace(`/repos/${repo}`, "")}${method === "POST" ? ` ${JSON.parse(init.body).body ?? ""}` : ""}`);
+    if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
+    if (method === "GET" && u.pathname === `/repos/${repo}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : open);
+    if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(timeline(n));
+    if (method === "GET" && u.pathname.endsWith("/collaborators")) return Array.isArray(writers) ? json(writers) : json({ message: "Server Error" }, writers);
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) {
+      const c = comments(n);
+      return Array.isArray(c) ? json(c) : json({ message: "Server Error" }, c);
+    }
+    if (method === "GET" && u.pathname === `/repos/${repo}/pulls`) return json(pulls(Number(/factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1])));
+    if (method === "POST" && /\/comments$/.test(u.pathname)) return json({ id: 1 }, 201);
+    if (method === "DELETE" || method === "POST") return json({}, 200);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+    return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+}
+
+const ago = (ms) => new Date(Date.now() - ms).toISOString();
+const HOUR = 3600_000;
+const localIssue = (number, state, labels = ["factory:local"]) => ({ number, state: "open", labels: ["factory:objective", ...labels, state].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
+const labelled = (name, at) => [{ event: "labeled", label: { name }, created_at: at }];
+
+test("local claim read: a failed read is unread, never 'no claim'; the next tick reads it and the Objective runs on (#167)", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  // Running 40 minutes, a fresh claim; the first tick's claim read fails, the second's answers.
+  const claim = { id: 77, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 30_000))}`, updated_at: ago(30_000) };
+  let fail = true;
+  const tick = () => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(40 * 60_000)), comments: (n) => (n === 7 && fail ? 502 : n === 7 ? [claim] : []) });
+  const first = await tick();
+  assert.deepEqual(first.r.vanished, [], "no Block rests on a failed read");
+  assert.equal(first.blocked(7), undefined);
+  assert.ok(first.r.deadlines.some((d) => d.kind === "retry"), "a retry is due");
+  fail = false;
+  const second = await tick();
+  assert.deepEqual(second.r.vanished, []);
+  assert.deepEqual(second.r.paused, [], "alive: the heartbeat is fresh");
+  assert.equal(second.blocked(7), undefined);
+});
+
+test("local claim read: an author that cannot be checked (the writer list unread) is unread; a stranger's marker never holds (#167)", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const body = (holder) => `<!-- factory:7:local -->\n${claimBody(holder, new Date())}`;
+  const open = [{ ...localIssue(7, "factory:running", []), labels: ["factory:objective", "factory:running"].map((name) => ({ name })) }];
+  const timeline = () => labelled("factory:running", ago(2 * HOUR));
+  // A repository whose writer list cannot be read: the developer's claim is unread, so nothing Blocks this tick.
+  const unread = await localTick({ repo: "acme/unread", open, timeline, writers: 502, comments: (n) => (n === 7 ? [{ id: 5, user: { login: "dev", type: "User" }, body: body("box-a:1:abc:m:b"), updated_at: ago(0) }] : []) });
+  assert.deepEqual(unread.r.vanished, []);
+  assert.ok(unread.r.deadlines.some((d) => d.kind === "retry"));
+  // With the writers read, a marker by someone who cannot push is no claim: the unclaimed Running one Blocks as before.
+  const stranger = await localTick({ open, timeline, comments: (n) => (n === 7 ? [{ id: 6, user: { login: "stranger", type: "User" }, body: body("box-x:1:abc:m:b"), updated_at: ago(0) }] : []) });
+  assert.deepEqual(stranger.r.vanished, [7]);
+  assert.match(stranger.blocked(7), /worker job vanished/);
+  assert.ok(!stranger.writes.includes("DELETE /issues/comments/6"), "a stranger's comment is not Factory's to delete");
+});
+
+test("local deadlines: a factory:local Objective with no claim waits a day, Running or in review, then Blocks naming factory serve (#167)", async () => {
+  const pr = (n) => [{ number: 100 + n, draft: false, labels: [{ name: "factory:review" }], head: { ref: `factory/${n}` } }];
+  // #7 Running 2 hours and #8 in review for 2 hours, neither claimed: they wait, with a wake at the day's end.
+  const young = await localTick({
+    open: [localIssue(7, "factory:running"), localIssue(8, "factory:in-review")],
+    timeline: (n) => labelled(n === 7 ? "factory:running" : n === 8 ? "factory:in-review" : "factory:review", ago(2 * HOUR)),
+    pulls: (n) => (n === 8 ? pr(8) : []),
+  });
+  assert.deepEqual(young.r.vanished, [], "no 15-minute grace for a local Objective");
+  assert.deepEqual(young.r.deadlines.filter((d) => d.kind === "local-pause").map((d) => d.issue).sort(), [7, 8]);
+  // Past a day: both Block, and the reason names the fix.
+  const old = await localTick({
+    open: [localIssue(7, "factory:running"), localIssue(8, "factory:in-review")],
+    // The PR's (#108) review label is as old as its In-review entry.
+    timeline: (n) => labelled(n === 7 ? "factory:running" : n === 8 ? "factory:in-review" : "factory:review", ago(25 * HOUR)),
+    pulls: (n) => (n === 8 ? pr(8) : []),
+  });
+  assert.deepEqual(old.r.vanished.sort(), [7, 8]);
+  for (const n of [7, 8]) assert.match(old.blocked(n), /no local loop[^]*start `factory serve` on the machine that runs it[^]*<!-- factory:block \{"cause":"setup"\} -->/);
+  // In review for three days, but factory:review re-applied to its PR 2 hours ago (a maintainer's comment, a re-review):
+  // a new review is owed, and its day counts from that label.
+  const rereview = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: (n) => labelled(n === 8 ? "factory:in-review" : "factory:review", ago(n === 8 ? 72 * HOUR : 2 * HOUR)), pulls: pr });
+  assert.deepEqual(rereview.r.vanished, []);
+  assert.equal(rereview.r.deadlines.find((d) => d.issue === 8 && d.kind === "local-pause")?.at.slice(0, 13), new Date(Date.now() + 22 * HOUR).toISOString().slice(0, 13));
+  // In review with no review owed (reviewed, waiting on a person): no deadline.
+  const reviewed = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: () => labelled("factory:in-review", ago(25 * HOUR)), pulls: () => [{ ...pr(8)[0], labels: [] }] });
+  assert.deepEqual(reviewed.r.vanished, []);
+  // An unlabelled Objective's runner job still gets 15 minutes.
+  const runner = await localTick({ open: [{ ...localIssue(9, "factory:running", []) }], timeline: () => labelled("factory:running", ago(20 * 60_000)) });
+  assert.deepEqual(runner.r.vanished, [9]);
+  assert.match(runner.blocked(9), /worker job vanished[^]*<!-- factory:block \{"cause":"factory"\} -->/, "a lost runner job is Factory's own");
+});
+
+test("local claim age: GitHub's update time, not the machine's clock in the body; an expired claim's Block names its holder (#167)", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const comment = (written, updated) => ({ id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(written))}`, updated_at: updated });
+  const run = (c) => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(3 * 24 * HOUR)), comments: (n) => (n === 7 ? [c] : []) });
+  // A machine whose clock runs an hour behind wrote its heartbeat seconds ago by GitHub's clock: alive.
+  const slow = await run(comment(Date.now() - HOUR, ago(10_000)));
+  assert.deepEqual(slow.r.vanished, []);
+  assert.deepEqual(slow.r.paused, []);
+  // By GitHub's clock the heartbeat stopped an hour ago: paused, whatever the body says.
+  const stale = await run(comment(Date.now(), ago(HOUR)));
+  assert.deepEqual(stale.r.paused, [7]);
+  // Two days without a heartbeat: Blocked, naming the loop and the fix, and the claim goes with it.
+  const expired = await run(comment(Date.now(), ago(2 * 24 * HOUR)));
+  assert.deepEqual(expired.r.vanished, [7]);
+  assert.match(expired.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over a day; start `factory serve`[^]*"cause":"setup"/);
+  assert.ok(expired.writes.includes("DELETE /issues/comments/70"));
+});
+
+test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause factory); younger, or a marked comment updated within the day, waits (#167)", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const open = [localIssue(7, "factory:running")];
+  const tick = (runningFor, comments, repo = "acme/app", writers) => localTick({ repo, open, writers, timeline: () => labelled("factory:running", ago(runningFor)), comments: (n) => (n === 7 ? comments : []) });
+  const young = await tick(2 * HOUR, 502);
+  assert.deepEqual(young.r.vanished, [], "a failed read inside the day only waits");
+  // Past the day with the comments still failing: the Block is due, and a tick whose Block cannot be written goes on.
+  const old = await tick(25 * HOUR, 502);
+  assert.deepEqual(old.r.vanished, [7]);
+  // The writer list never loads, but the marked comment was updated minutes ago: maybe a live loop, so it waits.
+  const marked = (at, association = "COLLABORATOR") => [{ id: 5, user: { login: "dev", type: "User" }, author_association: association, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date())}`, updated_at: at }];
+  const live = await tick(25 * HOUR, marked(ago(60_000)), "acme/nowriters", 502);
+  assert.deepEqual(live.r.vanished, []);
+  // An outsider's look-alike, edited a minute ago, delays nothing.
+  const outsider = await tick(25 * HOUR, marked(ago(60_000), "NONE"), "acme/nowriters3", 502);
+  assert.deepEqual(outsider.r.vanished, [7]);
+  const dead = await tick(25 * HOUR, marked(ago(26 * HOUR)), "acme/nowriters2", 502);
+  assert.deepEqual(dead.r.vanished, [7]);
+  assert.match(dead.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's claim author could not be checked[^]*"cause":"factory"/);
+});
+
+test("claimedLocally: a runner job steps aside only for a marked claim whose author cannot be checked; a comments read that keeps failing fails the job, never a skip (#167)", async () => {
+  const { BACKENDS } = await import("../scripts/lib/backend.mjs");
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  let failures = 0;
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const claim = (at, login = "maintainer") => [{ id: 1, user: { login, type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box:1:a:m:b", new Date())}`, updated_at: at }];
+  let comments = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/user") return json({ login: "maintainer", type: "User" });
+    if (u.pathname === "/repos/acme/nowriters/collaborators") return json({ message: "Server Error" }, 502);
+    if (u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (u.pathname.endsWith("/issues/7/comments")) return failures-- > 0 ? json({ message: "Server Error" }, 502) : json(comments);
+    return json({ message: "Not Found" }, 404);
+  };
+  const claimed = (name = "app") => BACKENDS.actions.trigger.claimedLocally({ owner: "acme", name, full: `acme/${name}` }, 7, { token: "t" }, { pauseMs: 0 });
+  try {
+    failures = Infinity;
+    await assert.rejects(claimed(), (e) => e.status === 502, "a listing that keeps failing is GitHub's error, never 'held by a local loop'");
+    failures = 1;
+    assert.equal(await claimed(), false, "read again: no claim, the runner works it");
+    comments = claim(new Date().toISOString());
+    assert.equal(await claimed(), true);
+    comments = claim(ago(HOUR));
+    assert.equal(await claimed(), false, "a stale claim holds nothing");
+    // The writer list never loads: a marked comment whose author cannot be checked may be a live loop's.
+    failures = 0;
+    comments = claim(new Date().toISOString(), "dev");
+    assert.equal(await claimed("nowriters"), true);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});
+
+test("local claim read: an unread claim Blocks only when Factory wrote nothing on the issue for the day; a live stage's progress keeps it waiting (#167)", async () => {
+  // Running 30 hours (a multi-part Objective), and this tick's claim read fails; the Block's own reads answer.
+  const tick = (timeline) => {
+    let reads = 0;
+    return localTick({ open: [localIssue(7, "factory:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads === 1 ? 502 : []) });
+  };
+  const running = labelled("factory:running", ago(30 * HOUR));
+  // Its progress comment, by Factory's login, was updated 5 minutes ago: a live stage, so it waits.
+  const live = await tick([...running, { event: "commented", user: { login: "maintainer" }, actor: { login: "maintainer" }, created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
+  assert.deepEqual(live.r.vanished, []);
+  assert.equal(live.blocked(7), undefined);
+  // On the Action, a local loop writes as its developer: a Factory marker comment by a person with push access counts.
+  const developer = await tick([...running, { event: "commented", user: { login: "dev" }, author_association: "MEMBER", body: "<!-- factory:7:progress -->\nworking", created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
+  assert.deepEqual(developer.r.vanished, []);
+  // A label event by Factory within the day counts too.
+  const labelledLately = await tick([...running, { event: "labeled", label: { name: "factory:in-review" }, actor: { login: "maintainer" }, created_at: ago(3 * HOUR) }]);
+  assert.deepEqual(labelledLately.r.vanished, []);
+  // Someone else's comment is no sign of a live stage.
+  const quiet = await tick([...running, { event: "commented", user: { login: "stranger" }, actor: { login: "stranger" }, created_at: ago(HOUR), updated_at: ago(HOUR) }, { event: "commented", user: { login: "maintainer" }, created_at: ago(26 * HOUR), updated_at: ago(25 * HOUR) }]);
+  assert.deepEqual(quiet.r.vanished, [7]);
+  assert.match(quiet.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's comments could not be read \(502\)\)[^]*"cause":"factory"/);
+});

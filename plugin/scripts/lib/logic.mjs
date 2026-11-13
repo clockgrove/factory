@@ -1397,7 +1397,7 @@ export function parseReview(text) {
       if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
       if (v && (Array.isArray(v.comments) || Array.isArray(v.acceptance))) {
         const acceptance = Array.isArray(v.acceptance)
-          ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "" }))
+          ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
           : null;
         return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
       }

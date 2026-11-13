@@ -36,6 +36,8 @@ Before writing a comment, find the body's answer to it (an assumption, a checkli
 - Where the repository has a design checklist or checklist questions of its own: load reference.md, "Repository checklists".
 - A protected path touched, or an undone item not listed under Undone.
 
+On a split part the prompt says is not the last, an entry the PR body assigns to a later part is deferred, not a finding: reference.md, "Split parts".
+
 ## What you do not do
 
 No summary comment, no approve, no request changes, no "LGTM", no overall verdict, no refusal to review and no recommendation to Block. Comment once on a recurring finding. Do not rewrite the code in the comment beyond a line or two. Do not comment on the PR body's prose except where it misstates the diff. Do not reply to the worker's replies; your pass is over when your comments are posted.

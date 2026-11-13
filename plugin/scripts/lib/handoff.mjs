@@ -45,8 +45,8 @@ export function sanitize(text, { max = TEXT_MAX } = {}) {
 }
 
 /** One line of the review body for a judged entry: one line, sanitised, cut at 300 characters. */
-const judgedLine = (a) => {
-  const text = sanitize(`${a.entry}: ${a.met ? "met" : "not met"}${a.evidence ? ` (${a.evidence})` : ""}`).replace(/\s+/g, " ").trim();
+const judgedLine = (a, splitPart) => {
+  const text = sanitize(`${a.entry}: ${a.met ? "met" : splitPart && a.deferred ? "deferred to a later part" : "not met"}${a.evidence ? ` (${a.evidence})` : ""}`).replace(/\s+/g, " ").trim();
   return `- ${text.length > 300 ? `${text.slice(0, 299)}…` : text}`;
 };
 
@@ -126,19 +126,21 @@ export function noReviewReason(recs, reviewOf) {
  * What Factory posts for one reviewer pass, from its parsed answer (parseReview): the review body (the marker, the count
  * and the reviewer's judgment of each acceptance entry, one line each) and the line comments, sanitised and fitted to the
  * diff. An entry judged not met with no comment of its own (its `entry`, or an "acceptance X:" body prefix) gets one at
- * the judgment's path and line, so the answer pass handles it; an entry of the issue (acceptanceEntries) the reviewer
+ * the judgment's path and line, so the answer pass handles it, except, on a split part that leaves work for the next
+ * (`splitPart`), one judged `deferred` (a later part delivers it), which the body lists as such; an entry of the issue (acceptanceEntries) the reviewer
  * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Factory's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
  * post a review that did not happen (reviewAnswer; the review job Blocks instead).
  */
-export function reviewPost({ issue, review, diff, entries = [], ok = true }) {
+export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
   if (review?.parsed === false) throw new Error("no review to post: the reviewer's answer held no findings JSON");
   const judged = review?.acceptance || [];
   const raw = (review?.comments || []).filter((c) => c && typeof c === "object");
   const commented = new Set(raw.map(commentEntry).filter(Boolean));
-  const unmet = judged.filter((a) => !a.met && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
+  // On a split part that is not the last, an entry judged deferred (a later part delivers it) gets no comment.
+  const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
   let comments = snapComments(
     [...raw, ...unmet].map((c) => ({ path: c.path, line: c.line, body: typeof c.body === "string" ? sanitize(c.body) : c.body })),
     diff,
@@ -159,7 +161,7 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true }) {
   }
   const lines = [`${marker(issue, "review")}`, `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`];
   if (judged.length || entries.length) {
-    lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map(judgedLine));
+    lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
   }
   return { body: lines.join("\n"), comments, placeholder, unjudged };
@@ -528,6 +530,9 @@ export async function recordPart(repo, issue, prNumber, remaining, opts) {
 
 /** Whether this PR is a split part that leaves work for the next (its body says `Refs #N`, not `Closes #N`). */
 export const isSplitPart = (rec, prNumber) => !!rec && rec.remaining > 0 && rec.prs.at(-1) === prNumber;
+
+/** What the reviewer is told of a split part that leaves work for the next: its 1-based part number; null for the last part or a one-PR Objective. */
+export const splitPartOf = (rec, prNumber) => (isSplitPart(rec, prNumber) ? { number: rec.prs.indexOf(prNumber) + 1 } : null);
 
 /** The merged PRs of the Objective's earlier parts, oldest first, for $FACTORY_IN/parts.md. */
 export async function mergedParts(repo, issue, opts) {

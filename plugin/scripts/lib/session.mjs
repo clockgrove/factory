@@ -5,9 +5,9 @@
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { backend } from "./backend.mjs";
+import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { copilotCreditUsd, finalText, runHarness, seedSessionTotal } from "./harness.mjs";
+import { copilotCreditUsd, finalText, runHarness, seedSessionTotal, stageSpendSoFar } from "./harness.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -718,7 +718,12 @@ export const progressRunId = (env = process.env) =>
 /** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "" }) {
+/**
+ * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a lower-bound spend line with every write
+ * until progress.spend records the final figure, so a stage that dies (killed, the machine restarted) still leaves the
+ * spend Factory last knew. Null when the stage records no spend in its progress comment (backend.mjs spendInProgress).
+ */
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null }) {
   const lines = [];
   const links = [];
   const started = Date.now();
@@ -735,7 +740,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const write = async () => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, spend, spendParts, read, triage, asked });
+    const live = spend === null && soFar ? await soFar().catch(() => null) : null;
+    const tail = progressTail({ harness, model, ...(spend === null && Number.isFinite(live) ? { spend: live, spendParts: { usdLowerBound: true } } : { spend, spendParts }), read, triage, asked });
     const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
     lastWrite = Date.now();
     await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).catch((e) => log(`progress: ${e.message.slice(0, 120)}`));
@@ -744,6 +750,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.
     lines.push(`- ${clock(Date.now())} ${sanitize(phase, { max: 2000 })}`);
     status = "";
+    // A status write still in flight lands first, so it never overwrites this one (the final spend line with it).
+    await writing;
     await write();
   };
   /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
@@ -755,7 +763,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
       writing = null;
     });
   };
-  /** A run with no usage artifact (local mode) records its dollars here, where any dispatcher can sum them. */
+  /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;

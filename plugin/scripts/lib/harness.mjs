@@ -424,6 +424,31 @@ export function harnessVersion(harness, env = process.env) {
 const SESSION_TOTALS = new Map();
 const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 
+// This process's stage spend as Factory has read it: each finished pass's own dollars, and each running pass's live meter
+// (live-spend.mjs). What the progress comment's spend line carries until the stage records its final figure.
+const STAGE_SPEND = { done: 0, open: new Set() };
+/**
+ * The stage's spend so far: finished passes' harness dollars, running passes' live readings and the gateway relay's key
+ * spend (its total, which no harness figure here holds). A lower bound: a pass that has not ended may spend more, and a
+ * meter that cannot be read counts nothing.
+ */
+export async function stageSpendSoFar() {
+  let usd = STAGE_SPEND.done;
+  for (const m of STAGE_SPEND.open) usd += await m.usd().catch(() => 0);
+  usd += Number(activeRelay()?.totals().usd) || 0;
+  return Math.round(Math.max(0, usd) * 1e6) / 1e6;
+}
+/** A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are none). */
+export function meterPass(meter) {
+  STAGE_SPEND.open.add(meter);
+  return {
+    end: async (usd) => {
+      if (!STAGE_SPEND.open.delete(meter)) return;
+      STAGE_SPEND.done += typeof usd === "number" && Number.isFinite(usd) ? Math.max(0, usd) : await meter.usd().catch(() => 0);
+    },
+  };
+}
+
 /**
  * The dollars per Copilot AI credit: the `copilot_credit_usd` setting, else GitHub's published $0.01. A value that is
  * not a positive number is refused with a warning (zero would make every Copilot run free to the caps).
@@ -833,12 +858,14 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
   const [execCmd, execArgs, execEnv] = runner && (harness === "claude" || harness === "copilot") ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
   // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
-  const live = relay ? liveSpend(harness, model || null, { prior, creditUsd, rollout: harness === "codex" ? codexRolloutReader(runner, childEnv) : null }) : null;
-  relay?.beginPass(maxUsd, live ? live.usd : null);
-  const lines = live ? (l) => {
+  // The same reading is the stage's spend so far in its progress comment (stageSpendSoFar), with or without a relay.
+  const live = liveSpend(harness, model || null, { prior, creditUsd, rollout: relay && harness === "codex" ? codexRolloutReader(runner, childEnv) : null });
+  const metered = meterPass(live);
+  relay?.beginPass(maxUsd, live.usd);
+  const lines = (l) => {
     live.line(l);
     onLine?.(l);
-  } : onLine;
+  };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
   const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
@@ -891,6 +918,8 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
   }
+  // The pass's own dollars join the stage's spend so far; its key spend is the relay's total there.
+  await metered.end(rec.usd);
   // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
   if (relay) {
     const pass = await relay.endPass();

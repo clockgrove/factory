@@ -1982,6 +1982,18 @@ export function decisionsSection(decisions, cap = 12_000) {
  */
 export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
 /**
+ * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
+ * progress.spend. Every stage gets one. No harness pass is a known $0. A pass that reported no dollars counts `known`
+ * (the stage's spend so far as Factory read it, harness.mjs stageSpendSoFar), marked `usdLowerBound`, as is a record
+ * that is a lower bound itself; so nothing reads it as nothing. `workerKeyUsd`: the relayed key's share, already in `usd`.
+ */
+export function stageSpendLine(usage, { ran = false, known = null } = {}) {
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  const usd = num(usage?.usd) ?? (ran ? (num(known) ?? 0) : 0);
+  const lower = !!usage?.usdLowerBound || (ran && num(usage?.usd) === null);
+  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}) } };
+}
+/**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
  * (the 1.0 streak counts per harness) reads it whatever the stage's model or exit, never from the prose phase lines.
  */

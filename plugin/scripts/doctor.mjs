@@ -6,12 +6,13 @@
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { platform } from "node:os";
 import { pathToFileURL } from "node:url";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
-import { prepareCopilotHome } from "./lib/copilot-runner.mjs";
+import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
+import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, pinnedVersion, prepareCopilotHome } from "./lib/copilot-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
@@ -24,11 +25,12 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, sandboxDroppedHosts, readWorkflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessOuterSettings, localBaseEnv, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { triageKey } from "./lib/triage.mjs";
+import { dropOwned } from "./lib/fsafe.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -1189,6 +1191,76 @@ export function workflowEnvChecks(wf = {}) {
 }
 
 /**
+ * Local mode: the stage's node and the repository's package manager as local mode resolves them for its sandboxed
+ * commands (copilot-runner.mjs localToolchain, localPackageManager; #111, #137), one row each, so a developer can see
+ * the resolution before a run. node's version is asked of the resolved binary itself, from `/` (no repository in reach);
+ * the package manager's is the one `packageManager` pins (nothing is run). A pinned package manager not resolved is a
+ * FAIL (the pre-start probe would Block); one resolved but kept out of the sandboxes (it sits in or above what a sandbox
+ * may write, or a credential store) a WARN. `os`: on Linux Claude Code's and Copilot's sandboxes bind them read-only.
+ */
+export function localToolchainRows({ checkout, env = process.env, os = platform(), run = (bin) => execFileSync(bin, ["--version"], { cwd: "/", env: { PATH: SAFE_PATH }, encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] }) }) {
+  const out = [];
+  const off = [join(checkout, ".factory"), stageTmpBase()];
+  const node = localToolchain({ path: env.PATH || "", off });
+  if (!node) out.push(FAIL("node", "no node on PATH", "install Node.js, or activate your version manager in this shell"));
+  else {
+    let version = "";
+    try {
+      version = String(run(node.toolchain.node)).trim();
+    } catch {
+      // not run: the path alone
+    }
+    out.push(PASS("node", `${version ? `${version} ` : ""}→ ${node.toolchain.node}${os === "linux" ? (node.dirs.length ? ` (${node.dirs[0]} read-only in Claude Code's and Copilot's sandboxes)` : " (the system's)") : ""}`));
+  }
+  const pm = localPackageManager({ clone: checkout, path: env.PATH || "", off });
+  if (pm) {
+    const pinned = pinnedVersion(checkout);
+    const what = `${pm.name}${pinned ? ` ${pinned}` : ""}`;
+    if (!pm.real) out.push(FAIL("package manager", `${what}${pinned ? " (packageManager)" : " (by the lockfile)"} is not resolved from PATH${pm.via ? ` (${pm.via}'s shim: no install of ${pinned || "an unpinned version"} in its install directory)` : ""}; local stages Block before the run`, pm.via ? `install it with ${pm.via}${pinned ? "" : ", and pin it in package.json's packageManager"}` : `put ${pm.name} on PATH (corepack enable, or a version manager)`));
+    else if (os === "linux" && !pm.dirs.length) out.push(WARN("package manager", `${what} (${pm.via}) → ${pm.real}, but it sits in or above a directory a sandbox may write, the home or a credential store, so Claude Code's and Copilot's commands cannot read it`, `install ${pm.name} elsewhere (corepack in a Node.js install, or a version manager)`));
+    else out.push(PASS("package manager", `${what} (${pm.via}) → ${pm.real}`));
+  }
+  return out;
+}
+
+/**
+ * Local mode with Claude Code on Linux: its sandbox's start and confinement (`claude sandbox: start`), by the probe every
+ * local Claude Code stage runs first (harness.mjs claudeLocalCheck), around a throwaway clone (this checkout's package.json
+ * only) in a directory of Factory's own, with the stage's toolchain and outer sandbox as a stage gets them.
+ */
+export async function claudeLocalStart({ checkout, env = process.env, check = claudeLocalCheck }) {
+  const ws = mkdtempSync(join(dirname(stageTmpBase()), "doctor-"));
+  const tmp = stageTemp("doctor-");
+  try {
+    const clone = join(ws, "repo");
+    const usage = join(ws, "usage");
+    const corepack = join(ws, "corepack");
+    for (const d of [join(usage, "harness"), corepack]) mkdirSync(d, { recursive: true });
+    await exec("git", ["init", "-q", clone], { env: { PATH: env.PATH || SAFE_PATH } });
+    if (existsSync(join(checkout, "package.json"))) copyFileSync(join(checkout, "package.json"), join(clone, "package.json"));
+    const tools = localTools({ harness: "claude", clone, path: env.PATH || "", off: [ws, join(checkout, ".factory"), dirname(tmp)], usageDir: usage });
+    const gitBin = join(usage, "gitbin");
+    mkdirSync(gitBin);
+    writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(whichSync("git"))), { mode: 0o755 });
+    const claudeEnv = tools.lead.length ? join(usage, "claude-env.sh") : null;
+    if (claudeEnv) writeFileSync(claudeEnv, claudeEnvText([gitBin, ...tools.lead]), { mode: 0o644 });
+    const domains = [...LOCAL_DOMAINS, ...String(env.FACTORY_LOCAL_DOMAINS || "").split(/[\s,]+/).filter(Boolean)];
+    const outerOn = outerProbe("claude", { domains, env }).on;
+    const outer = outerOn ? join(ws, "outer.json") : null;
+    if (outer) writeFileSync(outer, JSON.stringify(harnessOuterSettings({ harness: "claude", domains, writable: [clone, tmp, corepack, join(usage, "harness")], clone, env, install: harnessInstall(whichSync("claude")) })));
+    const local = { clone, addDirs: [corepack, tmp], cacheDirs: [corepack], readDirs: [usage], readOnly: [usage], domains, gitBin, toolchain: tools.probe, readable: tools.readable, ...(claudeEnv ? { claudeEnv } : {}) };
+    const runEnv = { ...localBaseEnv(env), TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COREPACK_HOME: corepack, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", NODE_USE_ENV_PROXY: "1" };
+    await check(local, outer, runEnv);
+    return PASS("claude sandbox: start", `its sandbox starts and confines here, and runs ${[tools.probe?.node ? "node" : "", tools.probe?.pm || ""].filter(Boolean).join(" and ") || "its commands"}`);
+  } catch (e) {
+    return FAIL("claude sandbox: start", String(e.message).replace(/^refusing to start the harness: /, "").slice(0, 300), e.rule === TOOLCHAIN_RULE ? "see the node and package manager rows" : "the probe's output is above; fix the sandbox (bubblewrap, srt) or the setting it names");
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    dropOwned(tmp);
+  }
+}
+
+/**
  * Local mode reads the workflow's settings from the default branch's committed workflow (#122): a WARN when there is
  * none there, or when this working tree's settings differ from it (local mode uses the default branch's).
  */
@@ -1243,6 +1315,8 @@ async function main() {
   results.push(...localDomainChecks({ inputs, env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
+  if (local) results.push(...localToolchainRows({ checkout, env: process.env }));
+  if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

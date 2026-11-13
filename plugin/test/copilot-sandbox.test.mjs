@@ -437,7 +437,7 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   writeFileSync(join(corepack, "dist", "pnpm.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
   symlinkSync(join(corepack, "dist", "pnpm.js"), join(home, ".local", "bin", "pnpm"));
   const clone = repo({ "package.json": '{"packageManager":"pnpm@12.18.0"}' });
-  assert.deepEqual(localPackageManager({ clone, path: `${join(home, ".local", "bin")}:/usr/bin`, off: [root + "/r-x"], home }), { name: "pnpm", real: join(corepack, "dist", "pnpm.js"), dirs: [corepack] }, "corepack's package, not the rest of the home");
+  assert.deepEqual(localPackageManager({ clone, path: `${join(home, ".local", "bin")}:/usr/bin`, off: [root + "/r-x"], home }), { name: "pnpm", real: join(corepack, "dist", "pnpm.js"), dirs: [corepack], via: "corepack" }, "corepack's package, not the rest of the home");
   // A version manager's shim (mise here) is resolved by its install layout and the pinned version, never by running it:
   // the manager would read the clone's own configuration, which can run commands on the host.
   const data = join(home, ".local", "share", "mise");
@@ -449,13 +449,13 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   writeFileSync(managed, "#!/bin/sh\n", { mode: 0o755 });
   writeFileSync(join(clone, ".mise.toml"), `[env]\nPLANTED = "{{exec(command='touch ${marker}')}}"\n[hooks]\nenter = "touch ${marker}"\n`);
   writeFileSync(join(clone, ".tool-versions"), "pnpm 12.18.0\n");
-  assert.deepEqual(localPackageManager({ clone, path: `${join(data, "shims")}:/usr/bin`, home }), { name: "pnpm", real: managed, dirs: [join(data, "installs", "pnpm", "12.18.0")] }, "that version's install directory, nothing else of the manager's");
+  assert.deepEqual(localPackageManager({ clone, path: `${join(data, "shims")}:/usr/bin`, home }), { name: "pnpm", real: managed, dirs: [join(data, "installs", "pnpm", "12.18.0")], via: "mise" }, "that version's install directory, nothing else of the manager's");
   assert.ok(!existsSync(marker), "nothing ran: neither the manager nor the clone's configuration");
-  assert.deepEqual(localPackageManager({ clone: repo({ "package.json": "{}", "pnpm-lock.yaml": "" }), path: join(data, "shims"), home }), { name: "pnpm", real: null, dirs: [] }, "a shim with no pinned version: none found, the probe Blocks");
+  assert.deepEqual(localPackageManager({ clone: repo({ "package.json": "{}", "pnpm-lock.yaml": "" }), path: join(data, "shims"), home }), { name: "pnpm", real: null, dirs: [], via: "mise" }, "a shim with no pinned version: none found, the probe Blocks");
   assert.deepEqual(localPackageManager({ clone: repo({ "package.json": '{"packageManager":"pnpm@9.9.9"}' }), path: join(data, "shims"), home }).real, null, "a pinned version the manager has not installed: none");
   assert.ok(!existsSync(marker));
   assert.deepEqual(localPackageManager({ clone, path: `${join(home, ".local", "bin")}`, off: [join(home, ".local")], home }).dirs, [], "never in or above what a sandbox may write");
-  assert.deepEqual(localPackageManager({ clone, path: "/nowhere", home }), { name: "pnpm", real: null, dirs: [] }, "none found: the probe Blocks");
+  assert.deepEqual(localPackageManager({ clone, path: "/nowhere", home }), { name: "pnpm", real: null, dirs: [], via: "" }, "none found: the probe Blocks");
   assert.equal(localPackageManager({ clone: repo({ "package.json": "{}" }), path: join(home, ".local", "bin"), home }), null);
   // Claude Code reads them by its settings; Copilot's probe proves the package manager runs.
   assert.deepEqual(claudeLocalSettings({ clone: "/c", home: "/h", readable: [corepack] }).sandbox.filesystem.allowRead, [corepack]);

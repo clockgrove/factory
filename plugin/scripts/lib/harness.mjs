@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
+import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./claude-local-probe.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
@@ -67,7 +68,7 @@ export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FA
  * FACTORY_STAGE_SANDBOX). None is a setting a workflow may set (inputs.mjs WORKFLOW_SETTINGS); every FACTORY_* name
  * Factory reads is a setting, a secret, one of these or a FACTORY_CONTROL_KEYS one (test/inputs.test.mjs).
  */
-export const FACTORY_CHILD_KEYS = ["FACTORY_IN", "FACTORY_OUT", "FACTORY_ISSUE", "FACTORY_BRANCH", "FACTORY_GIT_DIR", "FACTORY_GIT_ID", "FACTORY_DB_WRAP", "FACTORY_DB_NAME", "FACTORY_DB_USER", "FACTORY_INSTALL_CHECK", "FACTORY_COPILOT_PROBE", "FACTORY_PROBE_DECOY", "FACTORY_PROBE_MARKER", "FACTORY_PROBE_SCRIPT", "FACTORY_GATEWAY_SESSION", "FACTORY_RUN_TAG", "FACTORY_SHELL_SECRETS", "FACTORY_LFS_PIN", "FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "FACTORY_LOCAL_SANDBOX", "FACTORY_LOCAL_SRT", "FACTORY_LOCAL_SRT_GIT", "FACTORY_LOCAL_SRT_HARNESS", "FACTORY_PLUGIN_ROOT", "FACTORY_PRIVATE_DIR", "FACTORY_USAGE_DIR", "FACTORY_STAGE_SANDBOX"];
+export const FACTORY_CHILD_KEYS = ["FACTORY_IN", "FACTORY_OUT", "FACTORY_ISSUE", "FACTORY_BRANCH", "FACTORY_GIT_DIR", "FACTORY_GIT_ID", "FACTORY_DB_WRAP", "FACTORY_DB_NAME", "FACTORY_DB_USER", "FACTORY_INSTALL_CHECK", "FACTORY_COPILOT_PROBE", "FACTORY_CLAUDE_PROBE", "FACTORY_PROBE_DECOY", "FACTORY_PROBE_MARKER", "FACTORY_PROBE_SCRIPT", "FACTORY_GATEWAY_SESSION", "FACTORY_RUN_TAG", "FACTORY_SHELL_SECRETS", "FACTORY_LFS_PIN", "FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "FACTORY_LOCAL_SANDBOX", "FACTORY_LOCAL_SRT", "FACTORY_LOCAL_SRT_GIT", "FACTORY_LOCAL_SRT_HARNESS", "FACTORY_PLUGIN_ROOT", "FACTORY_PRIVATE_DIR", "FACTORY_USAGE_DIR", "FACTORY_STAGE_SANDBOX"];
 
 /**
  * Env for a non-harness child (and the harness itself, before its own credential is added): the
@@ -496,7 +497,7 @@ const SERVICES_SAID = new Set();
  * entry point (docs/PLAN.md names this).
  */
 /** The probe's own rule texts, the only ones a Blocked comment repeats (a host is named by its kind, not by the probe). */
-const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line", "Copilot's logs are readable by commands", TOOLCHAIN_RULE, RELAY_RULE]);
+const RULES = new Set(["the decoy outside the sandbox is readable", "the credential stand-in is readable in a process environment", "the agent home is writable", "the agent temp directory is not writable", "the checkout's .git/config is writable", "no curl or node to check the network rule", "the credential stand-in is in the first process's command line", "the probe script is missing", "the probe's decoy is missing", "Copilot's network rules are visible to commands", "Copilot's temp directory is writable", "Factory's HOME for Copilot is writable", "the probe ended without its pass line", "Copilot's logs are readable by commands", "the stage's usage directory is writable", TOOLCHAIN_RULE, RELAY_RULE]);
 const ruleOf = (said) => (RULES.has(said) ? said : /^[a-z0-9.-]+, off the allow-list, is reachable$/.test(said) ? "a host off the allow-list is reachable" : "an unknown rule");
 export async function codexSandboxCheck(runner, env, { run = exec } = {}) {
   let last = null;
@@ -565,10 +566,83 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
 }
 
 /** The refusal's detail (for the log) when the probe's toolchain rule broke: the node and npm a command did not run. */
-const toolchainRefused = (t) => {
+const toolchainRefused = (t, who = "Copilot") => {
   const what = [t?.node, t?.npm, t?.pm].filter(Boolean);
-  return `Copilot's sandbox does not give commands the stage's toolchain: ${what.length ? `${what.join(", ")} not found or not run in a command` : TOOLCHAIN_RULE}`;
+  return `${who}'s sandbox does not give commands the stage's toolchain: ${what.length ? `${what.join(", ")} not found or not run in a command` : TOOLCHAIN_RULE}`;
 };
+
+/** Local mode's Claude Code probe launcher (scripts/claude-probe.mjs): the probe's model on the outer sandbox's own loopback. */
+export const CLAUDE_PROBE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "claude-probe.mjs");
+
+/**
+ * Claude Code's sandbox in local mode on Linux, before every start and in doctor --local, as Codex's and Copilot's are:
+ * launched as the run is (`runEnv`, its outer sandbox `outer` where there is one, its flags and settings from
+ * harnessCommand, with the marker added to the variables its sandbox keeps from commands), with a throwaway
+ * CLAUDE_CONFIG_DIR in the usage directory's `harness` folder and none of the run's credentials (a stand-in key), against
+ * the loopback model (lib/claude-local-probe.mjs). The command it runs proves the stage's toolchain (node, npm, the
+ * repository's package manager: local.toolchain) and runs CONFINEMENT_PROBE beside a decoy: no environment it can read
+ * shows the marker Claude Code and the decoy hold, nothing it makes in the home or the usage directory is there
+ * afterwards, the clone's .git/config refuses a write, the stage's temp directory takes one, and a host off the
+ * allow-list is refused; a pass is exit 0 with the probe's pass line. A broken rule Blocks with its rule; a probe that
+ * left no result is tried once more, then Blocks. `drop`: more names to keep out (the worker's shell secrets).
+ */
+export async function claudeLocalCheck(local, outer, runEnv, { drop = [], run = exec, home = homedir(), script = CLAUDE_PROBE_SCRIPT } = {}) {
+  const env = { ...runEnv };
+  for (const k of [...SHELL_SECRET_KEYS, ...drop, "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]) delete env[k];
+  const usage = env.FACTORY_USAGE_DIR;
+  const tmp = env.TMPDIR;
+  const config = join(usage, "harness", "claude-probe");
+  const result = join(tmp, CLAUDE_PROBE_RESULT);
+  const persist = [home, usage];
+  // The run's own flags and settings, with the marker kept from commands as the model's credential is.
+  const c = harnessCommand({ harness: "claude", prompt: "", local });
+  const at = c.args.indexOf("--settings");
+  const settings = JSON.parse(c.args[at + 1]);
+  settings.sandbox.credentials.envVars.push({ name: PROBE_MARKER, mode: "deny" });
+  const args = c.args.map((a, i) => (i === at + 1 ? JSON.stringify(settings) : a));
+  let last = null;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      rmSync(config, { recursive: true, force: true });
+      mkdirSync(config, { recursive: true, mode: 0o700 });
+      for (const f of [result, ...persist.map((d) => join(d, PROBE_PERSIST))]) rmSync(f, { force: true });
+      const marker = probeMarker();
+      const driver = claudeProbeDriver({ gitConfig: join(local.clone, ".git", "config"), host: offListHost(local.domains), marker, result, tmp, persist, toolchain: local.toolchain || null });
+      const probeEnvs = { ...env, ...c.env, CLAUDE_CONFIG_DIR: config, FACTORY_CLAUDE_PROBE: driver, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, [PROBE_MARKER]: marker };
+      const launch = [process.execPath, script, "/bin/sh", "-c", CLAUDE_DECOY_LAUNCH, "sh", ...args];
+      const [cmd, argv] = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${tmp}`, ...launch]] : [launch[0], launch.slice(1)];
+      const r = await run(cmd, argv, { cwd: local.clone, env: probeEnvs, input: "Run the one command you are given.", timeoutMs: 180_000, fileStdio: true }).catch((err) => ({ code: null, stdout: "", stderr: err.message }));
+      let text = "";
+      try {
+        text = readFileSync(result, "utf8");
+      } catch {
+        // no result: the probe did not run
+      }
+      rmSync(result, { force: true });
+      const planted = persist.map((d) => join(d, PROBE_PERSIST)).filter((f) => !!lstatSync(f, { throwIfNoEntry: false }));
+      for (const f of planted) rmSync(f, { force: true });
+      if (planted.length) throw new GitRefusal("sandbox", `Claude Code's sandbox does not confine: ${planted.includes(join(home, PROBE_PERSIST)) ? "the agent home is writable" : "the stage's usage directory is writable"}`, { rule: planted.includes(join(home, PROBE_PERSIST)) ? "the agent home is writable" : "the stage's usage directory is writable", harness: "claude", local: true });
+      const [first = "", said = ""] = text.split("\n");
+      const code = /^\d+$/.test(first) ? Number(first) : null;
+      if (code === 4) throw new GitRefusal("sandbox", said === TOOLCHAIN_RULE ? toolchainRefused(local.toolchain, "Claude Code") : `Claude Code's sandbox does not confine: ${said.slice(0, 200)}`, { rule: ruleOf(said), harness: "claude", local: true });
+      // A pass is exit 0 with the probe's own last line, never exit 0 alone.
+      if (code === 0 && said === PROBE_PASS) return;
+      if (code === 0) throw new GitRefusal("sandbox", "Claude Code's sandbox probe ended without its pass line", { rule: "the probe ended without its pass line", harness: "claude", local: true });
+      let answered = "";
+      try {
+        answered = String(JSON.parse(String(r.stderr).trim().split("\n").at(-1)).said || "");
+      } catch {
+        // the launcher did not finish
+      }
+      last = { ...r, said: answered.replace(/\s+/g, " ").trim() };
+      if (attempt === 1) log(`Claude Code's sandbox probe did not run (${r.timedOut ? "timed out" : code === null ? `no result, exit ${r.code}` : `exit ${code}`}); trying once more`);
+    }
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+  const why = last.code === 5 ? "the probe's decoy did not come up" : last.said ? `its command did not run: ${last.said.slice(0, 400)}` : last.timedOut ? "timed out" : `no result, exit ${last.code}: ${String(last.stderr || "").trim().split("\n").at(-1)?.slice(0, 300) || ""}`;
+  throw new GitRefusal("sandbox", `Claude Code's sandbox could not start here: ${why}`, { harness: "claude", local: true });
+}
 
 /**
  * Copilot's flags in local mode: its sandbox, tools and URLs allowed, no update of itself, no logs (Copilot binds its logs
@@ -736,6 +810,8 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // Linux, locally: Copilot starts its sandbox's bubblewrap through Factory's, which drops the environment Copilot gives it
   // (the token included) so the sandbox's pid 1 holds none (local.mjs stageEnv, copilot-runner.mjs bwrapShim); and its
   // sandbox is probed for that and the other rules before every start.
+  // Linux, locally: Claude Code's sandbox probed before every start too (claudeLocalCheck), as the run is launched.
+  if (harness === "claude" && sandboxed && process.platform === "linux") await claudeLocalCheck(sandboxed, outer, childEnv, { drop: shellSecrets });
   if (harness === "copilot" && outer && sandboxed) {
     if (sandboxed.bwrapBin) childEnv.PATH = `${sandboxed.bwrapBin}:${childEnv.PATH || ""}`;
     await copilotLocalCheck(sandboxed, outer, childEnv, { drop: shellSecrets, relay });

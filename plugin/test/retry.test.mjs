@@ -186,6 +186,26 @@ test("rest: jitter spreads Factory's backoff both ways and GitHub's ask only upw
   );
 });
 
+test("rest: a rate limit that names no wait waits at least GitHub's minute; jitter never pushes a wait that fits out of the bound", async () => {
+  await withFetch(
+    (req, n) => (n === 1 ? json({ message: "You have exceeded a secondary rate limit" }, 403) : json({ ok: true })),
+    async ({ waits }) => {
+      RETRY.random = () => 0;
+      assert.deepEqual(await rest("repos/o/r"), { ok: true });
+      assert.ok(waits[0] >= 60_000, `waited ${waits[0]} ms`);
+    },
+  );
+  // Retry-After 85 s inside the 90 s bound: the spread (up to 110.5 s) is cut back to the bound, never skipped.
+  await withFetch(
+    (req, n) => (n === 1 ? json({ message: "x" }, 429, { "retry-after": "85" }) : json({ ok: true })),
+    async ({ waits }) => {
+      RETRY.random = () => 1;
+      assert.deepEqual(await rest("repos/o/r"), { ok: true });
+      assert.deepEqual(waits, [90_000]);
+    },
+  );
+});
+
 test("rest: a wait past the caller's deadline or the bound is not taken; the error goes to the caller at once", async () => {
   await withFetch(
     () => json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(1_000_000 / 1000) + 3600) }),

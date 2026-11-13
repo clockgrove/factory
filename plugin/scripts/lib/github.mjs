@@ -192,8 +192,12 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
       e = err;
     }
     if (n >= RETRY.tries || !transientError(e) || (noRateWait && e.rateLimited) || (again.possible && !again.possible(e))) throw e;
-    const wait = jitter(e.waitMs ?? (e.rateLimited && e.status > 0 ? 60_000 : RETRY.baseMs * 2 ** (n - 1)), e.waitMs !== undefined);
-    if (RETRY.now() + wait > end) throw e;
+    // GitHub's ask: its header, or the minute it documents for a rate limit that names none. Spread only upward.
+    const asked = e.waitMs !== undefined || (e.rateLimited && e.status > 0);
+    const base = e.waitMs ?? (asked ? 60_000 : RETRY.baseMs * 2 ** (n - 1));
+    // The bound is held against the unspread wait: jitter never costs a retry, it is cut back to what is left instead.
+    if (RETRY.now() + base > end) throw e;
+    const wait = Math.min(jitter(base, asked), Math.max(base, end - RETRY.now()));
     const cause = e.transport ? `network${e.code ? ` (${e.code})` : ""}` : e.rateLimited ? `rate limited${e.status ? ` (HTTP ${e.status})` : ""}` : `HTTP ${e.status}`;
     log(`GitHub ${what}: ${cause}; try ${n + 1} of ${RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
     await RETRY.sleep(wait);

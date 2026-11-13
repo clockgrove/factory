@@ -123,15 +123,26 @@ export function workflowDriftLines(working, committed) {
   return drift.length ? [`.github/workflows/factory.yml here differs from origin/${committed.branch} in ${drift.join(", ")}: local mode uses origin/${committed.branch}'s; commit the change to ${committed.branch} to use it`] : [];
 }
 
-/** A workflow env block (local.mjs workflowEnv) split into the settings Factory takes and the names it drops. */
+/**
+ * Settings another route reads from the workflow's env block and setup writes there itself (plugin/workflow-template.yml):
+ * local mode leaves them out of every stage, as any name it does not take, but does not warn about them (#179).
+ */
+export const OTHER_ROUTE_SETTINGS = new Set(["FACTORY_SANDBOX_VCPUS"]);
+
+/**
+ * A workflow env block (local.mjs workflowEnv) split into the settings Factory takes, the names it drops and warns
+ * about, and another route's own settings it drops quietly.
+ */
 export function workflowSettings(wf = {}) {
   const kept = {};
   const dropped = [];
+  const otherRoute = [];
   for (const [k, v] of Object.entries(wf)) {
     if (WORKFLOW_SETTINGS.has(k)) kept[k] = v;
+    else if (OTHER_ROUTE_SETTINGS.has(k)) otherRoute.push(k);
     else dropped.push(k);
   }
-  return { kept, dropped };
+  return { kept, dropped, otherRoute };
 }
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];

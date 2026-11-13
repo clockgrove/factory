@@ -320,7 +320,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const plugin = pluginDir ? ["--plugin-dir", join(pluginDir, "plugin"), "--agents", join(pluginDir, "agents.json")] : [];
       // The package caches are writable to shell commands only, never added directories, whose CLAUDE.md would load.
       const caches = local?.cacheDirs || [];
-      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, secretEnv: hidden }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
+      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, readable: local.readable || [], secretEnv: hidden }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
@@ -329,7 +329,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
-      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}) } };
+      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}), ...(local?.claudeEnv ? { CLAUDE_ENV_FILE: local.claudeEnv } : {}) } };
     }
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
@@ -565,7 +565,10 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
 }
 
 /** The refusal's detail (for the log) when the probe's toolchain rule broke: the node and npm a command did not run. */
-const toolchainRefused = (t) => `Copilot's sandbox does not give commands the stage's toolchain: ${t?.node ? `${t.node}${t.npm ? ` and ${t.npm}` : ""} not found or not run in a command` : TOOLCHAIN_RULE}`;
+const toolchainRefused = (t) => {
+  const what = [t?.node, t?.npm, t?.pm].filter(Boolean);
+  return `Copilot's sandbox does not give commands the stage's toolchain: ${what.length ? `${what.join(", ")} not found or not run in a command` : TOOLCHAIN_RULE}`;
+};
 
 /**
  * Copilot's flags in local mode: its sandbox, tools and URLs allowed, no update of itself, no logs (Copilot binds its logs

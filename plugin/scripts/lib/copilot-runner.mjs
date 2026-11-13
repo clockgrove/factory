@@ -28,7 +28,7 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { accessSync, chmodSync, constants, existsSync, lstatSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
@@ -344,6 +344,103 @@ export function localToolchain({ path = "", off = [], home = homedir(), execPath
   const safe = !bound && prefix !== "/" && !within(home, prefix) && !fenced.some((x) => within(prefix, x) || within(x, prefix));
   return { bin, toolchain, dirs: safe ? [prefix] : [], denied: safe && existsSync(join(prefix, "etc")) ? [join(prefix, "etc")] : [] };
 }
+
+/**
+ * The package manager a repository runs its scripts with, other than npm (which comes with node): `packageManager` in
+ * its package.json (pnpm@..., yarn@...), else its lockfile (pnpm-lock.yaml, yarn.lock). Null for npm or no package.json.
+ */
+export function packageManagerOf(clone) {
+  let pm = "";
+  try {
+    pm = String(JSON.parse(readFileSync(join(clone, "package.json"), "utf8")).packageManager || "");
+  } catch {
+    return null;
+  }
+  const named = /^(pnpm|yarn)@/.exec(pm)?.[1];
+  if (named) return named;
+  if (pm) return null;
+  return existsSync(join(clone, "pnpm-lock.yaml")) ? "pnpm" : existsSync(join(clone, "yarn.lock")) ? "yarn" : null;
+}
+
+/** The npm packages a package manager's command can come from (corepack's shim, the package itself, its executables). */
+const PM_PACKAGES = { pnpm: ["corepack", "pnpm", "@pnpm/exe"], yarn: ["corepack", "yarn", "@yarnpkg/cli-dist"] };
+
+/**
+ * Where a version manager keeps the package manager its shim runs, relative to its data directory (the shim directory's
+ * parent: mise's ~/.local/share/mise, asdf's ~/.asdf, Volta's ~/.volta), for a version: mise's and asdf's installs (mise's
+ * npm backend under npm-<name>), Volta's tool image.
+ */
+const MANAGED = (name, v) => [`installs/${name}/${v}/bin/${name}`, `installs/${name}/${v}/${name}`, `installs/npm-${name}/${v}/bin/${name}`, `tools/image/${name}/${v}/bin/${name}`];
+
+/**
+ * Local mode on Linux: the repository's package manager (packageManagerOf) for every harness's commands (#137). Claude
+ * Code's and Copilot's sandboxes show nothing of the home but what their settings name, and corepack, pnpm's standalone
+ * install and a version manager all keep it there. The first `name` on the stage's PATH by its real path. A version
+ * manager's shim (whose real path is the manager) is resolved by the manager's install layout (MANAGED) and the version
+ * `packageManager` pins, never by running anything: a version manager reads the repository's own configuration
+ * (.mise.toml, .tool-versions, package.json), which can run commands, so Factory runs no tool with the clone in reach.
+ * Returns {name, real, dirs}, or {name, real: null, dirs: []} when none is found that way (the probe then Blocks), or
+ * null with no such package manager:
+ * - `real`: what the stage's `toolbin/<name>` links to, first on each command's PATH (local.mjs stageEnv);
+ * - `dirs`, read-only in commands' reach: a manager's install directory of that version, else the npm package it belongs
+ *   to (corepack, pnpm), else the executable alone; none where that is `/`, the home or above it, in or above a
+ *   credential store or `off` (what a sandbox may write).
+ */
+export function localPackageManager({ clone, path = "", off = [], home = homedir() } = {}) {
+  const name = clone ? packageManagerOf(clone) : null;
+  if (!name) return null;
+  const real = (f) => {
+    try {
+      return realpathSync(f);
+    } catch {
+      return null;
+    }
+  };
+  const exe = (f) => {
+    try {
+      accessSync(f, constants.X_OK);
+      return statSync(f).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const first = absolutePath(path)
+    .split(":")
+    .map((d) => join(d, name))
+    .find(exe);
+  let target = first ? real(first) : null;
+  let managedDir = null;
+  // A version manager's shim: its real path is the manager. Its install of the pinned version, by the manager's layout.
+  if (target && !/^(pnpm|yarn)(\.c?js)?$/.test(basename(target)) && !/\.c?js$/.test(target)) {
+    let version = "";
+    try {
+      version = /^(?:pnpm|yarn)@(\d+\.\d+\.\d+[^+\s]*)/.exec(String(JSON.parse(readFileSync(join(clone, "package.json"), "utf8")).packageManager || ""))?.[1] || "";
+    } catch {
+      // no version pinned: none found
+    }
+    const data = dirname(dirname(first));
+    const found = version && !version.includes("/") ? MANAGED(name, version).find((p) => exe(join(data, p))) : null;
+    target = found ? real(join(data, found)) : null;
+    // That version's own install directory (its executable's files beside it, as pnpm's dist/), nothing else of the manager's.
+    managedDir = found ? real(join(data, found.split("/").slice(0, found.startsWith("tools/") ? 4 : 3).join("/"))) : null;
+  }
+  if (!target) return { name, real: null, dirs: [] };
+  // The npm package the command belongs to, by its package.json, up to the home.
+  let root = null;
+  for (let d = dirname(target); d !== "/" && d !== dirname(d) && !within(home, d); d = dirname(d)) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(d, "package.json"), "utf8"));
+      if (PM_PACKAGES[name].includes(pkg.name)) root = d;
+      break;
+    } catch {
+      // no package.json here: one level up
+    }
+  }
+  const dir = managedDir && within(target, managedDir) ? managedDir : root || target;
+  const fenced = [...off, ...credentialPaths(home)].filter((x) => x && x.startsWith("/"));
+  const safe = dir !== "/" && !within(home, dir) && !fenced.some((x) => within(dir, x) || within(x, dir));
+  return { name, real: target, dirs: safe ? [dir] : [] };
+}
 export const COPILOT_TMP_LAUNCH = 'if [ -L "$1" ] || { [ -e "$1" ] && ! [ -d "$1" -a -O "$1" ]; }; then echo "factory: $1 is not a directory of its own" >&2; exit 126; fi; [ -d "$1" ] || mkdir -m 700 -- "$1" || exit 126; t=$1; shift; exec /usr/bin/env TMPDIR="$t" "$@"';
 
 /** Copilot's settings and seeds for a fresh COPILOT_HOME: nothing trusted, no MCP servers, the sandbox's policy. */
@@ -398,7 +495,8 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
  * harness.mjs copilotLocalCheck); the commands' own $TMPDIR must not hold its rules either. `tmp`: the temp directory
  * commands must have, for the result and the temp rule, by its path (local mode: where $TMPDIR is not it, as without
  * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
- * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105); null: no rule.
+ * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105), and locally
+ * the repository's package manager (`pm`, #137), which must run; null: no rule.
  */
 export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null, relay = null }) => {
   const T = tmp ? sq(tmp) : '"$TMPDIR"';
@@ -416,6 +514,8 @@ export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", 
     `if tr '\\0' '\\n' < /proc/1/cmdline 2>/dev/null | grep -qxF -e ${sq(marker)} -e ${sq(`${PROBE_MARKER}=${marker}`)}; then out 4 "the credential stand-in is in the first process's command line"; fi`,
     // The stage's toolchain, as a command finds it: the same node first on its PATH, and it and npm run.
     ...(toolchain?.node ? [`if [ "$(command -v node)" != ${sq(toolchain.node)} ] || ! node --version >/dev/null 2>&1${toolchain.npm ? " || ! npm --version >/dev/null 2>&1" : ""}; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
+    // The repository's package manager (#137: pnpm or yarn, packageManagerOf), by its name on the command's PATH.
+    ...(toolchain?.pm && /^(pnpm|yarn)$/.test(toolchain.pm) ? [`if ! ${toolchain.pm} --version >/dev/null 2>&1; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
     // The gateway relay (gateway-relay.mjs), when the run relays a key: this relay's ping through the forwarder.
     ...(relay ? [`got=$( (curl -sS --max-time 5 ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)} || node -e 'fetch(process.argv[1]).then((r) => r.text()).then((t) => process.stdout.write(t), () => {})' ${sq(`http://127.0.0.1:${relay.port}${RELAY_PING}`)}) 2>/dev/null)`, `case "$got" in *${sq(`factory-relay ${relay.probeId}`)}*) ;; *) out 4 ${sq(RELAY_RULE)} ;; esac`] : []),
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),

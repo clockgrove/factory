@@ -413,3 +413,66 @@ test("local Copilot (#111): the stage's node, from a version manager in the home
   await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving(`4\n${TOOLCHAIN_RULE}\n`), home }), (e) => e.rule === TOOLCHAIN_RULE && e.local && e.message.includes(node));
   assert.match(gitRefusalReason("sandbox", 1, { rule: TOOLCHAIN_RULE, harness: "copilot", local: true }), /stage's toolchain.*The stage log on the local machine/);
 });
+
+test("local mode (#137): the repository's package manager, from corepack, its own install or a version manager, read-only for Claude Code's and Copilot's commands; the probe proves it runs", async () => {
+  const { localPackageManager, packageManagerOf } = await import("../scripts/lib/copilot-runner.mjs");
+  const { claudeLocalSettings } = await import("../scripts/lib/local.mjs");
+  const root = mkdtempSync(join(tmpdir(), "cpm-"));
+  const repo = (files) => {
+    const d = mkdtempSync(join(root, "r-"));
+    for (const [f, t] of Object.entries(files)) writeFileSync(join(d, f), t);
+    return d;
+  };
+  assert.equal(packageManagerOf(repo({ "package.json": '{"packageManager":"pnpm@12.18.0"}' })), "pnpm");
+  assert.equal(packageManagerOf(repo({ "package.json": '{"packageManager":"yarn@4.9.0"}', "pnpm-lock.yaml": "" })), "yarn", "packageManager wins over a lockfile");
+  assert.equal(packageManagerOf(repo({ "package.json": "{}", "pnpm-lock.yaml": "" })), "pnpm");
+  assert.equal(packageManagerOf(repo({ "package.json": "{}", "yarn.lock": "" })), "yarn");
+  assert.equal(packageManagerOf(repo({ "package.json": '{"packageManager":"npm@11.0.0"}', "pnpm-lock.yaml": "" })), null, "npm comes with node");
+  assert.equal(packageManagerOf(repo({})), null);
+  // corepack's shim in a node install under the home, linked from ~/.local/bin as `corepack enable` does.
+  const home = join(root, "h");
+  const corepack = join(home, ".local", "node-v24", "lib", "node_modules", "corepack");
+  for (const d of [join(corepack, "dist"), join(home, ".local", "bin"), join(home, "shims"), join(home, ".local", "share", "pnpm")]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(corepack, "package.json"), '{"name":"corepack"}');
+  writeFileSync(join(corepack, "dist", "pnpm.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
+  symlinkSync(join(corepack, "dist", "pnpm.js"), join(home, ".local", "bin", "pnpm"));
+  const clone = repo({ "package.json": '{"packageManager":"pnpm@12.18.0"}' });
+  assert.deepEqual(localPackageManager({ clone, path: `${join(home, ".local", "bin")}:/usr/bin`, off: [root + "/r-x"], home }), { name: "pnpm", real: join(corepack, "dist", "pnpm.js"), dirs: [corepack] }, "corepack's package, not the rest of the home");
+  // A version manager's shim (mise here) is resolved by its install layout and the pinned version, never by running it:
+  // the manager would read the clone's own configuration, which can run commands on the host.
+  const data = join(home, ".local", "share", "mise");
+  const marker = join(root, "planted-ran");
+  for (const d of [join(data, "shims"), join(data, "installs", "pnpm", "12.18.0", "bin")]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(home, "mise"), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+  symlinkSync(join(home, "mise"), join(data, "shims", "pnpm"));
+  const managed = join(data, "installs", "pnpm", "12.18.0", "bin", "pnpm");
+  writeFileSync(managed, "#!/bin/sh\n", { mode: 0o755 });
+  writeFileSync(join(clone, ".mise.toml"), `[env]\nPLANTED = "{{exec(command='touch ${marker}')}}"\n[hooks]\nenter = "touch ${marker}"\n`);
+  writeFileSync(join(clone, ".tool-versions"), "pnpm 12.18.0\n");
+  assert.deepEqual(localPackageManager({ clone, path: `${join(data, "shims")}:/usr/bin`, home }), { name: "pnpm", real: managed, dirs: [join(data, "installs", "pnpm", "12.18.0")] }, "that version's install directory, nothing else of the manager's");
+  assert.ok(!existsSync(marker), "nothing ran: neither the manager nor the clone's configuration");
+  assert.deepEqual(localPackageManager({ clone: repo({ "package.json": "{}", "pnpm-lock.yaml": "" }), path: join(data, "shims"), home }), { name: "pnpm", real: null, dirs: [] }, "a shim with no pinned version: none found, the probe Blocks");
+  assert.deepEqual(localPackageManager({ clone: repo({ "package.json": '{"packageManager":"pnpm@9.9.9"}' }), path: join(data, "shims"), home }).real, null, "a pinned version the manager has not installed: none");
+  assert.ok(!existsSync(marker));
+  assert.deepEqual(localPackageManager({ clone, path: `${join(home, ".local", "bin")}`, off: [join(home, ".local")], home }).dirs, [], "never in or above what a sandbox may write");
+  assert.deepEqual(localPackageManager({ clone, path: "/nowhere", home }), { name: "pnpm", real: null, dirs: [] }, "none found: the probe Blocks");
+  assert.equal(localPackageManager({ clone: repo({ "package.json": "{}" }), path: join(home, ".local", "bin"), home }), null);
+  // Claude Code reads them by its settings; Copilot's probe proves the package manager runs.
+  assert.deepEqual(claudeLocalSettings({ clone: "/c", home: "/h", readable: [corepack] }).sandbox.filesystem.allowRead, [corepack]);
+  assert.ok(!("allowRead" in claudeLocalSettings({ clone: "/c", home: "/h" }).sandbox.filesystem));
+  const { args, env } = harnessCommand({ harness: "claude", prompt: "p", local: { clone: "/c", addDirs: [], domains: LOCAL_DOMAINS, readOnly: ["/u"], readable: [corepack], claudeEnv: "/u/claude-env.sh" } });
+  assert.equal(env.CLAUDE_ENV_FILE, "/u/claude-env.sh", "its commands' PATH led by Factory's toolbin");
+  assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.filesystem.allowRead, [corepack]);
+  const [tmp, bin] = [join(root, "t"), join(root, "pmbin")];
+  mkdirSync(tmp);
+  mkdirSync(bin);
+  const drive = (ok) => {
+    writeFileSync(join(bin, "pnpm"), `#!/bin/sh\nexit ${ok ? 0 : 1}\n`, { mode: 0o755 });
+    const driver = probeDriver({ gitConfig: "", host: "", marker: "m8", toolchain: { pm: "pnpm" }, copilotTmp: join(root, "no-copilot-tmp") });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
+    return readFileSync(join(tmp, PROBE_RESULT), "utf8");
+  };
+  assert.equal(drive(false), `4\n${TOOLCHAIN_RULE}\n`);
+  assert.equal(drive(true), "4\nthe credential stand-in is readable in a process environment\n", "pnpm runs: on to the confinement rules (unconfined here)");
+  assert.ok(!probeDriver({ gitConfig: "", host: "", marker: "m", toolchain: { pm: "x; rm -rf /" } }).includes("rm -rf"), "only pnpm or yarn by name");
+});

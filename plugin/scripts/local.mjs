@@ -17,7 +17,7 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, hostname, platform, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,7 +38,7 @@ import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
-import { bwrapShim, localToolchain } from "./lib/copilot-runner.mjs";
+import { bwrapShim, localPackageManager, localToolchain } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
@@ -417,10 +417,24 @@ export class Local {
     }
     const base = this.baseEnv();
     const addDirs = [...caches, stageTmp];
-    // Linux: the stage's node for Copilot's commands, read-only, which its sandbox binds by policy only (#111): never in
-    // or above what a sandbox may write (this repository's Objectives, the stages' temp directories) or the home.
-    const toolchain = this.harness === "copilot" && platform() === "linux" ? localToolchain({ path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)] }) : null;
-    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, toolchain);
+    // Linux: the stage's node (#111) and the repository's package manager (#137) for Claude Code's and Copilot's commands,
+    // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
+    // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
+    // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
+    const shown = ["claude", "copilot"].includes(this.harness) && platform() === "linux";
+    const fenced = [this.dev, join(this.dev, ".factory"), dirname(stageTmp)];
+    const toolchain = shown ? localToolchain({ path: base.PATH, off: fenced }) : null;
+    const pm = shown ? localPackageManager({ clone, path: base.PATH, off: fenced }) : null;
+    // The package manager's command, first on each command's PATH, in a directory no sandbox may write: what the stage's
+    // PATH resolves it to (corepack's shim, its standalone install, a version manager's choice for the clone).
+    const toolBin = join(usageDir, "toolbin");
+    if (pm?.real) {
+      mkdirSync(toolBin, { recursive: true });
+      symlinkSync(pm.real, join(toolBin, pm.name));
+    }
+    const lead = [...(toolchain?.dirs.length ? [toolchain.bin] : []), ...(pm?.real ? [toolBin] : [])];
+    const tools = { readable: [...(toolchain?.dirs || []), ...(pm?.dirs || [])], denied: toolchain?.denied || [], probe: toolchain || pm ? { ...(toolchain?.toolchain || {}), ...(pm ? { pm: pm.name } : {}) } : null };
+    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
     const outerFile = join(sandboxDir, `srt-harness-${basename(usageDir)}.json`);
@@ -468,8 +482,12 @@ export class Local {
       mkdirSync(bwrapBin, { recursive: true });
       // Each command's PATH led by the stage's node where it is bound (after Factory's git): a version manager's shim
       // before it on PATH is outside the sandbox.
-      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp, toolchain?.dirs.length ? `${gitBin}:${toolchain.bin}` : null, localCopilotRelayShim(localRelayDir(usageDir))), { mode: 0o755 });
+      writeFileSync(join(bwrapBin, "bwrap"), bwrapShim(realpathSync(whichSync("bwrap")), null, stageTmp, lead.length ? [gitBin, ...lead].join(":") : null, localCopilotRelayShim(localRelayDir(usageDir))), { mode: 0o755 });
     }
+    // Claude Code sources this before each command, inside its sandbox (CLAUDE_ENV_FILE): the same PATH lead. In the
+    // usage directory, which no sandbox may write.
+    const claudeEnv = this.harness === "claude" && lead.length ? join(usageDir, "claude-env.sh") : null;
+    if (claudeEnv) writeFileSync(claudeEnv, `export PATH=${[gitBin, ...lead].map((d) => `'${d.replace(/'/g, "'\\''")}'`).join(":")}:"$PATH"\n`, { mode: 0o644 });
     return {
       ...base,
       FACTORY_CREDENTIAL: "login",
@@ -507,7 +525,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir), ...(toolchain ? { toolchain: toolchain.toolchain } : {}) } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir), ...(tools.probe ? { toolchain: tools.probe } : {}) } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
@@ -520,7 +538,7 @@ export class Local {
   }
 
   /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
-  harnessEnv(issue, addDirs, clone, usageDir, toolchain = null) {
+  harnessEnv(issue, addDirs, clone, usageDir, tools = null) {
     if (this.harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
@@ -528,9 +546,9 @@ export class Local {
     mkdirSync(home, { recursive: true });
     // Its policy, config and MCP servers, as Factory's own: whatever an earlier run left there (a link included) is replaced.
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
-    // The stage's node (localToolchain) read-only, its global npmrc denied.
-    const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(toolchain?.denied || [])] : [];
-    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir], readable: toolchain?.dirs || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
+    // The stage's node and package manager (stageEnv) read-only, its global npmrc denied.
+    const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(tools?.denied || [])] : [];
+    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir], readable: tools?.readable || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {
       // A directory an earlier run left under the name too.
       rmSync(join(home, f), { force: true, recursive: true });

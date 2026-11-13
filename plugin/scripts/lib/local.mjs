@@ -645,7 +645,7 @@ export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
  * directory and `addDirs` (acceptEdits). Local mode, the Actions runner and the cloud sandbox VM
  * use it alike (claudeRunnerSettings).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV } = {}) {
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV } = {}) {
   // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
@@ -659,7 +659,9 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       network: { allowedDomains: [...new Set(domains)] },
       // /proc: no sandboxed command reads another process's environment or command line.
       // writable: the package caches, for shell commands only (no file tool, and no CLAUDE.md read from them).
-      filesystem: { denyRead: [...secrets, "/proc"], ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
+      // readable: the stage's node and package manager, read-only (local.mjs stageEnv, #137): its sandbox shows nothing of
+      // the home but these, the working and added directories.
+      filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
       // The model's credential (and any other the harness holds) is not in a command's environment.
       credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
     },
@@ -1367,7 +1369,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, claudeEnv: s.claudeEnv || null, readable: s.readable || [], addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
 }
 
 /**

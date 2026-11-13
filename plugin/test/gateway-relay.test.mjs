@@ -757,7 +757,7 @@ test("image edits (#129): the recorded multipart and JSON requests pass byte for
   assert.equal(routeOf("GET", "/v1/credits"), null, "/v1/credits stays refused");
 });
 
-test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), refused before waiting when declared; a call waiting its turn keeps no body deadline, a stalled body is dropped and frees the turn", async () => {
+test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), refused before waiting when declared, and once a body sent chunked passes its cap; a call waiting its turn keeps no body deadline, a stalled body is dropped and frees the turn", async () => {
   const EDITS = "/v1/images/edits";
   const F = JSON.parse(readFileSync(new URL("./fixtures/image-edits-requests.json", import.meta.url), "utf8"));
   const m = F.requests.fetchMultipart;
@@ -765,15 +765,25 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
   // A multipart edit with one large reference PNG.
   const big = (bytes) => Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nopenai/gpt-image-2\r\n--${boundary}\r\nContent-Disposition: form-data; name="image[]"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n`), PNG, Buffer.alloc(bytes), Buffer.from(`\r\n--${boundary}--\r\n`)]);
   const priced = { body: { created: 1, data: [{ b64_json: "aGk=" }], providerMetadata: { gateway: { cost: "0.01", generationId: "gen_EDITSLOW00001" } } } };
-  const gw = await fakeGateway({ [EDITS]: () => new Promise((r) => setTimeout(() => r(priced), 600)), "/v1/generation": { body: { data: { total_cost: 0.01 } } } });
+  // The gateway answers an edit after `answerMs`.
+  let answerMs = 0;
+  const gw = await fakeGateway({ [EDITS]: () => new Promise((r) => setTimeout(() => r(priced), answerMs)), "/v1/generation": { body: { data: { total_cost: 0.01 } } } });
   const dir = mkdtempSync(join(tmpdir(), "relay-edits-big-"));
-  const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5], bodyTimeoutMs: 300 });
-  const auth = { authorization: `Bearer ${relay.token}`, "content-type": m.headers["content-type"] };
+  const opened = [];
+  const open = async (sub, extra = {}) => {
+    const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5], ...extra });
+    opened.push(r);
+    r.beginPass(100);
+    return r;
+  };
   try {
-    relay.beginPass(100);
+    // The production limits: 128 MB, and the body deadline of 5 minutes.
+    const real = await open("real");
+    const auth = { authorization: `Bearer ${real.token}`, "content-type": m.headers["content-type"] };
+    assert.equal(EDITS_MAX_BYTES, 128 * 1024 * 1024);
     // Declared over the cap: 413 at once, nothing read or sent.
     const declared = await new Promise((resolve, reject) => {
-      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": EDITS_MAX_BYTES + 1 } }, (res) => {
+      const req = http.request({ socketPath: real.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": EDITS_MAX_BYTES + 1 } }, (res) => {
         resolve(res.statusCode);
         req.destroy();
       });
@@ -782,29 +792,41 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
       setTimeout(() => reject(new Error("no answer before the body")), 2000).unref();
     });
     assert.equal(declared, 413);
-    // Sent chunked, with no length: refused once it passes the cap.
-    assert.equal((await send(relay.socketPath, { path: EDITS, headers: { ...auth, "transfer-encoding": "chunked" }, body: big(EDITS_MAX_BYTES) })).status, 413);
-    assert.equal(gw.seen.length, 0, "neither reached the gateway");
+    assert.equal(gw.seen.length, 0, "nothing reached the gateway");
     // A real turnaround's size (four base64 photo references, 38.5 MiB) passes whole.
     const turnaround = big(Math.ceil(38.5 * 1024 * 1024));
-    assert.equal((await send(relay.socketPath, { path: EDITS, headers: auth, body: turnaround })).status, 200);
+    assert.equal((await send(real.socketPath, { path: EDITS, headers: auth, body: turnaround })).status, 200);
     assert.ok(gw.seen.at(-1).raw.equals(turnaround), "the turnaround-sized body arrived whole");
+    assert.deepEqual([(await real.endPass()).calls], [1]);
+
+    // The same limits, small (a 64 KiB cap, a 300 ms body deadline), so no step depends on how fast the machine streams
+    // a large body.
+    const CAP = 64 * 1024;
+    const small = await open("small", { editsMaxBytes: CAP, bodyTimeoutMs: 300 });
+    const sauth = { authorization: `Bearer ${small.token}`, "content-type": m.headers["content-type"] };
+    const sent = gw.seen.length;
+    // Sent chunked, with no length: refused once it passes the cap; declared over it, refused at once.
+    assert.equal((await send(small.socketPath, { path: EDITS, headers: { ...sauth, "transfer-encoding": "chunked" }, body: big(CAP) })).status, 413);
+    assert.equal((await send(small.socketPath, { path: EDITS, headers: sauth, body: big(CAP) })).status, 413);
+    assert.equal(gw.seen.length, sent, "neither reached the gateway");
     // Two edits at once under the cap: the second waits 600 ms behind the first, past its 300 ms body deadline, and passes.
-    const [a, b] = await Promise.all([send(relay.socketPath, { path: EDITS, headers: auth, body: big(4 * 1024 * 1024) }), send(relay.socketPath, { path: EDITS, headers: auth, body: big(8 * 1024 * 1024) })]);
+    answerMs = 600;
+    const [a, b] = await Promise.all([send(small.socketPath, { path: EDITS, headers: sauth, body: big(4 * 1024) }), send(small.socketPath, { path: EDITS, headers: sauth, body: big(CAP / 2) })]);
     assert.deepEqual([a.status, b.status], [200, 200], b.text);
-    assert.ok(gw.seen.at(-1).raw.equals(big(8 * 1024 * 1024)), "the large body arrived whole");
+    assert.ok(gw.seen.slice(-2).some((x) => x.raw.equals(big(CAP / 2))), "the larger body arrived whole");
+    answerMs = 0;
     // A body that stalls once it is read: dropped at its deadline, and the next call gets its turn.
     const stalled = await new Promise((resolve) => {
-      const req = http.request({ socketPath: relay.socketPath, method: "POST", path: EDITS, headers: { ...auth, "content-length": 1000 } }, () => resolve("answered"));
+      const req = http.request({ socketPath: small.socketPath, method: "POST", path: EDITS, headers: { ...sauth, "content-length": 1000 } }, () => resolve("answered"));
       req.on("error", () => resolve("dropped"));
       req.write(Buffer.alloc(10));
     });
     assert.equal(stalled, "dropped");
-    assert.equal((await send(relay.socketPath, { path: EDITS, headers: auth, body: big(10) })).status, 200, "the turn was freed");
-    const pass = await relay.endPass();
-    assert.deepEqual([pass.calls, pass.unpriced], [4, 0]);
+    assert.equal((await send(small.socketPath, { path: EDITS, headers: sauth, body: big(10) })).status, 200, "the turn was freed");
+    const pass = await small.endPass();
+    assert.deepEqual([pass.calls, pass.unpriced], [3, 0]);
   } finally {
-    await relay.close();
+    for (const r of opened) await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1221,27 +1243,14 @@ const logLines = (file) =>
     .trim()
     .split("\n")
     .map((l) => JSON.parse(l));
-/** A port on this machine's loopback that refuses connections (checked, not assumed, before it is used). */
-async function refusedPort() {
-  const port = await new Promise((resolve) => {
-    const srv = net.createServer().listen(0, "127.0.0.1", () => {
-      const p = srv.address().port;
-      srv.close(() => resolve(p));
-    });
-  });
-  for (let i = 0; i < 100; i++) {
-    const refused = await new Promise((resolve) => {
-      const c = net.connect(port, "127.0.0.1");
-      c.on("connect", () => {
-        c.destroy();
-        resolve(false);
-      });
-      c.on("error", () => resolve(true));
-    });
-    if (refused) return port;
-    await sleep(20);
-  }
-  throw new Error("no refusing port");
+/**
+ * An origin on this machine's loopback that refuses connections, for good while the test runs: a port held open on
+ * 127.0.0.1 (so no other process can take it), called at another loopback address, where nothing listens.
+ */
+async function refusingOrigin() {
+  const holder = net.createServer();
+  await new Promise((resolve) => holder.listen(0, "127.0.0.1", resolve));
+  return { origin: `http://127.42.0.1:${holder.address().port}`, close: () => new Promise((r) => holder.close(r)) };
 }
 /** A TCP peer that takes a connection, reads its first bytes and resets: `seen.bytes` is what reached it. */
 async function resettingPeer() {
@@ -1273,10 +1282,10 @@ function callUntilClosed(socketPath, { path, token, body = "{}" }) {
 }
 
 test("a call that never left this machine costs $0 and is no unknown cost, by the socket's state; one that may have been sent is (#163)", async () => {
-  const closed = await refusedPort();
+  const closed = await refusingOrigin();
   const peer = await resettingPeer();
   // upstreamRequest's own facts. Refused: the socket never connected.
-  const refused = await upstreamRequest(`http://127.0.0.1:${closed}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
+  const refused = await upstreamRequest(`${closed.origin}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
   assert.deepEqual([refused.code, refused.unsent, refused.relayTimeout], ["ECONNREFUSED", true, false]);
   // Reset during the TLS handshake: connected, never secure, so none of the request was encrypted or sent.
   const handshake = await upstreamRequest(`https://127.0.0.1:${peer.port}/v4/ai/image-model`, { method: "POST", headers: {}, body: Buffer.from("{}") }).catch((e) => e);
@@ -1297,7 +1306,7 @@ test("a call that never left this machine costs $0 and is no unknown cost, by th
   await new Promise((r) => keeping.listen(0, "127.0.0.1", r));
   const kept = `http://127.0.0.1:${keeping.address().port}/v1/models`;
   await new Promise((resolve, reject) => http.get(kept, (res) => res.resume().on("end", resolve)).on("error", reject));
-  await sleep(20);
+  for (let i = 0; i < 200 && !Object.keys(http.globalAgent.freeSockets).length; i++) await sleep(10);
   cut = true;
   const pooled = await upstreamRequest(kept, { method: "GET", headers: {} }).catch((e) => e);
   assert.deepEqual([sockets.size, pooled.unsent], [1, false], "the same connection carried both requests");
@@ -1309,9 +1318,9 @@ test("a call that never left this machine costs $0 and is no unknown cost, by th
   });
   await new Promise((r) => silent.listen(0, "127.0.0.1", r));
   const quiet = `http://127.0.0.1:${silent.address().port}`;
-  const noHeaders = await upstreamRequest(`${quiet}/v1/chat/completions`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 80 }).catch((e) => e);
+  const noHeaders = await upstreamRequest(`${quiet}/v1/chat/completions`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 300 }).catch((e) => e);
   assert.deepEqual([noHeaders.relayTimeout, noHeaders.unsent], [true, false]);
-  const stalled = await upstreamRequest(`${quiet}/v1/embeddings`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 80 });
+  const stalled = await upstreamRequest(`${quiet}/v1/embeddings`, { method: "POST", headers: {}, body: Buffer.from("{}"), timeoutMs: 300 });
   assert.equal(stalled.timedOut(), false);
   let ended = null;
   try {
@@ -1332,7 +1341,7 @@ test("a call that never left this machine costs $0 and is no unknown cost, by th
   };
   try {
     // Through the relay: more never-sent calls than would shut it, each $0, the worker told it may try again.
-    const a = await open("a", `http://127.0.0.1:${closed}`);
+    const a = await open("a", closed.origin);
     for (let i = 0; i <= UNKNOWN_STREAK_SHUT; i++) {
       const r = await call(a.socketPath, { token: a.token });
       assert.equal(r.status, 502);
@@ -1356,7 +1365,7 @@ test("a call that never left this machine costs $0 and is no unknown cost, by th
     assert.deepEqual([pc.usd, pc.estimated], [IMAGE_UNKNOWN_FLOOR_USD, 1], "an image call, none priced on its route yet");
     assert.equal(logLines(join(dir, "c", "usage", CALL_LOG))[0].unpriced, "the call failed after it was sent: ECONNRESET; no generation id");
     // The relay's own timer, in the call log: `timeout`, before the headers and in the body.
-    const d = await open("d", quiet, { upstreamTimeoutMs: 80 });
+    const d = await open("d", quiet, { upstreamTimeoutMs: 300 });
     assert.equal((await call(d.socketPath, { token: d.token, path: "/v1/chat/completions" })).status, 502);
     await call(d.socketPath, { token: d.token, path: "/v1/embeddings" }).catch(() => null);
     await d.endPass();
@@ -1364,6 +1373,7 @@ test("a call that never left this machine costs $0 and is no unknown cost, by th
   } finally {
     for (const r of opened) await r.close();
     await peer.close();
+    await closed.close();
     keeping.closeAllConnections();
     silent.closeAllConnections();
     await new Promise((r) => keeping.close(r));

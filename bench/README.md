@@ -26,8 +26,8 @@ Every Blocked notice Factory posts ends with `<!-- factory:block {"cause":"<code
 | `max-usd` | yes | Factory's `max_usd` cap reached |
 | `gateway-budget` | yes | the AI Gateway refused for its own budget or credits |
 | `provider-quota` | yes | a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage (the upload refused for quota or storage), or the sandbox vendor's plan (still used up after the bounded wait) |
-| `outage` | yes | a provider or GitHub outage handled by Factory's rules: a required job GitHub never started, waited for in place and then Blocked as infrastructure, in validation or in the merge queue |
-| `setup` | no | a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access |
+| `outage` | yes | a provider or GitHub outage handled by Factory's rules: a required job GitHub never started, waited for in place and then Blocked as infrastructure, in validation or in the merge queue; a red head whose failed jobs failed only in their set-up or checkout before and after its one rerun; a required check's workflow run GitHub could not start (`startup_failure`) |
+| `setup` | no | a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access, a token that may not rerun failed jobs |
 | `work` | no | the worker's own Block, validation red, review findings, a protected path, the Objective's size |
 | `factory` | no | Factory itself: a crash, a lost or stuck stage, an exit it could not apply, or a cause it did not place |
 

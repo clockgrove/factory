@@ -519,7 +519,7 @@ async function main() {
       return;
     }
     if (!pre.green) {
-      const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, triageRefused: pre.triageRefused, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
+      const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, stuckCause: pre.stuck?.cause, triageRefused: pre.triageRefused, scope: pre.scope, unchanged: pre.unchanged }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
       await dropLabel();
       const why = relayReason(d.reason || "validation red before review");
       await applyExit(repo, { issue, pr, exit: "blocked", reason: why, cause: relayCause(d.exit === "blocked" ? d.cause : "work"), detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
@@ -784,7 +784,7 @@ async function main() {
     harness: validation.harness ?? (answerRun ? { ...answerRun, ok: answerOk } : { ok: true }),
     pr: { exists: true, draft: pr.draft, body: pr.body },
     commits: after.delta.count,
-    validation: validation.died || validation.harness || validation.question || conflict ? undefined : { passes: validation.passes, green: validation.green, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, triageRefused: validation.triageRefused, scope: validation.scope },
+    validation: validation.died || validation.harness || validation.question || conflict ? undefined : { passes: validation.passes, green: validation.green, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged },
     protectedHits: protectedTouched(after.delta.files, protectedList),
     record: answerRecord,
     question: answerRecord ? answerRecord.exit === "question" : false,

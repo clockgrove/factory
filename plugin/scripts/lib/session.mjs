@@ -831,6 +831,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   let checksFixed = false;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
+  // The head the last fix pass was asked to fix: the same head after it is no new observation (validate).
+  let redHead = null;
   // Workflow files read at a head while classifying a wait (triage.mjs checkSources): once per stage.
   const workflowFiles = new Map();
   // Factory's own catch-up merges (outbox.mjs caughtUp) validated red: each gets one fix pass that is not counted.
@@ -842,9 +844,16 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   if (!byChecks && !commands.length) return { green: true, passes: 0, lastOutput: "", usage, skipped: "no validation commands" };
   // The backend's gate: locally the heavy suites run on the box, not in CI (the commands first, then the checks).
   const localFirst = byChecks && commands.length && backend().gate.commandsFirst;
+  // The pass's first line, once its head is known: a head a fix pass left unchanged is no pass (said where it is caught).
+  const begin = async (sha = null) => {
+    if (sha && sha === redHead) return;
+    log(`${label} pass ${passes}: ${byChecks ? `required checks ${checks.names.join(", ")}` : `${commands.length} command(s)`}`);
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? "required checks" : `${commands.length} commands`})`);
+  };
   const validate = async () => {
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
     // memory and reaches the fix run in $FACTORY_IN/checks/; the prompt carries each one's tail.
+    if (!byChecks || localFirst) await begin();
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
     if (localFirst) {
       const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
@@ -853,6 +862,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // The checks run on the head Factory pushed (outbox.mjs); a refused push ends the loop, and the stage Blocks.
     if (outbox && !(await outbox.push())) return { green: false, pushRefused: outbox.error };
     const sha = outbox ? outbox.expected() : (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
+    if (!localFirst) await begin(sha);
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
@@ -901,6 +911,33 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     r = await settle(r);
     if (r.conflict) return { green: false, conflict: true, command };
     if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
+    // The fix pass committed nothing: the head is the one that was red, and its completed runs are that same red, not a
+    // second one. No pass is counted and no fix pass follows: the failed jobs are rerun once for this head (triage.mjs
+    // again), and a rerun refused, not made or red again Blocks saying so (unchangedBlock).
+    if (sha === redHead && !r.green && !r.timedOut && r.failedRuns?.length) {
+      const said = `the fix pass changed nothing; rerunning the failed jobs on ${sha.slice(0, 7)}`;
+      log(`${label}: ${said}`);
+      if (onPhase) await onPhase(`${label}: ${said}`);
+      const before = r.failedRuns;
+      const a = triage?.again
+        ? await triage.again({ sha, failedRuns: r.failedRuns }).catch((e) => {
+            log(`rerun on the unchanged head failed: ${String(e?.message || e).slice(0, 160)}`);
+            return { rerun: false, skipped: "the rerun could not be asked" };
+          })
+        : { rerun: false, skipped: "no rerun path" };
+      if (a.rerun) {
+        if (onPhase) await onPhase(`waiting for required checks again on ${sha.slice(0, 7)} after rerunning its failed jobs`);
+        r = await settle(await wait(a.ignoreIds), a.ignoreIds);
+        if (r.conflict) return { green: false, conflict: true, command };
+        if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
+        if (r.green) return { green: true, again: true };
+      }
+      // Red again the same way, GitHub's side both times: every failed job, before the rerun and after, failed only in
+      // its set-up or checkout (triage.mjs infra). A head rerun once already shows its red after that rerun.
+      const isInfra = async (runs) => !!runs?.length && !!(await triage?.infra?.({ sha, failedRuns: runs }).catch(() => false));
+      const infra = a.rerun ? (await isInfra(before)) && (await isInfra(r.failedRuns)) : !!a.already && (await isInfra(before));
+      return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command };
+    }
     // A required check whose job GitHub never started (no step, no runner: a billing lock, a spending limit, a runner
     // label nothing serves) is infrastructure no change can fix: no triage, no rerun, no fix pass; the stage Blocks.
     if (!r.green && !r.timedOut && r.failedRuns?.length) {
@@ -933,9 +970,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   };
   for (;;) {
     passes += 1;
-    log(`${label} pass ${passes}: ${byChecks ? `required checks ${checks.names.join(", ")}` : `${commands.length} command(s)`}`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? "required checks" : `${commands.length} commands`})`);
     const v = await validate();
+    // The same head as the red the fix pass had: not a pass of its own.
+    if (v.again) passes -= 1;
+    if (v.unchanged) {
+      const block = unchangedBlock(v.unchanged, lastLead);
+      log(`${label}: ${block.reason}`);
+      if (onPhase) await onPhase(`${label}: ${block.reason}`);
+      return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: v.command, usage, unchanged: block };
+    }
     if (v.pushRefused) return { green: false, passes, lastOutput: "", command: "push", usage, pushRefused: v.pushRefused };
     // Not a failure in the code: no fix run. The stage ends for the dispatcher's send-back, which rebases first.
     if (v.conflict) {
@@ -994,6 +1037,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase && fixing) await onPhase(`${label} pass ${passes} red: ${failed.command}; fix run`);
     if (!fixing) break;
     if (v.fromChecks) checksFixed = true;
+    redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
@@ -1048,6 +1092,24 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
   }
   return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}) };
+}
+
+/**
+ * The Block when a fix pass committed nothing and the red on that head stands (validationLoop): {reason, cause}. The
+ * reason says the rerun of its failed jobs came back red, was already made, was refused (refusedRerunText) or could not
+ * be made, then the failure's lead line (failureLead's first) and the remedy. The cause (logic.mjs BLOCK_CAUSES), on
+ * structure: a rerun the token may not make (403, 404, or refused before on the Objective) `setup`, any other failed
+ * rerun call `outage`; red again with every failed job failing only in its set-up or checkout before and after the
+ * rerun, or after the head's one earlier rerun (`infra`), `outage`; anything else `work`.
+ */
+export function unchangedBlock(u, lead = "") {
+  const short = String(u?.sha || "").slice(0, 7);
+  const first = String(lead || "").split("\n")[0].replace(/^--- /, "");
+  const head = `the fix pass changed nothing, so the red on ${short} is unchanged${first ? ` (${first})` : ""}`;
+  if (u?.refused) return { reason: `${head}; ${refusedRerunText(u.refused)}`, cause: u.refused.earlier || u.refused.status === 403 || u.refused.status === 404 ? "setup" : "outage" };
+  const side = u?.infra ? ", again in their set-up or checkout (GitHub's side)" : "";
+  const what = u?.red ? `its failed jobs were rerun once and failed again${side}` : u?.already ? `its failed jobs were already rerun once on this head${side}` : `its failed jobs were not rerun (${u?.skipped || "no rerun"})`;
+  return { reason: `${head}; ${what}; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`, cause: (u?.red || u?.already) && u.infra ? "outage" : "work" };
 }
 
 /** The longest a stage waits, past its first wait, for required checks GitHub has not started (validationLoop). */

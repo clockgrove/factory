@@ -502,7 +502,9 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
   let state = null;
   let conflict = false;
   for (;;) {
-    runs = (await checkRuns(repo, sha, { token }).catch(() => [])).filter((r) => !ignoreIds?.has(r.id));
+    // A failed read is no reading: the last good one stands, and the wait goes on to its own deadline.
+    const read = await checkRuns(repo, sha, { token }).catch(() => null);
+    if (read) runs = read.filter((r) => !ignoreIds?.has(r.id));
     state = evaluateChecks(names, runs);
     if (state.done) break;
     if (conflicted && (await conflicted().catch(() => false))) {
@@ -510,7 +512,7 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
       break;
     }
     const elapsed = Date.now() - started;
-    if (state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
+    if (read && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));

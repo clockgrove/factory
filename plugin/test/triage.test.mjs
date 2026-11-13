@@ -569,3 +569,241 @@ test("the last red, triaged flaky with its rerun refused, Blocks naming the verd
   assert.match(refusedRerunText({ ...refused, where: "actions" }), /or give the workflow's work and review jobs `actions: write`, then/);
   assert.match(refusedRerunText({ ...refused, status: 404, permission: false }), /refused the rerun \(404\); rerun the failed jobs on GitHub then re-apply the label$/);
 });
+
+// ------------------------------------------------------------------ a red on GitHub's side (#165)
+
+// GitHub's jobs API for a job whose checkout failed: Set up job passed, the checkout step failed, the rest skipped.
+const checkoutFailed = { id: 41, run_id: 600, name: "quality", conclusion: "failure", runner_id: 7, runner_name: "GitHub Actions 7", steps: [
+  { name: "Set up job", status: "completed", conclusion: "success", number: 1 },
+  { name: "Run actions/checkout@v4", status: "completed", conclusion: "failure", number: 2 },
+  { name: "Run npm test", status: "completed", conclusion: "skipped", number: 3 },
+  { name: "Post Run actions/checkout@v4", status: "completed", conclusion: "success", number: 5 },
+  { name: "Complete job", status: "completed", conclusion: "success", number: 6 },
+] };
+const setupFailed = { ...checkoutFailed, steps: [{ name: "Set up job", status: "completed", conclusion: "failure", number: 1 }, { name: "Run actions/checkout@v4", status: "completed", conclusion: "skipped", number: 2 }] };
+const testFailed = { ...checkoutFailed, steps: [{ name: "Set up job", status: "completed", conclusion: "success", number: 1 }, { name: "Run actions/checkout@v4", status: "completed", conclusion: "success", number: 2 }, { name: "Run npm test", status: "completed", conclusion: "failure", number: 3 }] };
+const CI_YML = "on: pull_request\njobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          lfs: true\n      - name: Fetch media\n        uses: actions/checkout@v4\n      - run: npm test\n";
+const lfsLog = ["##[group]Run actions/checkout@v4", "##[group]Fetching LFS objects", "[command]/usr/bin/git lfs fetch origin refs/remotes/pull/9/merge", "batch response: Fatal error: Server error https://github.com/acme/app.git/info/lfs/objects/batch from HTTP 502", "##[error]The process '/usr/bin/git' failed with exit code 2"].join("\n");
+
+/**
+ * GitHub on fetch for one red head, before and after a rerun: `runs` the head's check runs (`rerunRuns` once a rerun was
+ * accepted), `jobs` by id, `logs` by job id, the workflow file at the head, and the rerun's answer (`rerun`, a status).
+ */
+async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow = CI_YML, rerun = 201 }, fn) {
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const seen = { reruns: 0, contents: 0 };
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const p = u.pathname;
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (/\/commits\/[0-9a-f]+\/check-runs$/.test(p)) {
+      const now = seen.reruns ? rerunRuns : runs;
+      return json({ total_count: now.length, check_runs: now });
+    }
+    let m = /\/actions\/jobs\/(\d+)\/logs$/.exec(p);
+    if (m) return new Response(logs[m[1]] ?? "", { status: 200 });
+    m = /\/actions\/jobs\/(\d+)$/.exec(p);
+    if (m && jobs[m[1]]) return json(jobs[m[1]]);
+    if (method === "POST" && /\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(p)) {
+      if (rerun >= 400) return json({ message: "Resource not accessible by integration" }, rerun);
+      seen.reruns += 1;
+      return json({}, rerun);
+    }
+    if (/\/actions\/runs\/\d+$/.test(p)) return json({ status: "completed", path: ".github/workflows/ci.yml" });
+    if (/\/contents\/\.github\/workflows\/ci\.yml$/.test(p)) return (seen.contents += 1), new Response(workflow, { status: 200 });
+    if (/\/issues\/\d+\/comments$/.test(p) || /\/pulls\/\d+\/files$/.test(p)) return json([]);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    return await fn(seen);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+}
+
+/** A decider that records each question and answers `answer`; the real decision model is never called. */
+const asking = (answer) => {
+  const asked = [];
+  return { asked, decide: async (input) => (asked.push(input), answer) };
+};
+const repo165 = { owner: "acme", name: "app", full: "acme/app" };
+const red41 = [{ id: 41, name: "quality", conclusion: "failure", suite: 9, started_at: "2026-11-11T21:55:00Z", completed_at: "2026-11-11T21:57:00Z" }];
+
+test("setupFailure: a job that failed in its set-up or its checkout, with no step of the repository's failed, is decided on the jobs API's steps and the workflow's uses", async () => {
+  const { checkoutSteps, failedStep, setupFailure } = await import("../scripts/lib/triage.mjs");
+  assert.deepEqual([...checkoutSteps(CI_YML, "quality")], ["Run actions/checkout@v4", "Fetch media"]);
+  assert.deepEqual([...checkoutSteps(CI_YML, "other")], [], "another job's steps are not this one's");
+  assert.equal(failedStep(checkoutFailed).name, "Run actions/checkout@v4");
+  assert.equal(setupFailure(checkoutFailed, CI_YML), "checkout");
+  assert.equal(setupFailure(setupFailed, null), "set-up", "GitHub's own first step: no workflow needed");
+  assert.equal(setupFailure({ ...checkoutFailed, steps: checkoutFailed.steps.map((x) => (x.number === 2 ? { ...x, name: "Fetch media" } : x)) }, CI_YML), "checkout", "a named checkout step");
+  assert.equal(setupFailure(testFailed, CI_YML), null, "a run: step failed: the change's code ran");
+  assert.equal(setupFailure(checkoutFailed, "jobs:\n  quality:\n    steps:\n      - run: ./checkout.sh\n"), null, "a step named like checkout that is no actions/checkout is not one");
+  assert.equal(setupFailure(checkoutFailed, ""), null, "an unread workflow proves nothing");
+  assert.equal(setupFailure({ ...checkoutFailed, steps: [...checkoutFailed.steps.slice(0, 2), { name: "Run npm test", conclusion: "failure", number: 3 }] }, CI_YML), null, "a run: step failed as well");
+  // The failed step's name is part of what the model is asked.
+  assert.match(triageInput({ repo: "acme/app", prNumber: 2, sha: "a".repeat(40), job: "quality", step: "Run npm test", excerpt: "x" }), /^Failing CI job: quality\nFailed step: Run npm test$/m);
+  assert.doesNotMatch(triageInput({ repo: "acme/app", prNumber: 2, sha: "a".repeat(40), job: "quality", excerpt: "x" }), /Failed step/);
+});
+
+test("triage: a checkout or set-up failure is rerun once on its head without the decision model; a run: step failure is asked, with its step's name", async () => {
+  for (const job of [checkoutFailed, setupFailed]) {
+    const decider = asking({ verdict: "change_caused", confidence: 0.99 });
+    const lines = [];
+    await withHead({ runs: [], jobs: { 41: job }, logs: { 41: lfsLog } }, async (seen) => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+      const r = await t.red({ sha: "d".repeat(40), failedRuns: red41, required: ["quality"] });
+      assert.equal(r.rerun, true);
+      assert.equal(seen.reruns, 1);
+      assert.equal(decider.asked.length, 0, "no model asked");
+      assert.equal(seen.contents, job === setupFailed ? 0 : 1, "the workflow is read only to tell a checkout step");
+      assert.match(lines[0], new RegExp(`quality: failed in its ${job === setupFailed ? "set-up step \\(Set up job\\)" : "checkout step \\(Run actions/checkout@v4\\)"}, no model asked \\[[0-9a-f]{12} \`batch response: Fatal error`));
+      // Once per head: the same head is not rerun again.
+      assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: red41, required: ["quality"] })).rerun, false);
+      assert.equal(seen.reruns, 1);
+    });
+  }
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.55 });
+  await withHead({ runs: [], jobs: { 41: testFailed }, logs: { 41: failingLog } }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+    assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: red41, required: ["quality"] })).rerun, false, "below the bar: fix pass");
+    assert.equal(seen.reruns, 0);
+    assert.equal(decider.asked.length, 1);
+    assert.match(decider.asked[0], /^Failed step: Run npm test$/m);
+  });
+});
+
+test("failureSignature: Git LFS's own failure lines are a signature, also behind a tool's prefix", () => {
+  const sig = failureSignature("quality", lfsLog);
+  assert.ok(sig.id);
+  assert.match(sig.line, /^batch response: Fatal error: Server error/);
+  assert.match(failureSignature("quality", "##[group]Run ./setup.sh\nError downloading object: assets/yard.png (4f2a9c1): Smudge error: Error downloading assets/yard.png\n##[error]Process completed with exit code 2.").line, /^Error downloading object: assets\/yard\.png/);
+  assert.ok(failureSignature("quality", "##[group]Run pnpm quality\nquality:media: batch response: Fatal error: Server error from HTTP 502\n##[error]Process completed with exit code 2.").id);
+  assert.equal(failureSignature("quality", "##[group]Run npm test\nbatch processing done\n##[error]Process completed with exit code 1.").id, null, "the words alone are no LFS line");
+});
+
+test("again: the failed jobs of a head a fix pass left unchanged are rerun once, no model asked, with or without a key; a refusal is named", async () => {
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.99 });
+  await withHead({ runs: [], jobs: { 41: testFailed } }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+    const r = await t.again({ sha: "e".repeat(40), failedRuns: red41 });
+    assert.equal(r.rerun, true);
+    assert.deepEqual([...r.ignoreIds], [41]);
+    assert.equal(decider.asked.length, 0);
+    assert.deepEqual(await t.again({ sha: "e".repeat(40), failedRuns: red41 }), { rerun: false, already: true }, "once per head");
+    assert.equal((await t.red({ sha: "e".repeat(40), failedRuns: red41, required: ["quality"] })).rerun, false, "the head's one rerun is shared with red()");
+    assert.equal(seen.reruns, 1);
+  });
+  // No key: red() is off, but the unchanged head's rerun needs no model.
+  const home = mkdtempSync(join(tmpdir(), "nokey-"));
+  await withHead({ runs: [], jobs: { 41: testFailed }, rerun: 403 }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 1, prNumber: 2, token: "t" });
+    assert.equal(t.off, "no-key");
+    const r = await t.again({ sha: "e".repeat(40), failedRuns: red41 });
+    assert.equal(r.rerun, false);
+    assert.deepEqual(r.refused, { status: 403, permission: true, rateLimited: false, where: "local", unchanged: true });
+    const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
+    assert.equal(refusedRerunText(r.refused), "GitHub refused the rerun of the failed jobs (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label");
+    assert.equal((await t.again({ sha: "f".repeat(40), failedRuns: red41 })).refused.earlier, true, "refused once on the Objective: not asked again");
+  });
+  rmSync(home, { recursive: true, force: true });
+});
+
+/**
+ * A fix pass that commits nothing: a fake `codex` on PATH that ends its turn and changes no file. Returns the env for
+ * the loop and a put-back.
+ */
+function idleCodex() {
+  const work = mkdtempSync(join(tmpdir(), "idle-codex-"));
+  mkdirSync(join(work, "bin"));
+  writeFileSync(join(work, "bin", "codex"), `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(`${JSON.stringify({ type: "thread.started", thread_id: "t-165" })}\n${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 1 } })}\n`)});\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME };
+  process.env.PATH = `${join(work, "bin")}:${saved.PATH}`;
+  process.env.CODEX_HOME = join(work, "codex");
+  const env = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME };
+  return {
+    work,
+    env,
+    putBack: () => {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+      rmSync(work, { recursive: true, force: true });
+    },
+  };
+}
+
+test("validation loop: a fix pass that commits nothing never counts the same red twice; the head's failed jobs are rerun once, and a red or refused rerun Blocks saying so", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const { decideExit } = await import("../scripts/lib/logic.mjs");
+  const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
+  const sha = "9".repeat(40);
+  const red = [{ id: 51, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-11T21:55:00Z", completed_at: "2026-11-11T21:57:00Z" }];
+  const rerunRed = [{ ...red[0], id: 52 }];
+  const rerunGreen = [{ ...red[0], id: 52, conclusion: "success" }];
+  // Job ids of its own: a job log once read is not read again in this process (github.mjs jobLog).
+  // The real run: the model reads the red as flaky, below the bar (0.55), so a fix pass runs, and it commits nothing.
+  const run = async (github, { jobs = { 51: testFailed, 52: testFailed }, key = true } = {}) => {
+    const codex = idleCodex();
+    const home = mkdtempSync(join(tmpdir(), "nokey-"));
+    const decider = asking({ verdict: "flaky_or_infra", confidence: 0.55 });
+    const phases = [];
+    try {
+      const result = await withHead({ runs: red, jobs, logs: { 51: failingLog, 52: failingLog }, ...github }, (seen) =>
+        validationLoop({
+          checkout: codex.work,
+          commands: [],
+          harness: "codex",
+          maxUsd: 0,
+          session: {},
+          taskCard: "",
+          env: codex.env,
+          deadlineAt: Date.now() + 10 * 60_000,
+          checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
+          outbox: { push: async () => true, expected: () => sha },
+          triage: openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 4, prNumber: 5, token: "t", ...(key ? { decider } : {}) }),
+          onPhase: async (l) => phases.push(l),
+        }).then((r) => ({ ...r, reruns: seen.reruns })),
+      );
+      return { result, phases, asked: decider.asked.length };
+    } finally {
+      codex.putBack();
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  const again = await run({ rerunRuns: rerunRed });
+  assert.equal(again.result.green, false);
+  assert.equal(again.result.usage.length, 1, "one fix pass, as before");
+  assert.equal(again.result.passes, 1, "the unchanged head is not a second pass");
+  assert.equal(again.asked, 1, "the same red is not asked of the model again");
+  assert.equal(again.result.reruns, 1, "its failed jobs were rerun once");
+  assert.deepEqual(again.result.unchanged, { reason: `the fix pass changed nothing, so the red on 9999999 is unchanged (quality: ${supplyChain}); its failed jobs were rerun once and failed again; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`, cause: "work" }, "a run: step failed: the work's");
+  assert.ok(again.result.lastOutput.startsWith(`--- quality: ${supplyChain}`), "the Block quotes the failure's lead");
+  assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: again.result.passes, green: false, command: again.result.command, unchanged: again.result.unchanged } }), { exit: "blocked", ...again.result.unchanged });
+  // What a person reads in the log is true: no second pass, the rerun named.
+  assert.ok(!again.phases.some((l) => /validation pass 2/.test(l)), again.phases.join("\n"));
+  assert.ok(again.phases.includes("validation: the fix pass changed nothing; rerunning the failed jobs on 9999999"), again.phases.join("\n"));
+
+  // Checkout failed, with no key (so the first red goes to the fix pass), and the rerun fails in its checkout again: GitHub's side.
+  const outage = await run({ rerunRuns: rerunRed }, { jobs: { 51: checkoutFailed, 52: checkoutFailed }, key: false });
+  assert.equal(outage.result.reruns, 1);
+  assert.equal(outage.result.unchanged.cause, "outage");
+  assert.match(outage.result.unchanged.reason, /rerun once and failed again, again in their set-up or checkout \(GitHub's side\)/);
+  // A checkout red the first time, a test red after the rerun: not the same way, so the work's.
+  assert.equal((await run({ rerunRuns: rerunRed }, { jobs: { 51: checkoutFailed, 52: testFailed }, key: false })).result.unchanged.cause, "work");
+
+  const green = await run({ rerunRuns: rerunGreen });
+  assert.equal(green.result.green, true, "the rerun passed: the stage goes on");
+  assert.equal(green.result.passes, 1);
+  assert.equal(green.result.usage.length, 1);
+
+  const refused = await run({ rerun: 403 });
+  assert.equal(refused.result.reruns, 0);
+  assert.deepEqual(refused.result.unchanged, { reason: `the fix pass changed nothing, so the red on 9999999 is unchanged (quality: ${supplyChain}); ${refusedRerunText({ status: 403, permission: true, where: "local", unchanged: true })}`, cause: "setup" });
+  assert.match(refused.result.unchanged.reason, /GitHub refused the rerun of the failed jobs \(403: the token cannot rerun jobs\)/);
+});

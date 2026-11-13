@@ -493,9 +493,12 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * asked on every poll; when it says yes the wait ends at once with `conflict: true` (a conflicting PR gets no runs).
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
- * `ended` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends the wait
- * unfinished.
+ * `ended(runs)` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends
+ * the wait unfinished.
  */
+/** A check run as awaitChecks returns it (and checksNotStarted reads it). */
+const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
+
 export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ended = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const started = Date.now();
   // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
@@ -522,9 +525,9 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     const elapsed = Date.now() - started;
     if ((read || !readOnce) && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
     // A required check with no run while others reported (with none, appearMs above ends the wait), and `ended` (async,
-    // optional) says no more will come: every workflow run on the head completed, one before its jobs ran. The wait ends
-    // at once, unfinished.
-    if (read && state.missing.length && runs.length > 0 && ended && (await ended().catch(() => false))) break;
+    // optional, given the runs as returned below) says it will get none: its own workflow runs ended before their jobs
+    // ran. The wait ends at once, unfinished.
+    if (read && state.missing.length && runs.length > 0 && ended && (await ended(runs.map(runShape)).catch(() => false))) break;
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));
@@ -537,7 +540,7 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
   // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map((r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null })), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */

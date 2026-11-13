@@ -714,19 +714,22 @@ test("failureSignature: Git LFS's own failure lines are a signature, also behind
 });
 
 test("again: the failed jobs of a head a fix pass left unchanged are rerun once, no model asked, with or without a key; a refusal is named", async () => {
-  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.99 });
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.55 });
   await withHead({ runs: [], jobs: { 41: testFailed } }, async (seen) => {
     const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+    // The model answered on this head (flaky, below the bar): the unchanged head is rerun.
+    assert.equal((await t.red({ sha: "e".repeat(40), failedRuns: red41, required: ["quality"] })).rerun, false);
     const r = await t.again({ sha: "e".repeat(40), failedRuns: red41 });
     assert.equal(r.rerun, true);
     assert.deepEqual([...r.ignoreIds], [41]);
-    assert.equal(decider.asked.length, 0);
+    assert.equal(decider.asked.length, 1, "again() asks nothing");
     assert.deepEqual(await t.again({ sha: "e".repeat(40), failedRuns: red41 }), { rerun: false, already: true }, "once per head");
     assert.equal((await t.red({ sha: "e".repeat(40), failedRuns: red41, required: ["quality"] })).rerun, false, "the head's one rerun is shared with red()");
     assert.equal(seen.reruns, 1);
   });
   // A head whose red the model read as the change's is never rerun; one rerun records its signatures too.
-  const sure = asking({ verdict: "change_caused", confidence: 0.97 });
+  const sureAsked = [];
+  const sure = { decide: async (input) => (sureAsked.push(input), sureAsked.length === 1 ? { verdict: "change_caused", confidence: 0.97 } : { verdict: "flaky_or_infra", confidence: 0.55 }) };
   await withHead({ runs: [], jobs: { 46: { ...testFailed, id: 46 } }, logs: { 46: failingLog } }, async (seen) => {
     const recs = [];
     const progress = Object.assign(async () => {}, { triage: (rec) => recs.push(rec) });
@@ -735,7 +738,8 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
     await t.red({ sha: "a".repeat(40), failedRuns, required: ["quality"] });
     assert.deepEqual(await t.again({ sha: "a".repeat(40), failedRuns }), { rerun: false, skipped: "triage read it as caused by the change: quality 0.97" });
     assert.equal(seen.reruns, 0);
-    assert.equal((await t.again({ sha: "b".repeat(40), failedRuns })).rerun, true, "another head with no verdict");
+    await t.red({ sha: "b".repeat(40), failedRuns, required: ["quality"] });
+    assert.equal((await t.again({ sha: "b".repeat(40), failedRuns })).rerun, true, "another head, flaky below the bar");
     assert.deepEqual([...recs.at(-1).sigs], [failureSignature("quality", failingLog).id]);
     assert.deepEqual((await t.again({ sha: "c".repeat(40), failedRuns })).skipped, "the failure of quality was already rerun once on this Objective");
     // More failing jobs than MAX_JOBS: no rerun.
@@ -744,15 +748,22 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
   });
   // No key: red() is off, but the unchanged head's rerun needs no model.
   const home = mkdtempSync(join(tmpdir(), "nokey-"));
-  await withHead({ runs: [], jobs: { 41: testFailed }, rerun: 403 }, async () => {
+  // No verdict at all on a run: step failure: never rerun.
+  await withHead({ runs: [], jobs: { 47: { ...testFailed, id: 47 } }, logs: { 47: failingLog } }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 1, prNumber: 2, token: "t" });
+    assert.deepEqual(await t.again({ sha: "e".repeat(40), failedRuns: [{ ...red41[0], id: 47 }] }), { rerun: false, skipped: "quality has no triage verdict and did not fail on GitHub's side" });
+    assert.equal(seen.reruns, 0);
+  });
+  // No verdict, a checkout 502: GitHub's side, so rerun (refused here).
+  await withHead({ runs: [], jobs: { 48: { ...checkoutFailed, id: 48 } }, logs: { 48: lfsLog }, rerun: 403 }, async () => {
     const t = openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 1, prNumber: 2, token: "t" });
     assert.equal(t.off, "no-key");
-    const r = await t.again({ sha: "e".repeat(40), failedRuns: red41 });
+    const r = await t.again({ sha: "e".repeat(40), failedRuns: [{ ...red41[0], id: 48 }] });
     assert.equal(r.rerun, false);
     assert.deepEqual(r.refused, { status: 403, permission: true, rateLimited: false, where: "local", unchanged: true });
     const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
     assert.equal(refusedRerunText(r.refused), "GitHub refused the rerun of the failed jobs (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label");
-    assert.equal((await t.again({ sha: "f".repeat(40), failedRuns: red41 })).refused.earlier, true, "refused once on the Objective: not asked again");
+    assert.equal((await t.again({ sha: "f".repeat(40), failedRuns: [{ ...red41[0], id: 48 }] })).refused.earlier, true, "refused once on the Objective: not asked again");
   });
   rmSync(home, { recursive: true, force: true });
 });
@@ -848,6 +859,13 @@ test("validation loop: a fix pass that commits nothing never counts the same red
   assert.equal(caused.result.reruns, 0, "never rerun");
   assert.equal(caused.result.green, false);
   assert.deepEqual(caused.result.unchanged, { reason: `${lead}; its failed jobs were not rerun (triage read it as caused by the change: quality 0.97); ${remedy}`, cause: "work" });
+
+  // No verdict on a run: step failure (triage off, or the model errored): never rerun, the work's.
+  for (const opts of [{ key: false }, { answer: { verdict: null, confidence: null, error: "timeout" } }]) {
+    const none = await run(opts);
+    assert.equal(none.result.reruns, 0, JSON.stringify(opts));
+    assert.deepEqual(none.result.unchanged, { reason: `${lead}; its failed jobs were not rerun (quality has no triage verdict and did not fail on GitHub's side); ${remedy}`, cause: "work" });
+  }
 
   // The token may not rerun: setup.
   const refused = await run({ rerun: 403 });

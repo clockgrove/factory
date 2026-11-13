@@ -622,8 +622,8 @@ const ACTIONS_APP = "github-actions";
  * workflow that produces it queued on the head, or never created (as when the head has no workflow run at all). The
  * reason names who has not started it: GitHub, a run `pending` behind the repository's own concurrency group, or the
  * service whose app owns the check run. Kinds that do not wait: `running` (a check still running), `approval` (a
- * deployment approval), `filtered` (its workflow's path filter skips this change), `ended` (its workflow run ended
- * `startup_failure` or `cancelled` before the job that reports it existed), `unreported` (no workflow on the head
+ * deployment approval), `filtered` (its workflow's path filter skips this change), `ended` (every workflow run on the
+ * head that produces it ended `startup_failure`, or `cancelled` with no check run in its suite), `unreported` (no workflow on the head
  * produces it: a wrong check name) and `unread`. A queued run of another workflow is not this check's. `now` and
  * `waitedMin` only word the reason.
  */
@@ -642,6 +642,8 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
   const unreported = [];
   const filtered = [];
   const ended = [];
+  // A run that ended before its jobs ran: GitHub could not start it, or it was cancelled with no check run in its suite.
+  const early = (w) => w.status === "completed" && (w.conclusion === "startup_failure" || (w.conclusion === "cancelled" && !checkRuns.some((r) => (r.check_suite?.id ?? r.suite) === w.check_suite_id)));
   for (const n of open) {
     const r = latestRun(checkRuns, n);
     if (r) {
@@ -666,7 +668,7 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
     else if (mine.some((w) => w.status === "waiting")) approval.push(n);
     else if (mine.some((w) => w.status !== "completed")) running.push({ n, w: mine.find((w) => w.status !== "completed") });
     else if (ids && !mine.length && allSkip) filtered.push({ n, key: filter.key });
-    else if (mine.some((w) => ENDED_EARLY.includes(w.conclusion))) ended.push({ n, w: mine.find((w) => ENDED_EARLY.includes(w.conclusion)) });
+    else if (mine.length && mine.every(early)) ended.push({ n, w: mine[0] });
     else if ((ids && !mine.length) || !workflowRuns.length) started.push({ n, w: null, text: `no workflow run for it was created in ${waitedMin} min${filter ? ` (its workflow's path filter, ${filter.key}, may skip this change)` : ""}` });
     else unreported.push(n);
   }
@@ -887,7 +889,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
   // failed jobs are rerun once for that head (the same once-per-head record as red()), no model asked, only when nothing
   // says the change caused the red: no change_caused verdict on this head, no failure naming what the PR changes, no
-  // failure signature already rerun on the Objective. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
+  // failure signature already rerun on the Objective, and each job either answered by the model on this head or failed
+  // on GitHub's side. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
   const again = async ({ sha, failedRuns = [] }) => {
     const short = String(sha).slice(0, 7);
     if (!failedRuns.length) return { rerun: false, skipped: "no failed job" };
@@ -899,12 +902,16 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     if (caused.length) return { rerun: false, skipped: `triage read it as caused by the change: ${caused.map((j) => `${j.name} ${typeof j.confidence === "number" ? j.confidence.toFixed(2) : ""}`.trim()).join(", ")}` };
     const { notActions, jobs } = await actionsJobs(failedRuns);
     if (notActions) return { rerun: false, skipped: `${notActions} is not an Actions job, so it cannot be rerun` };
-    const { sigs, names } = await readRed(failedRuns);
+    const { texts, sigs, names } = await readRed(failedRuns);
+    // The model's answers on this head, by job: a job it gave no verdict (triage off, an error, a timeout) is rerun only
+    // when it failed on GitHub's side (githubSide).
+    const answered = new Set((asked.get(sha) || []).filter((j) => j.verdict).map((j) => j.name));
     for (const r of failedRuns) {
       const sig = sigs.get(r.id);
       if (sig.id && seen.sigs.has(sig.id)) return { rerun: false, skipped: `the failure of ${r.name} was already rerun once on this Objective` };
       const named = namesChange(sig, names);
       if (named) return { rerun: false, skipped: `the failure of ${r.name} names ${named}, which the PR changes` };
+      if (!answered.has(r.name) && !(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sig, names))) return { rerun: false, skipped: `${r.name} has no triage verdict and did not fail on GitHub's side` };
     }
     const line = (outcome) => `triage: the fix pass committed nothing, so the red on ${short} is unchanged → ${outcome}`;
     const failed = await rerunRuns(new Set([...jobs.values()].map((j) => j.run_id)), line);

@@ -866,17 +866,17 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
-    // Every workflow run on the head completed and one ended before its jobs ran (startup_failure, or cancelled): a
-    // required check still with no run will get none, so the wait ends then (checksNotStarted names that run).
-    const ended = async () => {
-      const runs = (await rest(`repos/${checks.repo.full}/actions/runs?head_sha=${sha}&per_page=100`, { token: checks.actionsToken || checks.token }))?.workflow_runs || [];
-      return runs.length > 0 && runs.every((w) => w.status === "completed") && runs.some((w) => ENDED_EARLY.includes(w.conclusion));
+    // A required check with no run whose own producing workflow runs all ended before their jobs ran (classify reads
+    // kind `ended`, checksNotStarted) will get none, so the wait ends then. Read only when every workflow run on the head
+    // completed and one ended so; past one page of runs (100) it is not read, and the wait goes on as before.
+    const ended = async (runs) => {
+      const page = await rest(`repos/${checks.repo.full}/actions/runs?head_sha=${sha}&per_page=100`, { token: checks.actionsToken || checks.token });
+      const all = page?.workflow_runs || [];
+      if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed") || !all.some((w) => ENDED_EARLY.includes(w.conclusion))) return false;
+      return (await classify({ runs })).kind === "ended";
     };
     const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
-    let r = await wait();
-    const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
-    if (r.conflict) return { green: false, conflict: true, command };
     // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
     // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
     // on every route, up to CHECKS_WAIT_MS or the stage's wall clock less CHECKS_WAIT_GUARD_MS, the reads backing off;
@@ -894,6 +894,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const read = await checkSources({ repo: checks.repo, sha, names: checks.names, checkRuns: x.runs || [], token: checks.token, actionsToken: checks.actionsToken || checks.token, history, files, cache: workflowFiles });
       return checksNotStarted({ sha, names: checks.names, checkRuns: x.runs || [], ...read, waitedMin: Math.round((Date.now() - waitedFrom) / 60000) });
     };
+    // The first wait, once what it may ask (ended, classify) is defined.
+    let r = await wait();
+    const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
+    if (r.conflict) return { green: false, conflict: true, command };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
     const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;

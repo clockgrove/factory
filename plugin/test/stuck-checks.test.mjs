@@ -318,7 +318,7 @@ test("a producing workflow run that ended startup_failure, or was cancelled befo
 
 test("a run that ended before its jobs is known as soon as every run on the head completed: no wait to the timeout when other checks reported", async () => {
   const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success", check_suite: { id: 10 }, started_at: ago(2) }];
-  const runs = [ciRun({ status: "completed", conclusion: "startup_failure" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, check_suite_id: 10, status: "completed", conclusion: "success" })];
+  const runs = [ciRun({ status: "completed", conclusion: "startup_failure" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "success" })];
   const t0 = Date.now();
   const { result } = await loop({ checkRuns: lint, workflowRuns: runs, files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 60_000 } });
   assert.ok(Date.now() - t0 < 5000, "the wait ended once every run had completed");
@@ -327,4 +327,22 @@ test("a run that ended before its jobs is known as soon as every run on the head
   // A run still going is not that: the wait goes on (to its timeout here).
   const going = await loop({ checkRuns: lint, workflowRuns: [runs[0], { ...runs[1], status: "in_progress", conclusion: null }], files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 50 } });
   assert.ok(going.checkReads > 2, "it kept reading");
+});
+
+test("an unrelated run cancelled, or a producing run cancelled after its jobs started, never ends the wait early", async () => {
+  const workflows = [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }, { id: 6, path: ".github/workflows/lint.yml", state: "active" }];
+  // The reviewer's case: quality green, a required check of an outside app not reported yet, and the repository's own
+  // concurrency group cancelled an unrelated run on the head. The outside check has no producing workflow: wait on.
+  const quality = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2) }];
+  const runs = [ciRun({ status: "completed", conclusion: "success" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "cancelled" })];
+  const t0 = Date.now();
+  const outside = await loop({ checkRuns: quality, workflowRuns: runs, files, workflows }, { checks: { names: ["quality", "outside/check"], timeoutMs: 300, stuckWaitMs: 0 } });
+  assert.ok(Date.now() - t0 >= 300, "the wait went on to its timeout");
+  assert.notEqual(outside.result.stuck?.kind, "ended");
+  // quality's own run cancelled after a job of it ran (a check run in its suite): not before its jobs, so not `ended`.
+  const build = [{ id: 4, name: "build", status: "completed", conclusion: "cancelled", check_suite: { id: 9 }, started_at: ago(2) }];
+  const t1 = Date.now();
+  const late = await loop({ checkRuns: build, workflowRuns: [ciRun({ status: "completed", conclusion: "cancelled" })], files, workflows }, { checks: { timeoutMs: 300, stuckWaitMs: 0 } });
+  assert.ok(Date.now() - t1 >= 300, "the wait went on to its timeout");
+  assert.notEqual(late.result.stuck?.kind, "ended");
 });

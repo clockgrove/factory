@@ -118,9 +118,9 @@ async function tailOf(stream, maxBytes) {
  * that ends past the caller's `deadlineAt`. Ninety seconds covers GitHub's own asks (a secondary rate limit's
  * Retry-After is usually a minute) and a blip of 5xx answers or dropped connections, and stays far inside the 15 minutes
  * a stage keeps after its deadline for its exit (session.mjs deadline). A wait beyond what is left is not taken: the
- * error goes to the caller at once, as without retries. `sleep` and `now` are the clock; tests replace them.
+ * error goes to the caller at once, as without retries. `sleep`, `now` and `random` (jitter); tests replace them.
  */
-export const RETRY = { tries: 4, maxWaitMs: 90_000, baseMs: 2_000, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now() };
+export const RETRY = { tries: 4, maxWaitMs: 90_000, baseMs: 2_000, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(), random: Math.random };
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, so even a create may go again. */
 const UNSENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
@@ -141,8 +141,15 @@ const repeatable = (method, path) => {
   return false;
 };
 
-/** Whether a failed request provably did nothing: it never left this machine, or GitHub's rate limit turned it away. */
-const notDone = (e) => e?.unsent === true || (e?.rateLimited === true && e.status > 0);
+/** Whether a failed request provably did nothing: it never left this machine, or GitHub's rate limit (403, 429) turned it away. */
+const notDone = (e) => e?.unsent === true || (e?.rateLimited === true && (e.status === 403 || e.status === 429));
+
+/**
+ * Whether an answer is GitHub's rate limit: a 429, or a 403 with its signals (a spent quota, Retry-After, the secondary
+ * limit's message). Any other status with those headers (a 5xx that asks for a wait, a 422 on the last quota point) is
+ * no rate limit: GitHub may have done the request.
+ */
+const rateLimitOf = (status, headers, message) => status === 429 || (status === 403 && (headers.get("x-ratelimit-remaining") === "0" || headers.has("retry-after") || /secondary rate limit/i.test(String(message || ""))));
 
 /** The wait GitHub asks for, in ms, or null: Retry-After (seconds or an HTTP date), else a spent quota's x-ratelimit-reset. */
 function askedWaitMs(headers, now = Date.now()) {
@@ -160,6 +167,12 @@ function askedWaitMs(headers, now = Date.now()) {
   return null;
 }
 
+/**
+ * A wait spread by up to 30% so many callers that failed together do not retry together: either way for a backoff of
+ * Factory's own, only longer for a wait GitHub asked for (never below its value). `RETRY.random` is the source.
+ */
+const jitter = (ms, asked) => Math.round(ms * (asked ? 1 + 0.3 * RETRY.random() : 0.7 + 0.6 * RETRY.random()));
+
 /** What withRetry returns a caller's found create under, so it is never read as an answer. */
 const LANDED = Symbol("landed");
 
@@ -169,7 +182,7 @@ const LANDED = Symbol("landed");
  * throw `e`, or {value} to end with that value (under LANDED). The wait is GitHub's ask (`e.waitMs`), a minute for a
  * rate limit that names none, else 2, 4, 8 s. Each retry is logged once, with its cause and try number; never a token.
  */
-async function withRetry(what, attempt, again, deadlineAt = Infinity) {
+async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false } = {}) {
   const end = Math.min(RETRY.now() + RETRY.maxWaitMs, Number.isFinite(deadlineAt) ? deadlineAt : Infinity);
   for (let n = 1; ; n += 1) {
     let e;
@@ -178,8 +191,8 @@ async function withRetry(what, attempt, again, deadlineAt = Infinity) {
     } catch (err) {
       e = err;
     }
-    if (n >= RETRY.tries || !transientError(e) || (again.possible && !again.possible(e))) throw e;
-    const wait = e.waitMs ?? (e.rateLimited && e.status > 0 ? 60_000 : RETRY.baseMs * 2 ** (n - 1));
+    if (n >= RETRY.tries || !transientError(e) || (noRateWait && e.rateLimited) || (again.possible && !again.possible(e))) throw e;
+    const wait = jitter(e.waitMs ?? (e.rateLimited && e.status > 0 ? 60_000 : RETRY.baseMs * 2 ** (n - 1)), e.waitMs !== undefined);
     if (RETRY.now() + wait > end) throw e;
     const cause = e.transport ? `network${e.code ? ` (${e.code})` : ""}` : e.rateLimited ? `rate limited${e.status ? ` (HTTP ${e.status})` : ""}` : `HTTP ${e.status}`;
     log(`GitHub ${what}: ${cause}; try ${n + 1} of ${RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
@@ -224,9 +237,10 @@ const createAgain = (landed) => {
  *
  * A transient failure is sent again within RETRY's bound and before `deadlineAt` (ms) when the call may repeat
  * (repeatable); a create only as createAgain allows, with the caller's optional `landed`. A DELETE whose retry finds
- * nothing (404) after a transient failure is done: the first try removed it.
+ * nothing (404) after a transient failure is done: the first try removed it. `noRateWait`: a rate limit is thrown at once,
+ * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed);
@@ -246,7 +260,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     } catch {
       // not JSON
     }
-    const rateLimited = r.status === 429 || r.headers.get("x-ratelimit-remaining") === "0" || r.headers.has("retry-after") || /secondary rate limit/i.test(msg);
+    const rateLimited = rateLimitOf(r.status, r.headers, msg);
     const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited });
     const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
     if (asked !== null) err.waitMs = asked;
@@ -254,7 +268,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   };
   const pages = [];
   for (;;) {
-    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, deadlineAt);
+    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait });
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { r, text } = res;
@@ -274,9 +288,9 @@ const isMutation = (query) => /^mutation\b/.test(String(query).replace(/#[^\n]*/
 
 /**
  * GraphQL call with fetch; `variables` are passed as JSON. A query is retried like a REST read; a mutation like a
- * create (createAgain, with the caller's optional `landed`). `deadlineAt` as for rest.
+ * create (createAgain, with the caller's optional `landed`). `deadlineAt` and `noRateWait` as for rest.
  */
-export async function graphql(query, variables = {}, { token, deadlineAt = Infinity, landed = null } = {}) {
+export async function graphql(query, variables = {}, { token, deadlineAt = Infinity, landed = null, noRateWait = false } = {}) {
   const url = process.env.GITHUB_GRAPHQL_URL || `${API()}/graphql`;
   const one = async () => {
     let res;
@@ -293,7 +307,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
       // not JSON
     }
     if (!r.ok) {
-      const rateLimited = r.status === 429 || r.headers.get("x-ratelimit-remaining") === "0" || r.headers.has("retry-after") || /secondary rate limit/i.test(String(data?.message || ""));
+      const rateLimited = rateLimitOf(r.status, r.headers, data?.message);
       const err = new GitHubError(`graphql failed (${r.status}): ${(data?.message || text).slice(0, 300)}`, r.status, text, { rateLimited });
       const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
       if (asked !== null) err.waitMs = asked;
@@ -312,7 +326,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
     return { data: data?.data };
   };
   const again = isMutation(query) ? createAgain(landed) : async () => true;
-  const res = await withRetry("graphql", one, again, deadlineAt);
+  const res = await withRetry("graphql", one, again, { deadlineAt, noRateWait });
   return LANDED in res ? res[LANDED] : res.data;
 }
 

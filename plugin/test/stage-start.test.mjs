@@ -69,7 +69,12 @@ test("a stage started by the launcher writes its part of the record before anyth
   // The first comment POST is the stage's part; wait for it, or for the process to end first.
   const deadline = Date.now() + 15_000;
   while (!writes.length && child.exitCode === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-  process.kill(-child.pid, "SIGKILL");
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch (e) {
+    // The group already ended: nothing to kill.
+    if (e.code !== "ESRCH") throw e;
+  }
   await exited;
   server.close();
   assert.doesNotMatch(stderr, /before initialization/, stderr);

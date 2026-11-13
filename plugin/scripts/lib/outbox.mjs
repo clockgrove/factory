@@ -85,8 +85,12 @@ export function gitTransport(r, ref = null) {
   return !GIT_REFUSED.test(text) && GIT_TRANSPORT.test(text);
 }
 
-/** The bound on one git network command's retries: four tries (waits of 2, 4, 8 s) within a minute and the stage's end. */
-export const GIT_RETRY = { tries: 4, maxWaitMs: 60_000 };
+/**
+ * The bound on one git network command's retries: four tries (waits of 2, 4, 8 s, each spread by up to 30%) within a
+ * minute and the stage's real end. The outbox's `deadlineAt` is the work's deadline; the stage keeps 15 minutes after it
+ * for its exit (session.mjs deadline), and a push made then (a timed-out stage's last) is a normal one.
+ */
+export const GIT_RETRY = { tries: 4, maxWaitMs: 60_000, exitReserveMs: 15 * 60_000 };
 
 /**
  * Run `cmd` and stream its stdout into a new file (O_EXCL, O_NOFOLLOW), at most `cap` bytes. Resolves
@@ -248,17 +252,19 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (r.code !== 0) throw new Error(`git ${args[0]} in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || r.code}`);
     return r.stdout.trim();
   };
+  // The stage's real end: its work deadline plus the exit's reserve (GIT_RETRY).
+  const stageEnd = () => (Number.isFinite(Number(deadlineAt)) ? Number(deadlineAt) + GIT_RETRY.exitReserveMs : Infinity);
   /**
    * A git network command in the mirror, sent again on a transport failure (gitTransport) within GIT_RETRY and the
    * stage's end. `landed()`, asked after each wait, says the earlier try took effect after all (a push whose answer was
    * lost): then it is not sent again. Each retry is logged once with its try number; git's text is not logged here.
    */
   const net = async (what, args, { ref = null, landed = null } = {}) => {
-    const end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, Number(deadlineAt) || Infinity);
+    const end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
     for (let n = 1; ; n += 1) {
       const r = await git(args);
       if (r.code === 0 || n >= GIT_RETRY.tries || !gitTransport(r, ref)) return r;
-      const wait = RETRY.baseMs * 2 ** (n - 1);
+      const wait = Math.round(RETRY.baseMs * 2 ** (n - 1) * (0.7 + 0.6 * RETRY.random()));
       if (RETRY.now() + wait > end) return r;
       log(`git ${what}: a network failure (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
       await RETRY.sleep(wait);
@@ -960,12 +966,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return refuse(pushRefusal({ branch, out, code: r.code }));
     }
     // GitHub's head must now be exactly the commit Factory checked. Its reads lag a push at times: five reads over about
-    // 30 s (each ls-remote retried on its own network failures), never past the stage's end.
+    // 30 s (each ls-remote retried on its own network failures); past the stage's real end, still the first three.
     let now = "";
     for (let i = 0; i < 5; i += 1) {
       now = await serverHead(branch).catch(() => "");
-      if (now === head || i === 4 || RETRY.now() + RETRY.baseMs * 2 ** i > (Number(deadlineAt) || Infinity)) break;
-      await RETRY.sleep(RETRY.baseMs * 2 ** i);
+      const wait = RETRY.baseMs * 2 ** i;
+      if (now === head || i === 4 || (i >= 2 && RETRY.now() + wait > stageEnd())) break;
+      await RETRY.sleep(wait);
     }
     if (now !== head) return refuse(`after the push GitHub's ${branch} is ${now.slice(0, 7) || "missing"}, not the checked ${head.slice(0, 7)}`);
     expected = head;

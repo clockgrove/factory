@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Local } from "../scripts/local.mjs";
+import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
 
@@ -17,7 +17,9 @@ import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
 function fakeClock() {
   const waits = [];
   let t = 1_000_000;
-  const saved = { sleep: RETRY.sleep, now: RETRY.now };
+  const saved = { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random };
+  // The middle of the jitter: Factory's own backoffs come out unspread, a wait GitHub asked for 15% longer.
+  RETRY.random = () => 0.5;
   RETRY.sleep = async (ms) => {
     waits.push(ms);
     t += ms;
@@ -126,13 +128,60 @@ test("rest: a create is never sent twice when it may have landed; it goes again 
       assert.deepEqual(created, ["one"], "a 502 on a create is not retried: it may have landed");
       assert.deepEqual(await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "two" } }), { id: 2 });
       assert.deepEqual(await rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "three" } }), { id: 3 });
-      assert.deepEqual(waits, [2000, 7000], "Retry-After honoured");
+      assert.deepEqual(waits, [2000, 8050], "Retry-After honoured, spread only upward");
       await assert.rejects(rest("repos/o/r/pulls/5/merge", { method: "PUT", body: {} }), (e) => e.status === 502);
       const landed = async () => (await rest("repos/o/r/issues/4/comments")).find((c) => c === "four") || null;
       assert.equal(await rest("repos/o/r/issues/4/comments", { method: "POST", body: { body: "four" }, landed }), "four");
       assert.deepEqual(created, ["one", "two", "three", "four"], "each create landed once");
       assert.equal(seen.filter((s) => s === "PUT /repos/o/r/pulls/5/merge").length, 1);
       assert.equal(seen.filter((s) => s === "POST /repos/o/r/issues/4/comments").length, 1);
+    },
+  );
+});
+
+test("rest: a 5xx or a 422 is no rate limit whatever its headers, so a create that may have landed is not sent again", async () => {
+  const reset = String(Math.floor(1_000_000 / 1000) + 30);
+  const firsts = {
+    "/repos/o/r/issues/1/comments": () => json({ message: "Service Unavailable" }, 503, { "retry-after": "1" }),
+    "/repos/o/r/issues/2/comments": () => json({ message: "Bad Gateway" }, 502, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
+    "/repos/o/r/issues/3/comments": () => json({ message: "Validation Failed" }, 422, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
+  };
+  await withFetch(
+    (req, n) => (n === 1 ? firsts[req.path]() : json({ id: 1 }, 201)),
+    async ({ seen }) => {
+      for (const [path, status] of [["repos/o/r/issues/1/comments", 503], ["repos/o/r/issues/2/comments", 502], ["repos/o/r/issues/3/comments", 422]]) {
+        await assert.rejects(rest(path, { method: "POST", body: { body: "x" } }), (e) => e.status === status && e.rateLimited === false);
+      }
+      assert.equal(seen.length, 3, "each create sent once");
+    },
+  );
+  // A read with a 503 asking for a wait is retried after it.
+  await withFetch(
+    (req, n) => (n === 1 ? json({ message: "Service Unavailable" }, 503, { "retry-after": "3" }) : json({ ok: true })),
+    async ({ waits }) => {
+      assert.deepEqual(await rest("repos/o/r"), { ok: true });
+      assert.deepEqual(waits, [3450]);
+    },
+  );
+});
+
+test("rest: jitter spreads Factory's backoff both ways and GitHub's ask only upward; noRateWait throws a rate limit at once", async () => {
+  for (const [r, want] of [[0, [1400, 5000]], [1, [2600, 6500]]]) {
+    await withFetch(
+      (req, n) => (n === 1 ? json({ message: "Bad Gateway" }, 502) : n === 2 ? json({ message: "x" }, 429, { "retry-after": "5" }) : json({ ok: true })),
+      async ({ waits }) => {
+        RETRY.random = () => r;
+        assert.deepEqual(await rest("repos/o/r"), { ok: true });
+        assert.deepEqual(waits, want);
+      },
+    );
+  }
+  await withFetch(
+    () => json({ message: "You have exceeded a secondary rate limit" }, 403, { "retry-after": "60" }),
+    async ({ seen, waits }) => {
+      await assert.rejects(rest("repos/o/r/issues/7/dependencies/blocked_by", { noRateWait: true }), (e) => e.rateLimited === true && e.status === 403);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(waits, []);
     },
   );
 });
@@ -229,6 +278,21 @@ test("outbox: a push whose connection drops is retried and lands; the outbox tak
   }
 });
 
+test("outbox: a push after the work's deadline (in the stage's exit reserve) is still retried", async () => {
+  const r = repos();
+  const clock = fakeClock();
+  try {
+    // A minute past the work's deadline, by the retry clock: a timed-out stage's last push.
+    const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root, deadlineAt: clock.now() - 60_000 });
+    dropConnection(r, "pre-receive", 1);
+    assert.equal(await box.push(), true, box.error);
+    assert.deepEqual(clock.waits, [2000]);
+    box.close();
+  } finally {
+    clock.restore();
+  }
+});
+
 test("outbox: a push that landed though its answer was lost is not sent again", async () => {
   const r = repos();
   const clock = fakeClock();
@@ -276,7 +340,11 @@ test("gitTransport: transport words count only without a refusal and without the
 
 // ------------------------------------------------------------------ serve and a 401
 
-test("serve: a 401 on the local token stops new work and names its source; a renewed token in that source resumes it", async () => {
+/**
+ * The real serve loop against a GitHub that answers 401 while `refuses(authorization)` says so. `onRefused(file)` runs
+ * once the refusal is logged; the loop stops after its first dispatch read GitHub answers, or after `stopMs`.
+ */
+async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
   const home = mkdtempSync(join(tmpdir(), "factory-home-"));
   const file = join(home, ".config", "factory", "tokens", "o", "r");
   mkdirSync(join(file, ".."), { recursive: true });
@@ -284,13 +352,15 @@ test("serve: a 401 on the local token stops new work and names its source; a ren
   let reads = 0;
   const server = createServer((req, res) => {
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
-    if (req.headers.authorization !== "Bearer github_pat_new") return send(401, { message: "Bad credentials" });
+    if (refuses(req.headers.authorization)) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://x");
     if (url.pathname === "/repos/o/r/issues") reads += 1;
-    return send(200, req.method === "POST" ? { message: "Validation Failed" } : []);
+    return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
   const env = { HOME: process.env.HOME, GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_TOKEN: process.env.FACTORY_LOCAL_TOKEN };
+  const probe = REFUSED_PROBE.ms;
+  REFUSED_PROBE.ms = 20;
   process.env.HOME = home;
   process.env.GITHUB_API_URL = `http://127.0.0.1:${server.address().port}`;
   process.env.FACTORY_LOCAL = "1";
@@ -314,25 +384,41 @@ test("serve: a 401 on the local token stops new work and names its source; a ren
     runObjective: async () => ({ exit: "delivered" }),
   });
   const write = process.stdout.write;
-  // The person renews the token a few ticks after the refusal is said.
   process.stdout.write = (chunk, ...rest) => {
     lines.push(String(chunk));
-    if (/GitHub refused the local token/.test(chunk)) setTimeout(() => writeFileSync(file, "github_pat_new\n"), 30);
+    if (/GitHub refused the local token/.test(chunk)) setTimeout(() => onRefused(file), 30);
     return write.call(process.stdout, chunk, ...rest);
   };
+  const stopper = setTimeout(() => (loop.stopping = true), stopMs);
   try {
     await loop.serve({ intervalMs: 5 });
   } finally {
+    clearTimeout(stopper);
     process.stdout.write = write;
+    REFUSED_PROBE.ms = probe;
     for (const [k, v] of Object.entries(env)) v === undefined ? delete process.env[k] : (process.env[k] = v);
     await new Promise((ok) => server.close(ok));
   }
-  const refusedLines = lines.filter((l) => /GitHub refused the local token \(HTTP 401/.test(l));
+  return { lines, reads, file, token: loop.token };
+}
+
+test("serve: a 401 on the local token stops new work and names its source; a renewed token in that source resumes it", async () => {
+  const run = await serveThrough401({ refuses: (auth) => auth !== "Bearer github_pat_new", onRefused: (file) => writeFileSync(file, "github_pat_new\n") });
+  const refusedLines = run.lines.filter((l) => /GitHub refused the local token \(HTTP 401/.test(l));
   assert.equal(refusedLines.length, 1, "said once, not every tick");
-  assert.ok(refusedLines[0].includes(file), "names the token's file");
-  assert.ok(!lines.some((l) => /github_pat_(old|new)/.test(l)), "never the token's value");
-  assert.ok(!lines.some((l) => /dispatch failed/.test(l)));
-  assert.ok(lines.some((l) => /a new token in .*: taking work again/.test(l)));
-  assert.equal(loop.token, "github_pat_new");
-  assert.ok(reads > 0, "the dispatcher read GitHub again with the new token");
+  assert.ok(refusedLines[0].includes(run.file), "names the token's file");
+  assert.ok(!run.lines.some((l) => /github_pat_(old|new)/.test(l)), "never the token's value");
+  assert.ok(!run.lines.some((l) => /dispatch failed/.test(l)));
+  assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
+  assert.equal(run.token, "github_pat_new");
+  assert.ok(run.reads > 0, "the dispatcher read GitHub again with the new token");
+});
+
+test("serve: a 401 GitHub gives for a moment does not stop the loop: the same token, tried again, resumes it", async () => {
+  let incident = true;
+  const run = await serveThrough401({ refuses: () => incident, onRefused: () => (incident = false) });
+  assert.equal(run.lines.filter((l) => /GitHub refused the local token/.test(l)).length, 1);
+  assert.ok(run.lines.some((l) => /GitHub takes the local token again: taking work again/.test(l)));
+  assert.equal(run.token, "github_pat_old");
+  assert.ok(run.reads > 0, "the dispatcher read GitHub again with the same token");
 });

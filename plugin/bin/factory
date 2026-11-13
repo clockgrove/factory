@@ -1,19 +1,30 @@
 #!/usr/bin/env node
 // factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json>
 // Local mode from a clone of the repository: the same worker and reviewer as the Action, on this machine, in its
-// sandboxes (docs/LOCAL.md). A thin front for plugin/scripts/local.mjs; Claude Code puts a plugin's bin/ on PATH.
-import { spawnSync } from "node:child_process";
+// sandboxes (docs/LOCAL.md). A thin front for plugin/scripts/local.mjs, which checks the command line (--help, -h, every
+// flag) before it does anything; Claude Code puts a plugin's bin/ on PATH.
+import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { constants } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const script = join(dirname(realpathSync(fileURLToPath(import.meta.url))), "..", "scripts", "local.mjs");
-const args = process.argv.slice(2);
-if (!["run", "serve", "review", "issue", "deliver", "post-review"].includes(args[0])) {
-  process.stderr.write("usage: factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json>\n");
-  process.exit(64);
+const child = spawn(process.execPath, [script, ...process.argv.slice(2)], { stdio: "inherit" });
+// A signal to this front (a closed terminal, a parent session's teardown, kill) goes on to local.mjs, which pauses its
+// work, stops every stage and its harness, and exits; this front exits with it. Ctrl-C reaches both (one process
+// group): local.mjs takes one stop for the two.
+for (const s of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(s, () => {
+    try {
+      child.kill(s);
+    } catch {
+      // gone already
+    }
+  });
 }
-// The terminal's Ctrl-C reaches local.mjs too (same process group); it pauses its work and exits on its own.
-process.on("SIGINT", () => {});
-const r = spawnSync(process.execPath, [script, ...args], { stdio: "inherit" });
-process.exit(r.status ?? 130);
+child.on("error", (e) => {
+  process.stderr.write(`factory: ${e.message}\n`);
+  process.exit(1);
+});
+child.on("exit", (code, sig) => process.exit(code ?? 128 + (constants.signals[sig] || 1)));

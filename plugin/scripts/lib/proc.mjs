@@ -3,8 +3,8 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { constants as osConstants, tmpdir } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
 import { delimiter, join } from "node:path";
 
@@ -289,7 +289,7 @@ function fileStdio(limit) {
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -307,6 +307,9 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     // `group`: the child leads a process group, and the whole group is killed when it exits (local mode's harness:
     // nothing it or its sandboxed commands started outlives the run, before Factory reads what it left).
     // Every process the run starts inherits a tag, so one that left the group (setsid, a double fork) is still found.
+    // A signal that stops this process stops the group first (stopGroups); `record` names the run in a file for as long
+    // as it lives (a file in the `record` directory), so a later start can stop it should this process die unsignalled
+    // (reapRecorded).
     const tag = group ? randomBytes(12).toString("hex") : null;
     const files = toFiles ? fileStdio(maxBytes) : null;
     let child;
@@ -317,6 +320,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       throw e;
     }
     files?.spawned();
+    if (group && child.pid) trackGroup(child.pid, tag, record);
     const out = [];
     const err = [];
     let outBytes = 0;
@@ -425,6 +429,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
         }
         const left = killTagged(tag);
         if (left) process.stdout.write(`[factory] ${left} process(es) the run left outside its group were killed\n`);
+        untrackGroup(child.pid);
       });
     }
     child.on("close", async (code, sig) => {
@@ -450,6 +455,234 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
+}
+
+// ------------------------------------------------------------------ group runs and stop signals
+
+/** The files in a stage's usage directory that name its live harness runs (exec's `record`), for a later start to reap. */
+export const groupRecordName = (pid) => `harness-group-${pid}.json`;
+export const GROUP_RECORD = /^harness-group-\d+\.json$/;
+/** This process's live `group` runs: leader pid → {tag, record}. */
+const GROUPS = new Map();
+let trapped = false;
+
+/** `sysctl -n kern.boottime` ("{ sec = 1731450000, usec = 12345 } Thu Nov 12 ...") as its seconds, a string; else null. */
+export const boottimeSeconds = (text) => /\bsec = (\d+)/.exec(String(text || ""))?.[1] ?? null;
+
+/** This boot: Linux's boot id; elsewhere the boot time macOS's sysctl reports. Null when unreadable. A pid means nothing across boots. */
+export function bootId() {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    try {
+      return boottimeSeconds(execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" } }));
+    } catch {
+      return null;
+    }
+  }
+}
+
+const probe = (target) => {
+  try {
+    process.kill(target, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+};
+
+/** The fields of a /proc/<pid>/stat line after the command name (index 0 is field 3, the state); null if it is none. */
+export function statFields(text) {
+  const end = String(text || "").lastIndexOf(")");
+  return end < 0 ? null : text.slice(end + 2).trim().split(" ");
+}
+/** Linux: /proc/<pid>/stat's fields (statFields), or null. */
+function procStat(pid) {
+  try {
+    return statFields(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `ps` (macOS) with a fixed environment: its time and text formats follow the locale and TZ, and a record written under
+ * one environment must read the same under another.
+ */
+const ps = (args) => execFileSync("ps", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024, env: { PATH: process.env.PATH || "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC0" } });
+
+/** `ps -o lstart=` under LC_ALL=C TZ=UTC0 ("Thu Nov 12 21:15:03 2026") as Unix seconds, a string; null if it is none. */
+export function lstartSeconds(text) {
+  const m = /^\s*[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s*$/.exec(String(text || ""));
+  const month = m ? ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(m[1]) : -1;
+  if (month < 0) return null;
+  return String(Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])) / 1000);
+}
+
+/** The pids in process group `pgid`, from `ps -A -o pid=,pgid=` output. */
+export const groupMembers = (text, pgid) =>
+  String(text || "")
+    .split("\n")
+    .map((l) => l.trim().split(/\s+/).map(Number))
+    .filter(([p, g]) => Number.isInteger(p) && p > 0 && g === pgid)
+    .map(([p]) => p);
+
+/** Whether a process's environment, as /proc/<pid>/environ (NUL-separated) or `ps eww` prints it, holds `mark` exactly. */
+export const holdsMark = (text, mark) => String(text || "").split(/[\0\s]+/).includes(mark);
+
+/**
+ * When process `pid` started, as a string that differs for another process given the same pid: Linux's start time in
+ * clock ticks since boot (/proc/<pid>/stat field 22), elsewhere `ps -o lstart=` read in a fixed locale and time zone, as
+ * Unix seconds. Null when it cannot be read.
+ */
+export function startTime(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") return procStat(pid)?.[19] ?? null;
+  try {
+    return lstartSeconds(ps(["-o", "lstart=", "-p", String(pid)]));
+  } catch {
+    return null;
+  }
+}
+
+/** A process as Factory names it in a record: its pid, start time and boot (sameProcess checks one). */
+export const processRecord = (pid = process.pid) => ({ pid, start: startTime(pid), boot: bootId() });
+
+/**
+ * Whether the process a record names is still that process: true when it is (this boot, alive, started when recorded),
+ * false only when it is known gone (another boot, no such pid, or a start time read and different), null when that
+ * cannot be told (no pid or boot, a start time unread or unrecorded): a caller then signals and deletes nothing.
+ */
+export function sameProcess(rec) {
+  const pid = Number(rec?.pid);
+  const boot = bootId();
+  if (!Number.isInteger(pid) || pid <= 1 || !boot || !rec.boot) return null;
+  if (rec.boot !== boot || !probe(pid)) return false;
+  const now = startTime(pid);
+  if (!now || !/^\d+$/.test(String(rec.start ?? ""))) return null;
+  return now === String(rec.start);
+}
+
+/** Whether process `pid` carries FACTORY_RUN_TAG=`tag` in its environment (Linux /proc; elsewhere `ps eww`). */
+function carriesTag(pid, tag) {
+  const mark = `FACTORY_RUN_TAG=${tag}`;
+  if (process.platform === "linux") {
+    try {
+      return holdsMark(readFileSync(`/proc/${pid}/environ`, "latin1"), mark);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return holdsMark(ps(["eww", "-o", "command=", "-p", String(pid)]), mark);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a live process in process group `pgid` carries the run's tag, which every process the run starts inherits. */
+function groupCarriesTag(pgid, tag) {
+  let members = [];
+  if (process.platform === "linux") {
+    try {
+      members = readdirSync("/proc").filter((p) => /^\d+$/.test(p) && procStat(p)?.[2] === String(pgid)).map(Number);
+    } catch {
+      return false;
+    }
+  } else {
+    try {
+      members = groupMembers(ps(["-A", "-o", "pid=,pgid="]), pgid);
+    } catch {
+      return false;
+    }
+  }
+  return members.some((p) => carriesTag(p, tag));
+}
+
+/** The signals that stop a process with a live `group` run (its groups go first: stopGroups), or a local loop. */
+export const STOP_SIGNALS = ["SIGTERM", "SIGHUP", "SIGINT"];
+
+function trackGroup(pid, tag, recordDir) {
+  const record = recordDir ? join(recordDir, groupRecordName(pid)) : null;
+  GROUPS.set(pid, { tag, record });
+  // A record names the run for the next start, should this process die without stopping it (SIGKILL, a crash).
+  if (record) {
+    try {
+      const owner = processRecord();
+      writeFileSync(record, JSON.stringify({ pid, start: startTime(pid), tag, owner: owner.pid, ownerStart: owner.start, boot: owner.boot }), { mode: 0o600 });
+    } catch {
+      // no record: the signal path below still stops it
+    }
+  }
+  // A process with a harness in its own process group stops it before it exits: a terminal's signal never reaches it.
+  if (!trapped) {
+    trapped = true;
+    for (const s of STOP_SIGNALS) process.on(s, () => stopGroups(s));
+  }
+}
+
+function untrackGroup(pid) {
+  const g = GROUPS.get(pid);
+  GROUPS.delete(pid);
+  if (g?.record) rmSync(g.record, { force: true });
+}
+
+/**
+ * On SIGTERM, SIGHUP or SIGINT: every live group run's process group and tagged processes are killed, then the process
+ * exits as the signal would have ended it (128 + its number), unless another handler of that signal is installed and
+ * decides when. All at once, with no await between: no code of the stage runs (a next pass, a post) once it is told
+ * to stop, and nothing of the harness is left when it exits. A killed pass's session is not carried over anyway.
+ */
+function stopGroups(sig) {
+  for (const [pid, g] of [...GROUPS]) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // gone
+    }
+    killTagged(g.tag);
+    untrackGroup(pid);
+  }
+  if (process.listenerCount(sig) <= 1) process.exit(128 + (osConstants.signals[sig] || 15));
+}
+
+/**
+ * Stop the harness run a dead stage recorded in `file` (exec's `record`), then remove the record. Nothing is signalled
+ * unless the record is this boot's and its owner stage is gone (sameProcess: a pid reused since does not keep it). The
+ * group is killed only when a live process in it carries the run's tag; when its leader is alive it must also be the
+ * process recorded. Every process carrying the tag goes too. Whatever cannot be checked on this platform is not
+ * signalled; never a match on command lines. Returns whether anything was signalled.
+ */
+export function reapRecorded(file) {
+  let rec = null;
+  try {
+    rec = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+  const pid = Number(rec?.pid);
+  const tag = typeof rec?.tag === "string" && /^[0-9a-f]{24}$/.test(rec.tag) ? rec.tag : null;
+  const boot = bootId();
+  if (!boot) return false;
+  if (!tag || !Number.isInteger(pid) || pid <= 1 || rec.boot !== boot) {
+    rmSync(file, { force: true });
+    return false;
+  }
+  // A live owner is a stage still running (its own stop path ends its run); one that cannot be told is left too.
+  if (sameProcess({ pid: rec.owner, start: rec.ownerStart, boot: rec.boot }) !== false) return false;
+  let hit = false;
+  const leader = probe(pid) ? sameProcess(rec) === true : true;
+  if (leader && groupCarriesTag(pid, tag)) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      hit = true;
+    } catch {
+      // gone
+    }
+  }
+  if (killTagged(tag)) hit = true;
+  rmSync(file, { force: true });
+  return hit;
 }
 
 /** exec that throws on a non-zero exit with stderr in the message. */
@@ -514,7 +747,7 @@ export function killTagged(tag) {
     }
   } else {
     try {
-      for (const line of execFileSync("ps", ["eww", "-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\n")) if (line.includes(mark)) pids.push(Number(line.trim().split(/\s+/)[0]));
+      for (const line of ps(["eww", "-A", "-o", "pid=,command="]).split("\n")) if (holdsMark(line, mark)) pids.push(Number(line.trim().split(/\s+/)[0]));
     } catch {
       // no ps
     }

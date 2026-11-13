@@ -839,7 +839,8 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     live.line(l);
     onLine?.(l);
   } : onLine;
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", fileStdio: true });
+  // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the

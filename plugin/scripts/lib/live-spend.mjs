@@ -82,8 +82,10 @@ export function rolloutTotal(text, id = null) {
 }
 
 /**
- * A live meter for one pass: `line(text)` takes each line of the harness's stream, `usd()` is its spend so far. `prior`:
- * a resumed session's running total as Factory last read it (harness.mjs SESSION_TOTALS), taken off once.
+ * A live meter for one pass: `line(text)` takes each line of the harness's stream, `usd()` is its spend so far, and
+ * `estimated()` whether any of it was priced at the table's dearest rates (a model with no row: an over-estimate of the
+ * tokens read, not a lower bound). `prior`: a resumed session's running total as Factory last read it (harness.mjs
+ * SESSION_TOTALS), taken off once.
  */
 export function liveSpend(harness, model = null, { prior = null, creditUsd = COPILOT_CREDIT_USD, rollout = null } = {}) {
   const claude = new Map();
@@ -126,5 +128,10 @@ export function liveSpend(harness, model = null, { prior = null, creditUsd = COP
     if (harness === "copilot") return Math.max(0, (copilotNano / 1e9) * creditUsd - n(prior?.usd));
     return 0;
   };
-  return { line, usd };
+  const estimated = () => {
+    if (harness === "claude") return [...claude.values()].some((m) => claudeRate(m.model) === CLAUDE_PRICES.upperBound);
+    if (harness === "codex") return priceCodex(codex.model, { input: 1, output: 1, cached: 0, written: 0 }) === null;
+    return false;
+  };
+  return { line, usd, estimated };
 }

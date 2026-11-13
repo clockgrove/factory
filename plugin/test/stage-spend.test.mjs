@@ -4,7 +4,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -60,46 +60,190 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   assert.deepEqual(lineOf(last), { usd: 0 }, last);
 });
 
-test("a stage killed mid-pass leaves the spend it had read, marked a lower bound", async () => {
+const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
+
+/** A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it. */
+function fakeCodex(bin, { hang = false } = {}) {
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}
+const fs = require("node:fs");
+const f = process.env.FAKE_STATE + "/thread.json";
+const resume = process.argv[3] === "resume" ? process.argv[4] : null;
+const t = resume && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : { input: 0, cached: 0, output: 0 };
+t.input += 200000; t.cached += 100000; t.output += 5000;
+fs.writeFileSync(f, JSON.stringify(t));
+const id = resume || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724";
+console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: 0, output_tokens: t.output, reasoning_output_tokens: 0 } }));
+${hang ? "setInterval(() => {}, 1000);" : ""}
+`, { mode: 0o755 });
+}
+
+/** Run `script` (an ES module body) as its own process: one stage, with its own spend and session state. */
+function stageProcess(script, env) {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (c) => (out += c));
+  child.stderr.on("data", (c) => (err += c));
+  const exited = new Promise((r) => child.on("exit", r));
+  return { child, exited, out: () => out, err: () => err };
+}
+
+test("a stage killed after a real pass leaves that pass's dollars in its default progress writer's line, a lower bound", async () => {
   const gh = await fakeGitHub();
-  const url = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
-  // The stage's own writer and meter: a pass's stream reports one priced message, a status write follows, then the
-  // process is killed with no chance to write its end.
+  const root = mkdtempSync(join(tmpdir(), "spend-kill-"));
+  mkdirSync(join(root, "bin"));
+  fakeCodex(join(root, "bin"));
+  // The default writer (local mode), a real pass through runHarness, one phase line, then the process is killed.
   const script = `
-    import { progressReporter } from ${JSON.stringify(url("session.mjs"))};
-    import { meterPass, stageSpendSoFar } from ${JSON.stringify(url("harness.mjs"))};
-    import { liveSpend } from ${JSON.stringify(url("live-spend.mjs"))};
-    import { repoOf } from ${JSON.stringify(url("github.mjs"))};
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", harness: "claude", soFar: stageSpendSoFar });
-    const meter = liveSpend("claude", "claude-sonnet-4-5");
-    meterPass(meter);
-    meter.line(JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 100000, output_tokens: 20000 } } }));
-    await progress("harness running");
-    process.stdout.write("written\\n");
+    import { progressReporter } from ${JSON.stringify(LIB("session.mjs"))};
+    import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
+    process.env.FACTORY_LOCAL = "1";
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", harness: "codex" });
+    delete process.env.FACTORY_LOCAL;
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: process.env.FAKE_STATE, env: { PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, label: "work-1" });
+    await progress("validation");
+    process.stdout.write("written " + rec.usd + "\\n");
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_LOCAL: "1" }, stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  child.stderr.on("data", (c) => (out += c));
-  await new Promise((resolve, reject) => {
-    child.stdout.on("data", (c) => String(c).includes("written") && resolve());
-    child.on("exit", () => reject(new Error(`ended before its write:\n${out}`)));
-  });
-  child.kill("SIGKILL");
-  await new Promise((r) => child.on("exit", r));
+  const s = stageProcess(script, { GITHUB_API_URL: gh.url, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` });
+  const deadline = Date.now() + 30_000;
+  while (!/written/.test(s.out()) && s.child.exitCode === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  s.child.kill("SIGKILL");
+  await s.exited;
   gh.close();
+  const usd = Number(/written (\S+)/.exec(s.out())?.[1]);
+  assert.ok(usd > 0, `the pass reported no dollars:\n${s.out()}\n${s.err()}`);
   const line = lineOf(gh.progress.at(-1));
-  assert.equal(line.usdLowerBound, true);
-  assert.ok(line.usd > 0, JSON.stringify(line));
-  // daily_usd counts it: a dead stage is no longer $0 there.
-  assert.equal(spendOf(gh.progress.at(-1)), line.usd);
+  assert.deepEqual(line, { usd, usdLowerBound: true });
+  assert.equal(spendOf(gh.progress.at(-1)), usd, "daily_usd counts it");
 });
 
-test("stageSpendLine: $0 for no pass, the record's dollars and key share otherwise, a lower bound when a pass reported none", () => {
-  assert.deepEqual(stageSpendLine({ usd: null }, { ran: false }), { usd: 0, parts: {} });
-  assert.deepEqual(stageSpendLine({ usd: 1.25, workerKeyUsd: 0.25 }, { ran: true }), { usd: 1.25, parts: { workerKeyUsd: 0.25 } });
-  assert.deepEqual(stageSpendLine({ usd: null }, { ran: true, known: 0.4 }), { usd: 0.4, parts: { usdLowerBound: true } });
-  assert.deepEqual(stageSpendLine({ usd: 0.9, usdLowerBound: true }, { ran: true }), { usd: 0.9, parts: { usdLowerBound: true } });
+test("kill after a finished pass, then resume: every pass is counted once across the three stages' lines", async () => {
+  const root = mkdtempSync(join(tmpdir(), "spend-resume-"));
+  const ws = join(root, "ws");
+  mkdirSync(join(root, "bin"));
+  mkdirSync(ws);
+  fakeCodex(join(root, "bin"));
+  const env = { FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
+  // One stage per process, as the local loop runs them: restore the work lineage, one pass, then end (A, C) or die (B).
+  const stage = (name, { dir, end }) => `
+    import { mkdirSync, writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { runHarness, stageSpendSoFar } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};
+    import { stageSpendLine } from ${JSON.stringify(LIB("logic.mjs"))};
+    const ws = ${JSON.stringify(ws)};
+    const usageDir = join(ws, ${JSON.stringify(dir)});
+    mkdirSync(usageDir, { recursive: true });
+    let resume = null;
+    if (${JSON.stringify(name)} !== "A") {
+      process.env.FACTORY_LOCAL = "1";
+      resume = (await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" })).id;
+      delete process.env.FACTORY_LOCAL;
+    }
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: process.env.FAKE_STATE, env: { PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const known = await stageSpendSoFar();
+    if (${JSON.stringify(end)}) {
+      // The stage's saved session (its rollout, as saveTranscript keeps it) and its result.json.
+      const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-" + rec.sessionId + ".jsonl");
+      mkdirSync(join(usageDir, "transcript", "2026", "11", "10"), { recursive: true });
+      writeFileSync(join(usageDir, "transcript", rel), "{}\\n");
+      writeFileSync(join(usageDir, "result.json"), JSON.stringify({ usd: rec.usd, session: { harness: "codex", id: rec.sessionId, files: [rel], checkout: "/c" }, sessionTotal: rec.sessionTotal }));
+      console.log(JSON.stringify(stageSpendLine({ usd: rec.usd }, { records: [rec], known })));
+    } else console.log(JSON.stringify({ usd: known.usd, usdLowerBound: true }));
+  `;
+  const lines = [];
+  for (const [name, dir, end] of [["A", "usage-work-1", true], ["B", "usage-work-2", false], ["C", "usage-work-3", true]]) {
+    const s = stageProcess(stage(name, { dir, end }), env);
+    const code = await s.exited;
+    assert.equal(code, 0, s.err());
+    lines.push(JSON.parse(s.out().trim().split("\n").at(-1)));
+  }
+  const [a, b, c] = lines;
+  assert.ok(a.usd > 0);
+  assert.equal(b.usdLowerBound, true);
+  // Each stage ran one equal pass: the resumed stage counts its own, not the killed stage's again.
+  assert.deepEqual([b.usd, c.usd], [a.usd, a.usd], JSON.stringify(lines));
+});
+
+test("a final write waits for a status write in flight, and its spend line replaces the interim one", async () => {
+  const { progressReporter } = await import("../scripts/lib/session.mjs");
+  const { repoOf } = await import("../scripts/lib/github.mjs");
+  const landed = [];
+  let gets = 0;
+  // The first write's comment read is slow, so its write lands late unless the next write waits for it.
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET") return setTimeout(() => res.end("[]"), ++gets === 1 ? 300 : 0);
+      landed.push(JSON.parse(b || "{}").body || "");
+      res.end("{}");
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, estimated: false }) });
+    progress.live("harness working", { force: true });
+    await new Promise((r) => setTimeout(r, 30));
+    progress.spend(1.25, null);
+    await progress("exit: delivered");
+  } finally {
+    process.env.GITHUB_API_URL = saved;
+    server.close();
+  }
+  assert.deepEqual(landed.map(lineOf), [{ usd: 0.5, usdLowerBound: true }, { usd: 1.25 }]);
+  assert.match(landed.at(-1), /exit: delivered/);
+});
+
+test("the default progress writer of a local stage carries the stage's spend so far; a --here writer (soFar null) none", async () => {
+  const { progressReporter } = await import("../scripts/lib/session.mjs");
+  const { repoOf } = await import("../scripts/lib/github.mjs");
+  const gh = await fakeGitHub();
+  const saved = [process.env.GITHUB_API_URL, process.env.FACTORY_LOCAL];
+  process.env.GITHUB_API_URL = gh.url;
+  process.env.FACTORY_LOCAL = "1";
+  try {
+    await progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1" })("setup");
+    await progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "2", soFar: null })("setup");
+  } finally {
+    [process.env.GITHUB_API_URL, process.env.FACTORY_LOCAL] = saved;
+    for (const [k, v] of [["GITHUB_API_URL", saved[0]], ["FACTORY_LOCAL", saved[1]]]) if (v === undefined) delete process.env[k];
+    gh.close();
+  }
+  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, usdLowerBound: true }, null]);
+});
+
+test("stageSpendLine: $0 for no pass; the record's dollars and key share; a pass with no dollars counts what was read", () => {
+  const priced = { usd: 2 };
+  const none = { usd: null };
+  assert.deepEqual(stageSpendLine({ usd: null }, { records: [] }), { usd: 0, parts: {} });
+  assert.deepEqual(stageSpendLine({ usd: 1.25, workerKeyUsd: 0.25 }, { records: [{ usd: 1 }], known: { usd: 1.25 } }), { usd: 1.25, parts: { workerKeyUsd: 0.25 } });
+  assert.deepEqual(stageSpendLine({ usd: null }, { records: [none], known: { usd: 0.4 } }), { usd: 0.4, parts: { usdLowerBound: true } });
+  // One priced pass and one with no dollars: never below the interim figure, and marked.
+  assert.deepEqual(stageSpendLine({ usd: 2 }, { records: [priced, none], known: { usd: 5 } }), { usd: 5, parts: { usdLowerBound: true } });
+  // Never below the record either.
+  assert.deepEqual(stageSpendLine({ usd: 2 }, { records: [priced, none], known: { usd: 1 } }), { usd: 2, parts: { usdLowerBound: true } });
+  // A reading at the table's dearest rates (a model with no price row) is an estimate, not a lower bound.
+  assert.deepEqual(stageSpendLine({ usd: null }, { records: [none], known: { usd: 1.35, estimated: true } }), { usd: 1.35, parts: { usdUpperBound: true } });
+  assert.deepEqual(stageSpendLine({ usd: 0.9, usdLowerBound: true }, { records: [{ usd: 0.9 }] }), { usd: 0.9, parts: { usdLowerBound: true } });
+});
+
+test("a live meter on a model with no price row says its reading is an estimate", async () => {
+  const { liveSpend } = await import("../scripts/lib/live-spend.mjs");
+  const turn = JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 100 } });
+  const unlisted = liveSpend("codex", "gpt-unlisted-9");
+  const listed = liveSpend("codex", "gpt-6.1-sol");
+  for (const m of [unlisted, listed]) m.line(turn);
+  assert.deepEqual([unlisted.estimated(), listed.estimated()], [true, false]);
+  const claude = liveSpend("claude", "claude-unlisted-1");
+  claude.line(JSON.stringify({ type: "assistant", message: { id: "m", usage: { input_tokens: 10, output_tokens: 1 } } }));
+  assert.equal(claude.estimated(), true);
 });
 
 test("the scorer: a $0 stage is metered, a lower-bound line marks the total, a relayed key's dollars count once", () => {
@@ -123,4 +267,18 @@ test("the scorer: a $0 stage is metered, a lower-bound line marks the total, a r
   assert.equal(cost.workerKeyUsd, 0.5);
   assert.equal(cost.usdLowerBound, true);
   assert.match(cost.basis, /lower bound/);
+  assert.match(cost.basis, /includes 0\.5 USD through a relayed worker key/);
+  // A line priced at the table's dearest rates reads as an estimate, not a lower bound.
+  const est = costOf(spendRecords({ ...collected, issueComments: [c(`<!-- factory:48:progress:work:4 -->\nFactory work run 4.\n${spendMarker(1.35, { usdUpperBound: true })}`)] }, { app: app.login }), { date: "x", perMillion: {} }, { harness: "codex" });
+  assert.equal(est.usdLowerBound, undefined);
+  assert.match(est.basis, /estimate at the price table's dearest rates/);
+});
+
+test("a usage record whose dollars include a relayed worker key says so in its basis", async () => {
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "spend-basis-"));
+  const records = [{ harness: "claude", model: "m", usd: 10.906043, harnessUsd: 8.758306, workerKeyUsd: 2.147737, basis: "harness-reported: total_cost_usd, modelUsage", tokens: { input: 1, output: 1, cached: 0 }, started: "a", ended: "b" }];
+  const usage = writeUsage(dir, { harness: "claude", model: "m", records, passes: 1, exit: "delivered", reason: "", credentialBasis: "x" });
+  assert.equal(usage.usd, 10.906043);
+  assert.match(usage.basis, /^harness-reported: total_cost_usd, modelUsage; plus 2\.147737 USD through the relayed worker key \(workerKeyUsd\), included in usd$/);
 });

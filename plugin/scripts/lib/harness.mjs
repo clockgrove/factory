@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { appendOwn, dropOwned, writeNew } from "./fsafe.mjs";
+import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
@@ -426,17 +426,24 @@ const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 
 // This process's stage spend as Factory has read it: each finished pass's own dollars, and each running pass's live meter
 // (live-spend.mjs). What the progress comment's spend line carries until the stage records its final figure.
-const STAGE_SPEND = { done: 0, open: new Set() };
+const STAGE_SPEND = { done: 0, open: new Set(), estimated: false };
 /**
- * The stage's spend so far: finished passes' harness dollars, running passes' live readings and the gateway relay's key
- * spend (its total, which no harness figure here holds). A lower bound: a pass that has not ended may spend more, and a
- * meter that cannot be read counts nothing.
+ * The stage's spend so far, `{usd, estimated}`: finished passes' harness dollars (a pass that reported none at its live
+ * reading), running passes' live readings and the gateway relay's key spend (its total, which no harness figure here
+ * holds). `estimated`: some of it is a live reading at the price table's dearest rates (a model with no row), an
+ * over-estimate of the tokens read. Otherwise a lower bound: a pass that has not ended may spend more, and a meter that
+ * cannot be read counts nothing.
  */
 export async function stageSpendSoFar() {
   let usd = STAGE_SPEND.done;
-  for (const m of STAGE_SPEND.open) usd += await m.usd().catch(() => 0);
+  let estimated = STAGE_SPEND.estimated;
+  for (const m of STAGE_SPEND.open) {
+    const read = await m.usd().catch(() => 0);
+    usd += read;
+    if (read > 0 && m.estimated?.()) estimated = true;
+  }
   usd += Number(activeRelay()?.totals().usd) || 0;
-  return Math.round(Math.max(0, usd) * 1e6) / 1e6;
+  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, estimated };
 }
 /** A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are none). */
 export function meterPass(meter) {
@@ -444,9 +451,31 @@ export function meterPass(meter) {
   return {
     end: async (usd) => {
       if (!STAGE_SPEND.open.delete(meter)) return;
-      STAGE_SPEND.done += typeof usd === "number" && Number.isFinite(usd) ? Math.max(0, usd) : await meter.usd().catch(() => 0);
+      if (typeof usd === "number" && Number.isFinite(usd)) {
+        STAGE_SPEND.done += Math.max(0, usd);
+        return;
+      }
+      const read = await meter.usd().catch(() => 0);
+      STAGE_SPEND.done += read;
+      if (read > 0 && meter.estimated?.()) STAGE_SPEND.estimated = true;
     },
   };
+}
+
+/**
+ * The file in a stage's usage directory that holds each session's running total as Factory read it after each pass
+ * (SESSION_TOTALS), written as the pass ends. A stage killed after a finished pass leaves no result.json, but the next
+ * stage that resumes the same live session seeds from this (session.mjs restoreTranscript), so the killed stage's
+ * passes, already in its progress comment's spend line, are not counted again.
+ */
+export const SESSION_TOTALS_FILE = "session-totals.json";
+function persistTotals(eventsFile, harness) {
+  if (!eventsFile) return;
+  try {
+    writeOwn(join(dirname(eventsFile), SESSION_TOTALS_FILE), `${JSON.stringify({ harness, at: new Date().toISOString(), totals: Object.fromEntries(SESSION_TOTALS) })}\n`);
+  } catch (e) {
+    log(`session totals not written: ${String(e?.message || e).slice(0, 120)}`);
+  }
 }
 
 /**
@@ -918,6 +947,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
   }
+  if (RUNNING_TOTALS.has(harness) && reported.sessionId) persistTotals(eventsFile, harness);
   // The pass's own dollars join the stage's spend so far; its key spend is the relay's total there.
   await metered.end(rec.usd);
   // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.

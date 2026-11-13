@@ -113,7 +113,7 @@ async function main() {
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
-      const line = stageSpendLine(usage, { ran: records.some(Boolean), known });
+      const line = stageSpendLine(usage, { records, known });
       progress.spend(line.usd, line.parts);
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);

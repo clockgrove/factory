@@ -1982,16 +1982,21 @@ export function decisionsSection(decisions, cap = 12_000) {
  */
 export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
 /**
- * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
- * progress.spend. Every stage gets one. No harness pass is a known $0. A pass that reported no dollars counts `known`
- * (the stage's spend so far as Factory read it, harness.mjs stageSpendSoFar), marked `usdLowerBound`, as is a record
- * that is a lower bound itself; so nothing reads it as nothing. `workerKeyUsd`: the relayed key's share, already in `usd`.
+ * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage) and its pass `records`:
+ * `{usd, parts}` for progress.spend. Every stage gets one; no harness pass is a known $0. When a pass that ran reported
+ * no dollars, the figure is the larger of the record's and `known` (the stage's spend so far, harness.mjs
+ * stageSpendSoFar, which holds that pass's live reading), marked `usdLowerBound`; or `usdUpperBound` when that reading
+ * was priced at the table's dearest rates (`known.estimated`, a model with no price row). The record's own bounds are
+ * kept. `workerKeyUsd`: the relayed key's share, already in `usd`.
  */
-export function stageSpendLine(usage, { ran = false, known = null } = {}) {
+export function stageSpendLine(usage, { records = [], known = null } = {}) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  const usd = num(usage?.usd) ?? (ran ? (num(known) ?? 0) : 0);
-  const lower = !!usage?.usdLowerBound || (ran && num(usage?.usd) === null);
-  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}) } };
+  const unreported = records.some((r) => r && num(r.usd) === null);
+  const usd = Math.max(num(usage?.usd) ?? 0, unreported ? (num(known?.usd) ?? 0) : 0);
+  const estimated = unreported && !!known?.estimated;
+  const lower = !!usage?.usdLowerBound || (unreported && !estimated);
+  const upper = !!usage?.usdUpperBound || estimated;
+  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}), ...(upper ? { usdUpperBound: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer

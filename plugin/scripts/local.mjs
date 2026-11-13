@@ -17,7 +17,7 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, hostname, platform, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,7 +38,7 @@ import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
-import { bwrapShim, localPackageManager, localToolchain } from "./lib/copilot-runner.mjs";
+import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
@@ -421,19 +421,8 @@ export class Local {
     // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
     // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
     // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
-    const shown = ["claude", "copilot"].includes(this.harness) && platform() === "linux";
-    const fenced = [this.dev, join(this.dev, ".factory"), dirname(stageTmp)];
-    const toolchain = shown ? localToolchain({ path: base.PATH, off: fenced }) : null;
-    const pm = shown ? localPackageManager({ clone, path: base.PATH, off: fenced }) : null;
-    // The package manager's command, first on each command's PATH, in a directory no sandbox may write: what the stage's
-    // PATH resolves it to (corepack's shim, its standalone install, a version manager's choice for the clone).
-    const toolBin = join(usageDir, "toolbin");
-    if (pm?.real) {
-      mkdirSync(toolBin, { recursive: true });
-      symlinkSync(pm.real, join(toolBin, pm.name));
-    }
-    const lead = [...(toolchain?.dirs.length ? [toolchain.bin] : []), ...(pm?.real ? [toolBin] : [])];
-    const tools = { readable: [...(toolchain?.dirs || []), ...(pm?.dirs || [])], denied: toolchain?.denied || [], probe: toolchain || pm ? { ...(toolchain?.toolchain || {}), ...(pm ? { pm: pm.name } : {}) } : null };
+    const tools = localTools({ harness: this.harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    const lead = tools.lead;
     const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
@@ -487,7 +476,7 @@ export class Local {
     // Claude Code sources this before each command, inside its sandbox (CLAUDE_ENV_FILE): the same PATH lead. In the
     // usage directory, which no sandbox may write.
     const claudeEnv = this.harness === "claude" && lead.length ? join(usageDir, "claude-env.sh") : null;
-    if (claudeEnv) writeFileSync(claudeEnv, `export PATH=${[gitBin, ...lead].map((d) => `'${d.replace(/'/g, "'\\''")}'`).join(":")}:"$PATH"\n`, { mode: 0o644 });
+    if (claudeEnv) writeFileSync(claudeEnv, claudeEnvText([gitBin, ...lead]), { mode: 0o644 });
     return {
       ...base,
       FACTORY_CREDENTIAL: "login",
@@ -525,7 +514,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir), ...(tools.probe ? { toolchain: tools.probe } : {}) } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's

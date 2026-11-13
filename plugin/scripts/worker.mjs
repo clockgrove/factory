@@ -394,7 +394,7 @@ async function main() {
   // The plan.md the mid-run stop read (the hand-off tick), when it stopped the harness.
   let stoppedPlan = null;
   const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
-  if (rebaseMode && !rebaseConflict) rec = { ok: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
+  if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
     await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);

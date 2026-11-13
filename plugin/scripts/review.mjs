@@ -551,7 +551,7 @@ async function main() {
     await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
   }
   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
-  const reviewRec = alreadyReviewed ? { ok: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
+  const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,

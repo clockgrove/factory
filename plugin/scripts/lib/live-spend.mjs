@@ -90,6 +90,7 @@ export function rolloutTotal(text, id = null) {
 export function liveSpend(harness, model = null, { prior = null, creditUsd = COPILOT_CREDIT_USD, rollout = null } = {}) {
   const claude = new Map();
   const codex = { input: 0, output: 0, cached: 0, written: 0, model };
+  let codexLast = null;
   let copilotNano = 0;
   let thread = null;
   const line = (text) => {
@@ -108,30 +109,55 @@ export function liveSpend(harness, model = null, { prior = null, creditUsd = COP
       codex.output += n(e.usage.output_tokens);
       codex.cached += n(e.usage.cached_input_tokens);
       codex.written += n(e.usage.cache_write_input_tokens);
+      // The thread's running total as its last turn reported it: what a resumed session starts from, never summed.
+      codexLast = { input: n(e.usage.input_tokens), output: n(e.usage.output_tokens), cached: n(e.usage.cached_input_tokens), written: n(e.usage.cache_write_input_tokens) };
     } else if (harness === "copilot" && e.type === "session.usage_checkpoint") copilotNano = Math.max(copilotNano, n(e.data?.totalNanoAiu));
+  };
+  // Codex: the thread's running total as read now (its stream's, or its rollout's when larger) and its share since `prior`.
+  const codexRead = async () => {
+    const p = prior?.tokens || {};
+    const since = (t) => ({ input: Math.max(0, n(t.input) - n(p.input)), output: Math.max(0, n(t.output) - n(p.output)), cached: Math.max(0, n(t.cached) - n(p.cached)), written: Math.max(0, n(t.written) - n(p.written)) });
+    let best = { total: codexLast ?? {}, usd: codexUsd(codex.model, since(codex)) };
+    if (rollout && thread) {
+      // A read that fails throws: the relay refuses the call rather than read the spend as $0.
+      const total = rolloutTotal(await rollout(thread), thread);
+      if (total) {
+        const fromRollout = codexUsd(codex.model, since(total));
+        best = fromRollout > best.usd ? { total, usd: fromRollout } : { total: best.total, usd: best.usd };
+      }
+    }
+    return best;
   };
   // Async: Codex's rollout is read when asked (once per relayed call).
   const usd = async () => {
     if (harness === "claude") return [...claude.values()].reduce((s, m) => s + claudeUsageUsd(m.usage, m.model), 0);
-    if (harness === "codex") {
-      const p = prior?.tokens || {};
-      const since = (t) => ({ input: Math.max(0, n(t.input) - n(p.input)), output: Math.max(0, n(t.output) - n(p.output)), cached: Math.max(0, n(t.cached) - n(p.cached)), written: Math.max(0, n(t.written) - n(p.written)) });
-      const fromStream = codexUsd(codex.model, since(codex));
-      let fromRollout = 0;
-      if (rollout && thread) {
-        // A read that fails throws: the relay refuses the call rather than read the spend as $0.
-        const total = rolloutTotal(await rollout(thread), thread);
-        if (total) fromRollout = codexUsd(codex.model, since(total));
-      }
-      return Math.max(fromStream, fromRollout);
-    }
+    if (harness === "codex") return (await codexRead()).usd;
     if (harness === "copilot") return Math.max(0, (copilotNano / 1e9) * creditUsd - n(prior?.usd));
     return 0;
+  };
+  /**
+   * The resumed session's running total as this meter counts it now (`prior` plus the reading, in sinceSession's shape),
+   * for the next stage to start from (harness.mjs stageSpendSoFar); null for a fresh session, which no later stage resumes.
+   */
+  const session = async () => {
+    if (typeof prior?.usd !== "number") return null;
+    if (harness === "codex") {
+      const r = await codexRead();
+      const pt = prior.tokens || {};
+      const most = (k) => Math.max(n(pt[k]), n(r.total[k]));
+      const tokens = { input: most("input"), output: most("output"), cached: most("cached"), written: most("written") };
+      // Priced from the same running total, so the next stage's priced total never reads below it (usage.mjs sinceSession).
+      const share = codexUsd(codex.model, { input: tokens.input - n(pt.input), output: tokens.output - n(pt.output), cached: tokens.cached - n(pt.cached), written: tokens.written - n(pt.written) });
+      return { ...prior, usd: prior.usd + Math.min(r.usd, share), tokens };
+    }
+    const read = await usd();
+    if (harness === "copilot") return { ...prior, usd: prior.usd + read, aiu: Math.max(n(prior.aiu), copilotNano / 1e9) };
+    return { ...prior, usd: prior.usd + read };
   };
   const estimated = () => {
     if (harness === "claude") return [...claude.values()].some((m) => claudeRate(m.model) === CLAUDE_PRICES.upperBound);
     if (harness === "codex") return priceCodex(codex.model, { input: 1, output: 1, cached: 0, written: 0 }) === null;
     return false;
   };
-  return { line, usd, estimated };
+  return { line, usd, estimated, session };
 }

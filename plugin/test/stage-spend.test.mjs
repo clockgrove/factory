@@ -4,7 +4,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -62,19 +62,24 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
 
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 
-/** A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it. */
-function fakeCodex(bin, { hang = false } = {}) {
+/**
+ * A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it.
+ * FAKE_SPLIT=1: the turn is reported half done, the process lingers, then its other half lands in the thread (a pass
+ * that runs on after its stage was killed) and it writes `<FAKE_STATE>/done`.
+ */
+function fakeCodex(bin) {
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
 const f = process.env.FAKE_STATE + "/thread.json";
 const resume = process.argv[3] === "resume" ? process.argv[4] : null;
 const t = resume && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : { input: 0, cached: 0, output: 0 };
-t.input += 200000; t.cached += 100000; t.output += 5000;
-fs.writeFileSync(f, JSON.stringify(t));
+const split = process.env.FAKE_SPLIT === "1";
+const add = (k) => { t.input += 200000 * k; t.cached += 100000 * k; t.output += 5000 * k; fs.writeFileSync(f, JSON.stringify(t)); };
+add(split ? 0.5 : 1);
 const id = resume || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724";
 console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: 0, output_tokens: t.output, reasoning_output_tokens: 0 } }));
-${hang ? "setInterval(() => {}, 1000);" : ""}
+if (split) setTimeout(() => { add(0.5); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, 1500);
 `, { mode: 0o755 });
 }
 
@@ -120,53 +125,99 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
   assert.equal(spendOf(gh.progress.at(-1)), usd, "daily_usd counts it");
 });
 
-test("kill after a finished pass, then resume: every pass is counted once across the three stages' lines", async () => {
+/**
+ * A local Objective's stages, one process each, against one fake GitHub and one live Codex session: each restores the work
+ * lineage, writes a phase line, runs one pass through runHarness, and then ends as `how` says:
+ * - end: the stage's end as worker.mjs makes it (stageSpendLine, the final write) and its saved session and result.json;
+ * - after: a phase line after the pass, then killed;
+ * - window: killed as the pass ends, before any write shows it;
+ * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session.
+ * Returns every stage's last spend line.
+ */
+async function stages(plan) {
+  const gh = await fakeGitHub();
   const root = mkdtempSync(join(tmpdir(), "spend-resume-"));
   const ws = join(root, "ws");
   mkdirSync(join(root, "bin"));
   mkdirSync(ws);
   fakeCodex(join(root, "bin"));
-  const env = { FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
-  // One stage per process, as the local loop runs them: restore the work lineage, one pass, then end (A, C) or die (B).
-  const stage = (name, { dir, end }) => `
-    import { mkdirSync, writeFileSync } from "node:fs";
+  const env = { GITHUB_API_URL: gh.url, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
+  const script = (name, how) => `
+    import { existsSync, mkdirSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
     import { runHarness, stageSpendSoFar } from ${JSON.stringify(LIB("harness.mjs"))};
-    import { restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};
+    import { progressReporter, restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};
     import { stageSpendLine } from ${JSON.stringify(LIB("logic.mjs"))};
-    const ws = ${JSON.stringify(ws)};
-    const usageDir = join(ws, ${JSON.stringify(dir)});
+    import { mergeUsage } from ${JSON.stringify(LIB("usage.mjs"))};
+    import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
+    const how = ${JSON.stringify(how)};
+    const root = process.env.FAKE_STATE;
+    const usageDir = join(root, "ws", "usage-work-" + ${JSON.stringify(name)});
     mkdirSync(usageDir, { recursive: true });
-    let resume = null;
-    if (${JSON.stringify(name)} !== "A") {
-      process.env.FACTORY_LOCAL = "1";
-      resume = (await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" })).id;
-      delete process.env.FACTORY_LOCAL;
+    process.env.FACTORY_LOCAL = "1";
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: ${JSON.stringify(name)}, harness: "codex" });
+    const resume = (await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id;
+    delete process.env.FACTORY_LOCAL;
+    await progress("harness");
+    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" ? "1" : "0" }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    if (how === "mid") {
+      const until = Date.now() + 10_000;
+      while (!((await stageSpendSoFar()).usd > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      await progress("validation");
+      process.exit(137);
     }
-    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: process.env.FAKE_STATE, env: { PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
-    const known = await stageSpendSoFar();
-    if (${JSON.stringify(end)}) {
-      // The stage's saved session (its rollout, as saveTranscript keeps it) and its result.json.
-      const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-" + rec.sessionId + ".jsonl");
-      mkdirSync(join(usageDir, "transcript", "2026", "11", "10"), { recursive: true });
-      writeFileSync(join(usageDir, "transcript", rel), "{}\\n");
-      writeFileSync(join(usageDir, "result.json"), JSON.stringify({ usd: rec.usd, session: { harness: "codex", id: rec.sessionId, files: [rel], checkout: "/c" }, sessionTotal: rec.sessionTotal }));
-      console.log(JSON.stringify(stageSpendLine({ usd: rec.usd }, { records: [rec], known })));
-    } else console.log(JSON.stringify({ usd: known.usd, usdLowerBound: true }));
+    const rec = await run;
+    if (how === "window") process.exit(137);
+    if (how === "after") {
+      await progress("validation");
+      process.exit(137);
+    }
+    const line = stageSpendLine({ usd: mergeUsage([rec]).usd }, { records: [rec], known: await stageSpendSoFar() });
+    progress.spend(line.usd, line.parts);
+    await progress("exit: delivered");
+    const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-" + rec.sessionId + ".jsonl");
+    for (const d of [join(usageDir, "transcript"), join(root, "codex", "sessions")]) {
+      mkdirSync(join(d, "2026", "11", "10"), { recursive: true });
+      if (!existsSync(join(d, rel))) writeFileSync(join(d, rel), "{}\\n");
+    }
+    writeFileSync(join(usageDir, "result.json"), JSON.stringify({ usd: rec.usd, session: { harness: "codex", id: rec.sessionId, files: [rel], checkout: "/c" }, sessionTotal: rec.sessionTotal }));
   `;
-  const lines = [];
-  for (const [name, dir, end] of [["A", "usage-work-1", true], ["B", "usage-work-2", false], ["C", "usage-work-3", true]]) {
-    const s = stageProcess(stage(name, { dir, end }), env);
-    const code = await s.exited;
-    assert.equal(code, 0, s.err());
-    lines.push(JSON.parse(s.out().trim().split("\n").at(-1)));
+  try {
+    for (const [i, how] of plan.entries()) {
+      const s = stageProcess(script(`s${i}`, how), env);
+      await s.exited;
+      assert.ok(!s.err(), s.err());
+      // A killed stage's pass runs on: the next stage starts once it has finished.
+      const until = Date.now() + 15_000;
+      if (how === "mid") while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+      rmSync(join(root, "done"), { force: true });
+    }
+  } finally {
+    gh.close();
   }
-  const [a, b, c] = lines;
-  assert.ok(a.usd > 0);
-  assert.equal(b.usdLowerBound, true);
-  // Each stage ran one equal pass: the resumed stage counts its own, not the killed stage's again.
-  assert.deepEqual([b.usd, c.usd], [a.usd, a.usd], JSON.stringify(lines));
-});
+  const last = new Map();
+  for (const body of gh.progress) last.set(/^<!-- factory:7:progress:work:(\S+) -->/.exec(body)?.[1], body);
+  return plan.map((_, i) => lineOf(last.get(`s${i}`)));
+}
+
+// The price of one full pass of the fake (gpt-6.1-sol, from the table), the unit every expectation is in.
+const PASS = (await import("../scripts/lib/usage.mjs")).priceCodex("gpt-6.1-sol", { input: 200000, output: 5000, cached: 100000, written: 0 });
+const near = (a, b) => Math.abs(a - b) < 1e-6;
+
+for (const [how, killed, own] of [
+  ["after", "after a finished pass and a write that shows it", PASS],
+  ["window", "as its pass ends, before a write shows it", 0],
+  ["mid", "in the middle of a pass that then runs on", PASS / 2],
+]) {
+  test(`a stage killed ${killed}, then resumed: the stages' lines sum to the spend, each pass counted once`, async () => {
+    const lines = await stages(["end", how, "end"]);
+    const sum = lines.reduce((s, l) => s + l.usd, 0);
+    assert.ok(near(sum, 3 * PASS), `${JSON.stringify(lines)} sum to ${sum}, not ${3 * PASS}`);
+    // The killed stage's line holds what it had written; the resumed stage counts the rest.
+    assert.ok(near(lines[1].usd, own) && lines[1].usdLowerBound === true, JSON.stringify(lines));
+    assert.ok(near(lines[0].usd, PASS) && !lines[0].usdLowerBound && !lines[2].usdLowerBound, JSON.stringify(lines));
+  });
+}
 
 test("a final write waits for a status write in flight, and its spend line replaces the interim one", async () => {
   const { progressReporter } = await import("../scripts/lib/session.mjs");
@@ -232,6 +283,8 @@ test("stageSpendLine: $0 for no pass; the record's dollars and key share; a pass
   // A reading at the table's dearest rates (a model with no price row) is an estimate, not a lower bound.
   assert.deepEqual(stageSpendLine({ usd: null }, { records: [none], known: { usd: 1.35, estimated: true } }), { usd: 1.35, parts: { usdUpperBound: true } });
   assert.deepEqual(stageSpendLine({ usd: 0.9, usdLowerBound: true }, { records: [{ usd: 0.9 }] }), { usd: 0.9, parts: { usdLowerBound: true } });
+  // A placeholder for a pass that never ran (a clean rebase, an already-reviewed PR): a plain $0.
+  assert.deepEqual(stageSpendLine({ usd: null }, { records: [{ noRun: true, usd: null }], known: { usd: 0 } }), { usd: 0, parts: {} });
 });
 
 test("a live meter on a model with no price row says its reading is an estimate", async () => {

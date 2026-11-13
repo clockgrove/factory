@@ -1983,7 +1983,8 @@ export function decisionsSection(decisions, cap = 12_000) {
 export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
 /**
  * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage) and its pass `records`:
- * `{usd, parts}` for progress.spend. Every stage gets one; no harness pass is a known $0. When a pass that ran reported
+ * `{usd, parts}` for progress.spend. Every stage gets one; no harness pass (none, or only `noRun` placeholders) is a
+ * known $0. When a pass that ran reported
  * no dollars, the figure is the larger of the record's and `known` (the stage's spend so far, harness.mjs
  * stageSpendSoFar, which holds that pass's live reading), marked `usdLowerBound`; or `usdUpperBound` when that reading
  * was priced at the table's dearest rates (`known.estimated`, a model with no price row). The record's own bounds are
@@ -1991,7 +1992,8 @@ export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.str
  */
 export function stageSpendLine(usage, { records = [], known = null } = {}) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  const unreported = records.some((r) => r && num(r.usd) === null);
+  // A placeholder for a pass that never ran (`noRun`: a clean rebase, an already-reviewed PR) spent nothing.
+  const unreported = records.some((r) => r && !r.noRun && num(r.usd) === null);
   const usd = Math.max(num(usage?.usd) ?? 0, unreported ? (num(known?.usd) ?? 0) : 0);
   const estimated = unreported && !!known?.estimated;
   const lower = !!usage?.usdLowerBound || (unreported && !estimated);

@@ -13,7 +13,7 @@ Write the plan to `$FACTORY_OUT/plan.md` before code, and edit it as the work mo
 
 1. **Goal in your own words.** Two or three sentences; where they disagree with the issue, the issue wins.
 2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to at least one item and name which. Mark each item done as it lands.
-3. **Assumptions.** Every one, numbered, however small: a default you chose, a behaviour the issue left unsaid, a library you picked, a name you invented. An assumption nobody can read is a silent change. Where an item speaks a protocol, a file format, a codec or a provider's API, use the official SDK or a maintained library whose licence the repository can take, and name it here; write that code yourself only when nothing fits (no library, a licence that does not fit, an unwanted install script or native binary, or output that must be byte-for-byte deterministic), and record here what you looked at and why it did not fit.
+3. **Assumptions.** Every one, numbered, however small: a default you chose, a behaviour the issue left unsaid, a library you picked, a name you invented. An assumption nobody can read is a silent change.
 4. **Design note.** When the repository has a design checklist, answer it here.
 
 ## The simplest-reading rule

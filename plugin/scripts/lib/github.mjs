@@ -493,7 +493,8 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * asked on every poll; when it says yes the wait ends at once with `conflict: true` (a conflicting PR gets no runs).
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
- * `ended` (async, optional) is asked on a read that leaves a required check with no run; yes ends the wait unfinished.
+ * `ended` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends the wait
+ * unfinished.
  */
 export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ended = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const started = Date.now();
@@ -520,9 +521,10 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     }
     const elapsed = Date.now() - started;
     if ((read || !readOnce) && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
-    // A required check with no run, and `ended` (async, optional) says no more will come: every workflow run on the head
-    // completed, one of them before its jobs ran. The wait ends at once, unfinished.
-    if (read && state.missing.length && ended && (await ended().catch(() => false))) break;
+    // A required check with no run while others reported (with none, appearMs above ends the wait), and `ended` (async,
+    // optional) says no more will come: every workflow run on the head completed, one before its jobs ran. The wait ends
+    // at once, unfinished.
+    if (read && state.missing.length && runs.length > 0 && ended && (await ended().catch(() => false))) break;
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));

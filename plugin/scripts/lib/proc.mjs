@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { constants as osConstants, tmpdir, uptime } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
 import { delimiter, join } from "node:path";
 
@@ -466,12 +466,19 @@ export const GROUP_RECORD = /^harness-group-\d+\.json$/;
 const GROUPS = new Map();
 let trapped = false;
 
-/** This boot: Linux's boot id; elsewhere its start minute. A pid means nothing across boots. */
+/** `sysctl -n kern.boottime` ("{ sec = 1731450000, usec = 12345 } Thu Nov 12 ...") as its seconds, a string; else null. */
+export const boottimeSeconds = (text) => /\bsec = (\d+)/.exec(String(text || ""))?.[1] ?? null;
+
+/** This boot: Linux's boot id; elsewhere the boot time macOS's sysctl reports. Null when unreadable. A pid means nothing across boots. */
 export function bootId() {
   try {
     return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   } catch {
-    return String(Math.round((Date.now() / 1000 - uptime()) / 60));
+    try {
+      return boottimeSeconds(execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" } }));
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -484,25 +491,55 @@ const probe = (target) => {
   }
 };
 
-/** Linux: the fields of /proc/<pid>/stat after the command name (index 0 is field 3, the state), or null. */
+/** The fields of a /proc/<pid>/stat line after the command name (index 0 is field 3, the state); null if it is none. */
+export function statFields(text) {
+  const end = String(text || "").lastIndexOf(")");
+  return end < 0 ? null : text.slice(end + 2).trim().split(" ");
+}
+/** Linux: /proc/<pid>/stat's fields (statFields), or null. */
 function procStat(pid) {
   try {
-    const text = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return text.slice(text.lastIndexOf(")") + 2).split(" ");
+    return statFields(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return null;
   }
 }
 
 /**
+ * `ps` (macOS) with a fixed environment: its time and text formats follow the locale and TZ, and a record written under
+ * one environment must read the same under another.
+ */
+const ps = (args) => execFileSync("ps", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024, env: { PATH: process.env.PATH || "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC0" } });
+
+/** `ps -o lstart=` under LC_ALL=C TZ=UTC0 ("Thu Nov 12 21:15:03 2026") as Unix seconds, a string; null if it is none. */
+export function lstartSeconds(text) {
+  const m = /^\s*[A-Z][a-z]{2}\s+([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})\s*$/.exec(String(text || ""));
+  const month = m ? ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(m[1]) : -1;
+  if (month < 0) return null;
+  return String(Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])) / 1000);
+}
+
+/** The pids in process group `pgid`, from `ps -A -o pid=,pgid=` output. */
+export const groupMembers = (text, pgid) =>
+  String(text || "")
+    .split("\n")
+    .map((l) => l.trim().split(/\s+/).map(Number))
+    .filter(([p, g]) => Number.isInteger(p) && p > 0 && g === pgid)
+    .map(([p]) => p);
+
+/** Whether a process's environment, as /proc/<pid>/environ (NUL-separated) or `ps eww` prints it, holds `mark` exactly. */
+export const holdsMark = (text, mark) => String(text || "").split(/[\0\s]+/).includes(mark);
+
+/**
  * When process `pid` started, as a string that differs for another process given the same pid: Linux's start time in
- * clock ticks since boot (/proc/<pid>/stat field 22), elsewhere `ps -o lstart=`. Null when it cannot be read.
+ * clock ticks since boot (/proc/<pid>/stat field 22), elsewhere `ps -o lstart=` read in a fixed locale and time zone, as
+ * Unix seconds. Null when it cannot be read.
  */
 export function startTime(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (process.platform === "linux") return procStat(pid)?.[19] ?? null;
   try {
-    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+    return lstartSeconds(ps(["-o", "lstart=", "-p", String(pid)]));
   } catch {
     return null;
   }
@@ -512,14 +549,17 @@ export function startTime(pid) {
 export const processRecord = (pid = process.pid) => ({ pid, start: startTime(pid), boot: bootId() });
 
 /**
- * Whether the process a record names is still that process: this boot, alive, and started when recorded. Null when that
- * cannot be told (alive, but its start time unreadable or unrecorded): a caller then signals nothing.
+ * Whether the process a record names is still that process: true when it is (this boot, alive, started when recorded),
+ * false only when it is known gone (another boot, no such pid, or a start time read and different), null when that
+ * cannot be told (no pid or boot, a start time unread or unrecorded): a caller then signals and deletes nothing.
  */
 export function sameProcess(rec) {
   const pid = Number(rec?.pid);
-  if (!Number.isInteger(pid) || pid <= 1 || rec.boot !== bootId() || !probe(pid)) return false;
+  const boot = bootId();
+  if (!Number.isInteger(pid) || pid <= 1 || !boot || !rec.boot) return null;
+  if (rec.boot !== boot || !probe(pid)) return false;
   const now = startTime(pid);
-  if (!now || !rec.start) return null;
+  if (!now || !/^\d+$/.test(String(rec.start ?? ""))) return null;
   return now === String(rec.start);
 }
 
@@ -528,13 +568,13 @@ function carriesTag(pid, tag) {
   const mark = `FACTORY_RUN_TAG=${tag}`;
   if (process.platform === "linux") {
     try {
-      return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(mark);
+      return holdsMark(readFileSync(`/proc/${pid}/environ`, "latin1"), mark);
     } catch {
       return false;
     }
   }
   try {
-    return execFileSync("ps", ["eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" }).split(/\s+/).includes(mark);
+    return holdsMark(ps(["eww", "-o", "command=", "-p", String(pid)]), mark);
   } catch {
     return false;
   }
@@ -551,7 +591,7 @@ function groupCarriesTag(pgid, tag) {
     }
   } else {
     try {
-      members = execFileSync("ps", ["-A", "-o", "pid=,pgid="], { encoding: "utf8" }).split("\n").map((l) => l.trim().split(/\s+/).map(Number)).filter(([, g]) => g === pgid).map(([p]) => p);
+      members = groupMembers(ps(["-A", "-o", "pid=,pgid="]), pgid);
     } catch {
       return false;
     }
@@ -622,7 +662,9 @@ export function reapRecorded(file) {
   }
   const pid = Number(rec?.pid);
   const tag = typeof rec?.tag === "string" && /^[0-9a-f]{24}$/.test(rec.tag) ? rec.tag : null;
-  if (!tag || !Number.isInteger(pid) || pid <= 1 || rec.boot !== bootId()) {
+  const boot = bootId();
+  if (!boot) return false;
+  if (!tag || !Number.isInteger(pid) || pid <= 1 || rec.boot !== boot) {
     rmSync(file, { force: true });
     return false;
   }
@@ -705,7 +747,7 @@ export function killTagged(tag) {
     }
   } else {
     try {
-      for (const line of execFileSync("ps", ["eww", "-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).split("\n")) if (line.includes(mark)) pids.push(Number(line.trim().split(/\s+/)[0]));
+      for (const line of ps(["eww", "-A", "-o", "pid=,command="]).split("\n")) if (holdsMark(line, mark)) pids.push(Number(line.trim().split(/\s+/)[0]));
     } catch {
       // no ps
     }

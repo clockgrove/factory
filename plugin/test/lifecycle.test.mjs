@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Local, STAGE_RECORD, liveStage, parseArgs, reapLeftRuns, stageFor } from "../scripts/local.mjs";
-import { GROUP_RECORD, bootId, groupRecordName, processRecord, startTime } from "../scripts/lib/proc.mjs";
+import { GROUP_RECORD, bootId, boottimeSeconds, groupMembers, groupRecordName, holdsMark, lstartSeconds, processRecord, sameProcess, startTime, statFields } from "../scripts/lib/proc.mjs";
 
 const scripts = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
 const bin = join(dirname(fileURLToPath(import.meta.url)), "..", "bin");
@@ -89,7 +89,7 @@ function leaderless(tag = null) {
   return { member, leader };
 }
 const deadPid = () => spawnSync("true").pid;
-const tags = { a: "a".repeat(24), b: "b".repeat(24), c: "c".repeat(24), d: "d".repeat(24), e: "e".repeat(24) };
+const tags = { a: "a".repeat(24), b: "b".repeat(24), c: "c".repeat(24), d: "d".repeat(24), e: "e".repeat(24), f: "f".repeat(24) };
 
 test("a start reaps the harness a dead stage of the Objective recorded, and only that one", { skip: process.platform !== "linux" }, async () => {
   const ws = mkdtempSync(join(tmpdir(), "ws-"));
@@ -113,10 +113,17 @@ test("a start reaps the harness a dead stage of the Objective recorded, and only
     write(live.pid, { tag: tags.c, owner: me.pid, ownerStart: me.start });
     // A dead stage whose pid a live process took since: the start time tells them apart.
     write(stale.pid, { tag: tags.e, owner: me.pid, ownerStart: "1" });
+    // An owner alive whose start time was not recorded: it cannot be told dead, so nothing of its run is signalled.
+    const unsure = harness(tags.f);
+    groups.push(unsure.pid);
+    assert.ok(await until(() => alive(unsure.pid)));
+    write(unsure.pid, { tag: tags.f, owner: me.pid, ownerStart: null });
     assert.equal(reapLeftRuns(ws), 2);
     assert.ok(await until(() => !alive(left.pid) && !alive(stale.pid)), "the left harnesses are gone");
     assert.ok(alive(reused.pid), "a process whose pid was reused is left alone");
     assert.ok(alive(live.pid), "a live stage's harness is left alone");
+    assert.ok(alive(unsure.pid), "an owner that cannot be told dead keeps its run");
+    assert.ok(existsSync(join(usage, groupRecordName(unsure.pid))));
     assert.ok(!existsSync(join(usage, groupRecordName(left.pid))));
     assert.ok(existsSync(join(usage, groupRecordName(live.pid))), "a live stage's record stays");
     // Another boot's record: nothing of that boot is running, so nothing is signalled.
@@ -160,7 +167,11 @@ test("liveStage: a recorded stage counts while it is the same process", () => {
   assert.equal(liveStage(ws), null, "a reused pid is no live stage");
   assert.ok(!existsSync(join(ws, "usage-work-1", STAGE_RECORD)), "its record goes");
   writeFileSync(join(ws, "usage-review-2", STAGE_RECORD), JSON.stringify(processRecord()));
-  assert.equal(liveStage(ws), process.pid);
+  assert.deepEqual(liveStage(ws), { pid: process.pid, file: join(ws, "usage-review-2", STAGE_RECORD), sure: true });
+  // Its start time was unreadable when written: still counted as running (never two stages), and the record kept.
+  writeFileSync(join(ws, "usage-review-2", STAGE_RECORD), JSON.stringify({ ...processRecord(), start: null }));
+  assert.equal(liveStage(ws)?.sure, false);
+  assert.ok(existsSync(join(ws, "usage-review-2", STAGE_RECORD)));
   writeFileSync(join(ws, "usage-review-2", STAGE_RECORD), JSON.stringify({ ...processRecord(deadPid()) }));
   assert.equal(liveStage(ws), null);
 });
@@ -231,7 +242,7 @@ test("factory run starts nothing when it cannot tell where the Objective stands"
   // A stage of it still running on this machine (its loop gone): not a second one beside it.
   mkdirSync(join(l.ws(7), "usage-work-1"), { recursive: true });
   writeFileSync(join(l.ws(7), "usage-work-1", STAGE_RECORD), JSON.stringify(processRecord()));
-  await assert.rejects(l.runIssue(7, { gh: reads(null, issue("factory:running")) }), /still runs on this machine/);
+  await assert.rejects(l.runIssue(7, { gh: reads(null, issue("factory:running")) }), /a stage of this Objective is running on this machine \(pid \d+\)/);
   assert.deepEqual(ran, []);
 });
 
@@ -267,4 +278,39 @@ test("factory and factory-db answer --help and refuse a bad flag before doing an
     assert.equal(r.status, 2, a.join(" "));
     assert.match(r.stderr, /usage: factory-db/);
   }
+});
+
+test("the process readers parse what /proc, ps and sysctl print", () => {
+  // /proc/<pid>/stat: a command name may hold spaces and parentheses; the fields follow the last ")".
+  const stat = "4242 (node (x) y) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 2 0 0 20 0 11 0 987654 1000 200";
+  assert.equal(statFields(stat)[0], "S");
+  assert.equal(statFields(stat)[2], "4242", "field 5, the process group");
+  assert.equal(statFields(stat)[19], "987654", "field 22, the start time");
+  assert.equal(statFields("garbage"), null);
+  // macOS ps -o lstart= under LC_ALL=C TZ=UTC0, as Unix seconds; anything else (another locale's text) is unread.
+  assert.equal(lstartSeconds("Thu Nov 12 21:15:03 2026\n"), String(Date.UTC(2026, 10, 12, 21, 15, 3) / 1000));
+  assert.equal(lstartSeconds("Mon Jan  5 09:00:00 2026"), String(Date.UTC(2026, 0, 5, 9, 0, 0) / 1000));
+  for (const t of ["jeu 12 nov 21:15:03 2026", "", "Thu Nov 12 2026"]) assert.equal(lstartSeconds(t), null, t);
+  // ps -A -o pid=,pgid=
+  assert.deepEqual(groupMembers("  101   100\n  100   100\n  202   200\n\n x y\n", 100), [101, 100]);
+  // An environment holds the tag exactly, from /proc (NUL-separated) or ps eww (spaces); never a longer value.
+  const mark = `FACTORY_RUN_TAG=${"a".repeat(24)}`;
+  assert.ok(holdsMark(`PATH=/bin\0${mark}\0HOME=/h\0`, mark));
+  assert.ok(holdsMark(`  4242 sleep 60 PATH=/bin ${mark} HOME=/h`, mark));
+  assert.ok(!holdsMark(`sleep ${mark}b`, mark));
+  // sysctl -n kern.boottime
+  assert.equal(boottimeSeconds("{ sec = 1731450000, usec = 12345 } Tue Nov 12 22:20:00 2026"), "1731450000");
+  assert.equal(boottimeSeconds(""), null);
+});
+
+test("sameProcess is false only when the process is known gone", () => {
+  const me = processRecord();
+  assert.equal(sameProcess(me), true);
+  assert.equal(sameProcess({ ...me, start: String(Number(me.start) + 1) }), false, "another start time: a reused pid");
+  assert.equal(sameProcess({ ...me, start: null }), null, "no start recorded: cannot tell");
+  assert.equal(sameProcess({ ...me, start: "Thu Nov 12 21:15:03 2026" }), null, "a start in another format: cannot tell");
+  assert.equal(sameProcess({ ...me, boot: "another-boot" }), false);
+  assert.equal(sameProcess({ ...me, boot: null }), null);
+  assert.equal(sameProcess({ pid: deadPid(), start: "1", boot: bootId() }), false);
+  assert.equal(sameProcess({ start: "1", boot: bootId() }), null, "no pid: cannot tell");
 });

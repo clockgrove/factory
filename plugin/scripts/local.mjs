@@ -334,8 +334,10 @@ export function reapLeftRuns(ws) {
 export const STAGE_RECORD = "stage-process.json";
 
 /**
- * The pid of a stage of this Objective still running on this machine (its loop died while it lives, say), or null. A
- * stage counts as running when its record's process is still that process, or cannot be told apart from it.
+ * A stage of this Objective still running on this machine (this loop's own, or one whose loop died), as {pid, file,
+ * sure}, or null. A stage counts as running when its record's process is still that process (`sure`), or cannot be told
+ * apart from it (its start time unread or unrecorded): two stages on one clone is worse than a refusal. A record is
+ * removed only when its process is known gone.
  */
 export function liveStage(ws) {
   let dirs = [];
@@ -352,11 +354,18 @@ export function liveStage(ws) {
     } catch {
       continue;
     }
-    if (sameProcess(rec) !== false) return rec.pid;
+    const same = sameProcess(rec);
+    if (same !== false) return { pid: rec?.pid, file, sure: same === true };
     rmSync(file, { force: true });
   }
   return null;
 }
+
+/** What a start says when it finds a stage of the Objective running here (liveStage), and how to clear it. */
+export const liveStageLine = (issue, live) =>
+  live.sure
+    ? `#${issue}: a stage of this Objective is running on this machine (pid ${live.pid}); stop it (kill ${live.pid}, which pauses it) or let it end`
+    : `#${issue}: ${live.file} names pid ${live.pid} as a running stage of this Objective, and this machine cannot tell whether it still is; if pid ${live.pid} is no Factory worker, delete that file`;
 
 /** A GitHub read, tried `tries` times with a growing wait; then an error that names it and says nothing was started. */
 async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
@@ -912,7 +921,7 @@ export class Local {
       this.reapHere(issue);
       const live = liveStage(join(root, name));
       if (live) {
-        log(`#${issue}: closed, but a stage of it still runs on this machine (pid ${live}); its directory stays until it ends`);
+        log(`${liveStageLine(issue, live)}; the closed Objective's directory stays until then`);
         continue;
       }
       // Of .factory only <issue>/claude-project is writable from a sandbox (claudeProjectLink); rmSync removes a link, never its target, so nothing planted there is followed.
@@ -928,7 +937,10 @@ export class Local {
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) {
-      log(`#${issue}: a stage of it still runs on this machine (pid ${live}) though its loop is gone; not resuming beside it (stop it with kill ${live}, which pauses it)`);
+      // Once per stage process, not every tick.
+      this.saidLive ??= new Set();
+      if (!this.saidLive.has(`${issue}:${live.pid}`)) log(`${liveStageLine(issue, live)}; not resuming beside it`);
+      this.saidLive.add(`${issue}:${live.pid}`);
       return { exit: "skipped" };
     }
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
@@ -975,7 +987,7 @@ export class Local {
   async runIssue(issue, { wait = false, gh = { findPr, getIssue }, waitMs = 2_000 } = {}) {
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
-    if (live) throw new Error(`#${issue}: a stage of it still runs on this machine (pid ${live}), from a loop that is gone; stop it (kill ${live}, which pauses it) or let it end, then run again`);
+    if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);
     const data = await retried(`reading issue #${issue}`, () => gh.getIssue(this.repo, issue, this.opts), { waitMs });
     if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
     const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });

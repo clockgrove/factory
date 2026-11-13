@@ -40,7 +40,10 @@
 //   the call sent last, plus, while one failed call that names its generation waits for its record, what that record
 //   says above its estimate: about two calls (and what the harness spends after the check). Beyond that, an estimate
 //   that stands for good is counted at the estimate, and what its call really cost above it is beyond the count, the
-//   cap included: at most UNKNOWN_STAGE_SHUT such failures that may have been billed in a stage.
+//   cap included: with a cap, at most UNKNOWN_STAGE_SHUT such failures that may have been billed in a stage; without
+//   one, those plus the calls already in flight when it shuts. A fast error status (FAST_ERROR_MS) is taken to cost no
+//   more than its estimate; should a provider bill one above it, only the cap, counting estimates, limits it, and the
+//   gateway key's own budget bounds what is really spent.
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, rmSync } from "node:fs";
 import http from "node:http";
@@ -193,11 +196,13 @@ export const UNKNOWN_WINDOW_MS = 60_000;
 export const UNKNOWN_STAGE_SHUT = 6;
 /**
  * A failed call is a fast error status, not one that may have been billed, when it is a whole HTTP answer with a status
- * a client retries (408, 409 or 5xx: FAST_ERROR_STATUS) that came within this long of sending: the edge's 502, 503 or
- * 504 in a blip takes a second or less, and an answer that fast ran no model. A reset after sending, a broken or
- * truncated answer, a timeout or a slow error status is what a billed failure looks like.
+ * a client retries (408, 409 or 5xx: FAST_ERROR_STATUS) that came within this long of sending. The edge's 502, 503 or
+ * 504 in a blip answers in about a second, while a billed call with a large prompt that then fails rarely finishes
+ * inside three, so the bound stays tight around the blip. A reset after sending, a broken or truncated answer, a
+ * timeout or a slow error status is what a billed failure looks like. Should a provider bill a fast whole error above
+ * its estimate, only the cap, counting estimates, limits it; the gateway key's own budget bounds what is really spent.
  */
-export const FAST_ERROR_MS = 10_000;
+export const FAST_ERROR_MS = 3_000;
 export const FAST_ERROR_STATUS = (status) => status === 408 || status === 409 || (status >= 500 && status < 600);
 /**
  * A failed call that ran this long upstream before it ended ran a model: its estimate is at least SLOW_UNKNOWN_FLOOR_USD

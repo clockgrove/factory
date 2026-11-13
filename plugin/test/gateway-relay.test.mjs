@@ -1582,7 +1582,7 @@ const gate = () => {
 test("a blip never shuts the relay: one, three or six clients' retries through one blip, or three clients' through two; each failed attempt is booked, and the next call is relayed (#163)", async () => {
   // At 1:20: the AI SDK's waits of 2 s and 4 s are 100 ms and 200 ms, a blip of about four seconds is 220 ms, and the
   // minute a run of unknown costs must last before it shuts the relay is 3 s.
-  assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT, FAST_ERROR_MS], [6, 60_000, 6, 10_000]);
+  assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT, FAST_ERROR_MS], [6, 60_000, 6, 3_000]);
   let downUntil = 0;
   let failed = 0;
   const gw = await fakeGateway({
@@ -1878,7 +1878,7 @@ test("a failure that ran long upstream is booked at least $1.00, and counts towa
     },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-slow-"));
-  // A fast error status within 100 ms here, a slow failure past 100 ms (10 s and 30 s in a stage).
+  // A fast error status within 100 ms here, a slow failure past 100 ms (3 s and 30 s in a stage).
   const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 100, callLog: join(dir, "usage", CALL_LOG) });
   const go = (mode) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
   try {
@@ -1944,7 +1944,7 @@ test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run c
     },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-fast4xx-"));
-  // A fast error status within 100 ms here (10 s in a stage).
+  // A fast error status within 100 ms here (3 s in a stage).
   const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100 });
   const go = (status, slow = false) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ status, slow }) });
   try {

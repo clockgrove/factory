@@ -1192,7 +1192,7 @@ export async function ensureRuleset(repo, { branch, checks, queue = true }, opts
 /**
  * Learn the repository's writers (push or more; org members and owners included, whatever their membership's
  * visibility) so trustedAuthor can tell them apart from strangers. Once per process per repository; a failed read
- * leaves the association check alone, logged.
+ * leaves the association check alone, logged. True when a list read for this repository is in memory.
  */
 const WRITERS_TTL_MS = 10 * 60_000;
 const primed = new Map();
@@ -1203,15 +1203,17 @@ export async function primeWriters(repo, opts, { maintainers = null } = {}) {
   if (!selfLogin()) await primeSelf(opts);
   // A long-lived loop (local serve) re-reads them, so access revoked meanwhile stops counting within minutes.
   // Fresh and for this repository: the list is one per process, so another repository's read never counts here.
-  if (same && Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return;
+  if (same && Date.now() - (primed.get(repo.full) ?? -Infinity) < WRITERS_TTL_MS) return true;
   try {
     const list = (await rest(`repos/${repo.full}/collaborators?affiliation=all&permission=push&per_page=100`, { ...opts, paginate: true })) || [];
     setWriters(repo.full, list.map((u) => u.login));
     primed.set(repo.full, Date.now());
     process.stdout.write(`[factory] ${list.length} writer(s) of ${repo.full} known\n`);
+    return true;
   } catch (e) {
-    // Not marked primed: the next call tries again.
+    // Not marked primed: the next call tries again. An earlier list of this repository's stays in use meanwhile.
     process.stdout.write(`[factory] writers of ${repo.full} could not be read (${e.status || String(e.message).slice(0, 80)}); trusting by author association only\n`);
+    return same && primed.has(repo.full);
   }
 }
 

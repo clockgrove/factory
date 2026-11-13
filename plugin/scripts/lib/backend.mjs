@@ -10,16 +10,45 @@ import { deniedHostsFix } from "./logic.mjs";
 import { input } from "./inputs.mjs";
 import { runnerDomains } from "./local.mjs";
 
-/** A local loop holds the Objective while its claim's heartbeat is fresh. */
-const claimedLocally = async (repo, issue, opts) => (await localClaim(repo, issue, opts).catch(() => null))?.fresh === true;
+/**
+ * A local loop holds the Objective while its claim's heartbeat is fresh. A claim that cannot be read or checked
+ * (ClaimUnread) is read again a few times. A marked comment whose author still cannot be checked may be a live loop's,
+ * so the runner job steps aside. A comments read that keeps failing counts as not claimed, as it always has: only an
+ * Objective without the factory:local label gets here (stepsAside), and a runner job that skipped it would leave it
+ * Running for the dispatcher to Block.
+ */
+const claimedLocally = async (repo, issue, opts, { tries = 3, pauseMs = 2000 } = {}) => {
+  for (let i = 1; ; i += 1) {
+    try {
+      return (await localClaim(repo, issue, opts))?.fresh === true;
+    } catch (e) {
+      if (i < tries) {
+        await new Promise((r) => setTimeout(r, pauseMs));
+        continue;
+      }
+      if (!e?.marked) {
+        process.stdout.write(`[factory] #${issue}: the local claim could not be read (${String(e?.message || e).slice(0, 160)}); not held by a local loop\n`);
+        return false;
+      }
+      process.stdout.write(`[factory] #${issue}: a local claim's author cannot be checked (${String(e.message).slice(0, 160)}); stepping aside\n`);
+      return true;
+    }
+  }
+};
 
 /**
  * A local loop's hold on a Running Objective: "alive" while its heartbeat is fresh, "paused" while it is stale but
  * younger than CLAIM_PAUSE_MS (the machine sleeps or serve stopped; that machine's serve resumes it), "expired" past
- * that, and null with no claim. `holder` names the loop.
+ * that, "unread" when the claim could not be read or its author checked (no answer: the caller reads again next tick,
+ * and it never counts as held), and null with no claim. `holder` names the loop.
  */
 const localHold = async (repo, issue, opts, now = Date.now()) => {
-  const c = await localClaim(repo, issue, opts, now).catch(() => null);
+  let c;
+  try {
+    c = await localClaim(repo, issue, opts, now);
+  } catch (e) {
+    return { state: "unread", reason: String(e?.message || e).slice(0, 160), updatedAt: e?.updatedAt ?? null };
+  }
   if (!c) return null;
   const state = c.fresh ? "alive" : now - Date.parse(c.heartbeat) < CLAIM_PAUSE_MS ? "paused" : "expired";
   return { state, holder: c.holder, heartbeat: c.heartbeat, commentId: c.commentId };

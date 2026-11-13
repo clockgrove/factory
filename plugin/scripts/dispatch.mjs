@@ -16,8 +16,8 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
-import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -37,6 +37,9 @@ export async function appToken(inputs) {
 
 /** At most this many blocked-by relation reads at once (GitHub's secondary rate limit counts concurrent requests). */
 const RELATION_READS = 6;
+
+/** What a person does about a factory:local Objective no loop came back to for a day. */
+const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
 
 /**
  * Today's spend (UTC day) against daily_usd: the usage artifacts of Actions runs plus the spend lines local runs and
@@ -216,6 +219,99 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // launcher a newer one replaced): past a grace for the launch job to start, the sweep names it again.
   const sandbox = !!inputs.sandbox;
   const relaunch = [];
+  // A local loop's hold on an Objective that waits on one (Running, or In review with work owed): "unread" when its
+  // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one
+  // that a human re-labelled) says nothing now.
+  const localWait = async (issue, entered) => {
+    const hold = await backend().trigger.localHold(repo, issue.number, opts);
+    return hold && hold.state !== "unread" && entered && Date.parse(hold.heartbeat) < Date.parse(entered) ? null : hold;
+  };
+  // The Block for an Objective no loop came back to: an expired claim names its holder and goes with the Block, so the
+  // next stint starts clean.
+  const blockLocalWait = async (n, hold, noClaim, cause) => {
+    const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+    const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day; ${SERVE_FIX}` : noClaim;
+    // A Block that cannot be written (the reads behind an unread claim failing too) is tried again next tick.
+    const written = await applyExit(repo, { issue: n, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "dispatch" }, opts).then(
+      () => true,
+      (e) => (log(`  #${n}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`), retry(`#${n}'s Block`), false),
+    );
+    if (written && hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
+  };
+  // An unread claim has a deadline too: past a day from `since` (when the Objective began waiting), and with the newest
+  // marked comment read (its author unchecked) also over a day old, no loop can be holding it. Only a read that keeps
+  // failing gets here, and its Block names that read (cause `factory`), never a machine.
+  // A live local stage keeps writing as Factory (its claim's heartbeat, its progress comment), so a Block also needs the
+  // issue to show none of that for the day: no comment created or updated by Factory's login, or carrying a Factory
+  // marker by a person GitHub shows with push access (a local loop writes as its developer, not as the Action's App),
+  // and no label event by Factory's login. Taken from the issue's timeline; a timeline or a login Factory cannot read is
+  // no evidence, so it waits.
+  const unreadLapsed = async (n, hold, since) => {
+    if (!since || Date.now() - Date.parse(since) <= CLAIM_PAUSE_MS) return false;
+    if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= CLAIM_PAUSE_MS) return false;
+    return factoryQuiet(n);
+  };
+  const factoryQuiet = async (n) => {
+    if (!selfLogin()) return false;
+    const events = await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
+    if (!Array.isArray(events)) return false;
+    const after = Date.now() - CLAIM_PAUSE_MS;
+    const recent = (...ts) => ts.some((t) => Date.parse(t) > after);
+    return !events.some((e) =>
+      e.event === "commented"
+        ? (isSelf({ user: e.user ?? e.actor }) || ((e.body || "").startsWith("<!-- factory:") && trustedAuthor({ ...e, user: e.user ?? e.actor }))) && recent(e.created_at, e.updated_at)
+        : (e.event === "labeled" || e.event === "unlabeled") && isSelf({ user: e.actor }) && recent(e.created_at),
+    );
+  };
+  const unreadReason = (hold, what) => `${what} for over a day and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
+  // In review with its review owed (an open PR, not a draft, labelled factory:review): only a local loop runs that
+  // review, so it waits as a Running one does, counted from the later of its entering In review and the PR's last
+  // factory:review label (a re-review owes a new one). The issue's own time is read first, so an Objective inside its
+  // day costs one read a tick. True when Blocked.
+  const reviewLapsed = async (issue) => {
+    const n = issue.number;
+    const entered = await objectiveLabeledAt(repo, n, "factory:in-review", opts).then((at) => ({ at }), () => null);
+    if (!entered) {
+      log(`  #${n}: In-review time unread; left alone this tick`);
+      retry(`#${n}'s In-review time`);
+      return false;
+    }
+    if (!entered.at) return false;
+    if (Date.now() - Date.parse(entered.at) < CLAIM_PAUSE_MS) {
+      due(n, "local-pause", Date.parse(entered.at) + CLAIM_PAUSE_MS);
+      return false;
+    }
+    const hold = await localWait(issue, entered.at);
+    if (hold?.state === "alive") return false;
+    if (hold?.state === "paused") {
+      paused.push(n);
+      due(n, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
+      return false;
+    }
+    if (hold?.state === "unread" && !(await unreadLapsed(n, hold, entered.at))) {
+      log(`  #${n}: local claim unread (${hold.reason}); left alone this tick`);
+      retry(`#${n}'s local claim`);
+      return false;
+    }
+    const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+    if (!pr || pr.draft || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return false;
+    const owed = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts).then((at) => ({ at }), () => null);
+    if (!owed) {
+      retry(`PR #${pr.number}'s review label time`);
+      return false;
+    }
+    const since = owed.at && Date.parse(owed.at) > Date.parse(entered.at) ? owed.at : entered.at;
+    if (Date.now() - Date.parse(since) < CLAIM_PAUSE_MS || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
+      due(n, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+      return false;
+    }
+    vanished.push(n);
+    statuses[n] = "Blocked";
+    if (dryRun) return true;
+    if (hold?.state === "unread") await blockLocalWait(n, null, unreadReason(hold, "In review"), "factory");
+    else await blockLocalWait(n, hold, `in review with no local loop running its review for over a day (no claim); ${SERVE_FIX}`, "setup");
+    return true;
+  };
   const runningIssues = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running");
   if (runningIssues.length) {
     const alive = sandbox
@@ -262,11 +358,23 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
         }
         // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
-        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day.
-        const since = await runningSince(repo, issue.number, opts).catch(() => null);
-        let hold = await backend().trigger.localHold(repo, issue.number, opts);
-        // A claim from before this Running stint (left on a Blocked one that a human re-labelled) says nothing now.
-        if (hold && since && Date.parse(hold.heartbeat) < Date.parse(since)) hold = null;
+        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day. A read that
+        // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
+        const read = await runningSince(repo, issue.number, opts).then((at) => ({ at }), () => null);
+        const hold = read && (await localWait(issue, read.at));
+        if (!read || (hold?.state === "unread" && !(backend().trigger.tends(issue) && (await unreadLapsed(issue.number, hold, read.at))))) {
+          log(`  #${issue.number}: ${read ? `local claim unread (${hold.reason})` : "Running time unread"}; left alone this tick`);
+          retry(`#${issue.number}'s local claim`);
+          continue;
+        }
+        const since = read.at;
+        if (hold?.state === "unread") {
+          vanished.push(issue.number);
+          statuses[issue.number] = "Blocked";
+          issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
+          if (!dryRun) await blockLocalWait(issue.number, null, unreadReason(hold, "Running"), "factory");
+          continue;
+        }
         // Only the Objectives this process tends, or one a local loop claimed this stint: a local loop leaves another
         // route's Running ones to that route (#2668), but still Blocks one a loop that no longer routes it left away.
         if (!hold && !backend().trigger.tends(issue)) continue;
@@ -276,17 +384,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
           continue;
         }
-        if (!hold && since && Date.now() - Date.parse(since) < 15 * 60_000) continue;
+        // No claim: a runner job gets 15 minutes to show up. A factory:local Objective waits for a loop on its
+        // machine (one that starts, or a start that failed before its claim), so it gets the day a claim gets.
+        const local = hasLocalLabel(issue);
+        if (!hold && since && Date.now() - Date.parse(since) < (local ? CLAIM_PAUSE_MS : 15 * 60_000)) {
+          if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+          continue;
+        }
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
-        if (!dryRun) {
-          const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
-          const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day` : "worker job vanished: Running with no job in progress";
-          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "dispatch" }, opts);
-          // The expired claim goes with the Block, so the next Running stint starts clean.
-          if (hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
-        }
+        // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : "worker job vanished: Running with no job in progress", hold || local ? "setup" : "factory");
       }
     }
   }
@@ -310,6 +419,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     let hungMs = null;
     const cache = {};
     for (const issue of issues) {
+      // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
+      if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
       // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
       if (!backend().trigger.routes(issue)) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;

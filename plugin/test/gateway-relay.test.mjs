@@ -6,7 +6,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EDITS_MAX_BYTES, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, keyCutter, openRelay, routeOf, tokenMatches } from "../scripts/lib/gateway-relay.mjs";
+import { EDITS_MAX_BYTES, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, openRelay, routeOf, tokenMatches, withGatewayRefusal } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { openWorkerRelay, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { keyBreakdown, writeUsage } from "../scripts/lib/session.mjs";
@@ -788,4 +788,92 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the AI Gateway's own budget refusal (402 quota_for_entity_exceeded) costs $0, is named, and refuses later calls apart from Factory's own cap 402 (#134)", async () => {
+  // The body the gateway answered an adopter's run with (v0.9.16), its key in the message to show it is cut.
+  const MESSAGE = `Team budget exceeded. Current spend: $50.06, limit: $50.00. Team owners can edit this budget in AI Gateway Budgets & Spend (https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fbudgets&title=AI+Gateway+Budgets+%26+Spend).`;
+  const real = { type: "quota_for_entity_exceeded", message: MESSAGE };
+  let quota = false;
+  const gw = await fakeGateway({
+    [IMAGE]: () => (quota ? { status: 402, body: { ...real, message: `${MESSAGE}\n${KEY}` } } : priced(0.05)),
+    "/v4/ai/language-model": { status: 402, body: { error: { type: "payment_required", message: "pay" } } },
+    "/v1/generation": { body: { data: { total_cost: 0.05 } } },
+    "/v1/models": { body: { data: [] } },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-quota-"));
+  // Every relay this test opens is closed whatever fails, so a failure never leaves a server holding the run open.
+  const opened = [];
+  const open = async (o) => {
+    const r = await openRelay(o);
+    opened.push(r);
+    return r;
+  };
+  // The model calls that reached the gateway (a reported cost's lookup runs aside and is not one).
+  const modelCalls = () => gw.seen.filter((r) => !r.url.startsWith("/v1/generation")).length;
+  try {
+    const relay = await open({ key: KEY, dir: join(dir, "a"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1] });
+    relay.beginPass(15);
+    assert.equal((await call(relay.socketPath, { token: relay.token })).status, 200);
+    quota = true;
+    // The gateway's 402 reaches the worker as it came, with its type and message, the key cut.
+    const first = await call(relay.socketPath, { token: relay.token });
+    assert.equal(first.status, 402);
+    assert.equal(JSON.parse(first.text).type, "quota_for_entity_exceeded");
+    assert.ok(first.text.includes("Team budget exceeded") && !first.text.includes(KEY), "the gateway's own answer, the key cut");
+    // Every later billable call: the gateway's refusal at once, never sent, and told apart from Factory's cap.
+    const sent = modelCalls();
+    const later = await call(relay.socketPath, { token: relay.token, path: "/v4/ai/embedding-model" });
+    assert.equal(later.status, 402);
+    const e = JSON.parse(later.text).error;
+    assert.deepEqual([e.type, e.source], ["quota_for_entity_exceeded", "ai-gateway"]);
+    assert.match(e.message, /^AI Gateway refused: quota_for_entity_exceeded \(Team budget exceeded\. Current spend: \$50\.06/);
+    assert.match(e.message, /not Factory's max_usd/);
+    assert.equal(modelCalls(), sent, "not sent");
+    assert.equal((await call(relay.socketPath, { token: relay.token, method: "GET", path: "/v1/models" })).status, 200, "the model list costs nothing and still passes");
+    const pass = await relay.endPass();
+    assert.deepEqual([pass.usd, pass.calls, pass.unpriced, pass.capped], [0.05, 1, 0, false], "the refusal is $0, not unpriced");
+    assert.equal(pass.gatewayRefused.type, "quota_for_entity_exceeded");
+    assert.ok(!pass.gatewayRefused.message.includes(KEY) && !/\n/.test(pass.gatewayRefused.message) && pass.gatewayRefused.message.length <= 160, "one line, clipped, the key cut");
+    const rec = addKeySpend({ usd: 9.99, tokens: {} }, pass);
+    assert.equal(rec.budgetExceeded, undefined, "the pass is not over budget: the worker finishes and exits itself");
+    assert.equal(rec.workerKeyGatewayRefused.type, "quota_for_entity_exceeded");
+    const totals = relay.totals();
+    assert.deepEqual([totals.failClosed, totals.unpriced, totals.failed, totals.refused.gateway], [false, 0, 1, 1]);
+    // result.json's workerKey records it.
+    assert.equal(keyBreakdown([rec], totals).fields.workerKey.gatewayRefused.type, "quota_for_entity_exceeded");
+    // The Block reason and the progress line name it first.
+    assert.match(withGatewayRefusal("the lookdev call failed", totals.gatewayRefused), /^AI Gateway refused: quota_for_entity_exceeded \(Team budget exceeded\. Current spend: \$50\.06, limit: \$50\.00\..*\); the lookdev call failed$/);
+    assert.equal(withGatewayRefusal("time cap reached", null), "time cap reached");
+
+    // Factory's own cap: a 402 of its own type, saying it is Factory's cap.
+    const capped = await open({ key: KEY, dir: join(dir, "b"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1] });
+    quota = false;
+    capped.beginPass(0.05);
+    assert.equal((await call(capped.socketPath, { token: capped.token })).status, 200);
+    const own = await call(capped.socketPath, { token: capped.token });
+    assert.equal(own.status, 402);
+    const oe = JSON.parse(own.text).error;
+    assert.equal(oe.type, "factory_max_usd");
+    assert.match(oe.message, /^Factory's gateway relay: Factory's dollar cap is reached/);
+    assert.equal(oe.source, undefined);
+    assert.equal((await capped.endPass()).gatewayRefused, null);
+
+    // A 402 of any other type still fails closed.
+    const other = await open({ key: KEY, dir: join(dir, "c"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1] });
+    other.beginPass(15);
+    assert.equal((await call(other.socketPath, { token: other.token, path: "/v4/ai/language-model" })).status, 402);
+    const failed = await other.endPass();
+    assert.deepEqual([failed.unpriced, failed.gatewayRefused], [1, null]);
+    assert.equal(other.totals().failClosed, true);
+  } finally {
+    for (const r of opened) await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // Both places the gateway puts its type; anything else is no refusal of the gateway's.
+  assert.equal(gatewayRefusalOf(real)?.type, "quota_for_entity_exceeded");
+  assert.equal(gatewayRefusalOf({ error: { type: "insufficient_funds", message: "no credits" } })?.message, "no credits");
+  assert.equal(gatewayRefusalOf({ type: "error", error: { type: "quota_for_entity_exceeded", message: "m" } })?.type, "quota_for_entity_exceeded");
+  for (const d of [null, "quota_for_entity_exceeded", [real], { error: { type: "rate_limit_exceeded" } }, { type: "payment_required" }, { data: real }]) assert.equal(gatewayRefusalOf(d), null, JSON.stringify(d));
 });

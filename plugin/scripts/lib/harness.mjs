@@ -338,7 +338,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // Locally the developer's own Codex config (MCP servers, plugins, hooks, notify) stays out, as with Claude Code;
       // on a runner its CODEX_HOME is made afresh before every start (codex-runner.mjs), and stays out as well.
       // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included. Only
-      // where there is no agent uid and no local sandbox (a developer's /factory:run) are permissions skipped.
+      // where there is no agent uid and no local sandbox (a developer's /factory:run --here) are permissions skipped.
       const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : runner ? ["--ignore-user-config", ...codexRunnerConfig({ runner, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
       args.push("--json", ...perms, "--skip-git-repo-check");
       // Through the Vercel AI Gateway (`gateway`, codexGatewayOf): its provider, and the model as `openai/<id>` on a
@@ -362,7 +362,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // .github/skills would load as trusted configuration. --trust-folder is never passed (the clone stays untrusted).
       // On a runner the same: its sandbox under the policy in the COPILOT_HOME Factory makes afresh before every start
       // (copilot-runner.mjs), file tools in the checkout and the agent's temp directory. Only where there is no agent uid
-      // and no local sandbox (a developer's /factory:run) is everything allowed.
+      // and no local sandbox (a developer's /factory:run --here) is everything allowed.
       const perms = local ? copilotLocalFlags(local) : runner ? copilotRunnerFlags(runner) : ["--allow-all"];
       // Copilot's built-in GitHub MCP server would act with whatever token Copilot holds: always off.
       // The prompt goes on stdin, never `-p <prompt>`: one argv string over 128 KB fails to start on Linux (E2BIG), and

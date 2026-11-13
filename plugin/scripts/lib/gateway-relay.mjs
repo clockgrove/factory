@@ -90,8 +90,8 @@ export const UPSTREAM_KEEPALIVE_MS = 60_000;
 export const BODY_TIMEOUT_MS = 5 * 60_000;
 
 /**
- * An image edit's body cap: its reference images travel in it, base64 in JSON as raccoon-world's turnaround sends them
- * (four photo references came to 38.5 MiB). Only one capped call's body is held at a time (one billable call in flight).
+ * An image edit's body cap: its reference images travel in it, base64 in JSON (a real four-photo turnaround came to
+ * 38.5 MiB). Only one capped call's body is held at a time (one billable call in flight).
  */
 export const EDITS_MAX_BYTES = 128 * 1024 * 1024;
 
@@ -244,10 +244,11 @@ export function stageBlockCause(cause, totals, capReached = false) {
 }
 
 /**
- * How a Block reason names the relay's shutdown: `gateway relay shut: <n> calls in this stage could not be priced (<why>)`
- * after UNKNOWN_STREAK_SHUT failures of unknown cost in a row, or `gateway relay shut: a complete answer could not be priced (<why>)`.
+ * How a Block reason names the relay's shutdown: `gateway relay shut: <n> calls in a row could not be priced (<why>)` after
+ * UNKNOWN_STREAK_SHUT failures of unknown cost with no priced call between them, or `gateway relay shut: a complete
+ * answer could not be priced (<why>)`.
  */
-export const relayShutText = (shut) => (shut.complete ? `gateway relay shut: a complete answer could not be priced (${shut.why})` : `gateway relay shut: ${shut.calls} calls in this stage could not be priced (${shut.why})`);
+export const relayShutText = (shut) => (shut.complete ? `gateway relay shut: a complete answer could not be priced (${shut.why})` : `gateway relay shut: ${shut.calls} calls in a row could not be priced (${shut.why})`);
 
 /**
  * A Blocked stage's reason with the relay's shutdown named first. The shutdown ends the pass over budget, so the stage
@@ -544,7 +545,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     if (s.failClosed) return;
     s.failClosed = true;
     s.shut = { calls: complete ? 1 : s.streak, why, ...(complete ? { complete: true } : {}) };
-    once("unpriced", `gateway relay: ${complete ? "a complete answer" : `${s.streak} calls in a row`} could not be priced (${why}); ${relayShutText(s.shut)}: the pass ends over budget and every later call is refused`);
+    once("unpriced", `${relayShutText(s.shut)}: the pass ends over budget and every later call is refused`);
   };
   // One more call of unknown cost in a row, its estimate already booked: the UNKNOWN_STREAK_SHUT-th with no priced call
   // between them shuts the gateway for the stage. Returns the call log's basis for it.

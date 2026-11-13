@@ -952,11 +952,11 @@ test("a failed call is priced where it can be; a cost still unknown is booked at
     pass = await relay.endPass();
     assert.deepEqual([pass.usd, pass.estimated, pass.unpriced, pass.shut], [2.4, 6, 1, { calls: 6, why: "the gateway answered 500 (model_not_found); no generation id" }], "all six booked, the one that shut it included");
     assert.deepEqual([addKeySpend({ usd: 1, tokens: {} }, pass).budgetExceeded], [true], "the shutdown ends the pass over budget: the stage Blocks");
-    assert.ok(lines.some((l) => /6 calls in a row could not be priced .*gateway relay shut: 6 calls in this stage could not be priced/.test(l)), lines.join("\n"));
+    assert.ok(lines.some((l) => /^gateway relay shut: 6 calls in a row could not be priced \(the gateway answered 500 \(model_not_found\); no generation id\): the pass ends over budget/.test(l)), lines.join("\n"));
     relay.beginPass(100);
     const shut = await go("ok");
     assert.equal(shut.status, 403);
-    assert.match(JSON.parse(shut.text).error.message, /gateway relay shut: 6 calls in this stage could not be priced/);
+    assert.match(JSON.parse(shut.text).error.message, /gateway relay shut: 6 calls in a row could not be priced/);
     await relay.endPass();
     const totals = relay.totals();
     assert.deepEqual([totals.estimated, totals.estimatedUsd, totals.failClosed, totals.callLog?.file], [12, 4.8, true, CALL_LOG], "the two looked-up failures are no estimates any more");
@@ -1020,9 +1020,9 @@ test("a failed call is priced where it can be; a cost still unknown is booked at
 
 test("a stage the relay shut Blocks naming the shutdown; only an actual max_usd overrun reads \"dollar cap reached\" (#142)", () => {
   const shut = { calls: 2, why: "the call failed after it was sent: ECONNRESET; no generation id" };
-  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Factory's max_usd was not reached");
-  assert.equal(withRelayShut("dollar cap reached", shut, true), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); dollar cap reached");
-  assert.equal(withRelayShut("the look-dev stalled", shut), "gateway relay shut: 2 calls in this stage could not be priced (the call failed after it was sent: ECONNRESET; no generation id); the look-dev stalled");
+  assert.equal(withRelayShut("dollar cap reached", shut, false), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); Factory's max_usd was not reached");
+  assert.equal(withRelayShut("dollar cap reached", shut, true), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); dollar cap reached");
+  assert.equal(withRelayShut("the look-dev stalled", shut), "gateway relay shut: 2 calls in a row could not be priced (the call failed after it was sent: ECONNRESET; no generation id); the look-dev stalled");
   assert.equal(withRelayShut("dollar cap reached", null), "dollar cap reached", "no shutdown: the reason stands");
   assert.match(stageBlockReason("dollar cap reached", { shut, gatewayRefused: { type: "insufficient_funds", message: "no credits" } }), /^AI Gateway refused: insufficient_funds \(no credits\); gateway relay shut: 2 calls/);
   // max_usd in fact reached: the spend at the cap, the relay's refusal at it, a harness's own cap. A pass ended over budget

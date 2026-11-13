@@ -269,6 +269,9 @@ function localToken(repoFull) {
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
 
+/** Where the local token comes from, to name in a log line: the variable or the file, never the value. */
+const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
+
 /**
  * The token can write to this repository and nothing else. A fine-grained token lists every public repository it
  * may read, and the listed permissions are the person's, not the token's, so write reach is probed instead: an
@@ -1175,7 +1178,25 @@ export class Local {
     log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
     this.stopOnSignals(() => Promise.allSettled(running.values()));
     let cleaned = 0;
+    // The token GitHub refused (401: expired or revoked), or null. While set, nothing new starts; each tick reads the
+    // token's source again and takes a new token once it passes the start's own check (checkToken).
+    let refused = null;
+    let tried = null;
     while (!this.stopping) {
+      if (refused !== null) {
+        const now = localToken(this.repoFull);
+        const fresh = now && now !== refused && now !== tried ? await checkToken(this.repoFull, now).then(() => true, (e) => log(`the new token in ${tokenSource(this.repoFull)} is not taken: ${e.message.slice(0, 200)}`)) : false;
+        if (!fresh) {
+          if (now !== refused) tried = now;
+          if (once) return void (await Promise.all(running.values()));
+          await new Promise((r) => setTimeout(r, intervalMs));
+          continue;
+        }
+        this.token = now;
+        this.opts.token = now;
+        refused = null;
+        log(`a new token in ${tokenSource(this.repoFull)}: taking work again`);
+      }
       // Every 10 minutes, and at start: closed Objectives' directories go.
       if (Date.now() - cleaned > 10 * 60_000) {
         cleaned = Date.now();
@@ -1193,10 +1214,21 @@ export class Local {
       const localHeld = Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"]));
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch((e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {
+        // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
+        if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
+          refused = this.token;
+          log(`GitHub refused the local token (HTTP 401: expired or revoked): no new work starts on this box until it is renewed in ${tokenSource(this.repoFull)}; stages already running end as they can`);
+          return { ready: [], refused: true };
+        }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
       });
+      if (result.refused) {
+        if (once) return void (await Promise.all(running.values()));
+        await new Promise((r) => setTimeout(r, intervalMs));
+        continue;
+      }
       for (const n of result.released || []) if (stopped.get(n) === given.get(n)) stopped.delete(n);
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));

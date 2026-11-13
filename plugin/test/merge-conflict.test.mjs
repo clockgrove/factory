@@ -8,7 +8,10 @@ import { join } from "node:path";
 import { REBASED_TWICE, applyExit, mergeBlockReason, mergeReadyOne, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, recordMergeable } from "../scripts/lib/session.mjs";
 import { marker, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
-import { transientError } from "../scripts/lib/github.mjs";
+import { RETRY, transientError } from "../scripts/lib/github.mjs";
+
+// The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 // #2647: two sibling Objectives add a function to one module. The first merges; the second, reviewed and green, then
 // conflicts at its merge. It goes back for one rebase (no Block), merges after it, and a conflict after that rebase Blocks.

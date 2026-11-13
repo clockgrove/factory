@@ -5,12 +5,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { postReview, prDiff } from "../scripts/lib/github.mjs";
+import { RETRY, postReview, prDiff } from "../scripts/lib/github.mjs";
 import { answerPrompt } from "../scripts/review.mjs";
 import { parseReplies, postReplies } from "../scripts/lib/handoff.mjs";
 import { bodyFindingId, bodyFindings, diffLines, filesDiff, fitToFiles, promptDiff, reviewBody, setSelf, snapComments } from "../scripts/lib/logic.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
 import { mirrorDiff, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+
+// The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
+RETRY.sleep = async () => {};
 
 const fixture = (name) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf8");
 const lineMap = (diff) => Object.fromEntries(Object.entries(diffLines(diff)).filter(([, v]) => v.first !== null).map(([p, v]) => [p, { first: v.first, lines: [...v.lines].sort((a, b) => a - b) }]));

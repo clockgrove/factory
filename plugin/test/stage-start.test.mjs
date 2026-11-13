@@ -59,6 +59,8 @@ test("a stage started by the launcher writes its part of the record before anyth
       FACTORY_STAGE_SESSION_END: new Date(Date.now() + 3_600_000).toISOString(),
     },
     stdio: ["ignore", "pipe", "pipe"],
+    // Its own process group, so the kill below also ends the worker it starts (which retries its GitHub calls, #168).
+    detached: true,
   });
   let stderr = "";
   child.stderr.on("data", (c) => (stderr += c));
@@ -67,7 +69,7 @@ test("a stage started by the launcher writes its part of the record before anyth
   // The first comment POST is the stage's part; wait for it, or for the process to end first.
   const deadline = Date.now() + 15_000;
   while (!writes.length && child.exitCode === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-  child.kill("SIGKILL");
+  process.kill(-child.pid, "SIGKILL");
   await exited;
   server.close();
   assert.doesNotMatch(stderr, /before initialization/, stderr);

@@ -179,6 +179,10 @@ test("the gateway's error body: a budget or payment refusal Blocks, with or with
   const bare = (type) => JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type, message: "m" } }) } });
   assert.deepEqual({ ...providerRefusal("codex", jsonLines(wrapped(402, "quota_for_entity_exceeded"))), message: undefined }, { harness: "codex", status: 402, type: "quota_for_entity_exceeded", code: null, message: undefined });
   assert.equal(providerRefusal("codex", jsonLines(bare("quota_for_entity_exceeded")))?.type, "quota_for_entity_exceeded");
+  // No AI Gateway Credits left: the same Block, with the status or without it.
+  assert.deepEqual({ ...providerRefusal("codex", jsonLines(wrapped(402, "insufficient_funds"))), message: undefined }, { harness: "codex", status: 402, type: "insufficient_funds", code: null, message: undefined });
+  assert.equal(providerRefusal("codex", jsonLines(bare("insufficient_funds")))?.type, "insufficient_funds");
+  assert.equal(parseUsage("codex", bare("insufficient_funds"), "gpt-6.1-sol").error, "refused by the provider: insufficient_funds");
   assert.equal(providerRefusal("codex", jsonLines(bare("customer_verification_required")))?.status, null);
   assert.equal(providerRefusal("codex", jsonLines(bare("authentication_error")))?.type, "authentication_error");
   assert.equal(providerRefusal("codex", jsonLines(wrapped(429, "rate_limit_exceeded"))), null);

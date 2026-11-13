@@ -133,10 +133,10 @@ export function jsonLines(text) {
 /**
  * Error types and codes that no retry can pass, whatever the status: an exhausted quota or billing (OpenAI's
  * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit), a rejected key, and the Vercel AI
- * Gateway's budget (`quota_for_entity_exceeded`, HTTP 402) and payment-method (`customer_verification_required`, 403)
- * types, which decide a gateway body that carries no status.
+ * Gateway's budget (`quota_for_entity_exceeded`, HTTP 402), credits (`insufficient_funds`, 402) and payment-method
+ * (`customer_verification_required`, 403) types, which decide a gateway body that carries no status.
  */
-const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "customer_verification_required"]);
+const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);

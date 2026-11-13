@@ -3,8 +3,8 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { constants as osConstants, tmpdir, uptime } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
 import { delimiter, join } from "node:path";
 
@@ -289,7 +289,7 @@ function fileStdio(limit) {
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -307,6 +307,9 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     // `group`: the child leads a process group, and the whole group is killed when it exits (local mode's harness:
     // nothing it or its sandboxed commands started outlives the run, before Factory reads what it left).
     // Every process the run starts inherits a tag, so one that left the group (setsid, a double fork) is still found.
+    // A signal that stops this process stops the group first (stopGroups); `record` names the run in a file for as long
+    // as it lives (a file in the `record` directory), so a later start can stop it should this process die unsignalled
+    // (reapRecorded).
     const tag = group ? randomBytes(12).toString("hex") : null;
     const files = toFiles ? fileStdio(maxBytes) : null;
     let child;
@@ -317,6 +320,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       throw e;
     }
     files?.spawned();
+    if (group && child.pid) trackGroup(child.pid, tag, record);
     const out = [];
     const err = [];
     let outBytes = 0;
@@ -425,6 +429,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
         }
         const left = killTagged(tag);
         if (left) process.stdout.write(`[factory] ${left} process(es) the run left outside its group were killed\n`);
+        untrackGroup(child.pid);
       });
     }
     child.on("close", async (code, sig) => {
@@ -450,6 +455,132 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
+}
+
+// ------------------------------------------------------------------ group runs and stop signals
+
+/** The files in a stage's usage directory that name its live harness runs (exec's `record`), for a later start to reap. */
+export const groupRecordName = (pid) => `harness-group-${pid}.json`;
+export const GROUP_RECORD = /^harness-group-\d+\.json$/;
+/** The signals that stop a process with a live `group` run: its groups go first (stopGroups). */
+export const STOP_SIGNALS = ["SIGTERM", "SIGHUP", "SIGINT"];
+/** This process's live `group` runs: leader pid → {tag, record}. */
+const GROUPS = new Map();
+let trapped = false;
+
+/** This boot: Linux's boot id; elsewhere its start minute. A pid means nothing across boots. */
+export function bootId() {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    return String(Math.round((Date.now() / 1000 - uptime()) / 60));
+  }
+}
+
+const probe = (target) => {
+  try {
+    process.kill(target, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+};
+
+/** Whether process `pid` carries FACTORY_RUN_TAG=`tag` in its environment (Linux /proc; elsewhere `ps eww`). */
+function carriesTag(pid, tag) {
+  const mark = `FACTORY_RUN_TAG=${tag}`;
+  if (process.platform === "linux") {
+    try {
+      return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(mark);
+    } catch {
+      return false;
+    }
+  }
+  try {
+    return execFileSync("ps", ["eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" }).split(/\s+/).includes(mark);
+  } catch {
+    return false;
+  }
+}
+
+function trackGroup(pid, tag, recordDir) {
+  const record = recordDir ? join(recordDir, groupRecordName(pid)) : null;
+  GROUPS.set(pid, { tag, record });
+  // A record names the run for the next start, should this process die without stopping it (SIGKILL, a crash).
+  if (record) {
+    try {
+      writeFileSync(record, JSON.stringify({ pid, tag, owner: process.pid, boot: bootId() }), { mode: 0o600 });
+    } catch {
+      // no record: the signal path below still stops it
+    }
+  }
+  // A process with a harness in its own process group stops it before it exits: a terminal's signal never reaches it.
+  if (!trapped) {
+    trapped = true;
+    for (const s of STOP_SIGNALS) process.on(s, () => stopGroups(s));
+  }
+}
+
+function untrackGroup(pid) {
+  const g = GROUPS.get(pid);
+  GROUPS.delete(pid);
+  if (g?.record) rmSync(g.record, { force: true });
+}
+
+/**
+ * On SIGTERM, SIGHUP or SIGINT: every live group run's process group and tagged processes are killed, then the process
+ * exits as the signal would have ended it (128 + its number), unless another handler of that signal is installed and
+ * decides when. All at once, with no await between: no code of the stage runs (a next pass, a post) once it is told
+ * to stop, and nothing of the harness is left when it exits. A killed pass's session is not carried over anyway.
+ */
+function stopGroups(sig) {
+  for (const [pid, g] of [...GROUPS]) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // gone
+    }
+    killTagged(g.tag);
+    untrackGroup(pid);
+  }
+  if (process.listenerCount(sig) <= 1) process.exit(128 + (osConstants.signals[sig] || 15));
+}
+
+/**
+ * Stop the harness run a dead stage recorded in `file` (exec's `record`), then remove the record. Nothing is signalled
+ * unless the record is this boot's and its owner (the stage) is gone; then the group is killed only when it is still the
+ * run's: its leader alive and carrying the run's tag, or its leader gone while the group lives (no process takes a pid
+ * that names a live group, so that group is the run's). Every process carrying the tag goes too. Never a match on
+ * command lines. Returns whether anything was signalled.
+ */
+export function reapRecorded(file) {
+  let rec = null;
+  try {
+    rec = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+  const pid = Number(rec?.pid);
+  const owner = Number(rec?.owner);
+  const tag = typeof rec?.tag === "string" && /^[0-9a-f]{24}$/.test(rec.tag) ? rec.tag : null;
+  if (!tag || !Number.isInteger(pid) || pid <= 1 || rec.boot !== bootId()) {
+    rmSync(file, { force: true });
+    return false;
+  }
+  // A live owner is a stage still running: its own stop path ends its run.
+  if (Number.isInteger(owner) && owner > 1 && probe(owner)) return false;
+  let hit = false;
+  if ((probe(pid) ? carriesTag(pid, tag) : true) && probe(-pid)) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      hit = true;
+    } catch {
+      // gone
+    }
+  }
+  if (killTagged(tag)) hit = true;
+  rmSync(file, { force: true });
+  return hit;
 }
 
 /** exec that throws on a non-zero exit with stderr in the message. */

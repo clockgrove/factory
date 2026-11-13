@@ -18,7 +18,7 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, homedir, hostname, platform, totalmem, uptime } from "node:os";
+import { availableParallelism, constants as osConstants, homedir, hostname, platform, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -29,7 +29,7 @@ import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLin
 import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { localRelayDir } from "./lib/worker-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
-import { exec, whichSync } from "./lib/proc.mjs";
+import { GROUP_RECORD, STOP_SIGNALS, exec, reapRecorded, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
@@ -56,20 +56,70 @@ export const copilotOuterReason = "local mode: Copilot runs locally only inside 
 export const sandboxScanReason = "local mode: the sandboxes' scan for protected paths (ripgrep, sandbox-scan) failed its check on this machine; the local loop's log says why; check that `rg` on PATH runs";
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
-function parse(argv) {
-  const out = { _: [] };
-  for (let i = 0; i < argv.length; i += 1) {
+/**
+ * Each command's arguments and flags: a flag is `bool` (takes no value), or takes one value named as usage shows it, a
+ * positive number where `number` is set. An argument named `issue` or `pr` is a positive whole number.
+ */
+const WHERE = { repo: { value: "OWNER/NAME" }, dir: { value: "CLONE" } };
+export const COMMANDS = {
+  run: { args: ["issue"], flags: { ...WHERE, wait: "bool" }, about: "one Objective, from the stage its state calls for (with --wait, to merged)" },
+  serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true } }, about: "a loop: the dispatcher's rules every --interval seconds (30)" },
+  review: { args: ["pr"], flags: { ...WHERE, wait: "bool" }, about: "a review re-run" },
+  issue: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "the issue as a session reads it" },
+  deliver: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "Factory's half of an Objective worked in a session" },
+  "post-review": { args: ["pr", "findings.json"], flags: WHERE, about: "post a session's reviewer pass" },
+};
+const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
+/** The usage text: one command's, or every command's. */
+export const usage = (cmd = null) => (cmd ? `usage: ${usageOf(cmd)}\n  ${COMMANDS[cmd].about}\n` : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}`);
+
+/**
+ * The command line, checked before anything runs: {help, cmd} for --help or -h anywhere, else {cmd, flags, _}. Throws an
+ * error with `usage` set for an unknown command or flag, a flag's missing or non-numeric value, a value given to a flag
+ * that takes none, or a missing, extra or non-numeric argument.
+ */
+export function parseArgs(argv) {
+  const cmd = Object.hasOwn(COMMANDS, argv[0] ?? "") ? argv[0] : null;
+  if (argv.some((a) => a === "--help" || a === "-h")) return { help: true, cmd };
+  const fail = (why) => Object.assign(new Error(`${why}\n${usage(cmd)}`), { usage: true });
+  if (!cmd) throw fail(argv[0] === undefined ? "no command" : `unknown command ${JSON.stringify(argv[0])}`);
+  const spec = COMMANDS[cmd];
+  const flags = { _: [cmd] };
+  for (let i = 1; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        out[key] = next;
-        i += 1;
-      } else out[key] = true;
-    } else out._.push(a);
+    if (!a.startsWith("-")) {
+      flags._.push(a);
+      continue;
+    }
+    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
+    const kind = m && Object.hasOwn(spec.flags, m[1]) ? spec.flags[m[1]] : null;
+    if (!kind) throw fail(`unknown flag ${a} for ${cmd}`);
+    const key = m[1];
+    if (kind === "bool") {
+      if (m[2] !== undefined) throw fail(`--${key} takes no value`);
+      flags[key] = true;
+      continue;
+    }
+    let value = m[2];
+    if (value === undefined) {
+      value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) throw fail(`--${key} needs a value`);
+      i += 1;
+    }
+    if (kind.number) {
+      const n = Number(value);
+      if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${key} needs a positive number, not ${JSON.stringify(value)}`);
+      flags[key] = n;
+    } else flags[key] = value;
   }
-  return out;
+  const given = flags._.slice(1);
+  if (given.length !== spec.args.length) throw fail(given.length < spec.args.length ? `missing <${spec.args[given.length]}>` : `unexpected argument ${JSON.stringify(given[spec.args.length])}`);
+  spec.args.forEach((name, i) => {
+    if (name !== "issue" && name !== "pr") return;
+    const n = Number(given[i]);
+    if (!/^\d+$/.test(given[i]) || !Number.isSafeInteger(n) || n <= 0) throw fail(`<${name}> must be a number, not ${JSON.stringify(given[i])}`);
+  });
+  return { cmd, flags };
 }
 
 /** OWNER/NAME from the clone's origin remote. */
@@ -241,6 +291,44 @@ async function checkToken(repoFull, token) {
 export const reviewIssue = (pr) => (pr?.draft || !(pr?.labels || []).some((l) => l.name === REVIEW_LABEL) ? 0 : Number(/^factory\/(\d+)$/.exec(pr?.head?.ref || "")?.[1]) || 0);
 /** An issue labelled factory:blocked. */
 export const isBlocked = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:blocked");
+const labelled = (item, name) => (item?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
+
+/**
+ * The stage an Objective's state calls for when a loop takes it up (serve's resume, `factory run`): "review" for its open,
+ * non-draft PR labelled for review; "work" while the issue is Running; "merge" while it is In review with an open,
+ * non-draft PR (reviewed, waiting for its merge); else null. `pr` is the open PR on factory/<issue>, or null.
+ */
+export function stageFor({ pr, issue }) {
+  const open = pr && pr.state !== "closed" && !pr.draft;
+  if (open && labelled(pr, REVIEW_LABEL)) return "review";
+  if (labelled(issue, "factory:running")) return "work";
+  if (open && labelled(issue, "factory:in-review")) return "merge";
+  return null;
+}
+
+/**
+ * Stop the harness runs a dead stage of this Objective left on this machine (proc.mjs reapRecorded: each named in a
+ * file in its stage's usage directory, verified before any signal). Returns how many were stopped.
+ */
+export function reapLeftRuns(ws) {
+  let n = 0;
+  let dirs = [];
+  try {
+    dirs = readdirSync(ws).filter((d) => d.startsWith("usage-"));
+  } catch {
+    return 0;
+  }
+  for (const d of dirs) {
+    let files = [];
+    try {
+      files = readdirSync(join(ws, d)).filter((f) => GROUP_RECORD.test(f));
+    } catch {
+      continue;
+    }
+    for (const f of files) if (reapRecorded(join(ws, d, f))) n += 1;
+  }
+  return n;
+}
 
 export class Local {
   constructor(flags) {
@@ -561,6 +649,9 @@ export class Local {
   async stage(issue, name, script, args) {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
+    // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
+    const reaped = reapLeftRuns(this.ws(issue));
+    if (reaped) log(`#${issue}: stopped ${reaped} harness run(s) an earlier stage left running on this machine`);
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const usageDir = join(this.ws(issue), `usage-${name}-${stamp}`);
     mkdirSync(usageDir, { recursive: true });
@@ -596,6 +687,10 @@ export class Local {
       log(`#${issue}: refusing to run: ${e.message}`);
       await this.block(issue, name, reason);
       return { code: null, exit: "blocked", usd: null, usageDir };
+    }
+    if (this.stopping) {
+      dropOwned(stageTmp);
+      return { code: null, exit: null, usd: null, usageDir };
     }
     return new Promise((done) => {
       if (this.firstSetup.has(issue)) {
@@ -656,6 +751,26 @@ export class Local {
     const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     if (pr) await gh.removeLabel(this.repo, pr.number, REVIEW_LABEL, this.opts).catch((e) => log(`#${issue} review label: ${e.message.slice(0, 120)}`));
     await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause: "setup", notify: inputs.notify, stage: name }, this.opts);
+  }
+
+  /**
+   * SIGINT, SIGTERM or SIGHUP to `run`, `review` or `serve`: stop. Nothing new starts, every stage process gets SIGTERM
+   * (it stops its harness's process group before it exits: proc.mjs stopGroups), and the claims stay, so the Objectives
+   * pause and this machine's next `factory run` or `factory serve` takes them up again. Exits once `settled()` resolves
+   * (the work in flight, wound down) or 30 s pass.
+   */
+  stopOnSignals(settled) {
+    let stopping = false;
+    const stop = async (sig) => {
+      if (stopping) return;
+      stopping = true;
+      this.stopping = true;
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away)`);
+      for (const child of this.children) child.kill("SIGTERM");
+      await Promise.race([Promise.resolve(settled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
+      process.exit(128 + (osConstants.signals[sig] || 2));
+    };
+    for (const s of STOP_SIGNALS) process.on(s, () => void stop(s));
   }
 
   /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. */
@@ -735,11 +850,12 @@ export class Local {
   /** Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions. */
   async resume(issue) {
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
     // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
     // send-back rebase) runs again; anything else (reviewed, waiting in the merge queue) needs nothing here.
-    if (pr && !pr.draft && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.withClaim(issue, () => this.review(issue, pr.number));
-    const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-    if ((data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) return this.runObjective(issue);
+    const next = stageFor({ pr, issue: data });
+    if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
+    if (next === "work") return this.runObjective(issue);
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});
@@ -766,6 +882,37 @@ export class Local {
   /** One Objective, start to delivered review (and, with `wait`, to merged). */
   runObjective(issue, { wait = false } = {}) {
     return this.withClaim(issue, () => this.work(issue, { wait }));
+  }
+
+  /**
+   * `factory run <issue>`: the stage the Objective's state calls for (stageFor, as serve's resume): its review, its merge
+   * (followed with `wait`, else named), or else its work. `gh`: the GitHub reads (a test's own).
+   */
+  async runIssue(issue, { wait = false, gh = { findPr, getIssue } } = {}) {
+    const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    const next = stageFor({ pr, issue: await gh.getIssue(this.repo, issue, this.opts).catch(() => null) }) ?? "work";
+    if (next !== "work") log(`#${issue}: PR #${pr.number} ${next === "review" ? "waits for its review; starting there" : "is reviewed and waits for its merge"}`);
+    if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
+    if (next === "merge") {
+      if (!wait) return { exit: "delivered" };
+      return this.withClaim(issue, async () => {
+        const merged = await this.followMerge(issue, pr.number);
+        return { exit: merged ? "delivered" : null, next: merged === "next" };
+      });
+    }
+    return this.runObjective(issue, { wait });
+  }
+
+  /**
+   * The last line when this loop stops following an Objective whose PR is not merged yet: who tends it now and, for a
+   * local Objective, the fix. Null when its PR is merged or gone.
+   */
+  async pendingMergeLine(issue) {
+    const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
+    if (!pr) return null;
+    const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+    const local = !data || BACKENDS.local.trigger.routes(data, this.baseEnv());
+    return `#${issue}: PR #${pr.number} is not merged yet; ${local ? `nothing tends a local Objective while no factory serve runs for this repository: start \`factory serve\` (or \`factory run ${issue} --wait\`) to merge it` : "the Action's dispatcher tends its merge"}`;
   }
 
   /** The work stage, then its review: in a claim this loop holds. */
@@ -904,7 +1051,8 @@ export class Local {
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
-    log(`#${issue}: PR #${prNumber} not merged after ${Math.round(timeoutMs / 60000)} min; the dispatcher takes it from here`);
+    log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(timeoutMs / 60000)} min`);
+    log((await this.pendingMergeLine(issue)) || `#${issue}: PR #${prNumber} is merged or closed`);
     return false;
   }
 
@@ -922,18 +1070,7 @@ export class Local {
       });
     const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
     log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
-    let stopping = false;
-    const stop = async () => {
-      if (stopping) return;
-      stopping = true;
-      this.stopping = true;
-      log(`stopping: ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and serve on this machine resumes them (the dispatcher Blocks one only after a day away)`);
-      for (const child of this.children) child.kill("SIGTERM");
-      await Promise.race([Promise.allSettled(running.values()), new Promise((r) => setTimeout(r, 30_000))]);
-      process.exit(130);
-    };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
+    this.stopOnSignals(() => Promise.allSettled(running.values()));
     let cleaned = 0;
     while (!this.stopping) {
       // Every 10 minutes, and at start: closed Objectives' directories go.
@@ -1165,48 +1302,61 @@ async function postFindings(prNumber, file, flags) {
 }
 
 async function main() {
-  const flags = parse(process.argv.slice(2));
-  const [cmd, issueArg] = flags._;
+  let parsed;
+  try {
+    parsed = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    if (!e.usage) throw e;
+    process.stderr.write(`factory: ${e.message}`);
+    process.exit(64);
+  }
+  if (parsed.help) {
+    process.stdout.write(usage(parsed.cmd));
+    return;
+  }
+  const { cmd, flags } = parsed;
+  const [, arg, file] = flags._;
   if (cmd === "run") {
-    const issue = Number(issueArg);
-    if (!Number.isInteger(issue) || issue <= 0) throw new Error("usage: local.mjs run <issue> [--wait]");
+    const issue = Number(arg);
     const local = await new Local(flags).init();
-    let r = await local.runObjective(issue, { wait: !!flags.wait });
-    // --wait on a split Objective: each part runs once the one before it merged.
-    while (r.next) r = await local.runObjective(issue, { wait: true });
+    let task = null;
+    local.stopOnSignals(() => task);
+    task = (async () => {
+      let r = await local.runIssue(issue, { wait: !!flags.wait });
+      // --wait on a split Objective: each part runs once the one before it merged.
+      while (r.next) r = await local.runObjective(issue, { wait: true });
+      return r;
+    })();
+    const r = await task;
+    // Delivered, not followed to its merge: the last line says who tends it now.
+    if (r.exit === "delivered" && !flags.wait) {
+      const line = await local.pendingMergeLine(issue);
+      if (line) log(line);
+    }
     process.exitCode = r.exit === "delivered" ? 0 : 1;
     return;
   }
   if (cmd === "issue") {
-    const issue = Number(issueArg);
-    if (!Number.isInteger(issue) || issue <= 0) throw new Error("usage: local.mjs issue <issue> [--out FILE]");
-    process.exitCode = await issueForSession(issue, flags);
+    process.exitCode = await issueForSession(Number(arg), flags);
     return;
   }
   if (cmd === "deliver") {
-    const issue = Number(issueArg);
-    if (!Number.isInteger(issue) || issue <= 0) throw new Error("usage: local.mjs deliver <issue> [--out DIR]");
-    process.exitCode = await deliver(issue, flags);
+    process.exitCode = await deliver(Number(arg), flags);
     return;
   }
   if (cmd === "post-review") {
-    const pr = Number(issueArg);
-    if (!Number.isInteger(pr) || pr <= 0 || !flags._[2]) throw new Error("usage: local.mjs post-review <pr> <findings.json>");
-    process.exitCode = await postFindings(pr, flags._[2], flags);
+    process.exitCode = await postFindings(Number(arg), file, flags);
     return;
   }
   if (cmd === "review") {
-    const pr = Number(issueArg);
-    if (!Number.isInteger(pr) || pr <= 0) throw new Error("usage: local.mjs review <pr> [--wait]");
-    const r = await (await new Local(flags).init()).runReview(pr, { wait: !!flags.wait });
-    process.exitCode = r.exit === "delivered" ? 0 : 1;
+    const local = await new Local(flags).init();
+    let task = null;
+    local.stopOnSignals(() => task);
+    task = local.runReview(Number(arg), { wait: !!flags.wait });
+    process.exitCode = (await task).exit === "delivered" ? 0 : 1;
     return;
   }
-  if (cmd === "serve") {
-    await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: Number(flags.interval || 30) * 1000 });
-    return;
-  }
-  throw new Error("usage: local.mjs run <issue> [--wait] | review <pr> [--wait] | serve [--once] [--all] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json>");
+  if (cmd === "serve") await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

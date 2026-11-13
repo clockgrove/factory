@@ -55,6 +55,14 @@ export const MAX_PRICED_BYTES = 128 * 1024 * 1024;
 export const LOOKUP_DELAYS_MS = [1000, 3000, 6000, 12000, 20000, 30000];
 /** How long a call may take upstream, sending to the last byte of its answer (a long image generation). */
 export const UPSTREAM_TIMEOUT_MS = 20 * 60_000;
+/**
+ * The TCP keepalive on each upstream call's socket (#145). Node's global agent probes after 1 s idle and then every
+ * second; Vercel's edge answers about 27 probes on a connection and then none, so ten unanswered probes later the kernel
+ * ended a call whose answer was still silent with ETIMEDOUT, about 38 s in. One probe a minute keeps a silent call (and
+ * any NAT on the path) alive past UPSTREAM_TIMEOUT_MS (27 probes a minute apart outlast it), and still finds a dead peer
+ * about 70 s after its last answer.
+ */
+export const UPSTREAM_KEEPALIVE_MS = 60_000;
 /** How long a request's body may take to arrive once the relay reads it (not while it waits its turn under a cap). */
 export const BODY_TIMEOUT_MS = 5 * 60_000;
 
@@ -277,13 +285,16 @@ export function keyCutter(key) {
 /**
  * One upstream call through Node's own http(s) client, with `timeoutMs` for the whole of it (fetch's agent would cut a
  * slow model's first byte at 300 s): {status, headers: Map, body: async iterable of decoded bytes}. Never follows a
- * redirect. A compressed answer is decoded, so its cost can be read.
+ * redirect. A compressed answer is decoded, so its cost can be read. Its socket probes the peer every `keepAliveMs`
+ * (UPSTREAM_KEEPALIVE_MS), not the global agent's every second, and is its own (`connection: close`): never a pooled
+ * socket that probed every second while it waited. The agent stays Node's own, so an operator's proxy (HTTPS_PROXY with
+ * NODE_USE_ENV_PROXY) still applies.
  */
-export function upstreamRequest(url, { method, headers, body = null, timeoutMs = UPSTREAM_TIMEOUT_MS }) {
+export function upstreamRequest(url, { method, headers, body = null, timeoutMs = UPSTREAM_TIMEOUT_MS, keepAliveMs = UPSTREAM_KEEPALIVE_MS }) {
   const u = new URL(url);
   const client = u.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
-    const req = client.request(u, { method, headers: { ...headers, ...(body ? { "content-length": body.length } : {}) } }, (res) => {
+    const req = client.request(u, { method, headers: { ...headers, connection: "close", ...(body ? { "content-length": body.length } : {}) } }, (res) => {
       const h = new Map(Object.entries(res.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(", ") : String(v)]));
       const enc = (h.get("content-encoding") || "").toLowerCase();
       const decoder = enc === "gzip" ? zlib.createGunzip() : enc === "br" ? zlib.createBrotliDecompress() : enc === "deflate" ? zlib.createInflate() : null;
@@ -295,6 +306,8 @@ export function upstreamRequest(url, { method, headers, body = null, timeoutMs =
     });
     const timer = setTimeout(() => req.destroy(new Error("timed out")), timeoutMs);
     timer.unref();
+    // After the agent's own setting (one second): the socket is handed to this request with it already applied.
+    req.on("socket", (sock) => sock.setKeepAlive(true, keepAliveMs));
     req.on("close", () => clearTimeout(timer));
     req.on("error", reject);
     req.end(body || undefined);

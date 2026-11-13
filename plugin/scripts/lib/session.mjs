@@ -49,7 +49,7 @@ import {
   transientError,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, exec, git } from "./proc.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -1233,8 +1233,9 @@ export const blockedLine = ({ issue, pr = null, stage, reason, fix = null }) =>
  * the review request. `where` is the issue number; `pr` may be null on blocked.
  * `notice` (local mode with a Factory App, app-token.mjs noticeMinter): the notices that @mention `notify` post as the
  * App, since local mode writes as the operator and GitHub notifies no one of their own mention (#2522).
+ * `cause` (logic.mjs BLOCK_CAUSES) goes on a Blocked notice as its cause line (blockMarker), for the bench scorer.
  */
-export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null }, { token, notice = null }) {
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "factory" }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
   // The reason and the output can carry the harness's words (its exit record, a command's output): published as
   // Factory, they are sanitised like every other harness text (handoff.mjs sanitize).
@@ -1249,7 +1250,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     await setStateLabel(repo, issue, "blocked", { token });
     await moveCard(project, repo, issue, "Blocked", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
-    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}`;
+    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
     return;
   }
@@ -1509,7 +1510,7 @@ export const REBASED_TWICE = "integration failed twice: the branch fell behind a
  * or a human recovery is a new condition, so it notifies again.
  */
 export function rebasedTwiceBlock({ issue, pr, since = null, notify, stage }) {
-  return { issue, pr, exit: "blocked", reason: REBASED_TWICE, notify, stage, key: `rebased-twice:${pr?.head?.sha || "none"}:${since || ""}` };
+  return { issue, pr, exit: "blocked", reason: REBASED_TWICE, cause: "work", notify, stage, key: `rebased-twice:${pr?.head?.sha || "none"}:${since || ""}` };
 }
 
 /**
@@ -1560,6 +1561,9 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
  * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
  */
+/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check is the work's; a drop is `report.cause`, else Factory's. */
+export const mergeBlockCause = (how, report = {}) => (how === "red" ? "work" : report.cause ?? "factory");
+
 export function mergeBlockReason(how, report = {}) {
   if (how === "red") return "a required check is red on the reviewed head";
   if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Factory re-enqueued it";
@@ -1702,6 +1706,8 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       delete report.watch;
       // A drop whose merge_group jobs GitHub never started (a billing lock, a spending limit): infrastructure, not the checks.
       const stuck = hung ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
+      // GitHub never started the queue's jobs, through Factory's re-enqueue: an outage handled by the rules.
+      if (!hung && stuck.length) report.cause = "outage";
       report.reason = hung
         ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
         : stuck.length

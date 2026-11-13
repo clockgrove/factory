@@ -128,7 +128,7 @@ test("blocked: each reason in the worker contract, in priority order", () => {
 test("no commits: the worker's own exit record decides the Block or Question and its reason, not the generic line", () => {
   const blocked = parseExitRecord('{"exit":"blocked","questions":[],"reason":"The last part needs a receipt the run does not have."}');
   for (const recordBasis of ["exit file", "asked", undefined]) {
-    assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: blocked, recordBasis }), { exit: "blocked", reason: "worker blocked: The last part needs a receipt the run does not have." }, String(recordBasis));
+    assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: blocked, recordBasis }), { exit: "blocked", reason: "worker blocked: The last part needs a receipt the run does not have.", cause: "work" }, String(recordBasis));
   }
   const question = parseExitRecord(JSON.stringify({ exit: "question", reason: "", questions: [{ question: "Drop the old route?", test: "contract", existing: "GET /v1/items" }] }));
   assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: question, recordBasis: "exit file" }), { exit: "question", reason: "question: Drop the old route?" });
@@ -166,7 +166,7 @@ test("deniedHosts: a blocked exit record's host names, checked for DNS shape, be
   for (const h of ["a.b", "xn--bcher-kva.example", "a-b.c-d.example.com"]) assert.equal(isHostName(h), true, h);
   for (const h of ["example", "1.2.3.4", "a..b.com", "a.b-.com", `${"a".repeat(64)}.com`, "A.COM", "a.com.", "a.com/x", "@a.com"]) assert.equal(isHostName(h), false, h);
   const green = { passes: 1, green: true };
-  assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: rec }), { exit: "blocked", reason: "worker blocked: the proof needs the download host", deniedHosts: rec.deniedHosts });
+  assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: rec }), { exit: "blocked", reason: "worker blocked: the proof needs the download host", cause: "setup", deniedHosts: rec.deniedHosts });
   assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).deniedHosts, rec.deniedHosts, "a Block before any commit keeps the worker's reason and hosts");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).reason, "worker blocked: the proof needs the download host");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).deniedHosts, undefined, "without hosts no host fix");
@@ -676,7 +676,7 @@ test("Factory's mirror refuses a branch name that collides with refs under it, b
 test("decideExit: a refused or rejected push always Blocks with its reason, PR or not", () => {
   const harness = { ok: true, died: 0 };
   assert.equal(decideExit({ harness, pr: null, commits: 3, pushRejected: "push rejected: ! [remote rejected] factory/808 (cannot lock ref)" }).reason, "push rejected: ! [remote rejected] factory/808 (cannot lock ref)");
-  assert.deepEqual(decideExit({ harness, pr: pr(), commits: 3, validation: { passes: 1, green: true }, pushRejected: "touched protected path .github/x.yml" }), { exit: "blocked", reason: "push refused: touched protected path .github/x.yml" });
+  assert.deepEqual(decideExit({ harness, pr: pr(), commits: 3, validation: { passes: 1, green: true }, pushRejected: "touched protected path .github/x.yml" }), { exit: "blocked", reason: "push refused: touched protected path .github/x.yml", cause: "work" });
   assert.equal(decideExit({ harness, pr: null, commits: 3 }).reason, "no PR could be opened for the branch");
 });
 
@@ -771,7 +771,9 @@ test("Git LFS: a quota refusal is named and Blocks even with a PR open; the endp
   assert.match(lfsQuotaLine(out), /^This repository is over its data quota/);
   assert.equal(lfsQuotaLine("! [rejected] HEAD -> factory/1 (fetch first)\nerror: failed to push some refs"), null);
   const reason = `Git LFS refused the upload (quota or storage): ${lfsQuotaLine(out)}`;
-  assert.deepEqual(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, validation: { passes: 1, green: true }, pushRejected: reason, lfsRefused: true }), { exit: "blocked", reason });
+  assert.deepEqual(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, validation: { passes: 1, green: true }, pushRejected: reason, lfsRefused: true, lfsQuota: true }), { exit: "blocked", reason, cause: "provider-quota" });
+  // Any other Git LFS refusal (the local cap, a missing endpoint, pointers) is a setup gap.
+  assert.equal(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, pushRejected: "the remote has no https Git LFS endpoint to pin the media upload to", lfsRefused: true }).cause, "setup");
   assert.match(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, lfsPlain: ["a.glb"] }).reason, /plain git blobs .*: a\.glb$/);
   assert.equal(lfsEndpoint("https://github.com/o/r"), "https://github.com/o/r.git/info/lfs");
   assert.equal(lfsEndpoint("https://github.com/o/r.git\n"), "https://github.com/o/r.git/info/lfs");
@@ -887,6 +889,7 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     assert.equal(box.lfsRefused, true);
     assert.match(box.error, /^the branch's Git LFS media is 0\.2 MB \(2 object\(s\)\), over the local limit of 0\.15 MB \(FACTORY_LOCAL_MEDIA_MAX_MB\)$/);
     assert.equal(decideExit({ harness: { ok: true }, pr: pr(), commits: 1, pushRejected: box.error, lfsRefused: true }).reason, box.error);
+    assert.equal(box.errorKind, "", "the local media cap is no quota of GitHub's");
     assert.throws(() => execFileSync("git", ["-C", origin, "rev-parse", "--verify", "factory/1"], { stdio: "ignore" }), "nothing reached origin");
     // The pin is Factory's own: no sandboxed child or harness gets it.
     const scrubbed = scrubbedEnv({ ...lfsPinEnv("https://github.com/o/r.git"), FACTORY_LFS_PIN: "1", PATH: "/bin" });
@@ -1110,7 +1113,7 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.deepEqual(fixScopeRefused(["toolchain/fetch.sh"], { texts: [plan, red] }), ["toolchain/fetch.sh"]);
   const reason = fixScopeReason(["a/.nvmrc", "b", "c", "d", "e", "f", "g"]);
   assert.match(reason, /^a fix pass changed a\/\.nvmrc, b, c, d, e and 2 more \(toolchain, lockfile or CI configuration\)/);
-  assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, validation: { passes: 1, green: false, scope: reason } }), { exit: "blocked", reason });
+  assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, validation: { passes: 1, green: false, scope: reason } }), { exit: "blocked", reason, cause: "work" });
 });
 
 test("fix-pass scope: a workspace member's manifest brings its workspace's root lockfile, as the declaration lists members", () => {
@@ -1335,3 +1338,32 @@ test("hostile member globs are decided in bounded time (factory#2618 review)", (
   }
 });
 
+
+test("Block causes: each Block carries a code from the one closed list; refusals, the cap and GitHub's unstarted job are external, the rest not", async () => {
+  const { BLOCK_CAUSES, blockCauseOf, blockMarker, refusalCause } = await import("../scripts/lib/logic.mjs");
+  const { stageBlockCause } = await import("../scripts/lib/gateway-relay.mjs");
+  assert.deepEqual(Object.keys(BLOCK_CAUSES), ["max-usd", "gateway-budget", "provider-quota", "outage", "setup", "work", "factory"]);
+  assert.deepEqual(Object.entries(BLOCK_CAUSES).filter(([, c]) => c.external).map(([k]) => k), ["max-usd", "gateway-budget", "provider-quota", "outage"]);
+  const ok = { ok: true };
+  const cause = (args) => decideExit({ harness: ok, pr: { exists: true }, commits: 1, ...args }).cause;
+  assert.equal(cause({ harness: { budgetExceeded: true } }), "max-usd");
+  assert.equal(cause({ harness: { budgetExceeded: true, unmetered: true } }), "factory");
+  assert.equal(cause({ harness: { refusal: { harness: "codex", status: 429, type: "insufficient_quota" } } }), "provider-quota");
+  assert.equal(cause({ harness: { refusal: { harness: "codex", status: null, type: "insufficient_funds" } } }), "gateway-budget");
+  assert.equal(cause({ harness: { refusal: { harness: "claude", status: 401, type: "authentication_error" } } }), "setup");
+  assert.equal(refusalCause({ harness: "claude", status: 402, type: null }), "provider-quota");
+  assert.equal(cause({ validation: { passes: 1, green: false, notStarted: "GitHub never started the job" } }), "outage");
+  assert.equal(cause({ validation: { passes: 2, green: false } }), "work");
+  assert.equal(cause({ harness: { died: 2 } }), "factory");
+  // The relay: the gateway's own refusal is the cause; its shutdown is no max_usd overrun.
+  assert.equal(stageBlockCause("work", { gatewayRefused: { type: "insufficient_funds" } }), "gateway-budget");
+  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, false), "factory");
+  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, true), "max-usd");
+  assert.equal(stageBlockCause("work", null), "work");
+  // The notice's cause line: read back by structure; a code off the list is written and read as nothing external.
+  assert.equal(blockCauseOf(`@dev Blocked (work): dollar cap reached\n${blockMarker("max-usd")}`), "max-usd");
+  assert.equal(blockMarker("bogus"), '<!-- factory:block {"cause":"factory"} -->');
+  assert.equal(blockCauseOf('<!-- factory:block {"cause":"bogus"} -->'), null);
+  assert.equal(blockCauseOf("@dev Blocked (work): an older notice"), null);
+  assert.equal(blockCauseOf(`${blockMarker("max-usd")}\n${blockMarker("work")}`), "work", "the last line is Factory's");
+});

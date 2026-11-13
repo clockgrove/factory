@@ -23,7 +23,7 @@ Job one: file an Objective, walk away, and come back to correct, merged work at 
 
 | Measure | Job-one part | Taken from |
 | --- | --- | --- |
-| Walk-away: merged with zero human input after the label | Operator walks away | Binary. Any human push, comment or edit on the branch or issue after the label breaks it; a Blocked card is a miss. |
+| Walk-away: merged with zero human input after the label | Operator walks away | Three buckets. Walk-away: merged with no human push, comment or edit on the branch or issue after the label. External: every stop was a Block outside Factory and outside the work (Factory's `max_usd` cap, the AI Gateway's budget or credits, a provider's quota, plan limit or billing: the model provider, GitHub's Git LFS storage or the sandbox vendor's plan; a provider or GitHub outage Factory handled by its rules), and the only human input answered those Blocks. Miss: anything else, a Blocked card of any other cause included. Each Block records its cause as a code (bench/README.md, Block causes), so the bucket is decided on structure. |
 | Solution quality | Correct work | The bench's blind pairwise judge where there is a comparison; the owner's read of the merged diff when they choose to read it; escapes found after merge count against it. |
 | Operator minutes | Operator walks away | Minutes spent on Blocked cards and on re-filing, from a stopwatch; zero on a clean merge. |
 | Dollars per merged Objective | Reasonable cost | Per harness: Claude's headless output carries total\_cost\_usd and per-model usage with sub-agents included; Codex's JSONL carries the thread's running token counts (a resumed pass counts only its own share), priced from a table, with each sub-agent thread's own counts read from its rollout and priced at its model; Copilot bills GitHub AI Credits and its usage file reports them per run, so its column is those credits at GitHub's published $0.01 each (configurable), with the premium requests beside them. Runner minutes beside it. Wall time reported, never alone. |
@@ -42,6 +42,7 @@ Counting rules:
 - Any Factory change means a new candidate tag, and every count starts again. Reason: the bar proves one exact tag.
 - An answer, un-block, hand-started run or re-run by anyone, an owner's agent session included, is operator input: that row is not a walk-away and the streak breaks.
 - A P1 defect found later in a counted merge breaks the streak. The owner reads the counted diffs.
+- An External Objective (Job one) is skipped: it neither counts toward the streak nor resets it. Reason: nothing Factory, the Objective or the repository's setup did could have avoided its stops.
 - The streak is counted by `node bench/score.mjs --streak --repo OWNER/NAME --since <candidate tag>` (bench/README.md, The streak): a stall, an unmerged end or an input source the scorer could not read resets it too.
 
 ## The 1.0 bar
@@ -51,9 +52,9 @@ Counting rules:
 - **Real adopters only:** `clockgrove/clockgrove`, `clockgrove/assetforge` and `clockgrove/raccoon-world` together, never the scratch drill repositories.
 - **One pooled streak:** the Objectives of all three, ordered by when each ended, on any harness (Claude Code, Codex or Copilot). Any miss on any of them resets it.
 - **It spans 0.9.x releases:** the streak counts from v0.9.0 and keeps counting when the adopters move to a later 0.9.x release; only a miss resets it.
-- **The same counting rules as above:** any human input (an answer, un-block, hand-started run or re-run by anyone, an owner's agent session included), a Blocked card, a stall, an unmerged end, an input source the scorer could not read, or a P1 defect found later in a counted merge breaks the streak. The owner reads the counted diffs.
+- **The same counting rules as above:** any human input (an answer, un-block, hand-started run or re-run by anyone, an owner's agent session included), a Blocked card, a stall, an unmerged end, an input source the scorer could not read, or a P1 defect found later in a counted merge breaks the streak; an External Objective is skipped. The owner reads the counted diffs.
 
-Counting it: `node bench/score.mjs --streak --since v0.9.0 --repo <adopter> --repo <adopter> --repo <adopter>` prints each adopter's streak per harness, then the pooled streak and the sequence it counted: every finished Objective of the three, ordered by when it ended, on any harness, each a walk-away (`yes`) or the miss that reset it. Five is the bar. An Objective in flight has not ended and does not count yet. A parked Objective (its label removed while it waits on other work) is still scored: it counts once it ends, and a Blocked one is a miss. `--out` writes the rows and both streaks (bench/README.md, The streak).
+Counting it: `node bench/score.mjs --streak --since v0.9.0 --repo <adopter> --repo <adopter> --repo <adopter>` prints each adopter's streak per harness, then the pooled streak and the sequence it counted: every finished Objective of the three, ordered by when it ended, on any harness, each a walk-away (`yes`), skipped as External, or the miss that reset it. Five is the bar. An Objective in flight has not ended and does not count yet. A parked Objective (its label removed while it waits on other work) is still scored: it counts once it ends, and a Blocked one is a miss. `--out` writes the rows and both streaks (bench/README.md, The streak).
 
 At 1.0 the surface README's Versioning section proposes (input names, labels, markers, the App's permission set, the template's jobs) freezes for 1.x.
 

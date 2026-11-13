@@ -9,7 +9,7 @@ Job one: file an Objective, walk away, come back to correct, merged work at a re
 
 ## 1. Walk-away (binary)
 
-Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit, relabel, un-block, review, or hand-started or re-run Factory workflow run by a human (anyone but the Factory App and the harness) breaks it, an answered Question breaks it even when the answer is not on the issue or PR, and a card that reached Blocked is a miss. Report `yes` or `no` with the first human action.
+Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit, relabel, un-block, review, or hand-started or re-run Factory workflow run by a human (anyone but the Factory App and the harness) breaks it, an answered Question breaks it even when the answer is not on the issue or PR, and a card that reached Blocked is a miss. Report `yes` or `no` with the first human action, and the bucket: walk-away, External or miss. External: every stop was a Block whose notice records an external cause, with no Question and no input but the answers those Blocks asked for; the 1.0 streak skips it. Load [reference.md](reference.md), "Block causes", for the codes.
 
 A merge that sat idle longer than the stall threshold between Factory's acts is a stall, not a walk-away, either way of counting. Load [reference.md](reference.md), "Stalls", for the threshold, what counts as Factory's acts and as idle, and what to report.
 

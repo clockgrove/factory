@@ -21,6 +21,7 @@
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, factoryLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf } from "./cost.mjs";
+import { BLOCK_CAUSES, blockCauseOf } from "../../plugin/scripts/lib/logic.mjs";
 
 export const ROW_VERSION = 1;
 const BRANCH = (issue) => `factory/${issue}`;
@@ -504,6 +505,33 @@ export function blockedAt(collected, since) {
   return { at: hits[0].at, reason: hits.find((h) => h.reason)?.reason ?? null };
 }
 
+/**
+ * Factory's Blocked notices after `since`, oldest first, each with the cause its notice records (plugin logic.mjs
+ * blockMarker), null for a notice written before causes were (or one off the list). Only Factory's own notices: a
+ * person's comment carrying the marker is input, never a cause.
+ */
+export function blockStops(collected, since, { bots = new Set() } = {}) {
+  const n = collected.issue.number;
+  const factoryLocal = localFactoryActions(collected);
+  return (collected.issueComments || [])
+    .filter((c) => (c.body || "").includes(`<!-- factory:${n}:blocked`) && ms(c.created_at) >= ms(since) && (!isHuman(c.user, bots) || factoryLocal(c.created_at, c.user, "marker comment")))
+    .map((c) => ({ at: c.created_at, cause: blockCauseOf(c.body) }))
+    .sort((a, b) => ms(a.at) - ms(b.at));
+}
+
+/**
+ * The walk-away bucket (docs/PLAN.md, Job one): `walk-away`; `external` when every stop was outside Factory and the
+ * work: at least one Block, each recording an external cause (BLOCK_CAUSES), no Question, every human action an answer
+ * to a Block (asked for by it), no stall and every input source read; else `miss`. Nothing here changes how input is
+ * found: it reads the actions, requests and stops the row already has.
+ */
+export function walkAwayBucket({ value, blocks, question, actions, stall, unseen }) {
+  if (value) return "walk-away";
+  const external = blocks.length > 0 && blocks.every((b) => BLOCK_CAUSES[b.cause]?.external === true);
+  const answeredBlocks = actions.every((a) => a.asked === "blocked");
+  return external && !question && answeredBlocks && !stall && unseen.length === 0 ? "external" : "miss";
+}
+
 /** Whether the worker raised a Question: the label, or QUESTION in a draft PR body or the plan comment. */
 export function questionAt(collected, since) {
   const n = collected.issue.number;
@@ -719,6 +747,8 @@ export function scoreObjective(collected, opts = {}) {
     unseen,
     question: question ? { ...question, answered: actions.some((a) => a.kind === "ready_for_review" || (a.where.startsWith("PR") && ms(a.at) >= ms(question.at))) } : null,
   };
+  walkAway.blocks = blockStops(collected, since, { bots });
+  walkAway.bucket = walkAwayBucket({ value: walkAway.value, blocks: walkAway.blocks, question, actions: split, stall, unseen });
   walkAway.reason = walkAway.value
     ? "merged with no human action after the label"
     : !merged
@@ -836,11 +866,14 @@ const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === 
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 /** The Markdown table: one row per Objective, oldest issue first. */
+/** An External row's stops, by cause: "Blocked: max-usd, provider-quota". */
+export const externalWhy = (r) => `Blocked: ${[...new Set((r.walkAway.blocks || []).map((b) => b.cause))].join(", ")}`;
+
 export function markdownTable(rows) {
   const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Turns", "Runs", "Sessions", "Harness"];
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
-    const walk = r.walkAway.value ? "yes" : `no: ${r.walkAway.reason}`;
+    const walk = r.walkAway.value ? "yes" : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     const model = r.cost.usd !== null && r.cost.tokens.input !== null ? `${fmtUsd(r.cost.usd)} (${fmtTokens(r.cost.tokens)})` : fmtUsd(r.cost.usd);
     // The spend through a relayed gateway key (#97) is in the dollars: named beside them.

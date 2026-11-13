@@ -410,7 +410,7 @@ async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDi
   const pr = stage === "review" ? { number: prNumber } : await findPr(repo, `factory/${issue}`, opts).catch(() => null);
   const minutes = Number(env.FACTORY_TIMEOUT_MINUTES) || null;
   const cap = sessionCapNote(env.FACTORY_STAGE_SESSION_CAP);
-  await applyExit(repo, { issue, pr: pr?.number ? { number: pr.number } : null, exit: "blocked", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.FACTORY_NOTIFY || "", stage }, { token: opts.token() }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
+  await applyExit(repo, { issue, pr: pr?.number ? { number: pr.number } : null, exit: "blocked", cause: "work", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.FACTORY_NOTIFY || "", stage }, { token: opts.token() }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

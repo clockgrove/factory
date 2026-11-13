@@ -19,7 +19,7 @@ import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, selectReady, setSelf, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
-import { applyExit, hungChecks, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
+import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
@@ -282,7 +282,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (!dryRun) {
           const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
           const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day` : "worker job vanished: Running with no job in progress";
-          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason, notify: inputs.notify, stage: "dispatch" }, opts);
+          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "dispatch" }, opts);
           // The expired claim goes with the Block, so the next Running stint starts clean.
           if (hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
         }
@@ -329,7 +329,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           log(`  #${issue.number}: a split part merged; the next part is queued`);
         } else if (next === "cap") {
           statuses[issue.number] = "Blocked";
-          await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
+          await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
         }
         continue;
       }
@@ -413,7 +413,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const why = mergeBlockReason(how, report);
         if (why) {
           statuses[issue.number] = "Blocked";
-          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: why, notify: inputs.notify, stage: "dispatch" }, opts);
+          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "dispatch" }, opts);
         }
       }
     }

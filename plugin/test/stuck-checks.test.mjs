@@ -99,7 +99,7 @@ test("a required check whose workflow run GitHub left queued: a bounded wait in 
   assert.ok(phases.some((l) => /; waiting up to 0 min for it to start, no fix run$/.test(l)), phases.join("\n"));
   assert.ok(Date.now() - t0 >= 40 && checkReads >= 3, "it waited in the stage, reading again");
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, stuck: result.stuck.reason } });
-  assert.deepEqual(exit, { exit: "blocked", reason: result.stuck.reason });
+  assert.deepEqual(exit, { exit: "blocked", reason: result.stuck.reason, cause: "factory" });
 });
 
 test("the in-stage wait is bounded by the stage's wall clock less the guard: none left, it Blocks at once", async () => {

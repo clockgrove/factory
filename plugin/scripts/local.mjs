@@ -33,7 +33,7 @@ import { exec, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, commitAuthor, gitIdentity, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
@@ -647,7 +647,7 @@ export class Local {
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     if (pr) await gh.removeLabel(this.repo, pr.number, REVIEW_LABEL, this.opts).catch((e) => log(`#${issue} review label: ${e.message.slice(0, 120)}`));
-    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, notify: inputs.notify, stage: name }, this.opts);
+    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause: "setup", notify: inputs.notify, stage: name }, this.opts);
   }
 
   /** Hold the Objective for the length of fn: a claim with a heartbeat the Actions path and other loops respect. */
@@ -821,7 +821,7 @@ export class Local {
     log(`#${issue} send-back: ${String(e?.message || e).slice(0, 160)}`);
     if (transientError(e)) return "retry";
     const reason = `the send-back of the conflicting PR for its rebase failed (${code}); the run log has GitHub's answer`;
-    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "merge" }, this.opts).catch((x) => log(`#${issue} Block: ${String(x?.message || x).slice(0, 160)}`));
+    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "merge" }, this.opts).catch((x) => log(`#${issue} Block: ${String(x?.message || x).slice(0, 160)}`));
     return false;
   }
 
@@ -867,7 +867,7 @@ export class Local {
         const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
         const why = mergeBlockReason(how, report);
         if (why) {
-          await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, notify: inputs.notify, stage: "merge" }, this.opts);
+          await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
           return false;
         }
         if (how === "held") {
@@ -1099,7 +1099,7 @@ async function deliver(issue, flags) {
     await removeLabel(repo, pr.number, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, pr.number, [REVIEW_LABEL], opts);
   }
-  await applyExit(repo, { issue, pr, exit: record.exit, reason: record.exit === "question" ? `question: ${clip(record.questions[0] || "")}` : record.reason, notify: inputs.notify, stage: "work" }, opts);
+  await applyExit(repo, { issue, pr, exit: record.exit, reason: record.exit === "question" ? `question: ${clip(record.questions[0] || "")}` : record.reason, cause: "work", notify: inputs.notify, stage: "work" }, opts);
   log(`#${issue}: ${record.exit}; PR #${pr.number} ${pr.html_url}${replied ? `; ${replied} repl${replied === 1 ? "y" : "ies"} posted` : ""}`);
   return record.exit === "delivered" ? 0 : 1;
 }

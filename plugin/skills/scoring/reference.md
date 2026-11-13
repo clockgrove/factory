@@ -13,6 +13,19 @@ Lookup detail for the scoring skill. SKILL.md says when to load each section; ev
 
 The issue gives the label time, the plan comment, the Blocked comment and any question. The PR gives the title, body, review comments, replies and merge time. The job log gives the runner minutes, the validation reruns and the exit (delivered, question, blocked). The usage artifact gives the tokens and dollars.
 
+## Block causes
+
+Each Blocked notice ends with a cause line, `<!-- factory:block {"cause":"<code>"} -->` (plugin `logic.mjs` `BLOCK_CAUSES`, the one list). External codes, outside Factory and the work:
+
+- `max-usd`: Factory's own `max_usd` cap reached.
+- `gateway-budget`: the AI Gateway refused for its own budget or credits.
+- `provider-quota`: a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, or the sandbox vendor's plan after the bounded wait.
+- `outage`: a provider or GitHub outage Factory handled by its rules (a required job GitHub never started, waited for in place, then Blocked as infrastructure; the same in the merge queue after one re-enqueue).
+
+Not external: `setup` (a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access), `work` (the worker's own Block, validation red, review findings, a protected path, the Objective's size) and `factory` (Factory itself, or any Block it did not place).
+
+An Objective is External when it is not a walk-away, it has at least one Blocked notice, every notice records an external code, it had no Question, every human action answered a Block (asked for), no stall, and every input source was read. A notice with no cause line (written before causes were) or a person's comment carrying the marker never makes one External. A parked Objective is External only when every stop it had is. In the streak an External Objective is listed as skipped: it does not count and does not reset; a P1 escape found later in its merge makes it a miss.
+
 ## Stalls
 
 The walk-away rule's stall, as `bench/score.mjs` applies it:

@@ -33,7 +33,7 @@ import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
-import { CALL_LOG, stageBlockReason } from "./lib/gateway-relay.mjs";
+import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 
@@ -130,20 +130,20 @@ async function main() {
     const refused = refusalExit(e, { stage: "work", issue });
     if (refused) {
       log(e.message.slice(0, 300));
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, notify: inputs.notify, stage: "work" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, cause: "setup", notify: inputs.notify, stage: "work" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
       await finish("blocked", refused.reason);
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);
     const reason = `worker crashed: ${e.message.slice(0, 200)}`;
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
     await finish("blocked", reason);
     throw e;
   }
 
   async function run() {
   if (agentError) {
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: agentError, notify: inputs.notify, stage: "doctor" }, token);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: agentError, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
     await finish("blocked", agentError);
     return;
   }
@@ -153,7 +153,7 @@ async function main() {
   for (const c of checks) log(`${c.status} ${c.name}${c.detail ? `: ${c.detail}` : ""}${c.fix && c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
   if (failed.length) {
     const reason = `doctor: ${failed.map((c) => `${c.name} (${c.fix || c.detail})`).join("; ")}`;
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason, notify: inputs.notify, stage: "doctor" }, token);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
     await finish("blocked", reason);
     return;
   }
@@ -212,7 +212,7 @@ async function main() {
   } catch (e) {
     if (e.code !== "ref-collision") throw e;
     log(e.message);
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: e.message, notify: inputs.notify, stage: "branch" }, token);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: e.message, cause: "setup", notify: inputs.notify, stage: "branch" }, token);
     await finish("blocked", e.message);
     return;
   }
@@ -236,7 +236,7 @@ async function main() {
   if (access.agent) await pinRunnerGit(checkout, childBase);
   if (lfs.used) log(!lfs.ok ? lfs.reason : lfs.warning ? `warning: ${lfs.warning}; the run goes on with pointer files` : "Git LFS: filters set up in the checkout, objects handed over");
   if (!lfs.ok) {
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: lfs.reason, notify: inputs.notify, stage: "lfs" }, token);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: lfs.reason, cause: "setup", notify: inputs.notify, stage: "lfs" }, token);
     await finish("blocked", lfs.reason);
     return;
   }
@@ -287,7 +287,7 @@ async function main() {
     const s = access.agent ? await sh(await outbox.defaultTree(), inputs.setup, { env: { ...childBase, TMPDIR: tmp.factory }, timeoutMs: remainingMs(deadlineAt), asRunner: true }) : await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {
       const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}`;
-      await applyExit(repo, { issue, pr: null, exit: "blocked", reason, notify: inputs.notify, stage: "setup" }, token);
+      await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "setup" }, token);
       await finish("blocked", reason);
       return;
     }
@@ -303,7 +303,7 @@ async function main() {
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     if (!i.ok) {
       const reason = i.reason;
-      await applyExit(repo, { issue, pr: null, exit: "blocked", reason, notify: inputs.notify, stage: "install" }, token);
+      await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "install" }, token);
       await finish("blocked", reason);
       return;
     }
@@ -326,7 +326,7 @@ async function main() {
   // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
   shellSecretValues = [...Object.values(shellSecrets), ...opened.masked];
   if (opened.blocked) {
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: opened.blocked, notify: inputs.notify, stage: "work" }, token);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: opened.blocked, cause: "setup", notify: inputs.notify, stage: "work" }, token);
     await finish("blocked", opened.blocked);
     return;
   }
@@ -601,10 +601,11 @@ async function main() {
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
+    lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
   });
-  if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused });
+  if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {
@@ -616,6 +617,7 @@ async function main() {
       if (rec) log(remaining ? `split: PR #${pr.number} is part ${rec.prs.length}; ${remaining} item(s) remain for the next part` : `split: PR #${pr.number} is the last of ${rec.prs.length} part(s)`);
     } catch (e) {
       decision.exit = "blocked";
+      decision.cause = "factory";
       decision.reason = `the split record could not be written: ${e.message.slice(0, 160)}`;
     }
   }
@@ -648,6 +650,7 @@ async function main() {
         }
       } catch (e) {
         decision.exit = "blocked";
+        decision.cause = "factory";
         decision.reason = `the maintainers' comments could not be read before the merge: ${e.message.slice(0, 160)}`;
       }
     }
@@ -657,6 +660,7 @@ async function main() {
         log(`PR #${pr.number} rebased onto ${defaultBranch} as ${outbox.expected().slice(0, 7)}; it merges once its required checks are green`);
       } catch (e) {
         decision.exit = "blocked";
+        decision.cause = "factory";
         decision.reason = `the rebased head could not be recorded for the merge: ${String(e.stderr || e.message).slice(0, 160)}`;
       }
     }
@@ -667,13 +671,18 @@ async function main() {
         await addLabels(repo, pr.number, [REVIEW_LABEL], token);
       } catch (e) {
         decision.exit = "blocked";
+        decision.cause = "factory";
         decision.reason = `the review label could not be applied, so no review job would run: ${e.message.slice(0, 160)}`;
       }
     }
   }
   // The AI Gateway refused a relayed call for its own budget or credits, or the relay shut the gateway for calls it could
   // not price: a Block names it first, and reads "dollar cap reached" only when max_usd was in fact reached.
-  if (decision.exit === "blocked" && relay) decision.reason = stageBlockReason(decision.reason, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals()));
+  if (decision.exit === "blocked" && relay) {
+    const capped = maxUsdReached(inputs.maxUsd, records, relay.totals());
+    decision.reason = stageBlockReason(decision.reason, relay.totals(), capped);
+    decision.cause = stageBlockCause(decision.cause, relay.totals(), capped);
+  }
   const askedAtPlan = decision.exit === "question" && !!planNeeds;
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).
   if (askedAtPlan) await progress.planAsked(needs.repos);
@@ -681,7 +690,7 @@ async function main() {
   // its shell lacked: the opt-in (worker_secrets) and where the value goes on this route.
   const fixes = decision.exit === "blocked" ? [decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null, decision.missingSecrets ? missingSecretsFix(decision.missingSecrets, inputs.workerSecrets, backend().name === "local" ? "local" : "runner") : null].filter(Boolean) : [];
   const fix = fixes.length ? fixes.join(" ") : null;
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix }, token);
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix, cause: decision.cause }, token);
   await finish(decision.exit, decision.reason);
   }
 }

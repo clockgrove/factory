@@ -87,7 +87,7 @@ test("a red is handed back only when every failing job is a steady base failure"
   const reason = baseFailureReason(both);
   assert.match(reason, /^base failure: unit, lint fail the same way on main@bbbbbbb \(.+\); not this change$/);
   const d = decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 1, green: false, baseFailure: reason } });
-  assert.deepEqual(d, { exit: "blocked", reason });
+  assert.deepEqual(d, { exit: "blocked", reason, cause: "work" });
   assert.match(decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 2, green: false } }).reason, /^validation red after Factory's second pass/);
 });
 

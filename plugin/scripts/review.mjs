@@ -29,7 +29,7 @@ import { refusalExit } from "./lib/local.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate } from "./lib/objective-trust.mjs";
-import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry } from "./lib/handoff.mjs";
+import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -81,9 +81,11 @@ const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
  * parses. Claude and Copilot run as the pinned reviewer agent (--agent); Codex has
  * no such flag, so the prompt names the definition file. The issue's acceptance
  * entries (acceptanceEntries) are listed by id: the answer judges each one, and an
- * entry left unjudged is named on the review (handoff.mjs reviewPost).
+ * entry left unjudged is named on the review (handoff.mjs reviewPost). `part` is set only on a split Objective's part
+ * that leaves work for the next (handoff.mjs isSplitPart): the prompt says so, so the reviewer judges the entries the
+ * PR body assigns to a later part as deferred; the last part and a one-PR Objective get the prompt without it.
  */
-export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [] }) {
+export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   const entries = acceptanceEntries(issueBody);
   const brief = (t) => (t.length > 160 ? `${t.slice(0, 159)}…` : t);
@@ -95,6 +97,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     entries.length
       ? `The issue's acceptance entries, by the ids to use (the full text is in the issue below):\n${entries.map((e) => `- ${e.id}: ${brief(e.text)}`).join("\n")}`
       : "Name each acceptance entry the issue states by its own label, or by its position when it has none.",
+    ...(part ? [splitPartBrief(part)] : []),
     "",
     "## Issue",
     issueBody || "(no body)",
@@ -109,6 +112,10 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     "```",
   ].join("\n");
 }
+
+/** The reviewer's brief for a split part that is not the last (review-pr reference.md, "Split parts"). */
+export const splitPartBrief = (part) =>
+  `This PR is part ${part.number} of this Objective, which is split into sequential PRs, and it is not the last part: a later part delivers the acceptance entries its PR body assigns to one. Judge such an entry \`"met": false, "deferred": true\` with no comment, as the review-pr reference says under "Split parts". That changes only those judgments: review every line this part changes, every claim its body makes for this part, and the repository's rules and checklist answers exactly as for any PR. A defect in this part's own lines is a finding on those lines even when the entry it relates to is deferred: a schema, constraint, signature or error this part adds that a later part's entry cannot be built on as it stands (a column that cannot hold a record that entry needs, a call with no way to bound or stop it, a refusal whose reason is lost) is raised now, not left for that part.`;
 
 /**
  * The decisions an answer pass is given to apply, as answerPrompt renders them: those that fit its task card (a fresh
@@ -460,8 +467,10 @@ async function main() {
     return;
   }
   const passEnv = { ...harnessEnv, ...packShellSecrets(shellSecrets) };
-  // A split part's PR keeps `Refs #N` whatever pr.md the answer pass writes.
-  const splitPart = isSplitPart(await partsRecord(repo, issue, token).catch(() => null), pr.number);
+  // A split part's PR keeps `Refs #N` whatever pr.md the answer pass writes, and its reviewer is told it is a part.
+  const parts = await partsRecord(repo, issue, token).catch(() => null);
+  const splitPart = isSplitPart(parts, pr.number);
+  const part = splitPartOf(parts, pr.number);
   // A PR GitHub would read as closing anything but this Objective's issue Blocks the stage (handoff.mjs closingChecked).
   let publishRefused = "";
   const publish = (current) => publishPr(repo, { branch, base: defaultBranch, issue, prText: io.files()["pr.md"], splitPart, pr: current }, token).catch((e) => {
@@ -555,7 +564,7 @@ async function main() {
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,
-    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
+    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part }),
     maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
     reviewer: true,
@@ -590,7 +599,7 @@ async function main() {
       harness: inputs.harness,
       model: again.model,
       effort: again.effort,
-      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions }),
+      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
       reviewer: true,
@@ -617,7 +626,7 @@ async function main() {
     return;
   }
   if (retryRec && answer === reviewRec) log(`the reviewer's rerun ended in ${reviewCallEnd(retryRec, reviewOf(retryRec))}; posting the first pass's answer`);
-  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok });
+  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart });
   if (post?.unjudged.length) log(`reviewer left ${post.unjudged.length} of ${entries.length} acceptance entr${entries.length === 1 ? "y" : "ies"} unjudged: ${post.unjudged.join(", ")}`);
   const comments = post ? post.comments : [];
   const placeholder = !!post?.placeholder;

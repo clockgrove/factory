@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixRunAllowed, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
-import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry } from "../scripts/lib/handoff.mjs";
+import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
 import { exitRecord } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 
@@ -353,6 +353,45 @@ test("review: the prompt lists the issue's entries by id and asks for a judgment
   assert.match(p, /"acceptance": \[\{"entry": "2", "met": true/);
   assert.match(p, /The issue's acceptance entries, by the ids to use[^\n]*\n- A: \*\*A:\*\* one\n- 2: two\n/);
   assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Want\n- x", prBody: "", diff: "", harness: "codex" }), /Name each acceptance entry the issue states by its own label/);
+});
+
+test("review: the prompt tells the reviewer of a split part, and only of one that is not the last (#157)", async () => {
+  const { reviewerPrompt, splitPartBrief } = await import("../scripts/review.mjs");
+  const args = { issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- **A:** one\n- two", prBody: "## Undone\nA: a later part", diff: "", harness: "claude" };
+  // Part 2 of a split that leaves items for the next: told so, with the part number, before the issue text.
+  const part = splitPartOf({ prs: [40, 41], remaining: 3 }, 41);
+  assert.deepEqual(part, { number: 2 });
+  const p = reviewerPrompt({ ...args, part });
+  assert.equal(p.split("\n").filter((l) => l === splitPartBrief(part)).length, 1);
+  assert.ok(p.indexOf(splitPartBrief(part)) < p.indexOf("## Issue"));
+  assert.match(splitPartBrief(part), /^This PR is part 2 of this Objective, [^\n]*not the last part[^\n]*"deferred": true/);
+  // The last part (nothing remains) and an Objective in one PR (no parts record): the prompt as before, every entry judged.
+  const plain = reviewerPrompt(args);
+  assert.equal(splitPartOf({ prs: [40, 41], remaining: 0 }, 41), null);
+  assert.equal(splitPartOf(null, 41), null);
+  assert.equal(splitPartOf({ prs: [40], remaining: 2 }, 41), null, "a PR that is not the recorded part");
+  assert.equal(reviewerPrompt({ ...args, part: splitPartOf({ prs: [40, 41], remaining: 0 }, 41) }), plain);
+  assert.equal(reviewerPrompt({ ...args, part: splitPartOf(null, 41) }), plain);
+  assert.doesNotMatch(plain, /split|deferred/);
+});
+
+test("review: on a split part an entry judged deferred gets no comment; elsewhere it is not met (#157)", () => {
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const entries = [{ id: "A", text: "a" }, { id: "B", text: "b" }];
+  const review = parseReview('{"acceptance": [{"entry": "A", "met": false, "deferred": true, "path": "src/a.ts", "line": 3, "evidence": "Undone: a later part"}, {"entry": "B", "met": false, "path": "src/new.ts", "line": 2, "evidence": "claimed, not done"}], "comments": []}');
+  assert.equal(review.acceptance[0].deferred, true);
+  assert.equal("deferred" in review.acceptance[1], false);
+  const part = reviewPost({ issue: 7, review, diff, entries, splitPart: true });
+  assert.deepEqual(part.comments.map((c) => c.body), ["acceptance B: not met. claimed, not done"]);
+  assert.match(part.body, /\n- A: deferred to a later part \(Undone: a later part\)\n- B: not met \(claimed, not done\)$/);
+  // The last part and a one-PR Objective: a deferred judgment is not honoured, so the entry is a finding as before.
+  const whole = reviewPost({ issue: 7, review, diff, entries });
+  assert.deepEqual(whole.comments.map((c) => c.body), ["acceptance A: not met. Undone: a later part", "acceptance B: not met. claimed, not done"]);
+  assert.match(whole.body, /\n- A: not met \(Undone: a later part\)\n/);
+  // Every entry deferred on a part: nothing to answer, the judgments still on record.
+  const allDeferred = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: false, deferred: true, evidence: "later" }] }, diff, entries: [{ id: "A", text: "a" }], splitPart: true });
+  assert.equal(allDeferred.placeholder, true);
+  assert.deepEqual(allDeferred.unjudged, []);
 });
 
 test("markers follow the 0.5 idempotent shape lane 1 adopted", () => {

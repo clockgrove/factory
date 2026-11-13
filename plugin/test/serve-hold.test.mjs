@@ -7,6 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
+
+// The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
+// fails every one of its tries.
+RETRY.sleep = async () => {};
 
 /**
  * A GitHub that keeps one Objective's labels and can show the issues listing a stale view of them (a read from before a
@@ -348,10 +353,11 @@ for (const [stage, end, how] of [
 }
 
 test("withClaim: a read-back that fails once is read again; one that never answers keeps the claim for this loop to resume (#167)", async () => {
-  // The comments reads of one claim: the check for another holder, upsertComment's own, then the read-back (the 3rd).
+  // The comments requests of one claim: the check for another holder, upsertComment's own, then the read-back (the 3rd),
+  // which fails through all of the client's tries, so the loop's own second read is what answers.
   let reads = 0;
   let failFrom = 3;
-  let failTo = 3;
+  let failTo = 2 + RETRY.tries;
   const gh = claimGitHub({ fail: (kind) => kind === "comments" && ++reads >= failFrom && reads <= failTo });
   try {
     const loop = await claimLoop();

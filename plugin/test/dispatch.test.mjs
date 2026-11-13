@@ -712,7 +712,8 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
   // Running 30 hours (a multi-part Objective), and this tick's claim read fails; the Block's own reads answer.
   const tick = (timeline) => {
     let reads = 0;
-    return localTick({ open: [localIssue(7, "factory:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads === 1 ? 502 : []) });
+    // The claim read fails through every one of the client's tries; the Block's own read of the comments then answers.
+    return localTick({ open: [localIssue(7, "factory:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads <= RETRY.tries ? 502 : []) });
   };
   const running = labelled("factory:running", ago(30 * HOUR));
   // Its progress comment, by Factory's login, was updated 5 minutes ago: a live stage, so it waits.

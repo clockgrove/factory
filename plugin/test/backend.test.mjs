@@ -452,13 +452,12 @@ test("Copilot's outer sandbox: bwrap gets the host's /dev/net/tun after srt's fr
   assert.deepEqual(argv(none, args), args);
 });
 
-// A stand-in for ripgrep that lists every file below its last argument, as `rg --files` does; exits $CODE when set after
-// printing $EXTRA lines (then sleeping $SLEEP seconds), so a test can make it fail, hang or add names.
+// A stand-in for ripgrep that lists every file below its last argument, as `rg --files` does; with $WARN a line on
+// stderr, then $SLEEP seconds of sleep and exit $CODE, so a test can make it warn, hang or fail.
 const FAKE_RG = `#!/bin/sh
 for t do :; done
 find "$t" -type f | sort
-[ -n "$EXTRA" ] && printf '%s\\n' "$EXTRA"
-echo "rg: some/dir: Permission denied" >&2
+[ -n "$WARN" ] && echo "rg: some/dir: Permission denied" >&2
 [ -n "$SLEEP" ] && sleep "$SLEEP"
 exit "\${CODE:-0}"
 `;
@@ -484,14 +483,18 @@ test("the sandboxes' scan (#154): ripgrep's list less the lines whose first prot
   }
   const paths = (xs) => xs.map((f) => join(r, f)).sort();
   const run = (env = {}) => spawnSync(scan, ["--files", "--max-depth", "4", r], { encoding: "utf8", env: { ...process.env, ...env } });
-  const ok = run();
+  const ok = run({ WARN: "1" });
   assert.equal(ok.status, 0);
   assert.deepEqual(ok.stdout.split("\n").filter(Boolean).sort(), paths(kept));
   assert.match(ok.stderr, /Permission denied/, "ripgrep's stderr passes through (srt denies the directories it could not read)");
   // Lines that are not plain paths below the scanned directory are kept as they are.
   for (const l of [`${r}/x/../.git/hooks/y`, `${r}//dep/.git/HEAD`, `/elsewhere/dep/.git/config`, `${r}-other/dep/.git/HEAD`]) assert.equal(nestedGitLine(l, r), false, l);
   const none = run({ CODE: "1" });
-  assert.equal(none.status, 1, "none found: ripgrep's 1");
+  assert.equal(none.status, 1, "none found: ripgrep's 1, silent");
+  // A 1 with anything on stderr (a shim that failed) is a failed scan: the whole list, exit 2.
+  const noisy = run({ CODE: "1", WARN: "1" });
+  assert.equal(noisy.status, 2);
+  assert.deepEqual(noisy.stdout.split("\n").filter(Boolean).sort(), paths([...kept, ...dropped]));
   // A failed ripgrep: the whole list, nested .git included, and a failed scan's exit, which srt still binds.
   for (const code of ["2", "7"]) {
     const bad = run({ CODE: code });
@@ -514,27 +517,57 @@ test("the sandboxes' scan (#154): ripgrep's list less the lines whose first prot
   assert.ok(Date.now() - t0 < 10_000, "the timeout bounds the scan: the sleeping ripgrep did not hold it open");
   assert.equal(code, 2);
   assert.deepEqual(out.split("\n").filter(Boolean).sort(), paths([...kept, ...dropped]));
-  assert.match(readFileSync(scan, "utf8"), new RegExp(`^#!/bin/sh\\nexec '${process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' `), "node by absolute path");
+  assert.ok(readFileSync(scan, "utf8").includes(`exec '${process.execPath}' `), "node by absolute path");
 });
 
-test("the sandboxes' scan (#154): a ripgrep shim that dispatches on its name works; a ripgrep that does not answer is refused as it is written", async () => {
-  const { writeNestedGitScan } = await import("../scripts/lib/local.mjs");
+test("the sandboxes' scan (#154): a ripgrep shim works and never reads the scanned tree's tool versions; no node falls back to ripgrep unfiltered; rg is found absolute and never where a sandbox writes", async () => {
+  const { nestedGitScanWrapper, ripgrepOnPath, writeNestedGitScan } = await import("../scripts/lib/local.mjs");
   const { mkdtempSync, mkdirSync, writeFileSync: write, symlinkSync, readFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const { join, dirname } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
-  // A version manager's binary: ripgrep only when called as `rg`, an error otherwise; its shim a link named rg.
+  // A version manager's binary: ripgrep only when called as `rg`, an error otherwise; and, like mise or asdf, it reads
+  // `.tool-versions` from its working directory: one there names a ripgrep it lacks, so it fails with exit 1.
   const manager = join(dir, "manager");
-  write(manager, `#!/bin/sh\n[ "$(basename "$0")" = rg ] || { echo "error: unexpected argument '$1'" >&2; exit 2; }\n${FAKE_RG.split("\n").slice(1).join("\n")}`, { mode: 0o755 });
+  write(manager, `#!/bin/sh\n[ "$(basename "$0")" = rg ] || { echo "error: unexpected argument '$1'" >&2; exit 2; }\n[ -f .tool-versions ] && { echo "ripgrep@99.0.0 is not installed" >&2; exit 1; }\n${FAKE_RG.split("\n").slice(1).join("\n")}`, { mode: 0o755 });
   mkdirSync(join(dir, "shims"));
   symlinkSync(manager, join(dir, "shims", "rg"));
+  // Its check runs the wrapper beside a `.tool-versions` of its own: it passes only because ripgrep never starts there.
   const scan = writeNestedGitScan(join(dir, "scan"), join(dir, "shims", "rg"));
-  assert.match(readFileSync(join(dir, "scan", "scan.cjs"), "utf8"), new RegExp(JSON.stringify(join(dir, "shims", "rg")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the PATH entry as found, never resolved");
-  assert.ok(scan);
+  assert.ok(readFileSync(join(dir, "scan", "scan.cjs"), "utf8").includes(JSON.stringify(join(dir, "shims", "rg"))), "the PATH entry as found, never resolved");
+  // The scanned tree (the clone, the sandbox's working directory) names a ripgrep the shim lacks: no effect.
+  const clone = join(dir, "clone");
+  for (const f of ["sub/.bashrc", "dep/.git/config", ".tool-versions"]) {
+    mkdirSync(dirname(join(clone, f)), { recursive: true });
+    write(join(clone, f), "ripgrep 99.0.0\n");
+  }
+  const r = spawnSync(scan, ["--files", clone], { cwd: clone, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.split("\n").filter(Boolean).sort(), [join(clone, ".tool-versions"), join(clone, "sub", ".bashrc")]);
   // The manager itself (what resolving the link gives): the check fails and the stage Blocks with sandbox-scan.
   assert.throws(() => writeNestedGitScan(join(dir, "scan2"), manager), (e) => e.code === "sandbox-scan" && /does not work here/.test(e.message));
-  // No rg at all.
+  // No rg at all, or a relative one.
   assert.throws(() => writeNestedGitScan(join(dir, "scan3"), null), (e) => e.code === "sandbox-scan");
+  assert.throws(() => writeNestedGitScan(join(dir, "scan3"), "bin/rg"), (e) => e.code === "sandbox-scan");
+  // The node it was written for gone (a version manager removed it mid-stage): the real ripgrep runs, unfiltered.
+  const fake = join(dir, "real-rg");
+  write(fake, FAKE_RG, { mode: 0o755 });
+  write(scan, nestedGitScanWrapper(join(dir, "scan"), join(dir, "no-such-node"), join(dir, "scan", "scan.cjs"), fake), { mode: 0o755 });
+  const raw = spawnSync(scan, ["--files", clone], { cwd: clone, encoding: "utf8" });
+  assert.equal(raw.status, 0);
+  assert.deepEqual(raw.stdout.split("\n").filter(Boolean).sort(), [join(clone, ".tool-versions"), join(clone, "dep", ".git", "config"), join(clone, "sub", ".bashrc")], "every name listed, nested .git included");
+  // A relative PATH entry is taken from the given directory, as an absolute path; links not followed.
+  mkdirSync(join(dir, "bin"));
+  symlinkSync(fake, join(dir, "bin", "rg"));
+  assert.equal(ripgrepOnPath({ PATH: "bin:/nonexistent" }, dir), join(dir, "bin", "rg"));
+  assert.equal(ripgrepOnPath({ PATH: "/nonexistent" }, dir), null);
+  // An rg in a directory a sandbox may write, or linked into one, is refused.
+  mkdirSync(join(clone, "bin"));
+  write(join(clone, "bin", "rg"), FAKE_RG, { mode: 0o755 });
+  assert.throws(() => writeNestedGitScan(join(dir, "scan4"), join(clone, "bin", "rg"), { writable: [clone] }), (e) => e.code === "sandbox-scan" && /where a sandbox may write/.test(e.message));
+  symlinkSync(join(clone, "bin", "rg"), join(dir, "bin", "rg2"));
+  assert.throws(() => writeNestedGitScan(join(dir, "scan4"), join(dir, "bin", "rg2"), { writable: [clone] }), (e) => e.code === "sandbox-scan");
 });
 
 test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from the stage's FACTORY_LOCAL_SANDBOX) get it; the clone's git guards stay", async () => {

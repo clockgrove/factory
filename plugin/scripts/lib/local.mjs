@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsS
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir, platform as osPlatform, uptime } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer } from "./logic.mjs";
@@ -663,35 +663,42 @@ export const nestedGitScanScript = (realRg) => `"use strict";
 // failure, ripgrep's whole list unfiltered and a non-zero exit, which the sandbox reads as a failed scan and still binds.
 const { spawn } = require("child_process");
 const { writeSync } = require("fs");
+const { isAbsolute } = require("path");
 const SCAN_DIR_NAMES = ${JSON.stringify(SCAN_DIR_NAMES)};
 ${nestedGitLine.toString()}
 const args = process.argv.slice(2);
 const root = args[args.length - 1] || "";
 const chunks = [];
 let over = false;
+let said = false;
+const put = (fd, text) => {
+  const buf = Buffer.isBuffer(text) ? text : Buffer.from(text || "");
+  for (let off = 0; off < buf.length; ) {
+    try { off += writeSync(fd, buf, off); } catch (e) { if (e.code !== "EAGAIN") throw e; }
+  }
+};
 const out = (text, code) => {
   if (over) return;
   over = true;
-  try {
-    const buf = Buffer.from(text || "");
-    for (let off = 0; off < buf.length; ) {
-      try { off += writeSync(1, buf, off); } catch (e) { if (e.code !== "EAGAIN") throw e; }
-    }
-  } catch { code = 2; }
+  try { put(1, text); } catch { code = 2; }
   process.exit(code);
 };
 const raw = () => Buffer.concat(chunks).toString("utf8");
 // Node exits 1 on an uncaught error, which the sandbox would read as "none found": any error is a failed scan instead.
 process.on("uncaughtException", () => out(raw(), 2));
-// ripgrep in a process group of its own, so what it started goes with it.
-const child = spawn(${JSON.stringify(realRg)}, args, { stdio: ["ignore", "pipe", "inherit"], detached: true });
+// ripgrep in a process group of its own, so what it started goes with it; in this script's directory, which no sandbox
+// may write, never the scanned one: a version manager's shim reads its tool versions from its working directory.
+const child = spawn(${JSON.stringify(realRg)}, args, { cwd: isAbsolute(root) ? __dirname : undefined, stdio: ["ignore", "pipe", "pipe"], detached: true });
 // Killed (the sandbox's scan timeout): ripgrep goes too, and the whole lines it gave so far go out unfiltered.
 const stop = () => { try { process.kill(-child.pid, "SIGKILL"); } catch {} const t = raw(); out(t.slice(0, t.lastIndexOf("\\n") + 1), 2); };
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, stop);
 child.stdout.on("data", (c) => chunks.push(c));
+// ripgrep's stderr passes through (srt denies the directories it could not read); any of it makes a "none found" a failure.
+child.stderr.on("data", (c) => { said = true; try { put(2, c); } catch {} });
 child.on("error", () => out(raw(), 2));
 child.on("close", (code) => {
-  if (code !== 0) return out(raw(), code === 1 ? 1 : 2);
+  if (code === 1 && !said) return out("", 1);
+  if (code !== 0) return out(raw(), 2);
   let kept;
   try {
     const t = raw();
@@ -702,36 +709,76 @@ child.on("close", (code) => {
 `;
 
 /**
- * nestedGitScanScript written in `dir` (made owner-only), then its script run once with the same node over a throwaway
- * tree: the wrapper's path, for the `ripgrep`
- * setting of srt and Claude Code. `rg` is the PATH entry as found, never resolved: a version manager's shim picks the
- * tool by the name it is called with. Throws (code "sandbox-scan") unless the scan returns a nested rc file and the
- * top-level .git and leaves out a nested repository's .git, exit 0.
+ * The wrapper the sandboxes run: from the scan's own directory when the scanned one is absolute (as srt and Claude Code
+ * give it), node on scan.cjs; the real ripgrep, unfiltered, when that node can no longer run (a version manager removed
+ * it mid-stage), so every name stays protected.
  */
+export const nestedGitScanWrapper = (dir, node, js, realRg) => `#!/bin/sh
+# Factory: the sandboxes' scan (lib/local.mjs nestedGitScanScript), or the real ripgrep unfiltered when node cannot run.
+for t do :; done
+case "$t" in /*) cd ${shq(dir)} 2>/dev/null ;; esac
+[ -x ${shq(node)} ] && [ -r ${shq(js)} ] && exec ${shq(node)} ${shq(js)} "$@"
+exec ${shq(realRg)} "$@"
+`;
+
+/** A shell word for `x`: single-quoted. */
 const shq = (x) => `'${String(x).replace(/'/g, "'\\''")}'`;
-export function writeNestedGitScan(dir, rg = whichPath("rg", process.env), { node = process.execPath } = {}) {
+/** Whether `p` is one of `dirs` or lies under one, by path; no link followed. */
+const under = (p, dirs) => dirs.some((d) => p === d || p.startsWith(`${d}/`));
+
+/**
+ * The `rg` a PATH lookup finds, as an absolute path whose links are not followed (a version manager's shim picks the tool
+ * by the name it is called with): a relative PATH entry is taken from `cwd`. Null when none.
+ */
+export function ripgrepOnPath(env = process.env, cwd = process.cwd()) {
+  for (const d of String(env.PATH || "").split(":").filter(Boolean)) {
+    const p = resolve(cwd, d, "rg");
+    const st = statSync(p, { throwIfNoEntry: false });
+    if (st?.isFile() && st.mode & 0o111) return p;
+  }
+  return null;
+}
+
+/**
+ * nestedGitScanScript and its wrapper written in `dir` (made owner-only), then the wrapper run once over a throwaway tree,
+ * from a directory whose `.tool-versions` names a ripgrep that does not exist: the wrapper's path, for the `ripgrep`
+ * setting of srt and Claude Code. `rg` is never resolved through its links, and is refused when it, or what it links
+ * to, lies in one of `writable` (the clone and every directory a sandbox may write). Throws (code "sandbox-scan") unless
+ * the scan returns a nested rc file and the top-level .git, and none of a nested repository's .git, exit 0.
+ */
+export function writeNestedGitScan(dir, rg = ripgrepOnPath(), { node = process.execPath, writable = [] } = {}) {
   const fail = (why) => Object.assign(new Error(`the sandbox's scan for protected paths does not work here: ${why}`), { code: "sandbox-scan" });
   if (!rg) throw fail("rg (ripgrep) is not on PATH");
+  if (!isAbsolute(rg)) throw fail(`rg is not an absolute path: ${rg}`);
+  let real = rg;
+  try {
+    real = realpathSync(rg);
+  } catch {
+    // checked by running it, below
+  }
+  if (under(rg, writable) || under(real, writable)) throw fail(`${rg} lies where a sandbox may write`);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const js = join(dir, "scan.cjs");
   writeFileSync(js, nestedGitScanScript(rg), { mode: 0o644 });
   chmodSync(js, 0o644);
   const p = join(dir, "rg");
-  writeFileSync(p, `#!/bin/sh\nexec ${shq(node)} ${shq(js)} "$@"\n`, { mode: 0o755 });
+  writeFileSync(p, nestedGitScanWrapper(dir, node, js, rg), { mode: 0o755 });
   chmodSync(p, 0o755);
-  // The test tree in `dir`, which no sandbox may write.
+  // The test tree in `dir`, which no sandbox may write; the wrapper started there, beside a `.tool-versions` that a shim
+  // reading its working directory would fail on.
   const t = mkdtempSync(join(dir, "check-"));
   try {
     for (const f of [".git/HEAD", "sub/.bashrc", "dep/.git/HEAD", "dep/.git/config", "dep/.git/hooks/pre-commit"]) {
       mkdirSync(dirname(join(t, f)), { recursive: true });
       writeFileSync(join(t, f), "");
     }
-    // Run as the wrapper runs it: the same node on the same script.
-    const r = spawnSync(node, [js, "--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { encoding: "utf8", timeout: 30_000 });
+    writeFileSync(join(t, ".tool-versions"), "ripgrep 0.0.0-factory-absent\n");
+    // As srt starts it: the wrapper itself (/bin/sh runs it, as its first line says), with the scanned directory last.
+    const r = spawnSync("/bin/sh", [p, "--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { cwd: t, encoding: "utf8", timeout: 30_000 });
     const got = String(r.stdout || "").split("\n").filter(Boolean).sort();
-    const want = [join(t, ".git", "HEAD"), join(t, "sub", ".bashrc")].sort();
-    if (r.status !== 0 || got.length !== want.length || got.some((g, i) => g !== want[i])) throw fail(`a check over a test tree gave exit ${r.status ?? r.signal}, ${got.length} paths (${String(r.stderr || "").trim().split("\n").at(-1)?.slice(0, 200) || "no error"})`);
+    const want = [join(t, ".git", "HEAD"), join(t, "sub", ".bashrc")];
+    if (r.status !== 0 || want.some((w) => !got.includes(w)) || got.some((g) => g.startsWith(`${join(t, "dep", ".git")}/`))) throw fail(`a check over a test tree gave exit ${r.status ?? r.signal}, ${got.length} paths (${String(r.stderr || "").trim().split("\n").at(-1)?.slice(0, 200) || "no error"})`);
   } finally {
     rmSync(t, { recursive: true, force: true });
   }

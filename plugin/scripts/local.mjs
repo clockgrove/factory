@@ -402,7 +402,8 @@ export class Local {
     // Linux: the ripgrep srt and Claude Code's sandbox scan with, which leaves a nested checkout's .git writable, so a resumed
     // stage can replace one (lib/local.mjs nestedGitScanScript). In the usage directory, which no sandbox may write: srt and
     // Claude Code run it outside their sandboxes. Checked as it is written; a failed check Blocks (sandboxScanReason).
-    const ripgrep = platform() === "linux" ? writeNestedGitScan(join(usageDir, "scan")) : null;
+    // An rg in or linked into a directory a sandbox may write is refused (the stage Blocks).
+    const ripgrep = platform() === "linux" ? writeNestedGitScan(join(usageDir, "scan"), undefined, { writable: [clone, ...caches, stageTmp, join(usageDir, "harness")] }) : null;
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, readOnly: [usageDir], ripgrep }), null, 2));
     // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
     const srtGitFile = join(sandboxDir, `srt-git-${basename(usageDir)}.json`);

@@ -81,7 +81,7 @@ test("objective trust: the stage Blocks (stage author) before any harness, with 
   assert.equal(stranger.ok, false);
   assert.equal(stranger.issueData, undefined, "no text for a harness");
   assert.deepEqual(order, ["before", "apply"], "the review job's label comes off first");
-  assert.deepEqual(applied[0].exit, { issue: 7, pr: { number: 9 }, exit: "blocked", reason: stranger.reason, fix: AUTHOR_FIX.author, notify: "boss", stage: "author" });
+  assert.deepEqual(applied[0].exit, { issue: 7, pr: { number: 9 }, exit: "blocked", reason: stranger.reason, fix: AUTHOR_FIX.author, cause: "setup", notify: "boss", stage: "author" });
   assert.deepEqual(applied[0].opts, { token: "t" });
   const edited = await authorGate({ repo, issue: 7, issueData: rest, notify: "boss", opts: {}, apply, gh: gh({ author: user("kirk"), editor: user("stranger") }) });
   assert.equal(applied[1].exit.fix, AUTHOR_FIX["last editor"]);

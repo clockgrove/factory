@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "7aae517674ff",
+  "digest": "bf5a47b2238e",
   "skills": {
     "deliver-pr": {
       "sha256": "2b3569d79d1a1eebd28a8076522d68683e898933ffe8a12dad949847b8366a51",
@@ -67,14 +67,14 @@
       "words": 473
     },
     "scoring": {
-      "sha256": "3a724832c2cfec747ae236af4bd8c3a15447871321e02e052d0a375926824eaa",
+      "sha256": "b72d383eb587a2535d62258b17a7a7db706abccfe64ef294838b4448d2f12836",
       "lines": 35,
-      "words": 619,
+      "words": 663,
       "files": {
         "reference.md": {
-          "sha256": "b2e9d821a30f4e5ead395ff818ec09d61ba87800f3a63e156932589c32dd8323",
-          "lines": 25,
-          "words": 575
+          "sha256": "a490df4c63945645e3498c770bed9b1c1342301351f4670da1b90dec7a3bb896",
+          "lines": 38,
+          "words": 817
         }
       }
     },
@@ -89,5 +89,5 @@
       "words": 698
     }
   },
-  "recordedAt": "2026-11-13T05:16:08.073Z"
+  "recordedAt": "2026-11-13T05:32:42.880Z"
 }

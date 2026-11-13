@@ -780,9 +780,9 @@ export function startFailure({ code }) {
   return TRANSIENT_START.includes(code) ? "retry" : "block";
 }
 
-/** The Objective Blocked with Factory's own reason (codes and times). */
-async function block({ repo, n, inputs, opts }, reason) {
-  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, notify: inputs.notify, stage: "launch" }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
+/** The Objective Blocked with Factory's own reason (codes and times) and its cause (logic.mjs BLOCK_CAUSES). */
+async function block({ repo, n, inputs, opts }, reason, cause = "factory") {
+  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch" }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
   return { exit: "blocked", reason, failed: true };
 }
 
@@ -1124,7 +1124,7 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const freed = `Factory destroyed ${sandboxes} sandbox(es) and ${images} image(s) no live Objective needs${storage ? `; ${storageLine(storage)}` : ""}.`;
   if (quota.giveUp) {
     await dropQuotaNote(run);
-    return block(run, `launcher: the ${plain(inputs.sandbox)} sandbox's plan quota stayed used up (${code}) for ${quota.tries} tries over ${Math.round(quota.waitedMs / 60_000)} min after pruning; free the vendor's snapshot storage or raise its plan, then re-apply ${inputs.objectiveLabel}`);
+    return block(run, `launcher: the ${plain(inputs.sandbox)} sandbox's plan quota stayed used up (${code}) for ${quota.tries} tries over ${Math.round(quota.waitedMs / 60_000)} min after pruning; free the vendor's snapshot storage or raise its plan, then re-apply ${inputs.objectiveLabel}`, "setup");
   }
   const until = new Date(Date.parse(quota.since) + QUOTA_WAIT_MS).toISOString();
   const note = `Factory: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Factory frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;

@@ -503,3 +503,72 @@ test("score.mjs: several --repo values need --streak and --since, and take no is
   assert.equal(code, 64);
   assert.match(err, /--issue takes one --repo/);
 });
+
+test("External: a Block for each external cause scores External; a mix with any other stop, a Question or an older uncoded Block is a miss", async () => {
+  const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
+  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const stopped = (n, ...causes) => {
+    const c = blocked(n);
+    c.bodyEdits = [];
+    c.workflowRuns = [];
+    // The fixture's one notice, then one more per further cause, each recording its cause.
+    c.issueComments[1].body += causes[0] === undefined ? "" : `\n${blockMarker(causes[0])}`;
+    causes.slice(1).forEach((cause, i) => c.issueComments.push({ user: APP, created_at: `2031-03-02T0${5 + i}:00:00Z`, body: `<!-- factory:${n}:blocked:work:${i + 2} -->\nBlocked (work): again\n${blockMarker(cause)}` }));
+    return score(c);
+  };
+  for (const cause of ["max-usd", "gateway-budget", "provider-quota", "outage"]) {
+    const r = stopped(80, cause);
+    assert.deepEqual([r.walkAway.bucket, r.walkAway.value, r.walkAway.blocks.map((b) => b.cause)], ["external", false, [cause]], cause);
+  }
+  assert.equal(stopped(81, "max-usd", "provider-quota").walkAway.bucket, "external");
+  assert.equal(stopped(82, "max-usd", "setup").walkAway.bucket, "miss");
+  assert.equal(stopped(83, "work").walkAway.bucket, "miss");
+  assert.equal(stopped(84).walkAway.bucket, "miss", "a notice with no cause line scores as before");
+  // A Question beside the external Block: a person's answer was asked for, so a miss.
+  const asked = blocked(85);
+  Object.assign(asked, { bodyEdits: [], workflowRuns: [] });
+  asked.issueComments[1].body += `\n${blockMarker("max-usd")}`;
+  asked.issueTimeline.push({ event: "labeled", label: { name: "factory:question" }, actor: APP, created_at: "2031-03-02T02:00:00Z" });
+  assert.equal(score(asked).walkAway.bucket, "miss");
+  // A person's marker comment is not Factory's notice.
+  const forged = blocked(86);
+  Object.assign(forged, { bodyEdits: [], workflowRuns: [] });
+  forged.issueComments[1].user = { login: "maintainer", type: "User" };
+  forged.issueComments[1].body += `\n${blockMarker("max-usd")}`;
+  assert.equal(score(forged).walkAway.bucket, "miss");
+});
+
+test("External: merged after an external Block whose only input was the relabel it asked for; a later unprompted comment makes it a miss", async () => {
+  const { blockMarker } = await import("../../plugin/scripts/lib/logic.mjs");
+  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const OWNER_ = { login: "maintainer", type: "User" };
+  const raised = () => {
+    const c = cleanMerge(87);
+    c.issueTimeline.push({ event: "labeled", label: { name: "factory:blocked" }, actor: APP, created_at: "2031-03-02T01:20:00Z" }, { event: "labeled", label: { name: "factory:objective" }, actor: OWNER_, created_at: "2031-03-02T01:40:00Z" }, { event: "labeled", label: { name: "factory:running" }, actor: APP, created_at: "2031-03-02T01:41:00Z" });
+    c.issueComments.push({ user: APP, created_at: "2031-03-02T01:20:00Z", body: `<!-- factory:87:blocked:work:1 -->\n@maintainer Blocked (work): dollar cap reached\n${blockMarker("max-usd")}` });
+    return c;
+  };
+  const r = score(raised());
+  assert.deepEqual([r.walkAway.value, r.walkAway.bucket, r.walkAway.interventions.asked, r.walkAway.interventions.unprompted], [false, "external", 1, 0]);
+  const noted = raised();
+  noted.issueComments.push({ user: OWNER_, created_at: "2031-03-02T02:30:00Z", body: "Use the other format." });
+  assert.equal(score(noted).walkAway.bucket, "miss");
+  // The row table names the bucket.
+  const { markdownTable } = await import("../lib/objective.mjs");
+  assert.match(markdownTable([r]), /\| external: Blocked: max-usd \|/);
+});
+
+test("streaks: an External Objective between walk-aways neither extends nor resets, per harness and pooled; a P1 escape on its merge breaks", () => {
+  const ext = (issue, over = {}) => row(issue, { exit: "blocked", mergedAt: null, walkAway: { value: false, bucket: "external", blocks: [{ at: "2031-03-02T00:00:00Z", cause: "provider-quota" }], since: "2031-03-01T00:00:00Z", reason: "not merged (blocked)", blocked: { at: `2031-03-0${issue % 9 + 1}T00:00:00Z` }, unseen: [] }, ...over });
+  const rows = [row(1), row(2), ext(3), row(4), ext(5, { harness: null })];
+  const s = streaks(rows, { from: "2031-02-28T00:00:00Z" });
+  assert.deepEqual([s.harnesses.claude.current, s.harnesses.claude.best, s.harnesses.claude.finished, s.harnesses.claude.external], [3, 3, 3, 1]);
+  assert.deepEqual(s.harnesses.claude.sequence.map((x) => [x.issue, x.ok]), [[1, true], [2, true], [3, null], [4, true]]);
+  assert.deepEqual(s.harnesses.unknown.sequence.map((x) => [x.issue, x.ok]), [[5, null]]);
+  assert.match(streakTable(s, { repository: REPO }), /^- #3 [^\n]*: skipped: external: Blocked: provider-quota$/m);
+  const p = pooledStreak(rows.map((r) => ({ ...r, repository: REPO })), { from: "2031-02-28T00:00:00Z" });
+  assert.deepEqual([p.current, p.best, p.finished, p.external], [3, 3, 3, 2]);
+  // Merged External with a P1 escape found later: a break.
+  const escaped = ext(6, { mergedAt: "2031-03-07T00:00:00Z", exit: "merged", quality: { escapes: [{ issue: "acme/widgets#99", priority: "P1" }] } });
+  assert.equal(verdict(escaped).ok, false);
+});

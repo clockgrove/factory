@@ -422,7 +422,7 @@ test("validation loop: a required job GitHub never started gets no triage and no
   assert.deepEqual(stuck.triaged, [], "never asked as change_caused or flaky: no triage, no rerun");
   assert.ok(stuck.phases.includes(`validation pass 1 red: ${reason}; infrastructure, no fix run`), stuck.phases.join("\n"));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: stuck.result.passes, green: false, notStarted: stuck.result.notStarted } });
-  assert.deepEqual(exit, { exit: "blocked", reason });
+  assert.deepEqual(exit, { exit: "blocked", reason, cause: "outage" });
 
   const real = await loop(ranAndFailed);
   assert.equal(real.result.notStarted, undefined);

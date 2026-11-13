@@ -622,6 +622,54 @@ export function clip(text, max = REASON_MAX) {
 }
 
 /**
+ * Why a stage Blocked, as a code: a closed list, written on each Blocked notice (blockMarker) so the bench scorer decides
+ * the External bucket on structure, never on the reason's words. `external`: outside Factory and outside the work, so
+ * the 1.0 streak skips an Objective whose only stops were these (docs/PLAN.md, Job one). Anything Factory cannot place
+ * is `factory`, never external.
+ */
+export const BLOCK_CAUSES = Object.freeze({
+  "max-usd": Object.freeze({ external: true, what: "Factory's max_usd cap reached" }),
+  "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
+  "provider-quota": Object.freeze({ external: true, what: "the harness's provider refused for quota or billing" }),
+  outage: Object.freeze({ external: true, what: "a provider or GitHub outage Factory waited or retried through by its rules" }),
+  setup: Object.freeze({ external: false, what: "a setup gap: a credential, secret, host, install, Git LFS, the repository's settings or rules, the author's access" }),
+  work: Object.freeze({ external: false, what: "the work: the worker's own Block, validation red, review findings, a protected path, the Objective's size" }),
+  factory: Object.freeze({ external: false, what: "Factory itself: a crash, a lost or stuck stage, an exit it could not apply, or a cause it did not place" }),
+});
+
+/** The Blocked notice's cause line; a code outside BLOCK_CAUSES is written as `factory`. */
+export const blockMarker = (cause) => `<!-- factory:block ${JSON.stringify({ cause: Object.hasOwn(BLOCK_CAUSES, cause) ? cause : "factory" })} -->`;
+
+const BLOCK_LINE = /^<!-- factory:block (\{[^\n]*\}) -->$/m;
+/** The cause a Blocked notice records (blockMarker), or null: none written (an older notice) or not on the list. */
+export function blockCauseOf(body) {
+  const m = BLOCK_LINE.exec(String(body || ""));
+  if (!m) return null;
+  try {
+    const cause = JSON.parse(m[1])?.cause;
+    return typeof cause === "string" && Object.hasOwn(BLOCK_CAUSES, cause) ? cause : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Provider error types and codes (usage.mjs REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
+const PROVIDER_QUOTA_KINDS = new Set(["insufficient_quota", "billing_error", "quota"]);
+const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
+
+/**
+ * A provider refusal's cause (usage.mjs providerRefusal): the AI Gateway's budget or credits, the provider's quota or
+ * billing (those kinds, or HTTP 402), else a setup gap (a key, an authorization, a payment method, a request the
+ * settings make).
+ */
+export function refusalCause(r) {
+  const kinds = [r?.type, r?.code];
+  if (kinds.some((k) => GATEWAY_BUDGET_KINDS.has(k))) return "gateway-budget";
+  if (kinds.some((k) => PROVIDER_QUOTA_KINDS.has(k)) || r?.status === 402) return "provider-quota";
+  return "setup";
+}
+
+/**
  * The Blocked reason for a provider's refusal (usage.mjs providerRefusal): the harness, the status, type and code, and the
  * provider's own message shortened (clip). Retrying cannot pass it, so the fix is the credential's account or the settings.
  */
@@ -637,7 +685,7 @@ const openQuestion = (record) => ({ exit: "question", reason: record?.questions?
  * A worker's own Block: its reason, shortened, the hosts its sandbox denied and the variables its shell lacked when it
  * named them.
  */
-const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}), ...(record.missingSecrets?.length ? { missingSecrets: record.missingSecrets } : {}) });
+const workerBlocked = (record) => ({ exit: "blocked", reason: `worker blocked: ${clip(record.reason || "no reason given")}`, cause: record.deniedHosts?.length || record.missingSecrets?.length ? "setup" : "work", ...(record.deniedHosts?.length ? { deniedHosts: record.deniedHosts } : {}), ...(record.missingSecrets?.length ? { missingSecrets: record.missingSecrets } : {}) });
 
 /**
  * A host name as DNS spells it, in lower case: two or more labels of letters, digits and inner hyphens, at most 63
@@ -695,24 +743,24 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  sessionCap: string, sessionCapNote: the sandbox vendor's session cut this stage's wall clock; a time cap names it
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
- * Returns {exit: 'delivered'|'question'|'blocked', reason}, plus `deniedHosts` when the worker Blocked on hosts its
+ * Returns {exit: 'delivered'|'question'|'blocked', reason}, a blocked one with its `cause` (BLOCK_CAUSES), plus `deniedHosts` when the worker Blocked on hosts its
  * sandbox denied (its exit record's): the stage's backend turns them into the notice's fix (backend.mjs deniedFix);
  * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
 export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
-  if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)" };
-  if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}` };
+  if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: "setup" };
+  if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}`, cause: "work" };
   // Factory refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
-  if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}` };
+  if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}`, cause: "work" };
   // A provider's refusal (usage.mjs providerRefusal) is never retried: it Blocks at once, naming the refusal.
-  if (harness?.refusal) return { exit: "blocked", reason: refusalReason(harness.refusal) };
-  if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice" };
+  if (harness?.refusal) return { exit: "blocked", reason: refusalReason(harness.refusal), cause: refusalCause(harness.refusal) };
+  if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "factory" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
-  if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached" };
-  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached" };
-  if (protectedHits.length) return { exit: "blocked", reason: `touched protected path ${protectedHits.join(", ")}` };
+  if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
+  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "factory" : "max-usd" };
+  if (protectedHits.length) return { exit: "blocked", reason: `touched protected path ${protectedHits.join(", ")}`, cause: "work" };
   // The plan needs another repository: the owner decides, so no commit (the plan-time stop) is no Block.
   if (planNeeds) return { exit: "question", reason: planNeeds };
   if (!pr?.exists) {
@@ -726,28 +774,28 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
       if (own && record.exit === "blocked" && record.reason) return workerBlocked(record);
       if (own && record.exit === "question") return openQuestion(record);
       const why = harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR";
-      return { exit: "blocked", reason: record?.exit === "blocked" && !own && record.reason ? `${why}; ${clip(record.reason)}` : why };
+      return { exit: "blocked", reason: record?.exit === "blocked" && !own && record.reason ? `${why}; ${clip(record.reason)}` : why, cause: "factory" };
     }
-    return { exit: "blocked", reason: "no PR could be opened for the branch" };
+    return { exit: "blocked", reason: "no PR could be opened for the branch", cause: "factory" };
   }
   if (validation && !validation.green) {
     // Every failing job fails the same way on the default branch (reds.mjs): handed back as the base's, not this change's.
-    if (validation.baseFailure) return { exit: "blocked", reason: validation.baseFailure };
+    if (validation.baseFailure) return { exit: "blocked", reason: validation.baseFailure, cause: "work" };
     // A required job GitHub never started (triage.mjs notStartedJobs): infrastructure, Blocked quoting GitHub's annotation.
-    if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted };
+    if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted, cause: "outage" };
     // A wait that ended with no required check failed (triage.mjs checksNotStarted): no red at all, so never "validation red".
-    if (validation.stuck) return { exit: "blocked", reason: validation.stuck };
+    if (validation.stuck) return { exit: "blocked", reason: validation.stuck, cause: "factory" };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
-    if (validation.scope) return { exit: "blocked", reason: validation.scope };
+    if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
     const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
-    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red };
+    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }
-  if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass` };
+  if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass`, cause: "work" };
   if (record?.exit === "blocked") return workerBlocked(record);
   const open = question !== undefined ? question : record?.exit === "question";
   if (open) return openQuestion(record);
-  if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error" };
+  if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error", cause: "factory" };
   return { exit: "delivered", reason: "" };
 }
 

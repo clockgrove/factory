@@ -73,6 +73,6 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
   const t = await trustedIssue(repo, issue, issueData, opts, gh);
   if (t.ok) return t;
   if (before) await before();
-  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, notify, stage: "author" }, opts);
+  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", notify, stage: "author" }, opts);
   return t;
 }

@@ -22,7 +22,7 @@ import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv 
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -33,7 +33,7 @@ import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, pos
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
-import { CALL_LOG, stageBlockReason } from "./lib/gateway-relay.mjs";
+import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -66,6 +66,7 @@ import {
   questionRaisedAt,
   answeredDuringJob,
   recordMergeable,
+  mergeBlockCause,
   mergeBlockReason,
   mergeReadyOne,
   unreadNow,
@@ -183,11 +184,14 @@ async function main() {
   // A Block's reason with what the gateway relay saw named first (gateway-relay.mjs stageBlockReason): its shutdown is no
   // max_usd overrun.
   const relayReason = (reason) => (relay ? stageBlockReason(reason, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals())) : reason);
+  // Its cause beside it (logic.mjs BLOCK_CAUSES): the gateway's own refusal, or a relay shutdown that is no max_usd overrun.
+  const relayCause = (cause) => (relay ? stageBlockCause(cause, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals())) : cause);
+  const capCause = () => (unmetered ? "factory" : "max-usd");
   const blockedAtCap = async (before) => {
     log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced (a run reported no priced AI credits)" : "spent"} before ${before}; not running it`);
     await dropLabel();
     const reason = relayReason(capReason());
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: relayCause(capCause()), notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", reason);
   };
   // The stage's time cap reached before a reviewer call (handoff.mjs reviewCallTimeout): Blocked, as a call that ran
@@ -196,7 +200,7 @@ async function main() {
     const reason = "time cap reached";
     log(`${reason} before ${before}; not running it`);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "work", notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", reason);
   };
 
@@ -279,14 +283,14 @@ async function main() {
     if (refused) {
       log(e.message.slice(0, 300));
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, notify: inputs.notify, stage: "review" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, cause: "setup", notify: inputs.notify, stage: "review" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
       await finish("blocked", refused.reason);
       return;
     }
     log(`review crashed: ${e.message.slice(0, 300)}`);
     const reason = `review crashed: ${e.message.slice(0, 200)}`;
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
     await finish("blocked", reason);
     throw e;
   }
@@ -294,7 +298,7 @@ async function main() {
   async function run() {
   if (agentError) {
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason: agentError, notify: inputs.notify, stage: "doctor" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason: agentError, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
     await finish("blocked", agentError);
     return;
   }
@@ -354,7 +358,7 @@ async function main() {
   if (lfs.used) log(!lfs.ok ? lfs.reason : lfs.warning ? `warning: ${lfs.warning}; the run goes on with pointer files` : "Git LFS: filters set up in the checkout, objects handed over");
   if (!lfs.ok) {
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason: lfs.reason, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason: lfs.reason, cause: "setup", notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", lfs.reason);
     return;
   }
@@ -367,7 +371,7 @@ async function main() {
     const s = access.agent ? await sh(await outbox.defaultTree(), inputs.setup, { env: { ...childBase, TMPDIR: tmp.factory }, timeoutMs: remainingMs(deadlineAt), asRunner: true }) : await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (!s.ok) {
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}`, notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}`, cause: "setup", notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", "setup failed");
       return;
     }
@@ -385,7 +389,7 @@ async function main() {
     if (!i.ok) {
       log(i.reason);
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: i.reason, notify: inputs.notify, stage: "install" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: i.reason, cause: "setup", notify: inputs.notify, stage: "install" }, token);
       await finish("blocked", i.reason);
       return;
     }
@@ -402,7 +406,7 @@ async function main() {
   } catch (e) {
     const reason = `the maintainers' comments could not be read, so Factory cannot tell whether one asks for a change: ${e.message.slice(0, 160)}`;
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", reason);
     return;
   }
@@ -445,7 +449,7 @@ async function main() {
   shellSecretValues = [...Object.values(shellSecrets), ...opened.masked];
   if (opened.blocked) {
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason: opened.blocked, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason: opened.blocked, cause: "setup", notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", opened.blocked);
     return;
   }
@@ -518,7 +522,7 @@ async function main() {
       const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, triageRefused: pre.triageRefused, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
       await dropLabel();
       const why = relayReason(d.reason || "validation red before review");
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: why, detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: why, cause: relayCause(d.exit === "blocked" ? d.cause : "work"), detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", why);
       return;
     }
@@ -599,9 +603,10 @@ async function main() {
   const answer = alreadyReviewed ? reviewRec : reviewAnswer(reviewRec, retryRec, reviewOf);
   if (!answer) {
     const reason = reviewRec.refusal && !retryRec ? refusalReason(reviewRec.refusal) : noReviewReason([reviewRec, retryRec], reviewOf);
+    const cause = reviewRec.refusal && !retryRec ? refusalCause(reviewRec.refusal) : "factory";
     log(reason);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "review" }, token);
     await finish("blocked", reason);
     return;
   }
@@ -789,10 +794,13 @@ async function main() {
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
   });
-  if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused });
-  if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason() });
+  if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
+  if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
-  if (decision.exit === "blocked") decision.reason = relayReason(decision.reason);
+  if (decision.exit === "blocked") {
+    decision.reason = relayReason(decision.reason);
+    decision.cause = relayCause(decision.cause);
+  }
   await dropLabel();
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally nothing runs an unlabelled ready PR, so the Question stands there). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
@@ -822,11 +830,13 @@ async function main() {
         decision.reason = `${late.length} maintainer comment(s) arrived during the review; the review runs again to apply them`;
         await addLabels(repo, pr.number, [REVIEW_LABEL], token).catch((e) => {
           decision.exit = "blocked";
+          decision.cause = "factory";
           decision.reason = `${late.length} maintainer comment(s) arrived during the review and the review label could not be re-applied to run it again: ${e.message.slice(0, 120)}`;
         });
       }
     } catch (e) {
       decision.exit = "blocked";
+      decision.cause = "factory";
       decision.reason = `the maintainers' comments could not be re-read before the merge: ${e.message.slice(0, 160)}`;
     }
   }
@@ -854,6 +864,7 @@ async function main() {
         if (how === "conflict") decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;
         if (why) {
           decision.exit = "blocked";
+          decision.cause = mergeBlockCause(how, report);
           decision.reason = why;
         }
       } catch (e) {
@@ -864,6 +875,7 @@ async function main() {
         if (recorded && transientError(e)) log(`PR #${pr.number}: the merge pass failed for now (${code}); the dispatcher merges it on its next tick`);
         else {
           decision.exit = "blocked";
+          decision.cause = "factory";
           decision.reason = `the merge failed (${code}); the job log has GitHub's answer`;
         }
       }
@@ -871,7 +883,7 @@ async function main() {
   }
   // Hosts the answer pass's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
   const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix }, token);
+  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
   await finish(decision.exit, decision.reason);
   }
 }

@@ -197,6 +197,17 @@ export function withGatewayRefusal(reason, refused) {
 export const stageBlockReason = (reason, totals, capReached = false) => withGatewayRefusal(withRelayShut(reason, totals?.shut ?? null, capReached), totals?.gatewayRefused ?? null);
 
 /**
+ * A Blocked stage's cause (logic.mjs BLOCK_CAUSES) beside stageBlockReason: the gateway's budget or credits refusal in
+ * this stage is the cause (the worker may have stopped on it); a "dollar cap" the relay's shutdown caused, with max_usd
+ * not reached, is Factory's own; anything else keeps `cause`.
+ */
+export function stageBlockCause(cause, totals, capReached = false) {
+  if (totals?.gatewayRefused) return "gateway-budget";
+  if (totals?.shut && cause === "max-usd" && !capReached) return "factory";
+  return cause;
+}
+
+/**
  * How a Block reason names the relay's shutdown: `gateway relay shut: <n> calls in this stage could not be priced (<why>)`
  * after a second failure of unknown cost, or `gateway relay shut: a complete answer could not be priced (<why>)`.
  */

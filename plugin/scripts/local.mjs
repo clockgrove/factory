@@ -30,7 +30,7 @@ import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
 import { localRelayDir } from "./lib/worker-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { exec, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
 import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -397,7 +397,11 @@ export class Local {
     const srtFile = join(sandboxDir, `srt-${basename(usageDir)}.json`);
     // The stage's usage directory is Factory's (its record, the event log, the transcript copy): every sandbox may read
     // it (factory-db is in its bin), none may write it.
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, readOnly: [usageDir] }), null, 2));
+    // Linux: the ripgrep srt and Claude Code's sandbox scan with, which leaves a nested checkout's .git writable, so a resumed
+    // stage can replace one (lib/local.mjs nestedGitScanScript). In the usage directory, which no sandbox may write: srt and
+    // Claude Code run it outside their sandboxes.
+    const ripgrep = platform() === "linux" ? writeNestedGitScan(join(usageDir, "scan")) : null;
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, readOnly: [usageDir], ripgrep }), null, 2));
     // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
     const srtGitFile = join(sandboxDir, `srt-git-${basename(usageDir)}.json`);
     writeFileSync(srtGitFile, JSON.stringify(srtSettings({ domains: [], writable: [clone, stageTmp], readOnly: [usageDir] }), null, 2));
@@ -453,7 +457,7 @@ export class Local {
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = this.harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: this.harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(this.harness)), projectDir, bwrapPath, relayDir: localRelayDir(usageDir) }), null, 2));
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: this.harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(this.harness)), projectDir, bwrapPath, relayDir: localRelayDir(usageDir), ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -516,7 +520,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude") }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's

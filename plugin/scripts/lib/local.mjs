@@ -633,6 +633,43 @@ export const credentialPaths = (home = homedir()) => CREDENTIAL_PATHS.map((p) =>
  */
 export const gitGuards = (clone) => [join(clone, ".git", "hooks"), join(clone, ".git", "config"), join(clone, ".git", "commondir"), join(clone, ".git", "info", "attributes")];
 
+/**
+ * Linux: the ripgrep srt and Claude Code's sandbox run to find the names they write-protect below the working directory
+ * (their `ripgrep` setting, #154). It is the real one, less what it lists inside a nested repository's .git, so a
+ * nested checkout's hooks and config are not bound read-only and a resumed stage can remove and replace the checkout.
+ * Those binds guarded nothing: they cover only a repository that exists when a command starts, and only one directly
+ * in the working directory, so a command could always make a new one, hooks and all. Nothing outside a sandbox runs
+ * git in a nested repository (Factory's git and every harness's run in the clone, with no fsmonitor and no submodule
+ * entered: harnessGitEnv), and the clone's own git internals stay unwritable by gitGuards. The other names the scan
+ * finds (shell rc files, .mcp.json, editor and Claude Code settings) stay protected. Its exit code is ripgrep's.
+ */
+export const nestedGitScanScript = (realRg) => `#!/bin/sh
+# Factory: ripgrep for the sandboxes' scan of protected names (lib/local.mjs nestedGitScanScript): the real one's list,
+# less what lies inside a nested repository's .git (a path below the last argument, the directory scanned). Exit code
+# kept: the sandbox reads 0 as found, 1 as none, anything else as a failed scan.
+for t do :; done
+exec 3>&1
+code=$( { { ${JSON.stringify(realRg)} "$@"; echo $? >&4; } | R="$t" awk '
+{
+  p = $0; r = ENVIRON["R"] "/"
+  if (index(p, r) != 1) { print; next }
+  n = split(substr(p, length(r) + 1), s, "/")
+  for (i = 1; i <= n; i++) if (s[i] == "" || s[i] == "." || s[i] == "..") { print; next }
+  for (i = 2; i < n; i++) if (tolower(s[i]) == ".git") next
+  print
+}' >&3; } 4>&1 )
+exit "\${code:-2}"
+`;
+
+/** nestedGitScanScript written in `dir` (made owner-only): its path, for the `ripgrep` setting of srt and Claude Code. */
+export function writeNestedGitScan(dir, rg = whichPath("rg", process.env)) {
+  if (!rg) throw new Error("rg (ripgrep) is not on PATH; the sandbox needs it");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const p = join(dir, "rg");
+  writeFileSync(p, nestedGitScanScript(realpathSync(rg)), { mode: 0o755 });
+  return p;
+}
+
 /** The model credentials Claude Code's sandbox unsets before every command it runs, on every route (harness.mjs passes all of SHELL_SECRET_KEYS). */
 export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
 
@@ -645,7 +682,7 @@ export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
  * directory and `addDirs` (acceptEdits). Local mode, the Actions runner and the cloud sandbox VM
  * use it alike (claudeRunnerSettings).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV } = {}) {
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV, ripgrep = null } = {}) {
   // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
@@ -664,6 +701,8 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
       // The model's credential (and any other the harness holds) is not in a command's environment.
       credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
+      // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+      ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
     },
     // Bash is allowed outright: every shell command still runs inside the sandbox (allowUnsandboxedCommands is
     // false), which is what confines it; without the rule, gh writes and commands with variables would need a
@@ -846,10 +885,12 @@ export function copilotTmpdir(local, env = {}) {
 }
 
 /** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
-export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [] } = {}) {
+export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [], ripgrep = null } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
     filesystem: { denyRead: [...credentialPaths(home), "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP] },
+    // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+    ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
 }
 
@@ -1323,10 +1364,11 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
 /**
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
+ * `ripgrep`: nestedGitScanScript's path (writeNestedGitScan).
  * `relayDir`: the stage's gateway relay directory (worker-relay.mjs localRelayDir): its socket stays reachable inside, for the
  * forwarder Factory's bwrap shim starts in each command's sandbox (relay-shim.mjs); never writable.
  */
-export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null } = {}) {
+export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relayDir = null, ripgrep = null } = {}) {
   const own = harnessHomes(harness, env, home);
   const isOwn = (p) => own.some((o) => p === o || p.startsWith(`${o}/`));
   // ~/.claude.json holds the developer's MCP servers: read-only, not a writable path.
@@ -1345,6 +1387,8 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.
     ...(bwrapPath ? { bwrapPath } : {}),
+    // The scan that leaves a nested checkout's .git writable (nestedGitScanScript).
+    ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
 }
 

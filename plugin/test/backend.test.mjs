@@ -452,6 +452,42 @@ test("Copilot's outer sandbox: bwrap gets the host's /dev/net/tun after srt's fr
   assert.deepEqual(argv(none, args), args);
 });
 
+test("the sandboxes' scan (#154): a nested repository's .git is left out of ripgrep's list, all else and its exit code kept; srt, Claude Code and the outer sandbox get it, the clone's git guards stay", async () => {
+  const { claudeLocalSettings, gitGuards, harnessOuterSettings, srtSettings, writeNestedGitScan } = await import("../scripts/lib/local.mjs");
+  const { mkdtempSync, writeFileSync: write, statSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "factory-scan-"));
+  // A stand-in for the real ripgrep: prints the lines in $LIST, a line on stderr, and exits $CODE.
+  const fake = join(dir, "real-rg");
+  write(fake, '#!/bin/sh\nprintf "%s" "$LIST"\necho "rg: some/dir: Permission denied" >&2\nexit "$CODE"\n', { mode: 0o755 });
+  const scan = writeNestedGitScan(join(dir, "scan"), fake);
+  assert.equal(statSync(scan).mode & 0o777, 0o755);
+  const r = "/w/clone";
+  const kept = [`${r}/.git/HEAD`, `${r}/.git/config`, `${r}/.git/hooks/pre-commit`, `${r}/.bashrc`, `${r}/sub/.bashrc`, `${r}/sub/.vscode/settings.json`, `${r}/sub/.claude/commands/x.md`, `${r}/sub/.mcp.json`, `${r}/x/../.git/hooks/y`, `/elsewhere/dep/.git/config`, `${r}-other/dep/.git/HEAD`];
+  const dropped = [`${r}/dep/.git/HEAD`, `${r}/dep/.git/config`, `${r}/dep/.git/hooks/pre-commit`, `${r}/vendor/dep/.git/hooks/x`, `${r}/Dep/.GIT/config`];
+  const run = (code) => spawnSync(scan, ["--files", "--max-depth", "4", "--iglob", "**/.git/config", r], { encoding: "utf8", env: { ...process.env, LIST: [...kept, ...dropped].join("\n") + "\n", CODE: String(code) } });
+  for (const code of [0, 1, 2]) {
+    const out = run(code);
+    assert.equal(out.status, code, "ripgrep's exit code: the sandbox reads 0 as found, 1 as none, else a failed scan");
+    assert.deepEqual(out.stdout.split("\n").filter(Boolean), kept);
+    assert.match(out.stderr, /Permission denied/, "ripgrep's stderr passes through (srt denies the directories it could not read)");
+  }
+  // Each sandbox Factory configures runs it, and still write-protects the clone's own git internals by path.
+  const srt = srtSettings({ clone: r, home: "/h", ripgrep: scan });
+  assert.deepEqual(srt.ripgrep, { command: scan });
+  const claude = claudeLocalSettings({ clone: r, home: "/h", ripgrep: scan });
+  assert.deepEqual(claude.sandbox.ripgrep, { command: scan });
+  const outer = harnessOuterSettings({ harness: "claude", clone: r, home: "/h", ripgrep: scan });
+  assert.deepEqual(outer.ripgrep, { command: scan });
+  for (const deny of [srt.filesystem.denyWrite, claude.sandbox.filesystem.denyWrite, outer.filesystem.denyWrite]) for (const g of gitGuards(r)) assert.ok(deny.includes(g), g);
+  // Without it (macOS, a runner) each keeps its own scan.
+  assert.equal(srtSettings({ clone: r, home: "/h" }).ripgrep, undefined);
+  assert.equal(claudeLocalSettings({ clone: r, home: "/h" }).sandbox.ripgrep, undefined);
+  assert.equal(harnessOuterSettings({ harness: "codex", clone: r, home: "/h" }).ripgrep, undefined);
+});
+
 test("Copilot's outer probe: names each missing tool its sandbox needs, and slirp4netns's own error when it fails", { skip: !existsSync("/dev/net/tun") && "no /dev/net/tun here" }, async () => {
   const { COPILOT_OUTER_PROBE } = await import("../scripts/lib/local.mjs");
   const { mkdtempSync, mkdirSync, writeFileSync: write, symlinkSync, renameSync } = await import("node:fs");

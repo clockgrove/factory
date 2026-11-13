@@ -702,7 +702,8 @@ child.on("close", (code) => {
 `;
 
 /**
- * nestedGitScanScript written in `dir` (made owner-only), then run once over a throwaway tree: its path, for the `ripgrep`
+ * nestedGitScanScript written in `dir` (made owner-only), then its script run once with the same node over a throwaway
+ * tree: the wrapper's path, for the `ripgrep`
  * setting of srt and Claude Code. `rg` is the PATH entry as found, never resolved: a version manager's shim picks the
  * tool by the name it is called with. Throws (code "sandbox-scan") unless the scan returns a nested rc file and the
  * top-level .git and leaves out a nested repository's .git, exit 0.
@@ -726,7 +727,8 @@ export function writeNestedGitScan(dir, rg = whichPath("rg", process.env), { nod
       mkdirSync(dirname(join(t, f)), { recursive: true });
       writeFileSync(join(t, f), "");
     }
-    const r = spawnSync(p, ["--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { encoding: "utf8", timeout: 30_000 });
+    // Run as the wrapper runs it: the same node on the same script.
+    const r = spawnSync(node, [js, "--files", "--hidden", "--no-ignore", "--no-config", "--max-depth", "4", "--iglob", ".bashrc", "--iglob", "**/.git/hooks/**", "--iglob", "**/.git/HEAD", "--iglob", "**/.git/config", t], { encoding: "utf8", timeout: 30_000 });
     const got = String(r.stdout || "").split("\n").filter(Boolean).sort();
     const want = [join(t, ".git", "HEAD"), join(t, "sub", ".bashrc")].sort();
     if (r.status !== 0 || got.length !== want.length || got.some((g, i) => g !== want[i])) throw fail(`a check over a test tree gave exit ${r.status ?? r.signal}, ${got.length} paths (${String(r.stderr || "").trim().split("\n").at(-1)?.slice(0, 200) || "no error"})`);

@@ -19,19 +19,22 @@
 //   (`/v1/generation?id=` by the answer's top-level generation id, or its x-generation-id header on a stream); the larger
 //   of the two counts. A reported cost is booked at once and the lookup reconciles it aside (the gateway records a
 //   generation seconds after the answer); with no reported cost the call waits for the lookup. A request body echoed
-//   into a response (a tool's schema, a tool call's input) is never read. A call whose cost cannot be determined, an
-//   error after the request was sent, a 5xx or a broken stream is never $0: the pass ends over budget, so the stage Blocks
-//   (fail closed), and the relay refuses every later call. A 4xx answer (the gateway refused the call) is not billed.
+//   into a response (a tool's schema, a tool call's input) is never read. A failed call (an error status, a broken
+//   answer) is looked up by the generation it names, if any; a refusal before any model ran (the gateway's known 4xx, or
+//   its error type for one, PRE_MODEL_ERRORS) is $0. A cost still unknown is never $0 (Kirk, #142): the stage's first is
+//   booked at an upper bound (the dearest call priced so far, at least $0.25) and relaying goes on; the second shuts the
+//   gateway for the stage (the pass ends over budget, so the stage Blocks, and every later call is refused).
+// - The call log: one line per call in the stage's usage directory (CALL_LOG), no body and no key.
 // - The cap: calls are relayed only while a harness pass runs, one billable call at a time, each only once the calls
 //   before it are priced, and only while the pass's spend through the key plus the harness's own spend in the pass so far
 //   (read live from its stream, live-spend.mjs) is under the pass's budget (what max_usd left when the pass started). So
 //   model spend plus key spend can pass the cap by at most one call's cost (and what the harness spends after it).
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { secretForms } from "./inputs.mjs";
 
 /** The one host the relay forwards to. */
@@ -98,6 +101,52 @@ const UNBILLED = new Set([400, 401, 403, 404, 413, 422, 429]);
  * $0; any other 402 fails closed.
  */
 export const GATEWAY_REFUSALS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
+/**
+ * The gateway's error types for a call it refused before any model ran (as `@ai-sdk/gateway` reads them): a key, a
+ * request, a rate limit, a model or a route it would not take. Such an answer costs $0 only with a 4xx status and the
+ * type at `error.type`; a 5xx is looked up or estimated whatever its type. A provider's failure (`failed_dependency`)
+ * or the gateway's own (`internal_server_error`) may come after a model ran: not these.
+ */
+export const PRE_MODEL_ERRORS = new Set(["authentication_error", "invalid_request_error", "rate_limit_exceeded", "model_not_found", "not_found", "forbidden", "customer_verification_required"]);
+/** The least a call whose cost stays unknown is booked at (Kirk, #142): it, or the dearest call priced so far, the larger. */
+export const UNKNOWN_COST_FLOOR_USD = 0.25;
+/** The per-call log, in the stage's usage directory (no sandbox writes there): one JSON line per call. */
+export const CALL_LOG = "relay-calls.jsonl";
+/** The most lines the call log takes; past them, one closing line counts the calls left out. */
+export const CALL_LOG_MAX_LINES = 2000;
+
+/** The gateway's error type in an error answer's body, at `error.type` only (its standard error shape); else null. */
+export function errorTypeOf(doc) {
+  const e = doc && typeof doc === "object" && !Array.isArray(doc) && doc.error && typeof doc.error === "object" && !Array.isArray(doc.error) ? doc.error : null;
+  return typeof e?.type === "string" && /^[a-z0-9_]{1,64}$/.test(e.type) ? e.type : null;
+}
+
+/** An error answer's generation id, from the gateway's own places: its top-level `generationId` or `id`, or the header. */
+export function errorGenerationId(doc, headerId = null) {
+  const d = doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null;
+  return [d?.generationId, d?.id, headerId].find((v) => typeof v === "string" && GEN_ID.test(v)) || null;
+}
+
+/**
+ * The model a call names, for the call log: its allowlisted model header, else a JSON body's or a form's `model`; kept
+ * only when it has a model id's shape (`provider/name`, at most 80 characters). The caller chose it: the stage's held
+ * secrets are masked in the log (worker.mjs finish).
+ */
+export function modelOf(headers, body, type = "") {
+  const clean = (v) => (typeof v === "string" && v.length <= 80 && /^[a-z0-9][a-z0-9.-]*\/[A-Za-z0-9][\w.:-]*$/.test(v) ? v : null);
+  const h = clean(headers?.["ai-language-model-id"]) ?? clean(headers?.["ai-model-id"]);
+  if (h || !body?.length) return h;
+  if (/^application\/json/i.test(type)) {
+    try {
+      const j = JSON.parse(body.toString("utf8"));
+      return clean(j && typeof j === "object" && !Array.isArray(j) ? j.model : null);
+    } catch {
+      return null;
+    }
+  }
+  if (/^multipart\/form-data/i.test(type)) return clean(/name="model"\r\n(?:[^\r\n]*\r\n)*\r\n([^\r\n]{1,120})\r\n/.exec(body.subarray(0, 64 * 1024).toString("latin1"))?.[1]);
+  return null;
+}
 
 /**
  * The gateway's budget or credits refusal in a 402 answer's body, or null: its error type (at `error.type`, or `type` at
@@ -122,6 +171,30 @@ export const gatewayRefusalText = (r) => `AI Gateway refused: ${r.type}${r.messa
 export function withGatewayRefusal(reason, refused) {
   if (!refused) return reason;
   const named = gatewayRefusalText(refused);
+  return !reason ? named : reason.includes(named) ? reason : `${named}; ${reason}`;
+}
+
+/**
+ * A Blocked stage's reason with what the relay saw named first: the gateway's own refusal (withGatewayRefusal), the
+ * relay's shutdown (withRelayShut). `totals`: the relay's (totals()); `capReached`: Factory's max_usd was in fact reached.
+ */
+export const stageBlockReason = (reason, totals, capReached = false) => withGatewayRefusal(withRelayShut(reason, totals?.shut ?? null, capReached), totals?.gatewayRefused ?? null);
+
+/**
+ * How a Block reason names the relay's shutdown: `gateway relay shut: <n> calls in this stage could not be priced (<why>)`
+ * after a second failure of unknown cost, or `gateway relay shut: a complete answer could not be priced (<why>)`.
+ */
+export const relayShutText = (shut) => (shut.complete ? `gateway relay shut: a complete answer could not be priced (${shut.why})` : `gateway relay shut: ${shut.calls} calls in this stage could not be priced (${shut.why})`);
+
+/**
+ * A Blocked stage's reason with the relay's shutdown named first. The shutdown ends the pass over budget, so the stage
+ * reads "dollar cap reached"; unless max_usd was in fact reached (`capReached`), that is replaced: only an actual overrun
+ * reads so.
+ */
+export function withRelayShut(reason, shut, capReached = false) {
+  if (!shut) return reason;
+  const named = relayShutText(shut);
+  if (reason === "dollar cap reached" && !capReached) return `${named}; Factory's max_usd was not reached`;
   return !reason ? named : reason.includes(named) ? reason : `${named}; ${reason}`;
 }
 /** What a call after the gateway's budget or credits refusal is told, after the refusal itself. */
@@ -299,7 +372,7 @@ function eventReader() {
  * less: no cap). Returns the relay: {url, port, tcpPort, socketPath, dir, token, probeId, beginPass(budget), endPass(),
  * totals(), close()}.
  */
-export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, log = () => {} }) {
+export async function openRelay({ key, dir, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -308,7 +381,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     const c = keyCutter(key);
     return Buffer.concat([c.push(Buffer.from(String(t), "utf8")), c.end()]).toString("utf8");
   };
-  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0, gateway: 0 }, gatewayRefused: null, busy: false, waiters: [], failClosed: false, capped: false, pass: null, pending: new Set(), checks: new Set(), said: new Set() };
+  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0, gateway: 0 }, gatewayRefused: null, dearest: 0, unknown: 0, estimated: 0, estimatedUsd: 0, shut: null, logged: 0, unlogged: 0, busy: false, waiters: [], failClosed: false, capped: false, pass: null, pending: new Set(), checks: new Set(), said: new Set() };
   const once = (what, line) => {
     if (s.said.has(what)) return;
     s.said.add(what);
@@ -316,26 +389,68 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
   };
   const capOn = Number(maxUsd) > 0;
 
-  // Spend booked with no pass running (a call that finished after its pass ended) waits for the next endPass.
-  const book = (usd) => {
+  // One JSON line per call in the stage's usage directory (CALL_LOG): never a body, a header's value or the key. A log
+  // that cannot be written is said once; the call goes on.
+  const record = (entry) => {
+    if (!callLog) return;
+    if (s.logged >= callLogMaxLines) {
+      s.unlogged += 1;
+      return;
+    }
+    try {
+      mkdirSync(dirname(callLog), { recursive: true, mode: 0o700 });
+      const { model: m, ...rest } = entry;
+      appendFileSync(callLog, `${JSON.stringify({ t: new Date().toISOString(), ...rest, ...(m ? { model: m } : {}) })}\n`, { mode: 0o600 });
+      s.logged += 1;
+    } catch (e) {
+      once("calllog", `gateway relay: the per-call log could not be written (${String(e?.code || e?.message || e).slice(0, 60)})`);
+    }
+  };
+  // Spend booked with no pass running (a call that finished after its pass ended) waits for the next endPass. `priced`:
+  // a cost the gateway gave (reported or looked up), which sets the dearest call so far; an estimate does not.
+  const book = (usd, priced = true) => {
     s.spent += usd;
+    if (priced) s.dearest = Math.max(s.dearest, usd);
     if (s.pass) {
       s.pass.usd += usd;
       s.pass.calls += 1;
     } else s.late += usd;
   };
   // A looked-up cost above the reported one: added to the spend, not counted as a call of its own.
-  const bookExtra = (usd) => {
+  const bookExtra = (usd, total) => {
     s.spent += usd;
+    s.dearest = Math.max(s.dearest, total);
     if (s.pass) s.pass.usd += usd;
     else s.late += usd;
   };
-  const failClosed = (why) => {
+  // The gateway shut for the stage: the pass ends over budget (the stage stops) and every later call is refused.
+  const shutDown = (why, complete) => {
+    if (complete) s.unknown += 1;
     s.unpriced += 1;
     s.failClosed = true;
+    s.shut ??= { calls: s.unknown, why, ...(complete ? { complete: true } : {}) };
     if (s.pass) s.pass.unpriced += 1;
     else s.lateUnpriced += 1;
-    once("unpriced", `gateway relay: a call's cost could not be determined (${why}); the pass ends over budget and every later call is refused`);
+    once("unpriced", `gateway relay: ${complete ? "a complete answer" : "a second call"} could not be priced (${why}); ${relayShutText(s.shut)}: the pass ends over budget and every later call is refused`);
+    return { usd: null, basis: "shut", unpriced: why };
+  };
+  // A call that failed after it was sent (a network error, a broken or truncated answer, a timeout, an error status) and
+  // whose cost stays unknown (Kirk, #142): no caller can cause one. The first in the stage is booked at an upper bound,
+  // the larger of the dearest call priced so far and UNKNOWN_COST_FLOOR_USD, against max_usd like any spend, and relaying
+  // goes on; the second shuts the gateway for the stage. Returns what the call log records.
+  const unknown = (why) => {
+    s.unknown += 1;
+    if (s.unknown === 1) {
+      const usd = Math.round(Math.max(s.dearest, UNKNOWN_COST_FLOOR_USD) * 1e6) / 1e6;
+      book(usd, false);
+      s.estimated += 1;
+      s.estimatedUsd += usd;
+      if (s.pass) s.pass.estimated = (s.pass.estimated || 0) + 1;
+      else s.lateEstimated = (s.lateEstimated || 0) + 1;
+      log(`gateway relay: a call's cost could not be determined (${why}); booked $${usd.toFixed(4)} against max_usd, an upper bound (the dearest call so far, or $${UNKNOWN_COST_FLOOR_USD.toFixed(2)}), and relaying goes on; a second such call shuts the gateway for this stage`);
+      return { usd, basis: "estimate", unpriced: why };
+    }
+    return shutDown(why, false);
   };
   const lookup = async (id) => {
     for (const ms of lookupDelaysMs) {
@@ -387,12 +502,14 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     const route = Object.keys(req.headers).some((h) => /^x-(http-)?method-override$/i.test(h)) ? null : routeOf(req.method, req.url);
     if (!route) {
       s.refused.route += 1;
+      record({ status: 403, refused: "route" });
       return refusal(res, 403, `${String(req.method).slice(0, 10)} ${String(req.url).split("?")[0].slice(0, 80)} is not relayed: only the AI Gateway's generation calls (POST) and its model list (GET)`);
     }
     // Every call, the model list included, only while a pass runs and nothing failed closed.
     if (s.failClosed) {
       s.refused.unpriced += 1;
-      return refusal(res, 403, "an earlier call's cost could not be determined, so the Objective's dollar cap cannot be enforced; no further call is relayed in this stage");
+      record({ method: req.method, path: req.url, status: 403, refused: "shut" });
+      return refusal(res, 403, `${relayShutText(s.shut)}, so the Objective's dollar cap cannot be enforced; no further call is relayed in this stage. Stop and report it`);
     }
     if (!s.pass || s.pass.ended) {
       s.refused.pass += 1;
@@ -402,16 +519,21 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     // The gateway refused an earlier call for its own budget or credits: every later billable call gets that refusal.
     const gatewayRefused = () => {
       s.refused.gateway += 1;
+      record({ method: req.method, path: req.url, status: 402, refused: "gateway", type: s.gatewayRefused.type });
       return refusal(res, 402, GATEWAY_REFUSED_MORE, { gateway: s.gatewayRefused });
     };
     if (billable && s.gatewayRefused) return gatewayRefused();
     // A body its declared length puts over the cap is refused before it is read or waits.
     const declared = Number(req.headers["content-length"]);
-    if (Number.isFinite(declared) && declared > route.maxBytes) return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+    if (Number.isFinite(declared) && declared > route.maxBytes) {
+      record({ method: req.method, path: req.url, status: 413, refused: "size" });
+      return refusal(res, 413, `a request over ${route.maxBytes} bytes is not relayed`);
+    }
     // With a cap on, a billable call waits its turn before its body is read, and only a few may wait. The body's deadline
     // stops while it waits (a few image edits queued behind each other take minutes) and starts again once it is read.
     const serial = billable && capOn;
     if (serial) {
+      if (s.busy && s.waiters.length >= MAX_WAITING) record({ method: req.method, path: req.url, status: 429, refused: "waiting" });
       if (s.busy && s.waiters.length >= MAX_WAITING) return refusal(res, 429, `more than ${MAX_WAITING} calls are waiting: with a dollar cap on, calls are relayed one at a time`);
       clearTimeout(bodyTimer);
       await acquire();
@@ -442,6 +564,8 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     }
     // Read whole: the deadline is done (a body refused over its cap keeps it while the rest is drained).
     clearTimeout(bodyTimer);
+    const model = billable ? modelOf(req.headers, chunks.length ? Buffer.concat(chunks) : null, String(req.headers["content-type"] || "")) : null;
+    const started = Date.now();
     if (billable) {
       // Checked once the calls before it are priced: the cap can be passed by this one call's cost at most.
       const p = s.pass && !s.pass.ended ? s.pass : null;
@@ -473,11 +597,13 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
           s.refused.cap += 1;
           s.capped = true;
           p.capped = true;
+          record({ method: req.method, path: req.url, model, status: 402, refused: "max_usd" });
           once("cap", `gateway relay: max_usd reached ($${p.usd.toFixed(4)} through the key and $${harnessUsd.toFixed(4)} by the harness this pass, $${p.budget.toFixed(4)} was left); further calls are refused`);
           return refusal(res, 402, `Factory's dollar cap is reached: the Objective's max_usd ($${p.usd.toFixed(2)} spent through the key and $${harnessUsd.toFixed(2)} by the model in this pass, of the $${p.budget.toFixed(2)} left); no further call is relayed. Stop and report it: the cap is Factory's, for this Objective, not the AI Gateway's budget`, { type: "factory_max_usd" });
         }
         s.refused[s.failClosed ? "unpriced" : "pass"] += 1;
-        return refusal(res, 403, s.failClosed ? "an earlier call's cost could not be determined; no further call is relayed in this stage" : "calls are relayed only while a Factory pass runs");
+        record({ method: req.method, path: req.url, model, status: 403, refused: s.failClosed ? "shut" : "pass" });
+        return refusal(res, 403, s.failClosed ? `${relayShutText(s.shut)}; no further call is relayed in this stage` : "calls are relayed only while a Factory pass runs");
       }
       s.calls += 1;
     }
@@ -492,8 +618,9 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       try {
         upstream = await upstreamRequest(`${origin}${req.url}`, { method: req.method, headers, body: route.method === "GET" ? null : Buffer.concat(chunks), timeoutMs: upstreamTimeoutMs });
       } catch (e) {
-        if (!res.headersSent && !res.destroyed) refusal(res, 502, `the AI Gateway call failed (${String(e?.cause?.code || e?.name || "error").slice(0, 40)})`);
-        return { sentError: true };
+        const code = String(e?.code || e?.cause?.code || (/timed out/.test(String(e?.message)) ? "timeout" : e?.name) || "error").slice(0, 40);
+        if (!res.headersSent && !res.destroyed) refusal(res, 502, `the AI Gateway call failed (${code})`);
+        return { sentError: true, error: code };
       }
       const outHeaders = {};
       for (const [k, v] of upstream.headers) if (RESPONSE_HEADERS.test(k.toLowerCase()) && !keyForms.carries(v)) outHeaders[k] = v;
@@ -524,8 +651,8 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
           }
         }
         if (!res.destroyed) res.end(cutter.end());
-      } catch {
-        broken = true;
+      } catch (e) {
+        broken = String(e?.code || e?.cause?.code || (/timed out/.test(String(e?.message)) ? "timeout" : e?.name) || "error").slice(0, 40);
         if (!res.destroyed) res.destroy();
       }
       if (!billable) return { free: true };
@@ -539,51 +666,84 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
         }
       }
       return { status: upstream.status, broken, overflow, headerId: upstream.headers.get("x-generation-id"), ...parsed };
-    })().catch(() => ({ sentError: true }));
+    })().catch(() => ({ sentError: true, error: "relay" }));
     if (!billable) return;
-    // The lock passes to the next call once this one is priced (finally), whatever happened to it.
+    // The lock passes to the next call once this one is priced (finally), whatever happened to it. Each call's outcome is
+    // one line of the call log.
     const pricing = done.then(async (o) => {
+      const entry = { method: req.method, path: req.url, model, status: o.status ?? null, ms: Date.now() - started };
       try {
-        // A known refusal (a bad or unauthorised request, a missing model, too large, unprocessable, rate limited): the
-        // gateway refused the call, which is not billed. Any other 4xx fails closed below.
-        if (UNBILLED.has(o.status) && !o.broken) {
-          s.failed += 1;
-          return;
-        }
-        // The gateway's budget or credits refusal (a 402 with its error type): refused before any model ran, so $0. The
-        // pass goes on (the worker sees the gateway's answer and decides); later billable calls get the same refusal.
-        const refused = o.status === 402 && !o.broken && !o.overflow && !o.first ? gatewayRefusalOf(o.doc, cutText) : null;
-        if (refused) {
-          s.failed += 1;
-          s.gatewayRefused ??= refused;
-          if (s.pass) s.pass.gatewayRefused ??= refused;
-          once("gateway", `gateway relay: ${gatewayRefusalText(refused)}; the call cost $0, and later calls in this stage get the same refusal`);
-          return;
-        }
-        if (o.sentError || o.broken || o.overflow || !(o.status >= 200 && o.status < 300)) return failClosed(o.sentError ? "the call failed after it was sent" : o.broken ? "the answer broke off" : o.overflow ? "the answer was too large to read its cost" : `the gateway answered ${o.status}`);
-        const { usd, id } = costOf(o.doc, route.family, o.first, o.headerId);
-        if (usd !== null) {
-          // The gateway's own top-level cost: booked now, so the next call need not wait for the generation's record,
-          // which the gateway writes seconds later. The lookup then runs aside, and a larger looked-up cost is booked on
-          // top (in the pass still running, else in the next one).
-          book(usd);
-          if (id) {
-            const check = lookup(id).then((looked) => {
-              if (looked !== null && looked > usd) bookExtra(looked - usd);
-            });
-            s.checks.add(check);
-            check.finally(() => s.checks.delete(check));
-          }
-          return;
-        }
-        // No cost reported: the lookup is the only figure, so the next call waits for it.
-        const looked = id ? await lookup(id) : null;
-        if (looked === null) return failClosed(id ? "the gateway reported no cost and its generation's record never came" : "the answer named no cost and no generation");
-        book(looked);
+        Object.assign(entry, await price(o));
       } finally {
+        record(entry);
         free();
       }
     });
+    // What one sent call cost, and how that was found: {usd, basis, id?, unpriced?, type?}.
+    const price = async (o) => {
+      // A known refusal (a bad or unauthorised request, a missing model, too large, unprocessable, rate limited): the
+      // gateway refused the call, which is not billed.
+      if (UNBILLED.has(o.status) && !o.broken) {
+        s.failed += 1;
+        return { usd: 0, basis: "refused", type: errorTypeOf(o.doc) };
+      }
+      // The gateway's budget or credits refusal (a 402 with its error type): refused before any model ran, so $0. The
+      // pass goes on (the worker sees the gateway's answer and decides); later billable calls get the same refusal.
+      const refused = o.status === 402 && !o.broken && !o.overflow && !o.first ? gatewayRefusalOf(o.doc, cutText) : null;
+      if (refused) {
+        s.failed += 1;
+        s.gatewayRefused ??= refused;
+        if (s.pass) s.pass.gatewayRefused ??= refused;
+        once("gateway", `gateway relay: ${gatewayRefusalText(refused)}; the call cost $0, and later calls in this stage get the same refusal`);
+        return { usd: 0, basis: "gateway-refused", type: refused.type };
+      }
+      const complete = !o.sentError && !o.broken && o.status >= 200 && o.status < 300;
+      // A complete answer too large to read its cost: the caller can ask for one, so it never gets the estimate.
+      if (complete && o.overflow) return shutDown("the answer was too large to read its cost", true);
+      if (!complete) {
+        // Any other error answered whole: a 4xx the gateway gave before any model ran (its `error.type`, never its status
+        // alone) is $0. A 5xx is looked up or estimated, whatever its type.
+        const type = o.sentError || o.broken || o.overflow || o.first ? null : errorTypeOf(o.doc);
+        if (type && o.status >= 400 && o.status < 500 && PRE_MODEL_ERRORS.has(type)) {
+          s.failed += 1;
+          return { usd: 0, basis: "refused", type };
+        }
+        // Else its generation, when the answer names one (its body or the x-generation-id header), is looked up.
+        const why = o.sentError ? `the call failed after it was sent: ${o.error}` : o.broken ? `the answer broke off: ${o.broken}` : o.overflow ? "the error answer was too large to read" : `the gateway answered ${o.status}${type ? ` (${type})` : ""}`;
+        const id = o.sentError ? null : errorGenerationId(o.overflow ? null : o.doc, typeof o.headerId === "string" ? o.headerId : null) || (o.first && typeof o.first.id === "string" && GEN_ID.test(o.first.id) ? o.first.id : null);
+        const looked = id ? await lookup(id) : null;
+        if (looked !== null) {
+          book(looked);
+          return { usd: looked, basis: "lookup", id, why };
+        }
+        return { ...unknown(id ? `${why}; generation ${id} has no record` : `${why}; no generation id`), ...(id ? { id } : {}), ...(type ? { type } : {}) };
+      }
+      const { usd, id } = costOf(o.doc, route.family, o.first, o.headerId);
+      if (usd !== null) {
+        // The gateway's own top-level cost: booked now, so the next call need not wait for the generation's record,
+        // which the gateway writes seconds later. The lookup then runs aside, and a larger looked-up cost is booked on
+        // top (in the pass still running, else in the next one).
+        book(usd);
+        if (id) {
+          const check = lookup(id).then((looked) => {
+            if (looked !== null && looked > usd) {
+              bookExtra(looked - usd, looked);
+              record({ method: req.method, path: req.url, model, id, usd: looked, basis: "lookup", reconciled: Math.round((looked - usd) * 1e6) / 1e6 });
+            }
+          });
+          s.checks.add(check);
+          check.finally(() => s.checks.delete(check));
+        }
+        return { usd, basis: "reported", ...(id ? { id } : {}) };
+      }
+      // No cost reported: the lookup is the only figure, so the next call waits for it. A complete answer that stays
+      // unpriced shuts the gateway at once: which route and request shape answer so is the caller's choice, so it never
+      // gets the estimate.
+      const looked = id ? await lookup(id) : null;
+      if (looked === null) return { ...shutDown(id ? "the gateway reported no cost and its generation's record never came" : "the answer named no cost and no generation", true), ...(id ? { id } : {}) };
+      book(looked);
+      return { usd: looked, basis: "lookup", id };
+    };
     s.pending.add(pricing);
     pricing.finally(() => s.pending.delete(pricing));
   };
@@ -646,7 +806,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
      * pass so far, live-spend.mjs), stays under `budget` (null: no cap).
      */
     beginPass(budget, live = null) {
-      s.pass = { budget: capOn ? Math.max(0, Number(budget) || 0) : null, live, usd: 0, calls: 0, unpriced: 0, capped: false, pings: 0 };
+      s.pass = { budget: capOn ? Math.max(0, Number(budget) || 0) : null, live, usd: 0, calls: 0, unpriced: 0, estimated: 0, capped: false, pings: 0 };
     },
     /**
      * The pass ended: its spend through the key once every call in it is priced (or failed closed), with any spend booked
@@ -655,7 +815,7 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
     async endPass() {
       // Ended first: a call still waiting for its turn sees the pass ended and is refused, never sent. What is in flight
       // still books into it.
-      const p = s.pass || { usd: 0, calls: 0, unpriced: 0, capped: false, pings: 0 };
+      const p = s.pass || { usd: 0, calls: 0, unpriced: 0, estimated: 0, capped: false, pings: 0 };
       p.ended = true;
       await Promise.allSettled([...s.pending]);
       // The reported costs' lookups: waited for a while (the gateway records a generation within seconds); one still
@@ -664,13 +824,24 @@ export async function openRelay({ key, dir, group = null, chgrp = null, tcp = fa
       s.pass = null;
       const late = s.late;
       const lateUnpriced = s.lateUnpriced;
+      const lateEstimated = s.lateEstimated || 0;
       s.late = 0;
       s.lateUnpriced = 0;
-      return { usd: Math.round((p.usd + late) * 1e6) / 1e6, calls: p.calls, unpriced: p.unpriced + lateUnpriced, capped: p.capped, pings: p.pings, gatewayRefused: p.gatewayRefused ?? null };
+      s.lateEstimated = 0;
+      return { usd: Math.round((p.usd + late) * 1e6) / 1e6, calls: p.calls, unpriced: p.unpriced + lateUnpriced, estimated: (p.estimated || 0) + lateEstimated, capped: p.capped, pings: p.pings, gatewayRefused: p.gatewayRefused ?? null, shut: s.shut };
     },
-    totals: () => ({ usd: Math.round(s.spent * 1e6) / 1e6, pings: s.pings, calls: s.calls, failed: s.failed, unpriced: s.unpriced, capped: s.capped, failClosed: s.failClosed, gatewayRefused: s.gatewayRefused, refused: { ...s.refused } }),
+    totals: () => ({ usd: Math.round(s.spent * 1e6) / 1e6, pings: s.pings, calls: s.calls, failed: s.failed, unpriced: s.unpriced, capped: s.capped, failClosed: s.failClosed, gatewayRefused: s.gatewayRefused, estimated: s.estimated, estimatedUsd: Math.round(s.estimatedUsd * 1e6) / 1e6, shut: s.shut, callLog: callLog && s.logged ? { file: CALL_LOG, lines: s.logged, ...(s.unlogged ? { unlogged: s.unlogged } : {}) } : null, refused: { ...s.refused } }),
     async close() {
       await Promise.allSettled([...s.pending, ...s.checks]);
+      // The calls past the log's cap, counted on one closing line.
+      if (callLog && s.unlogged && !s.summarised) {
+        s.summarised = true;
+        try {
+          appendFileSync(callLog, `${JSON.stringify({ t: new Date().toISOString(), unlogged: s.unlogged, note: `${s.unlogged} more calls past the log's ${callLogMaxLines} lines` })}\n`, { mode: 0o600 });
+        } catch {
+          // said once when the log first failed
+        }
+      }
       for (const srv of [server, tcpServer].filter(Boolean)) {
         srv.closeAllConnections?.();
         await new Promise((r) => srv.close(() => r()));
@@ -700,10 +871,16 @@ export function addKeySpend(rec, pass) {
   rec.workerKeyCalls = pass.calls;
   if (pass.usd > 0 || rec.usd !== null) rec.usd = Math.round(((rec.usd ?? 0) + pass.usd) * 1e6) / 1e6;
   if (rec.harnessUsd === null && pass.usd > 0) rec.usdLowerBound = true;
+  // A call booked at its upper-bound estimate (#142): the dollars are an upper bound; the pass goes on.
+  if (pass.estimated) {
+    rec.usdUpperBound = true;
+    rec.workerKeyEstimated = pass.estimated;
+  }
   if (pass.unpriced) {
     rec.usdLowerBound = true;
     rec.workerKeyUnpriced = pass.unpriced;
     rec.budgetExceeded = true;
+    if (pass.shut) rec.workerKeyShut = pass.shut;
   }
   if (pass.capped) {
     rec.budgetExceeded = true;

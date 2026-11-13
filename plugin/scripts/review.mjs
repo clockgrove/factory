@@ -22,7 +22,7 @@ import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv 
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -33,7 +33,7 @@ import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, pos
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
-import { withGatewayRefusal } from "./lib/gateway-relay.mjs";
+import { CALL_LOG, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
@@ -180,11 +180,15 @@ async function main() {
     }
     return rec;
   };
+  // A Block's reason with what the gateway relay saw named first (gateway-relay.mjs stageBlockReason): its shutdown is no
+  // max_usd overrun.
+  const relayReason = (reason) => (relay ? stageBlockReason(reason, relay.totals(), maxUsdReached(inputs.maxUsd, records, relay.totals())) : reason);
   const blockedAtCap = async (before) => {
     log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced (a run reported no priced AI credits)" : "spent"} before ${before}; not running it`);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason: capReason(), notify: inputs.notify, stage: "review" }, token);
-    await finish("blocked", capReason());
+    const reason = relayReason(capReason());
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, notify: inputs.notify, stage: "review" }, token);
+    await finish("blocked", reason);
   };
   // The stage's time cap reached before a reviewer call (handoff.mjs reviewCallTimeout): Blocked, as a call that ran
   // into it would be, rather than a call with no wall-clock cap.
@@ -246,6 +250,9 @@ async function main() {
     const workerKey = relay ? relay.totals() : null;
     const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
+    // The gateway relay's call log (uploaded with the usage directory) carries text the caller chose: masked the same way.
+    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
       usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
@@ -510,7 +517,7 @@ async function main() {
     if (!pre.green) {
       const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, triageRefused: pre.triageRefused, scope: pre.scope }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
       await dropLabel();
-      const why = withGatewayRefusal(d.reason || "validation red before review", relay?.totals().gatewayRefused);
+      const why = relayReason(d.reason || "validation red before review");
       await applyExit(repo, { issue, pr, exit: "blocked", reason: why, detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", why);
       return;
@@ -785,7 +792,7 @@ async function main() {
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason() });
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
-  if (decision.exit === "blocked") decision.reason = withGatewayRefusal(decision.reason, relay?.totals().gatewayRefused);
+  if (decision.exit === "blocked") decision.reason = relayReason(decision.reason);
   await dropLabel();
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally nothing runs an unlabelled ready PR, so the Question stands there). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass

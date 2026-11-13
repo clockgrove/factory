@@ -19,7 +19,7 @@ import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, l
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
-import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText } from "./gateway-relay.mjs";
+import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
@@ -894,7 +894,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (relay) {
     const pass = await relay.endPass();
     addKeySpend(rec, pass);
-    if (pass.calls || pass.usd || pass.gatewayRefused) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unpriced ? "; a call's cost could not be determined, so the relay refused every later call" : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
+    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unpriced) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.estimated ? `; ${pass.estimated} call${pass.estimated === 1 ? "" : "s"} of unknown cost booked at an upper bound` : ""}${pass.unpriced ? `; ${pass.shut ? relayShutText(pass.shut) : "a call's cost could not be determined"}, so the relay refused every later call` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
     // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
     if (!pass.pings && commandsRan(harness, r.stdout)) {
       rec.workerKeyUnreached = true;

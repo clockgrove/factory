@@ -64,7 +64,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
-import { checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
 import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
@@ -866,7 +866,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
-    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    // Every workflow run on the head completed and one ended before its jobs ran (startup_failure, or cancelled): a
+    // required check still with no run will get none, so the wait ends then (checksNotStarted names that run).
+    const ended = async () => {
+      const runs = (await rest(`repos/${checks.repo.full}/actions/runs?head_sha=${sha}&per_page=100`, { token: checks.actionsToken || checks.token }))?.workflow_runs || [];
+      return runs.length > 0 && runs.every((w) => w.status === "completed") && runs.some((w) => ENDED_EARLY.includes(w.conclusion));
+    };
+    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     let r = await wait();
     const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
@@ -930,10 +936,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         r = await settle(await wait(a.ignoreIds), a.ignoreIds);
         if (r.conflict) return { green: false, conflict: true, command };
         if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
-        if (r.green) return { green: true, again: true };
+        // Passing on a rerun is not proof of a flake, as after a triage rerun: said where a person reads it.
+        if (r.green) {
+          if (onPhase) await onPhase(`rerun on ${sha.slice(0, 7)} turned green: ${(a.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
+          return { green: true, again: true };
+        }
       }
-      // Red again the same way, GitHub's side both times: every failed job, before the rerun and after, failed only in
-      // its set-up or checkout (triage.mjs infra). A head rerun once already shows its red after that rerun.
+      // Red again the same way, GitHub's side both times: every failed job, before the rerun and after, failed in its
+      // set-up or checkout on a server or network failure (triage.mjs infra). A head rerun once already shows its red
+      // after that rerun.
       const isInfra = async (runs) => !!runs?.length && !!(await triage?.infra?.({ sha, failedRuns: runs }).catch(() => false));
       const infra = a.rerun ? (await isInfra(before)) && (await isInfra(r.failedRuns)) : !!a.already && (await isInfra(before));
       return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command };
@@ -1099,8 +1110,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
  * reason says the rerun of its failed jobs came back red, was already made, was refused (refusedRerunText) or could not
  * be made, then the failure's lead line (failureLead's first) and the remedy. The cause (logic.mjs BLOCK_CAUSES), on
  * structure: a rerun the token may not make (403, 404, or refused before on the Objective) `setup`, any other failed
- * rerun call `outage`; red again with every failed job failing only in its set-up or checkout before and after the
- * rerun, or after the head's one earlier rerun (`infra`), `outage`; anything else `work`.
+ * rerun call `outage`; red again with every failed job failing on GitHub's side (triage.mjs infra) before and after the
+ * rerun, or after the head's one earlier rerun (`infra`), `outage`; anything else, a rerun declined included, `work`.
  */
 export function unchangedBlock(u, lead = "") {
   const short = String(u?.sha || "").slice(0, 7);

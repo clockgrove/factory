@@ -493,18 +493,25 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * asked on every poll; when it says yes the wait ends at once with `conflict: true` (a conflicting PR gets no runs).
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
+ * `ended` (async, optional) is asked on a read that leaves a required check with no run; yes ends the wait unfinished.
  */
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ended = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const started = Date.now();
   // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
   let pause = pollMs;
   let runs = [];
   let state = null;
   let conflict = false;
+  // Whether a read of the check runs has succeeded since the wait began.
+  let readOnce = false;
   for (;;) {
-    // A failed read is no reading: the last good one stands, and the wait goes on to its own deadline.
+    // A failed read is no reading: once one has succeeded, the last good one stands and the wait goes on to its own
+    // deadline; with none yet, the wait ends at `appearMs` as for nothing ran.
     const read = await checkRuns(repo, sha, { token }).catch(() => null);
-    if (read) runs = read.filter((r) => !ignoreIds?.has(r.id));
+    if (read) {
+      runs = read.filter((r) => !ignoreIds?.has(r.id));
+      readOnce = true;
+    }
     state = evaluateChecks(names, runs);
     if (state.done) break;
     if (conflicted && (await conflicted().catch(() => false))) {
@@ -512,7 +519,10 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
       break;
     }
     const elapsed = Date.now() - started;
-    if (read && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
+    if ((read || !readOnce) && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
+    // A required check with no run, and `ended` (async, optional) says no more will come: every workflow run on the head
+    // completed, one of them before its jobs ran. The wait ends at once, unfinished.
+    if (read && state.missing.length && ended && (await ended().catch(() => false))) break;
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));

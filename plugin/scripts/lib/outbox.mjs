@@ -288,7 +288,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   // A merge of Factory's the checkout could not take (box.synced false): {from: the agent's head it was made from, to:
   // the merge pushed}. The next push builds on that merge instead of making a fresh one that would replace it.
   let unsynced = null;
-  // `kind`: what refused it, for a caller that names it apart ("protected", "fix-scope"; "" for anything else).
+  // `kind`: what refused it, for a caller that names it apart ("protected", "fix-scope", "lfs-quota": GitHub's Git LFS
+  // refused the upload for its quota or storage; "" for anything else).
   const refuse = (reason, { lfs = false, kind = "" } = {}) => {
     box.failed = true;
     box.error = reason;
@@ -892,7 +893,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (up.code !== 0) {
           const out = `${up.stdout}\n${up.stderr}`;
           const quota = lfsQuotaLine(out);
-          return refuse(quota ? `Git LFS refused the upload (quota or storage): ${quota}` : `Git LFS upload failed: ${out.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 200) || `exit ${up.code}`}`, { lfs: !!quota });
+          return refuse(quota ? `Git LFS refused the upload (quota or storage): ${quota}` : `Git LFS upload failed: ${out.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 200) || `exit ${up.code}`}`, { lfs: !!quota, kind: quota ? "lfs-quota" : "" });
         }
       }
     }

@@ -793,6 +793,7 @@ async function main() {
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
+    lfsQuota: outbox.errorKind === "lfs-quota",
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });

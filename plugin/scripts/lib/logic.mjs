@@ -630,9 +630,9 @@ export function clip(text, max = REASON_MAX) {
 export const BLOCK_CAUSES = Object.freeze({
   "max-usd": Object.freeze({ external: true, what: "Factory's max_usd cap reached" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
-  "provider-quota": Object.freeze({ external: true, what: "the harness's provider refused for quota or billing" }),
+  "provider-quota": Object.freeze({ external: true, what: "a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, or the sandbox vendor's plan" }),
   outage: Object.freeze({ external: true, what: "a provider or GitHub outage Factory waited or retried through by its rules" }),
-  setup: Object.freeze({ external: false, what: "a setup gap: a credential, secret, host, install, Git LFS, the repository's settings or rules, the author's access" }),
+  setup: Object.freeze({ external: false, what: "a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access" }),
   work: Object.freeze({ external: false, what: "the work: the worker's own Block, validation red, review findings, a protected path, the Objective's size" }),
   factory: Object.freeze({ external: false, what: "Factory itself: a crash, a lost or stuck stage, an exit it could not apply, or a cause it did not place" }),
 });
@@ -640,10 +640,13 @@ export const BLOCK_CAUSES = Object.freeze({
 /** The Blocked notice's cause line; a code outside BLOCK_CAUSES is written as `factory`. */
 export const blockMarker = (cause) => `<!-- factory:block ${JSON.stringify({ cause: Object.hasOwn(BLOCK_CAUSES, cause) ? cause : "factory" })} -->`;
 
-const BLOCK_LINE = /^<!-- factory:block (\{[^\n]*\}) -->$/m;
-/** The cause a Blocked notice records (blockMarker), or null: none written (an older notice) or not on the list. */
+const BLOCK_LINE = /^<!-- factory:block (\{[^\n]*\}) -->$/gm;
+/**
+ * The cause a Blocked notice records (blockMarker), or null: none written (an older notice) or not on the list. The
+ * notice's last cause line is Factory's (applyExit writes it after the sanitised reason and output).
+ */
 export function blockCauseOf(body) {
-  const m = BLOCK_LINE.exec(String(body || ""));
+  const m = [...String(body || "").matchAll(BLOCK_LINE)].at(-1);
   if (!m) return null;
   try {
     const cause = JSON.parse(m[1])?.cause;
@@ -737,6 +740,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  reviewUnaddressed: number (review pass: comments without a worker reply)
  *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
  *  lfsRefused: boolean, the refusal was Git LFS's (quota, storage, cap, pointers)
+ *  lfsQuota:   boolean, that refusal was GitHub's Git LFS quota or storage (outbox.mjs errorKind "lfs-quota")
  *  lfsPlain:   string[], files .gitattributes routes to Git LFS but committed as plain blobs
  *  planNeeds:  string, why the plan needs another repository (one-repo.mjs planNeeds): a
  *              Question, asked whether or not the run committed, before any other check but the hard stops
@@ -748,9 +752,10 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
-  if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: "setup" };
+  // GitHub's Git LFS quota or storage (the outbox's `lfs-quota` refusal) is a plan limit a person raises; any other LFS refusal is setup.
+  if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: lfsQuota ? "provider-quota" : "setup" };
   if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}`, cause: "work" };
   // Factory refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
   if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}`, cause: "work" };

@@ -601,6 +601,7 @@ async function main() {
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
+    lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
   });

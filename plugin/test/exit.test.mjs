@@ -771,7 +771,9 @@ test("Git LFS: a quota refusal is named and Blocks even with a PR open; the endp
   assert.match(lfsQuotaLine(out), /^This repository is over its data quota/);
   assert.equal(lfsQuotaLine("! [rejected] HEAD -> factory/1 (fetch first)\nerror: failed to push some refs"), null);
   const reason = `Git LFS refused the upload (quota or storage): ${lfsQuotaLine(out)}`;
-  assert.deepEqual(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, validation: { passes: 1, green: true }, pushRejected: reason, lfsRefused: true }), { exit: "blocked", reason, cause: "setup" });
+  assert.deepEqual(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, validation: { passes: 1, green: true }, pushRejected: reason, lfsRefused: true, lfsQuota: true }), { exit: "blocked", reason, cause: "provider-quota" });
+  // Any other Git LFS refusal (the local cap, a missing endpoint, pointers) is a setup gap.
+  assert.equal(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, pushRejected: "the remote has no https Git LFS endpoint to pin the media upload to", lfsRefused: true }).cause, "setup");
   assert.match(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, lfsPlain: ["a.glb"] }).reason, /plain git blobs .*: a\.glb$/);
   assert.equal(lfsEndpoint("https://github.com/o/r"), "https://github.com/o/r.git/info/lfs");
   assert.equal(lfsEndpoint("https://github.com/o/r.git\n"), "https://github.com/o/r.git/info/lfs");
@@ -887,6 +889,7 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     assert.equal(box.lfsRefused, true);
     assert.match(box.error, /^the branch's Git LFS media is 0\.2 MB \(2 object\(s\)\), over the local limit of 0\.15 MB \(FACTORY_LOCAL_MEDIA_MAX_MB\)$/);
     assert.equal(decideExit({ harness: { ok: true }, pr: pr(), commits: 1, pushRejected: box.error, lfsRefused: true }).reason, box.error);
+    assert.equal(box.errorKind, "", "the local media cap is no quota of GitHub's");
     assert.throws(() => execFileSync("git", ["-C", origin, "rev-parse", "--verify", "factory/1"], { stdio: "ignore" }), "nothing reached origin");
     // The pin is Factory's own: no sandboxed child or harness gets it.
     const scrubbed = scrubbedEnv({ ...lfsPinEnv("https://github.com/o/r.git"), FACTORY_LFS_PIN: "1", PATH: "/bin" });
@@ -1362,4 +1365,5 @@ test("Block causes: each Block carries a code from the one closed list; refusals
   assert.equal(blockMarker("bogus"), '<!-- factory:block {"cause":"factory"} -->');
   assert.equal(blockCauseOf('<!-- factory:block {"cause":"bogus"} -->'), null);
   assert.equal(blockCauseOf("@dev Blocked (work): an older notice"), null);
+  assert.equal(blockCauseOf(`${blockMarker("max-usd")}\n${blockMarker("work")}`), "work", "the last line is Factory's");
 });

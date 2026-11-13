@@ -300,6 +300,10 @@ test("a vendor's transient start failures back off 2, 4, 8, 16, then every 30 mi
   for (const code of ["unavailable", "rate_limited", "timeout"]) assert.equal(startFailure({ code }), "retry", code);
   assert.equal(startFailure({ code: "quota" }), "quota");
   assert.equal(startFailure({ code: "auth" }), "block", "any other error Blocks at once");
+  // Its Block's cause: the vendor's plan quota after the wait is external (provider-quota); any other failed start is Factory's.
+  const { failedStartCause } = await import("../scripts/launch.mjs");
+  assert.equal(failedStartCause(startFailure({ code: "quota" })), "provider-quota");
+  assert.equal(failedStartCause(startFailure({ code: "auth" })), "factory");
   assert.deepEqual([1, 2, 3, 4, 5, 6, 9].map(startBackoffMs), [2, 4, 8, 16, 30, 30, 30].map((m) => m * min));
   // An hour-long outage: eight transient failures in the stint, no Block, the next try 30 minutes after the last.
   const outage = { state: "failed", launches: [1, 3, 7, 15, 31, 61, 91, 121].map((m) => fail(m, "unavailable")) };

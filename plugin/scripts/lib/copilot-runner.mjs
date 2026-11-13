@@ -28,7 +28,6 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { spawnSync } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync, lstatSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -367,17 +366,27 @@ export function packageManagerOf(clone) {
 const PM_PACKAGES = { pnpm: ["corepack", "pnpm", "@pnpm/exe"], yarn: ["corepack", "yarn", "@yarnpkg/cli-dist"] };
 
 /**
+ * Where a version manager keeps the package manager its shim runs, relative to its data directory (the shim directory's
+ * parent: mise's ~/.local/share/mise, asdf's ~/.asdf, Volta's ~/.volta), for a version: mise's and asdf's installs (mise's
+ * npm backend under npm-<name>), Volta's tool image.
+ */
+const MANAGED = (name, v) => [`installs/${name}/${v}/bin/${name}`, `installs/${name}/${v}/${name}`, `installs/npm-${name}/${v}/bin/${name}`, `tools/image/${name}/${v}/bin/${name}`];
+
+/**
  * Local mode on Linux: the repository's package manager (packageManagerOf) for every harness's commands (#137). Claude
  * Code's and Copilot's sandboxes show nothing of the home but what their settings name, and corepack, pnpm's standalone
- * install and a version manager all keep it there. The first `name` on the stage's PATH by its real path (a version
- * manager's shim, whose real path is the manager, asked which one it runs for the clone: `<manager> which <name>`).
- * Returns {name, real, dirs}, or {name, real: null, dirs: []} when none is found (the probe then Blocks), or null with
- * no such package manager:
+ * install and a version manager all keep it there. The first `name` on the stage's PATH by its real path. A version
+ * manager's shim (whose real path is the manager) is resolved by the manager's install layout (MANAGED) and the version
+ * `packageManager` pins, never by running anything: a version manager reads the repository's own configuration
+ * (.mise.toml, .tool-versions, package.json), which can run commands, so Factory runs no tool with the clone in reach.
+ * Returns {name, real, dirs}, or {name, real: null, dirs: []} when none is found that way (the probe then Blocks), or
+ * null with no such package manager:
  * - `real`: what the stage's `toolbin/<name>` links to, first on each command's PATH (local.mjs stageEnv);
- * - `dirs`, read-only in commands' reach: the npm package it belongs to (corepack, pnpm), else the executable alone;
- *   none where that is `/`, the home or above it, in or above a credential store or `off` (what a sandbox may write).
+ * - `dirs`, read-only in commands' reach: a manager's install directory of that version, else the npm package it belongs
+ *   to (corepack, pnpm), else the executable alone; none where that is `/`, the home or above it, in or above a
+ *   credential store or `off` (what a sandbox may write).
  */
-export function localPackageManager({ clone, path = "", off = [], home = homedir(), which = (bin, name) => spawnSync(bin, ["which", name], { cwd: clone, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] }) } = {}) {
+export function localPackageManager({ clone, path = "", off = [], home = homedir() } = {}) {
   const name = clone ? packageManagerOf(clone) : null;
   if (!name) return null;
   const real = (f) => {
@@ -400,11 +409,20 @@ export function localPackageManager({ clone, path = "", off = [], home = homedir
     .map((d) => join(d, name))
     .find(exe);
   let target = first ? real(first) : null;
-  // A version manager's shim (mise, asdf, Volta): its real path is the manager, which names the one it runs here.
+  let managedDir = null;
+  // A version manager's shim: its real path is the manager. Its install of the pinned version, by the manager's layout.
   if (target && !/^(pnpm|yarn)(\.c?js)?$/.test(basename(target)) && !/\.c?js$/.test(target)) {
-    const r = which(target, name);
-    const named = r?.status === 0 ? String(r.stdout).trim().split("\n").at(-1) : "";
-    target = named.startsWith("/") && exe(named) ? real(named) : null;
+    let version = "";
+    try {
+      version = /^(?:pnpm|yarn)@(\d+\.\d+\.\d+[^+\s]*)/.exec(String(JSON.parse(readFileSync(join(clone, "package.json"), "utf8")).packageManager || ""))?.[1] || "";
+    } catch {
+      // no version pinned: none found
+    }
+    const data = dirname(dirname(first));
+    const found = version && !version.includes("/") ? MANAGED(name, version).find((p) => exe(join(data, p))) : null;
+    target = found ? real(join(data, found)) : null;
+    // That version's own install directory (its executable's files beside it, as pnpm's dist/), nothing else of the manager's.
+    managedDir = found ? real(join(data, found.split("/").slice(0, found.startsWith("tools/") ? 4 : 3).join("/"))) : null;
   }
   if (!target) return { name, real: null, dirs: [] };
   // The npm package the command belongs to, by its package.json, up to the home.
@@ -418,7 +436,7 @@ export function localPackageManager({ clone, path = "", off = [], home = homedir
       // no package.json here: one level up
     }
   }
-  const dir = root || target;
+  const dir = managedDir && within(target, managedDir) ? managedDir : root || target;
   const fenced = [...off, ...credentialPaths(home)].filter((x) => x && x.startsWith("/"));
   const safe = dir !== "/" && !within(home, dir) && !fenced.some((x) => within(dir, x) || within(x, dir));
   return { name, real: target, dirs: safe ? [dir] : [] };

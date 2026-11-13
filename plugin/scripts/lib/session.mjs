@@ -795,7 +795,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     lastWrite = Date.now();
     const wrote = await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).then(
       () => true,
-      (e) => log(`progress: ${e.message.slice(0, 120)}`),
+      (e) => {
+        log(`progress: ${e.message.slice(0, 120)}`);
+        return false;
+      },
     );
     // Only a line that landed says what was counted: the session totals it counted are recorded after it, never before.
     if (wrote && counted) live.commit?.();

@@ -29,6 +29,11 @@ async function fakeGitHub() {
       if (req.method === "GET" && /\/user$/.test(req.url)) return res.end(JSON.stringify({ login: "me", type: "User" }));
       if ((req.method === "POST" || req.method === "PATCH") && /\/comments/.test(req.url)) {
         const text = JSON.parse(body || "{}").body || "";
+        // A write that asks for it fails, as GitHub's 502 does: the comment keeps what landed before.
+        if (text.includes("FAIL-THIS")) {
+          res.statusCode = 502;
+          return res.end('{"message":"bad gateway"}');
+        }
         if (/^<!-- factory:7:progress:/.test(text)) progress.push(text);
       }
       res.end(JSON.stringify({ id: 1, user: { login: "me", type: "User" }, body: "" }));
@@ -131,7 +136,8 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
  * - end: the stage's end as worker.mjs makes it (stageSpendLine, the final write) and its saved session and result.json;
  * - after: a phase line after the pass, then killed;
  * - window: killed as the pass ends, before any write shows it;
- * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session.
+ * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session;
+ * - failed: a phase line that lands, a second pass, a phase line that fails to land, then killed.
  * Returns every stage's last spend line.
  */
 async function stages(plan) {
@@ -159,7 +165,8 @@ async function stages(plan) {
     const resume = (await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id;
     delete process.env.FACTORY_LOCAL;
     await progress("harness");
-    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" ? "1" : "0" }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" ? "1" : "0" }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const run = pass();
     if (how === "mid") {
       const until = Date.now() + 10_000;
       while (!((await stageSpendSoFar()).usd > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
@@ -168,6 +175,12 @@ async function stages(plan) {
     }
     const rec = await run;
     if (how === "window") process.exit(137);
+    if (how === "failed") {
+      await progress("validation");
+      await pass();
+      await progress("FAIL-THIS write");
+      process.exit(137);
+    }
     if (how === "after") {
       await progress("validation");
       process.exit(137);
@@ -204,15 +217,16 @@ async function stages(plan) {
 const PASS = (await import("../scripts/lib/usage.mjs")).priceCodex("gpt-6.1-sol", { input: 200000, output: 5000, cached: 100000, written: 0 });
 const near = (a, b) => Math.abs(a - b) < 1e-6;
 
-for (const [how, killed, own] of [
-  ["after", "after a finished pass and a write that shows it", PASS],
-  ["window", "as its pass ends, before a write shows it", 0],
-  ["mid", "in the middle of a pass that then runs on", PASS / 2],
+for (const [how, killed, own, passes] of [
+  ["after", "after a finished pass and a write that shows it", PASS, 3],
+  ["window", "as its pass ends, before a write shows it", 0, 3],
+  ["mid", "in the middle of a pass that then runs on", PASS / 2, 3],
+  ["failed", "after a second pass whose write failed to land", PASS, 4],
 ]) {
   test(`a stage killed ${killed}, then resumed: the stages' lines sum to the spend, each pass counted once`, async () => {
     const lines = await stages(["end", how, "end"]);
     const sum = lines.reduce((s, l) => s + l.usd, 0);
-    assert.ok(near(sum, 3 * PASS), `${JSON.stringify(lines)} sum to ${sum}, not ${3 * PASS}`);
+    assert.ok(near(sum, passes * PASS), `${JSON.stringify(lines)} sum to ${sum}, not ${passes * PASS}`);
     // The killed stage's line holds what it had written; the resumed stage counts the rest.
     assert.ok(near(lines[1].usd, own) && lines[1].usdLowerBound === true, JSON.stringify(lines));
     assert.ok(near(lines[0].usd, PASS) && !lines[0].usdLowerBound && !lines[2].usdLowerBound, JSON.stringify(lines));
@@ -334,4 +348,37 @@ test("a usage record whose dollars include a relayed worker key says so in its b
   const usage = writeUsage(dir, { harness: "claude", model: "m", records, passes: 1, exit: "delivered", reason: "", credentialBasis: "x" });
   assert.equal(usage.usd, 10.906043);
   assert.match(usage.basis, /^harness-reported: total_cost_usd, modelUsage; plus 2\.147737 USD through the relayed worker key \(workerKeyUsd\), included in usd$/);
+});
+
+test("a Claude session resumed after a killed stage starts from the lower of the recorded total and Claude's own", async () => {
+  const root = mkdtempSync(join(tmpdir(), "spend-claude-"));
+  const ws = join(root, "ws");
+  const id = "0b0c0d0e-0000-4000-8000-000000000001";
+  const rel = join("-c", `${id}.jsonl`);
+  const cost = (usd) => `${JSON.stringify({ type: "cost-state", totalCostUSD: usd })}\n`;
+  // A ended with its session at $1.00; B, killed, recorded $1.80 from its live reading; Claude's own live total is $1.50.
+  mkdirSync(join(ws, "usage-work-a", "transcript", "-c"), { recursive: true });
+  writeFileSync(join(ws, "usage-work-a", "transcript", rel), cost(1));
+  writeFileSync(join(ws, "usage-work-a", "result.json"), JSON.stringify({ session: { harness: "claude", id, files: [rel], checkout: "/c" } }));
+  await new Promise((r) => setTimeout(r, 20));
+  mkdirSync(join(ws, "usage-work-b"), { recursive: true });
+  writeFileSync(join(ws, "usage-work-b", "session-totals.json"), JSON.stringify({ harness: "claude", totals: { [id]: { usd: 1.8 } } }));
+  mkdirSync(join(root, "config", "projects", "-c"), { recursive: true });
+  writeFileSync(join(root, "config", "projects", rel), cost(1) + cost(1.5));
+  mkdirSync(join(root, "bin"));
+  // C's resumed pass: Claude reports the session's running total, $2.50.
+  writeFileSync(join(root, "bin", "claude"), `#!${process.execPath}\nconsole.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: ${JSON.stringify(id)}, total_cost_usd: 2.5, result: "ok" }));\n`, { mode: 0o755 });
+  const script = `
+    import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};
+    process.env.FACTORY_LOCAL = "1";
+    const r = await restoreTranscript({ checkout: "/c", workDir: ${JSON.stringify(ws)}, harness: "claude" });
+    delete process.env.FACTORY_LOCAL;
+    const rec = await runHarness({ harness: "claude", model: "claude-sonnet-4-5", prompt: "p", maxUsd: 0, resume: r.id, cwd: ${JSON.stringify(root)}, env: { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, timeoutMs: 60_000, label: "work-1" });
+    console.log(JSON.stringify({ resumed: r.id, usd: rec.usd }));
+  `;
+  const s = stageProcess(script, { CLAUDE_CONFIG_DIR: join(root, "config"), PATH: `${join(root, "bin")}:${process.env.PATH}` });
+  assert.equal(await s.exited, 0, s.err());
+  // $2.50 less $1.50: B's $0.30 beyond Claude's own total is not taken off C's pass.
+  assert.deepEqual(JSON.parse(s.out().trim().split("\n").at(-1)), { resumed: id, usd: 1 });
 });

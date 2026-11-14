@@ -522,7 +522,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
  * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
  * `writers`: the collaborators read, or a status to fail it with.
  */
-async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {} }) {
+async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2 }) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -550,7 +550,7 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
     return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
   } finally {
     globalThis.fetch = realFetch;
@@ -878,4 +878,30 @@ test("serve --all keeps a sandbox-route Objective whose stage holds a live lease
   assert.ok(all.r.deadlines.some((d) => d.issue === 62 && d.kind === "lease"), "looked at again when its lease ends");
   assert.equal(all.markers(62), null, "no record written for it here");
   assert.deepEqual(all.r.relaunch, []);
+});
+
+test("max_concurrent caps the repository as a whole: every route's Running Objectives count, each route picks only its own (#240)", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const obj = (number, ...labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
+  // #1 the Action's, Running five minutes (its job inside the start grace); #2 a local loop's, paused (its machine away an
+  // hour); #3 a local loop's, alive. #4 the Action's and #5 a local loop's, Queued. #6 a draft still labelled Running.
+  const open = [obj(1, "factory:running"), obj(2, "factory:local", "factory:running"), obj(3, "factory:local", "factory:running"), obj(4), obj(5, "factory:local"), obj(6, "factory:running", "factory:draft")];
+  const claim = (n, at) => ({ id: 70 + n, user: { login: "maintainer", type: "User" }, body: `<!-- factory:${n}:local -->\n${claimBody(`box-a:${n}:abc:m:b`, new Date(at))}`, updated_at: new Date(at).toISOString() });
+  const comments = (n) => (n === 2 ? [claim(2, Date.now() - HOUR)] : n === 3 ? [claim(3, Date.now() - 30_000)] : []);
+  const timeline = (n) => labelled("factory:running", ago(n === 1 ? 5 * 60_000 : 2 * HOUR));
+  const tick = (env, maxConcurrent) => localTick({ open, timeline, comments, env, maxConcurrent });
+
+  // At the cap (three Running across both routes, the paused one among them; the draft not counted): neither route picks.
+  for (const env of [{}, { FACTORY_LOCAL: "1" }, { FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }]) {
+    const { r } = await tick(env, 3);
+    assert.deepEqual(r.ready, [], `${JSON.stringify(env)}: nothing starts at the cap`);
+    assert.equal(r.running, 3);
+    assert.equal(r.reason, "max_concurrent reached");
+    assert.deepEqual(r.vanished, [], "no Running one is Blocked");
+    assert.deepEqual(r.paused, [2], "the paused one keeps its place");
+  }
+  // One slot free: each route takes it with its own Objective; serve --all routes both and takes the first.
+  assert.deepEqual((await tick({}, 4)).r.ready, [4]);
+  assert.deepEqual((await tick({ FACTORY_LOCAL: "1" }, 4)).r.ready, [5]);
+  assert.deepEqual((await tick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, 4)).r.ready, [4]);
 });

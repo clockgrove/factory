@@ -666,7 +666,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   watch.mark("review");
-  // Running count comes from every objective, not only the wanted ones.
+  // max_concurrent caps the repository as a whole (LOCAL.md): the Running count is every route's Objectives (a local
+  // loop's paused ones too, which stay Running), never only the ones this route picks from. Drafts are not in `issues`.
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
   const { spentToday, records, usageError } = await spend;
@@ -712,6 +713,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const picked = selectReady({
     deferred,
     issues: wanted,
+    running,
     held,
     statuses,
     openIssues: openNumbers,

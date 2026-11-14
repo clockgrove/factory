@@ -554,9 +554,11 @@ export const doneRecord = (labels) => `Factory: this Objective is closed, so its
  *  held:        {number: reason} for Queued issues the caller holds back for now (a requeue's backoff)
  *  maxConcurrent, dailyUsd, spentToday
  *  deferred:    {number: reason} for issues that wait before their next start (a vendor quota's backoff)
+ *  running:     the repository's Running Objectives, every route's (max_concurrent caps the repository as a whole);
+ *               when absent, the Running ones among `issues`
  * Returns {ready: [numbers], skipped: [{number, reason}], running, reason}
  */
-export function selectReady({ issues, statuses = {}, openIssues = new Set(), held = {}, maxConcurrent, dailyUsd, spentToday = 0, deferred = {} }) {
+export function selectReady({ issues, statuses = {}, openIssues = new Set(), held = {}, maxConcurrent, dailyUsd, spentToday = 0, deferred = {}, running: repoRunning = null }) {
   const skipped = [];
   let running = 0;
   const candidates = [];
@@ -589,6 +591,7 @@ export function selectReady({ issues, statuses = {}, openIssues = new Set(), hel
     candidates.push(issue);
   }
   candidates.sort((a, b) => priorityOf(a) - priorityOf(b) || a.number - b.number);
+  if (Number.isFinite(repoRunning)) running = repoRunning;
 
   if (dailyUsd !== undefined && dailyUsd !== null && Number(dailyUsd) > 0 && spentToday >= Number(dailyUsd)) {
     for (const c of candidates) skipped.push({ number: c.number, reason: `daily_usd reached ($${spentToday.toFixed(2)} of $${Number(dailyUsd)})` });

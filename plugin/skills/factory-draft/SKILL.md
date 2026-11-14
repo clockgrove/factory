@@ -13,7 +13,7 @@ Run `gh issue view <issue> --repo OWNER/NAME --json number,title,body,state,labe
 
 - Closed: say so and stop.
 - `factory:draft` on it: Factory does not run it; edit it freely.
-- `factory:objective` without `factory:draft`: it is started. An edit before its first plan is used by the run; after it, the next stage Blocks the Objective, and re-applying `factory:objective` plans again from the new text (docs/USAGE.md, Edit an Objective). Say so before going on, and offer to make it a draft again first: `gh issue edit <issue> --repo OWNER/NAME --add-label factory:draft`, which stops a running stage the way a stop does.
+- `factory:objective` without `factory:draft`: it is started. An edit before its first plan is used by the run; after it, the next stage Blocks the Objective, and re-applying `factory:objective` plans again from the new text (docs/USAGE.md, Edit an Objective). Say so before going on, and offer to make it a draft again first: `gh issue edit <issue> --repo OWNER/NAME --add-label factory:draft`, which stops a running stage the way a stop does. When `gh` says the label is not found, create it as the factory-file skill does, then apply it.
 
 ## Refine it
 

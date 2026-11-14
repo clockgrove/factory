@@ -72,6 +72,9 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
   return { spentToday: usageError ? Number.POSITIVE_INFINITY : sumSpend(records.filter((r) => !r?.spendInProgress)) + localUsd, records, usageError };
 }
 
+/** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
@@ -115,11 +118,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i));
   if (inputs.issue && drafts.includes(inputs.issue)) {
     log(`issue #${inputs.issue} is a draft (${DRAFT_LABEL}); nothing to dispatch`);
-    return { ready: [], skipped: draftSkips, running: 0, spentToday: 0, reason: "a draft" };
+    return { ...nothingDispatched(), skipped: draftSkips, reason: "a draft" };
   }
   if (inputs.issue && !wanted.length) {
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
-    return { ready: [], skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], running: 0, spentToday: 0, reason: "not an objective" };
+    return { ...nothingDispatched(), skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], reason: "not an objective" };
   }
 
   // Today's spend is read beside everything below: it decides only the picks at the end. It never rejects.
@@ -974,6 +977,42 @@ export async function closedIssueTicks(eventName, payload, { objectiveLabel, obj
 /** The deadline kinds an event or a local loop owns: listed, never slept to on any repository. */
 const WAKE_OWNED = new Set(["launch-grace", "review-grace", "checks-grace", "answer-grace", "local-pause"]);
 
+/** The tick's summary (JSON with `json`, else log lines), as main() reports it; returns the summary. */
+export function reportDispatch(result, inputs, { json = false } = {}) {
+  const summary = {
+    ready: result.ready,
+    running: result.running,
+    spent_today_usd: Math.round(result.spentToday * 100) / 100,
+    daily_usd: inputs.dailyUsd,
+    max_concurrent: inputs.maxConcurrent,
+    skipped: result.skipped,
+    blocking_source: result.relationSource,
+    reset: result.reset,
+    done: result.done,
+    stopped: result.stopped,
+    restarted: result.restarted,
+    vanished: result.vanished,
+    paused: result.paused,
+    sent_back_to_rebase: result.sentBack,
+    next_parts: result.nextParts,
+    merged: result.merged,
+    branches_updated: result.updated,
+    merge_queue: result.queue,
+    project: result.project,
+  };
+  if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+  else {
+    log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
+    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
+    for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
+    for (const n of result.paused || []) log(`  #${n}: paused; the local machine holding it is away, and its serve resumes it`);
+    for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
+    for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
+    if (result.ms) log(`dispatch timing: ${timingLine(result.ms)}`);
+  }
+  return summary;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = resolveInputs({ args });
@@ -1005,37 +1044,7 @@ async function main() {
   }
   const failedLaunch = eventName === "workflow_dispatch" && /^[1-9]\d{0,9}$/.test(String(payload?.inputs?.failed_launch ?? "")) ? Number(payload.inputs.failed_launch) : null;
   const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch });
-  const summary = {
-    ready: result.ready,
-    running: result.running,
-    spent_today_usd: Math.round(result.spentToday * 100) / 100,
-    daily_usd: inputs.dailyUsd,
-    max_concurrent: inputs.maxConcurrent,
-    skipped: result.skipped,
-    blocking_source: result.relationSource,
-    reset: result.reset,
-    done: result.done,
-    stopped: result.stopped,
-    restarted: result.restarted,
-    vanished: result.vanished,
-    paused: result.paused,
-    sent_back_to_rebase: result.sentBack,
-    next_parts: result.nextParts,
-    merged: result.merged,
-    branches_updated: result.updated,
-    merge_queue: result.queue,
-    project: result.project,
-  };
-  if (args.json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
-  else {
-    log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
-    for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
-    for (const n of result.paused || []) log(`  #${n}: paused; the local machine holding it is away, and its serve resumes it`);
-    for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
-    for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
-    if (result.ms) log(`dispatch timing: ${timingLine(result.ms)}`);
-  }
+  const summary = reportDispatch(result, inputs, { json: !!args.json });
   // With a cloud sandbox the matrix also carries the sweep's re-launches; the launcher decides each one's stage.
   const named = [...result.ready, ...(result.relaunch || [])];
   for (const n of result.relaunch || []) log(`  #${n}: its launch was lost; launching again`);

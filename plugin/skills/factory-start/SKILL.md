@@ -18,12 +18,13 @@ Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels,bo
 
 ## Check trust
 
-Factory acts on an issue only when its author, and its last editor once the body was edited, can push to the repository or is a maintainer the workflow names (`FACTORY_NOTIFY` or `FACTORY_MAINTAINERS` in `.github/workflows/factory.yml`, as `login#id`). Otherwise the run Blocks before any model reads the text, so check before starting it:
+Factory acts on an issue only when its author, and its last editor once the body was edited, is a person who can push to the repository or a maintainer the workflow names (`FACTORY_NOTIFY` or `FACTORY_MAINTAINERS` in `.github/workflows/factory.yml`, as `login#id`). Otherwise the run Blocks before any model reads the text, so check first:
 
-1. `gh api graphql -f query='query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){author{login} editor{login}}}}' -F o=OWNER -F n=NAME -F i=<issue>`. No `editor`: the body was never edited, and only the author counts.
-2. For each login: `gh api repos/OWNER/NAME/collaborators/<login>/permission --jq .permission` prints `admin`, `maintain` or `write`, or the login is one of the workflow's maintainers.
+1. `gh api graphql -f query='query($o:String!,$n:String!,$i:Int!){repository(owner:$o,name:$n){issue(number:$i){lastEditedAt author{__typename login} editor{__typename login}}}}' -f o=OWNER -f n=NAME -F i=<issue>`. The body was edited when `lastEditedAt` or `editor` is set; then the editor counts too, and an editor that reads as null (a deleted account) fails.
+2. Each one counted must have `__typename` `User`: an App or bot never vouches.
+3. For each login, `gh api repos/OWNER/NAME/collaborators/<login>/permission --jq '.permission + " " + .role_name'` must show `admin`, `maintain` or `write`, or the login is one of the workflow's maintainers.
 
-When either fails, or a login cannot be read, do not start it. Say who it is and why: an author who cannot push means a person who can push files it again as a new issue; a last editor who cannot push means a person who can push reads the body and saves it, which makes them its last editor.
+When a check fails, or a login cannot be read, do not start it. Say who and why: an author who fails means a person who can push files it again as a new issue; a last editor who fails means a person who can push reads the body and saves it, becoming its last editor.
 
 ## Ask
 
@@ -31,4 +32,4 @@ Show the number, title and labels, the people the trust check read, and what sta
 
 ## Start it
 
-On a yes, when the issue carries `factory:objective` too, first run `gh issue edit <issue> --repo OWNER/NAME --remove-label factory:objective`, so the start applies the label afresh (its time is when the run's clock starts, and an edit made while it was a draft is planned from). Then run `gh issue edit <issue> --repo OWNER/NAME --remove-label factory:draft --add-label factory:objective`. Say it is started and print its URL.
+On a yes, when the issue carries `factory:objective` too, first run `gh issue edit <issue> --repo OWNER/NAME --remove-label factory:objective`, so the start applies the label afresh. Then run `gh issue edit <issue> --repo OWNER/NAME --remove-label factory:draft --add-label factory:objective`; for an issue without `factory:draft`, drop `--remove-label factory:draft`, since `gh` refuses to remove a label the repository does not have. Say it is started and print its URL.

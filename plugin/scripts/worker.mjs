@@ -17,7 +17,7 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, objectiveLabeledAt, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
@@ -26,7 +26,7 @@ import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, con
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
-import { authorGate, planGate } from "./lib/objective-trust.mjs";
+import { authorGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -240,9 +240,10 @@ async function main() {
   watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
-  // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
-  // landing between the two reads then count as after this stage's plan, never as before it.
-  const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, token);
+  // When the Objective was last started (its label applied, or its draft label taken off: objective-trust.mjs startedAt),
+  // read before the text (planGate): an edit and a start landing between the two reads then count as after this stage's
+  // plan, never as before it.
+  const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, token);
   // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the body read with its author
   // and last editor, and Blocks before any harness when either cannot push and is not a pinned maintainer.
   const trusted = await authorGate({ repo, issue, issueData, notify: inputs.notify, opts: token, apply: applyExit });

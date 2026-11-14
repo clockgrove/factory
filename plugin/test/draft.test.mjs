@@ -28,7 +28,7 @@ test("stopCause: a draft never runs, its Objective label on or not, and a draft 
   assert.equal(stopCause({ state: "open", labels: [OBJ, DRAFT_LABEL] }, OBJ), "draft", "labels as names");
   assert.equal(stopCause(issue([OBJ]), OBJ), null, "started: runs");
   assert.ok(isDraft(issue([DRAFT_LABEL])) && !isDraft(issue([OBJ])));
-  assert.equal(stopText("draft"), "`factory:draft` is on it (a draft never runs)");
+  assert.equal(stopText("draft"), "`factory:draft` was applied", "no brackets inside the exit line's own: exit: stopped (`factory:draft` was applied)");
 });
 
 test("a running stage stops when its Objective is made a draft", { timeout: 5000 }, async () => {
@@ -251,4 +251,49 @@ test("scorecard: a draft's clock starts when it is started, whatever the order o
   // No draft label ever: the clock is the first label, as before; a later relabel before Running is still input.
   const plain = started([ev("labeled", OBJ, "2031-03-02T01:00:00Z"), ev("unlabeled", OBJ, "2031-03-02T01:02:00Z"), ev("labeled", OBJ, "2031-03-02T01:03:00Z")]);
   assert.equal(labelTime(plain.issue, plain.issueTimeline), "2031-03-02T01:00:00Z");
+});
+
+test("a draft edited after its plan and started by taking its draft label off is planned again, not Blocked as edited", async () => {
+  const { planGate } = await import("../scripts/lib/objective-trust.mjs");
+  // The Objective label at T0 and a plan from that text; made a draft at T1, edited at T2, started at T3 by taking the
+  // draft label off (factory:objective stayed on).
+  const T0 = "2031-03-02T01:00:00Z";
+  const timeline = [
+    { event: "labeled", label: { name: OBJ }, created_at: T0 },
+    { event: "labeled", label: { name: "factory:running" }, created_at: "2031-03-02T01:01:00Z" },
+    { event: "labeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:10:00Z" },
+    { event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:30:00Z" },
+  ];
+  await withApi({}, async () => {
+    setSelf("factory-app[bot]");
+    const api = fakeApi({ timeline: () => timeline });
+    const blocks = [];
+    try {
+      const r = await planGate({ repo: REPO, issue: 7, sha: "new-text", editedAt: "2031-03-02T01:20:00Z", work: true, objectiveLabel: OBJ, opts: { token: "t" }, apply: async (...a) => blocks.push(a), stage: "work", read: { planComment: async () => ({ record: { sha256: "old-text", label: T0 }, text: "## Plan", own: true, at: "2031-03-02T01:05:00Z" }) } });
+      assert.equal(r.state, "replan");
+      assert.equal(r.record.label, "2031-03-02T01:30:00Z", "the plan's record carries the start's time");
+      assert.deepEqual(blocks, []);
+    } finally {
+      api.restore();
+      setSelf(null);
+    }
+  });
+});
+
+test("the dispatcher's report of a tick named for a draft, or for an issue that is no Objective, lists nothing and does not throw", async () => {
+  const { dispatch, reportDispatch } = await import("../scripts/dispatch.mjs");
+  for (const [labels, reason] of [[[OBJ, DRAFT_LABEL], "a draft"], [["bug"], "not an objective"]]) {
+    await withApi({}, async () => {
+      const api = fakeApi({ issues: (label) => (label === OBJ && labels.includes(OBJ) ? [issue(labels)] : []) });
+      try {
+        const inputs = { ...INPUTS, issue: 7 };
+        const r = await dispatch(inputs, { token: "t" });
+        assert.equal(r.reason, reason);
+        const summary = reportDispatch(r, inputs);
+        assert.deepEqual([summary.ready, summary.vanished, summary.paused, summary.sent_back_to_rebase], [[], [], [], []]);
+      } finally {
+        api.restore();
+      }
+    });
+  }
 });

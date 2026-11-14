@@ -82,7 +82,7 @@ export function objectiveReader({ read, list }) {
 
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
 export const stopText = (cause, label = "factory:objective") =>
-  cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : cause === "draft" ? `\`${DRAFT_LABEL}\` is on it (a draft never runs)` : `\`${label}\` was removed`;
+  cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : cause === "draft" ? `\`${DRAFT_LABEL}\` was applied` : `\`${label}\` was removed`;
 
 // This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, who ends it
 // (`exit`), and whether its own exit is under way (`committed`: an exit being applied, or a merge), which a later stop

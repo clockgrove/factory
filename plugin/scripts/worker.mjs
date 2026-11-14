@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, remov
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, outageExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -96,7 +96,15 @@ async function main() {
   // read it from a file, so a six-hour harness session never holds a stale token.
   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
   const factoryTree = checkout;
-  const access = await openAccess({ inputs, repo, args, given: factoryTree });
+  let access;
+  try {
+    access = await openAccess({ inputs, repo, args, given: factoryTree });
+  } catch (e) {
+    // Its token's mint could not reach GitHub (lib/app-token.mjs): the outage's end, before any other.
+    if (!unreachable(e)) throw e;
+    await earlyOutageEnd(e, { local, usageDir, harness: inputs.harness, model: inputs.model });
+    return;
+  }
   const { keeper } = access;
   checkout = access.checkout;
   // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).

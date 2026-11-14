@@ -15,7 +15,7 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
-import { githubOrigin, networkBack, passCutOff, waitingOutages } from "./network.mjs";
+import { OUTAGE, githubOrigin, networkBack, passCutOff, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -850,17 +850,23 @@ export async function runHarness(opts) {
   let rec = await runResumable(opts);
   // A pass this machine's network cut off (network.mjs passCutOff) is no death and no answer: once the network is back,
   // the same pass runs again, resuming its session when it has one (a reviewer's runs from its own prompt), on what is
-  // left of its budget and wall clock. The wait throws NetworkDown past the stage's limit: the stage then ends on it.
+  // left of its budget and wall clock, at most OUTAGE.passReruns times. The wait throws NetworkDown past the stage's
+  // limit: the stage then ends on it.
   for (;;) {
+    if (lost.length >= OUTAGE.passReruns) break;
     const cut = await outageCut(rec, opts);
     if (!cut) break;
-    lost.push(rec);
     if (cut.ongoing) await networkBack(cut.origin, cut.code);
-    const spent = lost.reduce((s, r) => s + (Number.isFinite(r.usd) ? Math.max(0, r.usd) : 0), 0);
+    const spent = [...lost, rec].reduce((s, r) => s + (Number.isFinite(r.usd) ? Math.max(0, r.usd) : 0), 0);
     const maxUsd = opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd;
     const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs;
-    if (opts.maxUsd > 0 && maxUsd <= 0) return joinLost(lost, { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" });
-    if (Number.isFinite(timeoutMs) && timeoutMs <= 0) return joinLost(lost, { ...rec, ok: false, timedOut: true, error: "wall clock reached" });
+    // Nothing left to run it again with: this run is the pass's last, marked with the cap it reached.
+    const capped = opts.maxUsd > 0 && maxUsd <= 0 ? { budgetExceeded: true, error: "dollar cap reached" } : Number.isFinite(timeoutMs) && timeoutMs <= 0 ? { timedOut: true, error: "wall clock reached" } : null;
+    if (capped) {
+      rec = { ...rec, ok: false, ...capped };
+      break;
+    }
+    lost.push(rec);
     const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
     log(`${opts.label || "run"}: the pass was cut off by this machine's network (${cut.code} reaching ${new URL(cut.origin).host}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
     rec = await runResumable({ ...opts, maxUsd, timeoutMs, ...(session ? { resume: session, prompt: LOST_PASS_PROMPT } : {}) });

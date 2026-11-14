@@ -23,7 +23,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, minutesText, probe, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
@@ -1142,14 +1142,20 @@ export class Local {
     for (const issue of issues) {
       if (running.has(issue.number) || out.includes(issue.number)) continue;
       if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
-      // A stopped Objective (its label removed: stop.mjs) is not resumed; the dispatcher's stopped pass tidies it.
-      if (stopCause(issue, this.objectiveLabel())) continue;
+      // A stopped Objective (its label removed: stop.mjs) is not resumed; the dispatcher's stopped pass tidies it. Its
+      // outage pause, if it had one, is over with it.
+      if (stopCause(issue, this.objectiveLabel())) {
+        this.offline?.delete(issue.number);
+        continue;
+      }
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
       if (!c || !sameMachineHolder(c.holder)) continue;
-      // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads).
+      // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
+      // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
+      // answers would otherwise leave it Running with no notice).
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
-        if (!off.origin || (await probe(off.origin)) === null) out.push(issue.number);
+        if (!off.origin || (this.clock ?? Date.now)() - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
@@ -1658,6 +1664,7 @@ export class Local {
       for (const n of result.restarted || []) {
         this.startFailures?.delete(n);
         this.lapsed?.delete(n);
+        this.offline?.delete(n);
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));

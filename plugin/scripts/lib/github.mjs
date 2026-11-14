@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { UNREACHABLE, causeCode, networkBack, outageOn, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { UNREACHABLE, causeCode, downFor, networkBack, outageOn, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -199,7 +199,8 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
       e = err;
     }
     if (origin && e?.transport === true && e.unsent === true && e.status === 0) {
-      if (stoppedWaiting()) throw e;
+      // Stopped waiting: at once, as the outage this process gave up on (its host and first loss), when it was this host's.
+      if (stoppedWaiting()) throw downFor(origin) ?? e;
       if (waitingOutages()) {
         await networkBack(origin, e.code, { deadlineAt });
         end = bound();

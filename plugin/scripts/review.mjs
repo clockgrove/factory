@@ -52,6 +52,7 @@ import {
   liveActivity,
   maskFile,
   mirrorDiff,
+  earlyOutageEnd,
   outageExit,
   restoreTranscript,
   saveTranscript,
@@ -234,31 +235,46 @@ async function main() {
   };
 
   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
+  // These first steps (the token, the writers, the PR, the local loop's hold) end on an outage the same way the stage
+  // does (session.mjs earlyOutageEnd): paused locally, an `outage` Block elsewhere once the issue is known.
   const factoryTree = checkout;
-  const access = await openAccess({ inputs, repo, args, given: factoryTree });
-  const { keeper } = access;
-  checkout = access.checkout;
-  // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).
-  const token = { token: keeper.getter, notice: access.notice };
-  // No agent uid on this runner (no sudo, no systemd): the run Blocks before anything else.
-  const agentError = access.agentError || null;
-  await primeWriters(repo, token, { maintainers: inputs.maintainers });
+  let keeper;
+  let token = null;
+  let agentError = null;
+  let pr = null;
+  let issue = null;
+  let access;
+  try {
+    access = await openAccess({ inputs, repo, args, given: factoryTree });
+    keeper = access.keeper;
+    checkout = access.checkout;
+    // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).
+    token = { token: keeper.getter, notice: access.notice };
+    // No agent uid on this runner (no sudo, no systemd): the run Blocks before anything else.
+    agentError = access.agentError || null;
+    await primeWriters(repo, token, { maintainers: inputs.maintainers });
+    pr = await getPr(repo, inputs.pr, token);
+    const m = /^factory\/(\d+)$/.exec(pr.head?.ref || "");
+    if (!m) {
+      log(`PR #${pr.number} is not on a factory/<issue> branch; nothing to review`);
+      setOutput("exit", "skipped");
+      return;
+    }
+    issue = Number(m[1]);
+    if (await backend().trigger.stepsAside(repo, issue, token)) {
+      log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
+      setOutput("exit", "skipped");
+      setOutput("issue", "");
+      return;
+    }
+  } catch (e) {
+    if (!unreachable(e)) throw e;
+    const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
+    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) : null });
+    if (issue) setOutput("issue", String(issue));
+    return;
+  }
   const app = keeper.app;
-
-  let pr = await getPr(repo, inputs.pr, token);
-  const m = /^factory\/(\d+)$/.exec(pr.head?.ref || "");
-  if (!m) {
-    log(`PR #${pr.number} is not on a factory/<issue> branch; nothing to review`);
-    setOutput("exit", "skipped");
-    return;
-  }
-  const issue = Number(m[1]);
-  if (await backend().trigger.stepsAside(repo, issue, token)) {
-    log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
-    setOutput("exit", "skipped");
-    setOutput("issue", "");
-    return;
-  }
   const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(factoryTree, "..", `factory-usage-${issue}-review`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");

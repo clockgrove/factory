@@ -1,14 +1,18 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
 import { NetworkDown, OUTAGE, networkBack, passCutOff, resetNetwork, unreachable, waitOutages } from "../scripts/lib/network.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
 import { outageExit, crashed } from "../scripts/lib/session.mjs";
+import { parseUsage } from "../scripts/lib/usage.mjs";
 import { LOST_PASS_PROMPT, runHarness } from "../scripts/lib/harness.mjs";
 
 // #228: a request or a harness pass that cannot leave this machine waits for the network in place, one probe loop and
@@ -43,7 +47,7 @@ async function offline(answer, fn) {
   };
   const lines = [];
   const write = process.stdout.write;
-  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
   try {
     return await fn({ seen, lines, waits, now: () => t });
   } finally {
@@ -132,7 +136,8 @@ test("rest: past the stage's limit the wait ends with NetworkDown (offline, its 
       assert.match(netLines(lines).at(-1), /still unreachable after 15 min .*; no longer waiting/);
       // Past its limit the stage waits no more: what it still writes (its exit) is one try, failing at once.
       const before = seen.length;
-      await assert.rejects(rest("repos/o/r/issues/7/comments", { method: "POST", body: { body: "x" }, token: "t" }), (x) => x.unsent === true && !(x instanceof NetworkDown));
+      // ...as the outage it gave up on: its host and its first loss, whoever swallowed the wait's own error.
+      await assert.rejects(rest("repos/o/r/issues/7/comments", { method: "POST", body: { body: "x" }, token: "t" }), (x) => x instanceof NetworkDown && x.since === start && x.origin === "https://api.github.test");
       assert.equal(seen.length - before, 1, "no retries once the stage stopped waiting");
     },
   );
@@ -151,8 +156,8 @@ test("passCutOff: a failed pass counts as cut off when an outage was under way n
       down = false;
       await ep;
       const back = now();
-      assert.equal((await passCutOff(back - 60_000, back + 30_000, ["https://api.github.test"]))?.origin, "https://api.anthropic.test");
-      assert.equal(await passCutOff(back + 1, back + 30_000, ["https://api.github.test"]), null);
+      assert.equal((await passCutOff(back - 60_000, back + 30_000, ["https://api.anthropic.test", "https://api.github.test"]))?.origin, "https://api.anthropic.test");
+      assert.equal(await passCutOff(back + 1, back + 30_000, ["https://api.anthropic.test", "https://api.github.test"]), null);
     },
   );
 });
@@ -184,18 +189,22 @@ test("outageExit: locally the stage ends paused with the outage and writes nothi
   }
 });
 
-/** A fake codex: its first run loses its stream (a failed turn, exit 1), every later one completes; argv logged. */
-function fakeCodex() {
+const LOST_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}\n`;
+// A run that did a turn's work (its usage reported) before its stream was lost.
+const SPENT_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.completed","usage":{"input_tokens":16151,"cached_input_tokens":12288,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}\n{"type":"turn.started"}\n{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}\n`;
+
+/** A fake codex: its first `fail` runs print `lost` and exit 1, every later one completes; argv logged. */
+function fakeCodex({ fail = 1, lost = LOST_RUN } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "factory-codex-outage-"));
   const log = join(bin, "calls.jsonl");
-  writeFileSync(join(bin, "lost.jsonl"), `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}\n`);
+  writeFileSync(join(bin, "lost.jsonl"), lost);
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const prompt = fs.readFileSync(0, "utf8");
 const n = fs.existsSync(${JSON.stringify(log)}) ? fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length : 0;
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt }) + "\\n");
-if (n === 0) { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "lost.jsonl"))}, "utf8")); process.exit(1); }
+if (n < ${fail}) { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "lost.jsonl"))}, "utf8")); process.exit(1); }
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(fixtures, "codex-0.167-thread.jsonl"))}, "utf8"));
 `, { mode: 0o755 });
   const calls = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -291,4 +300,151 @@ test("the work and review stages wait outages out and end on one through outageE
   }
   const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
   assert.match(local.slice(local.indexOf("async serve(")), /^[\s\S]*?\n {4}waitOutages\(\);/, "serve: no bound");
+});
+
+// --- #228 review: the real stage processes, against a GitHub API on a port nothing listens on (ECONNREFUSED). ---
+
+/** A loopback port nothing listens on. */
+async function closedPort() {
+  const srv = createServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const { port } = srv.address();
+  await new Promise((r) => srv.close(r));
+  return port;
+}
+
+/**
+ * Run worker.mjs or review.mjs as its own process, local mode, against an unreachable API, with the stage's wait cut to
+ * 1.5 s (a preload sets OUTAGE, the one module instance the script loads). Returns {code, out, result}.
+ */
+async function stageAgainstNothing(script, args, extraEnv = {}) {
+  const root = mkdtempSync(join(tmpdir(), "outage-stage-"));
+  mkdirSync(join(root, "co"));
+  const pre = join(root, "pre.mjs");
+  writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "network.mjs")).href)};\nOUTAGE.stageWaitMs = 1500;\nOUTAGE.probeMs = [100];\n`);
+  const port = await closedPort();
+  const r = spawnSync(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: `http://127.0.0.1:${port}`, ...extraEnv },
+  });
+  const file = join(root, "u", "result.json");
+  return { code: r.status, out: `${r.stdout}${r.stderr}`, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, origin: `http://127.0.0.1:${port}` };
+}
+
+test("worker.mjs, run for real: a stage whose first reads swallow the outage still ends paused on it, naming its host and its first loss", async () => {
+  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { FACTORY_APP_TOKEN: "t" });
+  assert.equal(code, 0, out);
+  assert.equal(result?.exit, "paused", out);
+  const first = /network: \S+ is unreachable from this machine \(ECONNREFUSED\)/.exec(out);
+  assert.ok(first, out);
+  const lostAt = /still unreachable after .* \(since (\S+)\)/.exec(out)[1];
+  assert.deepEqual(result.outage, { host: new URL(origin).host, code: "ECONNREFUSED", since: lostAt, origin }, "the first loss, not the moment the stage ended");
+  assert.ok(!/crashed/.test(out), out);
+});
+
+test("review.mjs, run for real: an outage in its first reads (the token, the writers, the PR) ends it paused with its record, not exit 1", async () => {
+  const { code, out, result, origin } = await stageAgainstNothing("review.mjs", ["--pr", "12"], { FACTORY_APP_TOKEN: "t" });
+  assert.equal(code, 0, out);
+  assert.equal(result?.exit, "paused", out);
+  assert.equal(result.outage.origin, origin);
+});
+
+test("worker.mjs, run for real: a token mint that cannot reach GitHub waits, then ends the stage paused on the outage", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const { code, out, result, origin } = await stageAgainstNothing("worker.mjs", ["--issue", "7"], { FACTORY_INPUT_APP_ID: "1", FACTORY_INPUT_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }) });
+  assert.equal(code, 0, out);
+  assert.equal(result?.exit, "paused", out);
+  assert.equal(result.outage.origin, origin);
+  assert.equal(result.outage.code, "ECONNREFUSED");
+});
+
+test("runHarness: a pass that fails on its own after each outage runs again at most twice", async () => {
+  const { bin, calls } = fakeCodex({ fail: Infinity });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  let probes = 0;
+  try {
+    await offline(
+      // The provider fails every other probe: each failed run finds it down, then it answers.
+      (req) => (req.origin === "https://chatgpt.com" && ++probes % 2 === 1 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+      async () => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        assert.equal(calls().length, 1 + OUTAGE.passReruns, "the first run and two more, then its failure stands");
+        assert.equal(rec.ok, false);
+        assert.equal(rec.lostToOutage, OUTAGE.passReruns);
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test("passCutOff: a short outage on another host than the pass's provider (a heartbeat's GitHub blip) does not cut the pass off", async () => {
+  let down = true;
+  await offline(
+    (req) => (req.origin === "https://api.github.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+    async ({ now }) => {
+      waitOutages({ until: () => Infinity });
+      const start = now();
+      const ep = networkBack("https://api.github.test", "EAI_AGAIN");
+      down = false;
+      await ep;
+      assert.equal(await passCutOff(start, now() + 1000, ["https://chatgpt.com", "https://api.github.test"]), null, "five seconds on GitHub: not the pass's outage");
+      assert.equal((await passCutOff(start, now() + 1000, ["https://api.github.test", "https://chatgpt.com"]))?.origin, "https://api.github.test", "on the pass's own provider it counts");
+    },
+  );
+});
+
+test("runHarness: a cut-off run that leaves no budget for another counts its spend once", async () => {
+  const { bin, calls } = fakeCodex({ lost: SPENT_RUN });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  let probes = 0;
+  try {
+    await offline(
+      (req) => (req.origin === "https://chatgpt.com" && ++probes < 2 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+      async () => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const one = parseUsage("codex", SPENT_RUN, "gpt-6.1-sol", 1);
+        assert.ok(one.usd > 0);
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: one.usd / 2, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        assert.equal(calls().length, 1, "no budget left to run it again");
+        assert.equal(rec.budgetExceeded, true);
+        assert.equal(rec.usd, one.usd, "the run's dollars once");
+        assert.equal(rec.tokens.input, one.tokens.input, "its tokens once");
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test("rest: a host that comes and goes is one outage: its first loss and limit carried over, one lost line and one back line in all", async () => {
+  let up = false;
+  await offline(
+    // Answers each probe, then drops again on the next request: a DNS that fails on and off.
+    (req, seen) => {
+      if (seen.length > 2000) throw new Error("a fresh wait per flap: it never ends");
+      if (req.probe) {
+        up = true;
+        return new Response(null, { status: 200 });
+      }
+      if (up) {
+        up = false;
+        throw dns();
+      }
+      throw dns();
+    },
+    async ({ lines, now }) => {
+      const start = now();
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const e = await rest("repos/o/r/issues/1", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+      assert.ok(e instanceof NetworkDown);
+      assert.equal(e.since, start, "the first loss");
+      assert.ok(now() - start <= OUTAGE.stageWaitMs + 60_000, "one limit, not a fresh one per flap");
+      assert.equal(netLines(lines).length, 3, `lost, back once, given up: ${netLines(lines).join("")}`);
+    },
+  );
 });

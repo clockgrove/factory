@@ -24,10 +24,14 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
  * to resume (fifteen minutes: a DNS flap or a router restart passes, and a longer outage costs the stage no more of its
  * wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS). `blockMs`: how long an Objective may stay paused
  * on one outage before serve Blocks it with the External cause `outage` (twelve hours: a night's outage, from late evening
- * to the next morning, fits with room; it ends before the dispatcher's day for a claim gone quiet, local.mjs
- * CLAIM_PAUSE_MS, so the Block names the outage rather than the loop). `probeMs`: the pause before each probe, the last
+ * to the next morning, fits with room; under the dispatcher's day for a claim gone quiet, local.mjs CLAIM_PAUSE_MS, so an
+ * outage of twelve to twenty-four hours Blocks naming the outage, while one that keeps the machine off GitHub for over a
+ * day meets the dispatcher's Block first). `probeMs`: the pause before each probe, the last
  * repeated. `passWindowMs`: how close to a failed harness pass's end an outage must have been to have cut it off (the
- * harnesses retry their own calls for minutes before a pass fails); one before the pass began never counts. `now` and `sleep` are replaced in tests.
+ * harnesses retry their own calls for minutes before a pass fails); one before the pass began never counts, and one on
+ * another host than the pass's provider counts only when it lasted `passOutageMs`. `passReruns`: how many times one pass
+ * runs again after an outage before its failure stands. `flapMs`: a host lost again this soon after answering is the same
+ * outage (its first loss and its limit carried over). `now` and `sleep` are replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
@@ -35,6 +39,9 @@ export const OUTAGE = {
   probeMs: [5_000, 10_000, 20_000, 30_000, 60_000],
   probeTimeoutMs: 10_000,
   passWindowMs: 10 * 60_000,
+  passOutageMs: 2 * 60_000,
+  passReruns: 2,
+  flapMs: 60_000,
   now: () => Date.now(),
   sleep: (ms, signal) =>
     new Promise((resolve) => {
@@ -95,6 +102,14 @@ let MODE = null;
 let STOPPED = false;
 const EPISODES = new Map();
 const PAST = [];
+// The outage each host was in when this process stopped waiting for it (given up, or stopWaiting): what a later request
+// to it, or the stage's end, names (downFor, outageOf), so the host and the first loss are never lost to a caller that
+// swallowed the wait's own NetworkDown.
+const GIVEN_UP = new Map();
+// The last outage each host came back from, for a host lost again soon after (OUTAGE.flapMs): the same outage.
+const RECENT = new Map();
+// Bumped by resetNetwork: an episode from before it records nothing after it.
+let GEN = 0;
 
 /**
  * Wait outages out in this process: a request that cannot leave this machine waits for its host to answer again, up to
@@ -122,9 +137,21 @@ export function resetNetwork() {
   stopWaiting();
   MODE = null;
   STOPPED = false;
+  GEN += 1;
   EPISODES.clear();
   PAST.length = 0;
+  GIVEN_UP.clear();
+  RECENT.clear();
 }
+
+/**
+ * The NetworkDown for `origin` once this process stopped waiting for it: its outage's host, code and first loss. Null when
+ * this process never gave up on that host.
+ */
+export const downFor = (origin) => {
+  const g = origin && GIVEN_UP.get(origin);
+  return g ? new NetworkDown(g) : null;
+};
 
 /** One probe: null when `origin` gives any HTTP answer, else why not (a connect-level code, or "no answer"). */
 export async function probe(origin) {
@@ -149,13 +176,18 @@ export async function unreachableNow(origins) {
 function episode(origin, code) {
   const known = EPISODES.get(origin);
   if (known) return known;
-  const since = OUTAGE.now();
-  const end = MODE.until(since);
+  // A host lost again within OUTAGE.flapMs of answering (a network that comes and goes): the same outage, its first loss
+  // and its limit carried over, and no new log line, so a flapping network neither floods the log nor waits afresh.
+  const last = RECENT.get(origin);
+  const flap = !!last && OUTAGE.now() - last.back < OUTAGE.flapMs;
+  const since = flap ? last.since : OUTAGE.now();
+  const end = flap ? last.end : MODE.until(since);
   const stop = new AbortController();
-  const ep = { origin, code, since, end, stop, back: null };
+  const gen = GEN;
+  const ep = { origin, code: flap ? last.code : code, since, end, stop, back: null };
   EPISODES.set(origin, ep);
   const host = hostOf(origin);
-  log(`network: ${host} is unreachable from this machine (${code || "no answer"}); waiting for it to answer again${Number.isFinite(end) ? `, for up to ${minutesText(end - since)}` : ""}`);
+  if (!flap) log(`network: ${host} is unreachable from this machine (${code || "no answer"}); waiting for it to answer again${Number.isFinite(end) ? `, for up to ${minutesText(end - since)}` : ""}`);
   ep.done = (async () => {
     for (let i = 0; ; i += 1) {
       const left = ep.end - OUTAGE.now();
@@ -164,7 +196,8 @@ function episode(origin, code) {
       if (stop.signal.aborted) break;
       if ((await probe(origin)) === null) {
         ep.back = OUTAGE.now();
-        log(`network: ${host} answers again after ${minutesText(ep.back - since)} (unreachable since ${iso(since)})`);
+        if (!flap) log(`network: ${host} answers again after ${minutesText(ep.back - since)} (unreachable since ${iso(since)})`);
+        if (gen === GEN) RECENT.set(origin, { since, end, code: ep.code, back: ep.back });
         return true;
       }
     }
@@ -174,10 +207,12 @@ function episode(origin, code) {
       // goes on gets its next unreachable request's error at once, not a fresh wait of its own.
       stopWaiting();
     }
+    if (gen === GEN) GIVEN_UP.set(origin, { origin, code: ep.code, since });
     return false;
   })().finally(() => {
+    if (gen !== GEN) return;
     EPISODES.delete(origin);
-    PAST.push({ origin, code, since, back: ep.back ?? OUTAGE.now() });
+    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now() });
     if (PAST.length > 20) PAST.shift();
   });
   return ep;
@@ -210,9 +245,13 @@ export const outageOn = (origin) => (origin && EPISODES.get(origin)) || null;
  */
 export async function passCutOff(startedMs, endedMs, origins) {
   const from = Math.max(startedMs, endedMs - OUTAGE.passWindowMs);
-  const now = [...EPISODES.values()][0];
+  const [provider] = origins;
+  // Only an outage that could have cut the pass off: on its provider's host, or one on any host that lasted at least
+  // OUTAGE.passOutageMs (a heartbeat's GitHub blip of a few seconds is no reason for a pass to fail).
+  const counts = (o) => o.origin === provider || (o.back ?? OUTAGE.now()) - o.since >= OUTAGE.passOutageMs;
+  const now = [...EPISODES.values()].find(counts);
   if (now) return { origin: now.origin, code: now.code, since: now.since, ongoing: true };
-  const past = PAST.findLast((p) => p.back >= from && p.since <= endedMs);
+  const past = PAST.findLast((p) => p.back >= from && p.since <= endedMs && counts(p));
   if (past) return { origin: past.origin, code: past.code, since: past.since, ongoing: false };
   const down = await unreachableNow(origins);
   return down ? { ...down, since: OUTAGE.now(), ongoing: true } : null;
@@ -220,8 +259,10 @@ export async function passCutOff(startedMs, endedMs, origins) {
 
 /** The outage a NetworkDown (or a bare connect-level error) names, for an exit: {origin, host, code, since} (ms). */
 export function outageOf(e, now = OUTAGE.now()) {
-  const origin = e?.origin ?? null;
-  return { origin, host: origin ? hostOf(origin) : "the network", code: e?.code || causeCode(e) || "no answer", since: Number.isFinite(e?.since) ? e.since : now };
+  // An error that names no outage (a bare connect failure): the one this process last gave up on, if any.
+  const known = e?.origin && Number.isFinite(e?.since) ? e : (e?.origin && GIVEN_UP.get(e.origin)) || [...GIVEN_UP.values()].at(-1) || e;
+  const origin = known?.origin ?? null;
+  return { origin, host: origin ? hostOf(origin) : "the network", code: known?.code || causeCode(e) || "no answer", since: Number.isFinite(known?.since) ? known.since : now };
 }
 
 /** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` in ms). */

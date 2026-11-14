@@ -16,7 +16,7 @@ import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion,
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
-import { networkBack, originOf, unreachableNow, waitingOutages } from "./network.mjs";
+import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
 import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 
@@ -269,8 +269,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     let end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
     for (let n = 1; ; n += 1) {
       const r = await git(args);
-      if (r.code !== 0 && remoteOrigin && waitingOutages() && gitTransport(r, ref)) {
+      if (r.code !== 0 && remoteOrigin && (waitingOutages() || stoppedWaiting()) && gitTransport(r, ref)) {
         const down = await unreachableNow([remoteOrigin]);
+        // Stopped waiting: the stage ends on the outage (NetworkDown), never on a push refused for it.
+        if (down && stoppedWaiting()) throw downFor(down.origin) ?? new NetworkDown({ ...down, since: OUTAGE.now() });
         if (down) {
           await networkBack(down.origin, down.code, { deadlineAt: stageEnd() });
           if (landed && (await landed().catch(() => false))) return { ...r, code: 0, landed: true };

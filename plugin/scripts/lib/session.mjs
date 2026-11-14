@@ -50,7 +50,7 @@ import {
   upsertComment,
   transientError,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms } from "./inputs.mjs";
+import { log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
@@ -1589,6 +1589,25 @@ export async function outageExit(e, { local, records, finish, block }) {
   log(`blocked: ${blocked}`);
   await block(blocked).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", blocked, outage);
+}
+
+/**
+ * The same end as outageExit for a stage the network ended before its usual end exists (its token's mint, its first
+ * reads): its usage written to `usageDir` when it is known, its exit and reason as step outputs, no progress comment. On
+ * the local route `paused`, for serve's resume; elsewhere `blocked`, through `block(reason)` when the stage knows its
+ * issue and holds a token (one try), and its record says so either way.
+ */
+export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null }) {
+  stopWaiting();
+  const lost = outageOf(e);
+  const reason = local ? outageReason(lost) : `${outageReason(lost)}; the stage waited for the network until its time ran out. Re-apply the label to run it again.`;
+  const outage = { host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}) };
+  const exit = local ? "paused" : "blocked";
+  log(`${exit} before the stage began: ${reason}`);
+  if (!local && block) await block(reason).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
+  if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason, outage, credentialBasis: "none" });
+  setOutput("exit", exit);
+  setOutput("reason", reason);
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */

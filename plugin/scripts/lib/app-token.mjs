@@ -3,6 +3,7 @@
 // needed; the same code serves the Action and `/factory doctor` on a laptop.
 // Factory never creates an App; it only verifies and uses the one it is given.
 import { createSign } from "node:crypto";
+import { NetworkDown, OUTAGE, UNREACHABLE, causeCode, downFor, networkBack, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 const b64url = (buf) => Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 
@@ -56,12 +57,26 @@ async function api(path, { token, method = "GET", body } = {}) {
   return json;
 }
 
-/** fetch, its own failure (the network, DNS, a timeout) tagged `transport`: no answer, as github.mjs's GitHubError says it. */
+/**
+ * fetch, its own failure (the network, DNS, a timeout) tagged `transport`: no answer, as github.mjs's GitHubError says it,
+ * with fetch's error as its cause and its connect-level code. In a process that waits outages out (network.mjs), a mint
+ * that never left this machine waits for GitHub to answer and goes again; past the stage's limit it throws NetworkDown,
+ * which the stage ends on (paused locally, an `outage` Block elsewhere).
+ */
 async function fetchOrNoAnswer(url, init) {
-  try {
-    return await fetch(url, init);
-  } catch (e) {
-    throw Object.assign(new Error(`${init.method} ${url}: ${e.message}`), { status: 0, transport: true });
+  for (;;) {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      const code = causeCode(e);
+      const origin = new URL(url).origin;
+      if (UNREACHABLE.has(code) && waitingOutages()) {
+        await networkBack(origin, code);
+        continue;
+      }
+      if (UNREACHABLE.has(code) && stoppedWaiting()) throw downFor(origin) ?? new NetworkDown({ origin, code, since: OUTAGE.now() });
+      throw Object.assign(new Error(`${init.method} ${url}: ${e.message}`, { cause: e }), { status: 0, transport: true, code, unsent: UNREACHABLE.has(code) });
+    }
   }
 }
 

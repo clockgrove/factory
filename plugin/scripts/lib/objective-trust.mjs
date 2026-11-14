@@ -233,14 +233,15 @@ export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
 
 /**
  * The inputs an Objective runs on before any stage starts (the launcher, the local loop): its labels read now,
- * choiceTrusted, then choice.mjs chosenInputs over `args` and `env`. {ok, inputs, labels} or {ok: false, reason, fix}.
+ * choiceTrusted, then choice.mjs chosenInputs over `args` and `env` (`gateway`: whether Codex has the AI Gateway key, when
+ * `env` no longer holds it). {ok, inputs, labels} or {ok: false, reason, fix}.
  * `gh` (issue, labelers, permission) is a test's own.
  */
-export async function objectiveInputs({ repo, issue, args = {}, env = process.env, opts, gh = {} }) {
+export async function objectiveInputs({ repo, issue, args = {}, env = process.env, opts, gateway, gh = {} }) {
   const names = ((await (gh.issue ?? getIssue)(repo, issue, opts))?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
   const t = await choiceTrusted(repo, issue, names, opts, gh);
   if (!t.ok) return t;
-  const c = chosenInputs({ args, env, choice: t.choice });
+  const c = chosenInputs({ args, env, choice: t.choice, gateway });
   return c.ok ? { ...c, labels: t.labels } : c;
 }
 

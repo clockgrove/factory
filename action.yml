@@ -93,7 +93,7 @@ inputs:
     description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
     required: false
   harness_version:
-    description: The npm version of the harness CLI to install on the runner; `latest` by default.
+    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the repository's harness only; another harness an Objective's label chooses installs its latest.
     required: false
   allowed_domains:
     description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains). The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
@@ -273,8 +273,8 @@ runs:
       env:
         GITHUB_TOKEN: ${{ github.token }}
         FACTORY_INPUT_ISSUE: ${{ inputs.issue }}
-        FACTORY_INPUT_PR: ${{ inputs.pr }}
-      run: node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --repo "$GITHUB_REPOSITORY" --issue "${FACTORY_INPUT_ISSUE:-0}" --pr "${FACTORY_INPUT_PR:-0}"
+      # A review job's issue is its PR's branch's (GITHUB_HEAD_REF on a pull_request event): no API call for the PR.
+      run: node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --repo "$GITHUB_REPOSITORY" --issue "${FACTORY_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}"
 
     - name: Install the harness CLI
       id: install
@@ -282,14 +282,17 @@ runs:
       shell: bash
       # The harness comes from the Objective's harness label when it names one, else `with:` when given, else the
       # workflow's FACTORY_HARNESS env block (visible to composite steps at runtime), else claude: the same precedence as
-      # lib/choice.mjs chosenInputs over lib/inputs.mjs.
+      # lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version: lib/choice.mjs harnessVersionFor.
       env:
         FACTORY_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
         FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
         FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
-        HARNESS="${FACTORY_CHOSEN_HARNESS:-${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}}"
+        DEFAULT_HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
+        HARNESS="${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}"
         VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
+        # harness_version pins the repository's harness only: another one an Objective's label chose installs its latest.
+        if [ -n "$FACTORY_CHOSEN_HARNESS" ] && [ "$FACTORY_CHOSEN_HARNESS" != "$DEFAULT_HARNESS" ]; then VERSION=latest; fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in

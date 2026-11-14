@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CHOICE_PREFIXES, LABEL_MAX, choiceLabel, choiceLabels, choiceOf, chosenInputs, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
+import { CHOICE_PREFIXES, LABEL_MAX, choiceLabel, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
 import { MODEL_DEFAULTS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
@@ -194,29 +194,71 @@ test("the timeline: who last applied each label, and when the text or a choice l
 test("the Action installs the harness the label names: read before the install, the stage told what was installed", async () => {
   const issue = (labels) => async (_, n) => (assert.equal(n, 12), { labels: labels.map((name) => ({ name })) });
   assert.equal(await labelHarness({ repo, issue: 12, read: { issue: issue(["factory:objective", "factory:harness:copilot"]) } }), "copilot");
-  assert.equal(await labelHarness({ repo, pr: 40, read: { pr: async () => ({ head: { ref: "factory/12" } }), issue: issue(["factory:harness:codex"]) } }), "codex", "a review job finds its issue from the PR's branch");
+  assert.equal(await labelHarness({ repo, branch: "factory/12", read: { issue: issue(["factory:harness:codex"]) } }), "codex", "a review job finds its issue from its PR's branch, with no PR read");
   assert.equal(await labelHarness({ repo, issue: 12, read: { issue: issue(["factory:harness:codex", "factory:harness:claude"]) } }), "", "two: the default, and the stage Blocks");
   assert.equal(await labelHarness({ repo, issue: 12, read: { issue: issue(["factory:objective"]) } }), "");
-  assert.equal(await labelHarness({ repo, pr: 40, read: { pr: async () => ({ head: { ref: "feature/x" } }) } }), "");
+  assert.equal(await labelHarness({ repo, branch: "feature/x", read: { issue: async () => assert.fail("no Factory branch: nothing read") } }), "");
   const steps = parseYaml(readFileSync(join(ROOT, "action.yml"), "utf8")).runs.steps;
   const at = (id) => steps.findIndex((s) => s.id === id);
   assert.ok(at("choice") >= 0 && at("choice") < at("install") && at("install") < at("run"), "the label is read before the install, the install before the run");
   assert.match(steps[at("choice")].if, /inputs\.mode == 'work' \|\| inputs\.mode == 'review'/);
   assert.equal(steps[at("install")].env.FACTORY_CHOSEN_HARNESS, "${{ steps.choice.outputs.harness }}");
-  assert.match(steps[at("install")].run, /HARNESS="\$\{FACTORY_CHOSEN_HARNESS:-\$\{FACTORY_INPUT_HARNESS:-\$\{FACTORY_HARNESS:-claude\}\}\}"/, "the label, then with:, then the env block");
+  assert.match(steps[at("install")].run, /DEFAULT_HARNESS="\$\{FACTORY_INPUT_HARNESS:-\$\{FACTORY_HARNESS:-claude\}\}"\n\s*HARNESS="\$\{FACTORY_CHOSEN_HARNESS:-\$DEFAULT_HARNESS\}"/, "the label, then with:, then the env block");
+  assert.match(steps[at("choice")].run, /--branch "\$\{GITHUB_HEAD_REF:-none\}"/, "the review job's branch from its event");
+  assert.doesNotMatch(readFileSync(join(ROOT, "plugin", "scripts", "objective-harness.mjs"), "utf8"), /pulls\//, "no pull request read: the job token may not have pull-requests access");
   assert.match(steps[at("install")].run, /echo "harness=\$HARNESS" >> "\$GITHUB_OUTPUT"/);
   assert.equal(steps[at("run")].env.FACTORY_STAGE_HARNESS, "${{ steps.install.outputs.harness }}");
 });
 
-test("the launcher hands the stage the chosen harness's credential alone, names it as prepared, and Blocks first without one", () => {
+test("the launcher hands the stage the chosen harness's credential alone and names it as prepared, the repository's defaults kept, and Blocks first without one", () => {
+  const defaults = chosenInputs({ env: ENV }).inputs;
   const inputs = { ...chosenInputs({ env: ENV, choice: { harness: "copilot" } }).inputs, anthropicApiKey: "an", copilotGithubToken: "cp", codexApiKey: "cx" };
-  const out = stageEnvironment({ inputs, env: ENV, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
-  assert.deepEqual([out.FACTORY_HARNESS, out.FACTORY_STAGE_HARNESS, out.FACTORY_INPUT_COPILOT_GITHUB_TOKEN], ["copilot", "copilot", "cp"]);
-  for (const k of ["FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CODEX_API_KEY", "FACTORY_MODEL"]) assert.equal(k in out, false, k);
+  const out = stageEnvironment({ inputs, defaults, env: ENV, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
+  assert.deepEqual([out.FACTORY_HARNESS, out.FACTORY_MODEL, out.FACTORY_STAGE_HARNESS, out.FACTORY_INPUT_COPILOT_GITHUB_TOKEN], ["claude", "claude-opus-5-5", "copilot", "cp"], "the defaults as the workflow sets them; the labels' harness only as prepared");
+  for (const k of ["FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CODEX_API_KEY"]) assert.equal(k in out, false, k);
   assert.equal(missingCredential(inputs), null);
   const none = missingCredential({ harness: "codex", anthropicApiKey: "an" });
   assert.match(none.reason, /no codex credential reached the launch job/);
   assert.match(none.fix, /FACTORY_CODEX_GATEWAY_KEY or CODEX_API_KEY/);
+});
+
+test("a label removed between the launcher's read and the stage's is seen by the stage: it runs on the defaults, or Blocks when its harness was the label's", () => {
+  const defaults = chosenInputs({ env: ENV }).inputs;
+  const stageOf = (choice) => stageEnvironment({ inputs: { ...chosenInputs({ env: ENV, choice }).inputs, anthropicApiKey: "an", codexApiKey: "cx" }, defaults, env: ENV, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
+  // The launcher read `factory:model:claude-sonnet-5-5`; the stage reads no label: the repository's model, labels none.
+  const modelEnv = stageOf({ model: "claude-sonnet-5-5" });
+  const now = chosenInputs({ env: modelEnv, choice: {} });
+  assert.deepEqual([now.inputs.harness, now.inputs.model, routeProblem(modelEnv.FACTORY_STAGE_HARNESS, now.inputs.harness)], ["claude", "claude-opus-5-5", null]);
+  // The launcher read `factory:harness:codex`; the stage reads no label: prepared for codex, the defaults say claude.
+  const harnessEnv = stageOf({ harness: "codex" });
+  assert.match(routeProblem(harnessEnv.FACTORY_STAGE_HARNESS, chosenInputs({ env: harnessEnv, choice: {} }).inputs.harness).reason, /prepared for codex/);
+  assert.equal(routeProblem(harnessEnv.FACTORY_STAGE_HARNESS, chosenInputs({ env: harnessEnv, choice: { harness: "codex" } }).inputs.harness), null, "the label still there: it runs");
+});
+
+test("chosenInputs: a harness label never inherits the default harness's models, from any source; their check names the harness label", () => {
+  // The env block names no harness but sets a Claude model: the default harness is Claude, and Codex takes its own models.
+  const env = { GITHUB_REPOSITORY: "acme/app", FACTORY_MODEL: "claude-opus-5-5", FACTORY_INPUT_REVIEWER_MODEL: "claude-fable-5-2", FACTORY_EFFORT: "high" };
+  const codex = chosenInputs({ env, choice: { harness: "codex" } });
+  assert.deepEqual([codex.ok, codex.inputs.model, codex.inputs.reviewerModel, codex.inputs.effort], [true, "gpt-6.1-sol", "gpt-6.1-sol", ""]);
+  assert.equal(chosenInputs({ env, choice: { harness: "claude" } }).inputs.model, "claude-opus-5-5", "the default harness keeps the repository's models");
+  assert.equal(chosenInputs({ env, choice: { harness: "codex", model: "gpt-6.1-terra" } }).inputs.model, "gpt-6.1-terra");
+});
+
+test("the gateway key the launcher holds counts though its environment no longer has it", async () => {
+  const gh = { issue: async () => ({ labels: [{ name: "factory:harness:codex" }, { name: "factory:model:openai/gpt-6.1-sol" }] }), ...timeline({ "factory:harness:codex": person("dev"), "factory:model:openai/gpt-6.1-sol": person("dev") }) };
+  assert.equal((await objectiveInputs({ repo, issue: 7, env: ENV, opts: {}, gh })).ok, false, "without it: refused");
+  assert.equal((await objectiveInputs({ repo, issue: 7, env: ENV, opts: {}, gh, gateway: true })).ok, true);
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "launch.mjs"), "utf8");
+  assert.match(src, /objectiveInputs\(\{[^)]*gateway: !!inputs\.codexGatewayKey/, "the launcher passes its own");
+});
+
+test("the harness CLI version pin is for the repository's harness only", () => {
+  assert.equal(harnessVersionFor("claude", "claude", "2.1.140"), "2.1.140");
+  assert.equal(harnessVersionFor("codex", "claude", "2.1.140"), "latest", "a label's harness: its latest, never Claude Code's pin");
+  assert.equal(harnessVersionFor("claude", "claude", ""), "latest");
+  const steps = parseYaml(readFileSync(join(ROOT, "action.yml"), "utf8")).runs.steps;
+  const install = steps.find((s) => s.id === "install").run;
+  assert.match(install, /if \[ -n "\$FACTORY_CHOSEN_HARNESS" \] && \[ "\$FACTORY_CHOSEN_HARNESS" != "\$DEFAULT_HARNESS" \]; then VERSION=latest; fi/, "the Action likewise");
 });
 
 test("what ran is recorded: the progress comment's harness line and doctor's defaults line", () => {

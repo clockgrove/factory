@@ -92,21 +92,41 @@ export function modelProblem(harness, model, { gateway = false } = {}) {
 /** The inputs an Objective's choice sets (inputs.mjs resolveInputs): its harness, and the models and efforts that go with it. */
 export const CHOSEN_FIELDS = ["harness", "model", "effort", "subagentModel", "reviewerModel", "reviewerEffort", "reviewerFallback"];
 
+/** The settings that belong to a harness: a switch of harness takes the new one's own defaults for each. */
+const HARNESS_BOUND = ["model", "subagent_model", "reviewer_model", "reviewer_effort", "effort"];
+const FIELD = { model: "model", subagent_model: "subagentModel", reviewer_model: "reviewerModel" };
+
 /**
  * The harness and models this Objective runs on: the repository's defaults (`env`, the workflow's env block; `args`, a
- * stage's flags) with the labels' `choice` as the strongest input. A harness label takes that harness's own defaults for
- * the models no label names, as a run that overrides the harness does (resolveInputs). Returns {ok, inputs} (the
- * CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label whose model the harness cannot run (modelProblem).
+ * stage's flags) with the labels' `choice` as the strongest input. A harness label naming another harness than the
+ * default takes that harness's own defaults for the models and efforts no label names, whatever the env block or a flag
+ * set for the default one. Returns {ok, inputs} (the CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label,
+ * or the harness label whose defaults these are, when the harness cannot run a model (modelProblem). `gateway`: whether
+ * Codex has the AI Gateway key, when `env` no longer holds it (the launcher).
  */
-export function chosenInputs({ args = {}, env = process.env, choice = {} } = {}) {
-  const r = resolveInputs({ args: { ...args, ...choice }, env });
-  for (const kind of ["model", "subagent_model", "reviewer_model"]) {
-    if (!choice[kind]) continue;
-    const p = modelProblem(r.harness, choice[kind], { gateway: !!r.codexGatewayKey });
-    if (p) return { ok: false, reason: `${tick(`${CHOICE_PREFIXES[kind]}${choice[kind]}`)} asks ${r.harness} for a model it cannot run here: ${p.reason}`, fix: `${p.fix} Then re-apply \`factory:objective\`.` };
+export function chosenInputs({ args = {}, env = process.env, choice = {}, gateway } = {}) {
+  const base = resolveInputs({ args, env });
+  const switched = !!choice.harness && choice.harness !== base.harness;
+  // The default harness's models and efforts, in whichever source set them, are not the chosen harness's.
+  const bound = (name) => switched && HARNESS_BOUND.some((n) => name === n || name === `FACTORY_${n.toUpperCase()}` || name === `FACTORY_INPUT_${n.toUpperCase()}`);
+  const keep = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !bound(k)));
+  const r = resolveInputs({ args: { ...keep(args), ...choice }, env: keep(env) });
+  const viaGateway = gateway ?? !!r.codexGatewayKey;
+  for (const kind of Object.keys(FIELD)) {
+    const m = choice[kind] || (switched ? r[FIELD[kind]] : "");
+    if (!m) continue;
+    const p = modelProblem(r.harness, m, { gateway: viaGateway });
+    const label = choice[kind] ? `${CHOICE_PREFIXES[kind]}${m}` : `${CHOICE_PREFIXES.harness}${choice.harness}`;
+    if (p) return { ok: false, reason: `${tick(label)} asks ${r.harness} for a model it cannot run here${choice[kind] ? "" : ` (its ${WHAT[kind]}, ${tick(m)})`}: ${p.reason}`, fix: `${p.fix} Then re-apply \`factory:objective\`.` };
   }
   return { ok: true, inputs: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, r[k]])) };
 }
+
+/**
+ * The harness CLI version to install: the repository's pin (`harness_version`) for the harness it was set for, the
+ * repository's default (`defaultHarness`); `latest` for another one an Objective's harness label chose.
+ */
+export const harnessVersionFor = (harness, defaultHarness, version) => (harness === defaultHarness && version ? version : "latest");
 
 /**
  * Why a stage cannot run on `harness` where its route prepared another (`prepared`: FACTORY_STAGE_HARNESS, the harness the

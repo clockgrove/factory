@@ -1880,6 +1880,20 @@ async function deliver(issue, flags) {
 /** Why pushing a handed-over workflow waits for a person's read. */
 export const HANDOVER_RISK = "a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed";
 
+/**
+ * The body of the pull request `factory handover <issue> --push` opens: it names the Objective (Refs, not Closes: the
+ * Objective's own PR closes it), links Factory's hand-over comment, and says the person read the change before pushing.
+ */
+export function handoverPrBody({ issue, url = "" }) {
+  return [
+    `Refs #${issue}`,
+    "",
+    `The workflow change Factory handed over for #${issue}: Factory never pushes a workflow file, so a person applies it. ${url ? `Factory's hand-over comment: ${url}` : `Factory's hand-over comment is on #${issue}.`}`,
+    "",
+    `The person who pushed this branch reviewed the workflow change before pushing it: \`factory handover ${issue}\` staged and showed it, and \`factory handover ${issue} --push\` committed and pushed it only once the staged change was exactly that hand-over.`,
+  ].join("\n");
+}
+
 /** The job token's login on Actions: any workflow can post as it, so it never hands a workflow over. */
 const JOB_TOKEN_LOGIN = "github-actions[bot]";
 
@@ -1993,10 +2007,11 @@ async function handoverForPerson(issue, flags) {
     const staged = await git(["diff-index", "--cached", "-p", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"]);
     if (staged.code !== 0 || staged.stdout !== checked.patch) return fail(`what is staged on ${branch} is not the hand-over as shown; nothing was pushed. Start again: switch back, delete ${branch} and run \`factory handover ${issue}\``);
     if ((await git(["diff", "--name-only"])).stdout.trim()) return fail(`${branch} has unstaged changes; nothing was pushed`);
+    const title = `#${issue}: the workflow change Factory handed over`;
     const steps = [
-      ["git", ["-C", dir, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", `#${issue}: the workflow change Factory handed over`]],
+      ["git", ["-C", dir, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", title]],
       ["git", ["-C", dir, "push", "-u", "origin", `HEAD:refs/heads/${branch}`]],
-      ["gh", ["pr", "create", "--repo", repo.full, "--base", defaultBranch, "--head", branch, "--fill"]],
+      ["gh", ["pr", "create", "--repo", repo.full, "--base", defaultBranch, "--head", branch, "--title", title, "--body", handoverPrBody({ issue, url: trusted.url })]],
     ];
     for (const [cmd, args] of steps) {
       const r = await exec(cmd, args, { env, cwd: dir });

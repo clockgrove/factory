@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
-import { addLabels, closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, removeLabel, rest, updatePr, upsertComment } from "./github.mjs";
+import { addLabels, closedPrsFor, collaboratorPermission, closingIssues, createPr, findPr, getPr, listComments, postReply, removeLabel, rest, updatePr, upsertComment } from "./github.mjs";
 import { HANDOVER_FILE, HANDOVER_LABEL, closedHarnessText, handoverLine, handoverMarker, handoverOf, handoverRefusedReason, handoverText, patchFiles, withoutHandoverLine } from "./handover.mjs";
 import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, selfLogin, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
@@ -635,21 +635,34 @@ export async function handoverOnIssue(repo, { issue, handover, defaultBranch }, 
   await syncHandover(repo, { issue, posted: await handoverPosted(repo, issue, opts), text: handoverText({ issue, patch: handover.patch, files: handover.files, defaultBranch }), label: true }, opts);
 }
 
+/** Repository permissions whose holders may hand a workflow over, or mark one applied: they could push it themselves. */
+export const HANDOVER_WRITERS = new Set(["admin", "maintain", "write"]);
+
 /**
- * Whether a person has applied the hand-over: someone other than Factory took the factory:handover label off after
- * Factory last applied it (the issue's timeline, actors by login). A timeline that cannot be read reads as not applied:
- * the label goes on again, which a person can take off again.
+ * Whether the hand-over has been applied: after Factory last applied the factory:handover label, it was taken off by
+ * Factory's own login (in local mode that is the operator, who applies it; Factory itself takes it off only when it drops
+ * the hand-over, and then its comment holds none, so this is not asked) or by someone whose repository permission, read
+ * now, is write, maintain or admin. A triager's or another bot's removal never counts, and neither does one whose
+ * permission cannot be read. A timeline that cannot be read reads as not applied: the label goes on again, which a
+ * person can take off again.
  */
 export async function handoverApplied(repo, issue, opts) {
   const self = String(selfLogin() || "").toLowerCase();
   const events = await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
   if (!Array.isArray(events) || !self) return false;
+  const writer = new Map();
+  const canWrite = async (login) => {
+    if (/\[bot\]$/i.test(login)) return false;
+    if (!writer.has(login)) writer.set(login, await collaboratorPermission(repo, login, opts).then((p) => HANDOVER_WRITERS.has(p), () => false));
+    return writer.get(login);
+  };
   let applied = false;
   for (const e of [...events].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
     if (e.label?.name !== HANDOVER_LABEL) continue;
-    const mine = String(e.actor?.login || "").toLowerCase() === self;
+    const login = String(e.actor?.login || "");
+    const mine = login.toLowerCase() === self;
     if (e.event === "labeled" && mine) applied = false;
-    if (e.event === "unlabeled" && !mine) applied = true;
+    if (e.event === "unlabeled" && (mine || (await canWrite(login)))) applied = true;
   }
   return applied;
 }

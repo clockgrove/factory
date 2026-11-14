@@ -125,7 +125,7 @@ test("hand-over: every crafted bypass is refused in Factory's mirror (rename or 
 });
 
 /** A fetch fake over acme/app: the PR (`pr`, null for none), comments kept as written, every write recorded as {method, path, body}. */
-function fakeApi({ pr = null, comments = [], timeline = null } = {}) {
+function fakeApi({ pr = null, comments = [], timeline = null, permissions = {} } = {}) {
   const writes = [];
   const store = comments.map((c) => ({ ...c }));
   const real = globalThis.fetch;
@@ -158,6 +158,8 @@ function fakeApi({ pr = null, comments = [], timeline = null } = {}) {
     if (path === "/pulls") return json(pr ? [pr] : []);
     if (/\/comments$/.test(path)) return json(store);
     if (timeline && path === "/issues/7/timeline") return json(timeline);
+    const perm = /^\/collaborators\/([^/]+)\/permission$/.exec(path);
+    if (perm) return permissions[perm[1]] ? json({ permission: permissions[perm[1]] }) : json({ message: "Not Found" }, 404);
     return json({ message: "Not Found" }, 404);
   };
   return {
@@ -230,18 +232,37 @@ test("hand-over: a publish that keeps it keeps a person's text below Factory's l
   assert.equal(withoutHandoverLine(`${line}\n\nbody\n\nperson`, 7), "body\n\nperson");
 });
 
-test("hand-over: once a person has applied it (took the label off), a pass that leaves no workflow.patch neither labels the issue again nor calls the change pending", async () => {
+test("hand-over: once someone who can write (or local mode's operator) has applied it (took the label off), a pass that leaves no workflow.patch neither labels the issue again nor calls the change pending", async () => {
   const r = repos();
   setSelf(BOT);
   const comment = { id: 5, html_url: "https://github.test/c5", user: { login: BOT, type: "Bot" }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: r.patch })}` };
   const carried = { number: 70, title: "#7: t", body: `${handoverLine({ issue: 7, url: "https://github.test/c5", files: patchFiles(r.patch) })}\n\nharness text\n\nCloses #7\n` };
   const timeline = [{ event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: BOT }, created_at: "2031-03-02T01:00:00Z" }, { event: "unlabeled", label: { name: HANDOVER_LABEL }, actor: { login: "maintainer" }, created_at: "2031-03-02T03:00:00Z" }];
-  let api = fakeApi({ pr: carried, comments: [comment], timeline });
+  let api = fakeApi({ pr: carried, comments: [comment], timeline, permissions: { maintainer: "maintain" } });
   try {
     const out = await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried }, { token: "t" });
     assert.deepEqual(said(api), ["PATCH /pulls/70"], "no label: the person's step is done");
     assert.match(out.body.split("\n")[1], /^\*\*Workflow hand-over:\*\* this PR left a change to `\.github\/workflows\/ci\.yml`, `\.github\/workflows\/release\.yml` for a person, who has applied it \(the `factory:handover` label is off\)/);
     assert.ok(carriesHandover(out.body, 7), "the scorecard still sees the person's step");
+  } finally {
+    api.restore();
+  }
+  // A triager's removal, or one by a writer whose permission cannot be read, is no application: the label goes on again.
+  for (const permissions of [{ maintainer: "triage" }, {}]) {
+    api = fakeApi({ pr: carried, comments: [comment], timeline, permissions });
+    try {
+      const out = await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried }, { token: "t" });
+      assert.deepEqual(said(api), ["POST /issues/7/labels"]);
+      assert.match(out.body, /this PR leaves a change/);
+    } finally {
+      api.restore();
+    }
+  }
+  // Local mode: Factory posts as the operator, whose own removal after Factory's label counts as applied.
+  api = fakeApi({ pr: carried, comments: [comment], timeline: [timeline[0], { ...timeline[1], actor: { login: BOT } }] });
+  try {
+    await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried }, { token: "t" });
+    assert.deepEqual(said(api), ["PATCH /pulls/70"]);
   } finally {
     api.restore();
   }
@@ -519,17 +540,21 @@ test("hand-over: `factory handover` trusts only the named Factory App or someone
     }
   };
   const refusals = [
-    // A: Factory's hand-over is there; a triager relabels and posts their own comment.
-    [{ timeline: [labeled(`${APP.slug}[bot]`), labeled("triager", "2031-03-02T02:00:00Z", "unlabeled"), labeled("triager", "2031-03-02T02:01:00Z")], comments: [factoryComment, posted(3, "triager", evil)], permissions: { triager: "read" } }, /triager, who wrote the hand-over comment and applied factory:handover, cannot write to acme\/app \(read\)/],
     // B: no Factory hand-over at all; a triager labels and comments.
-    [{ timeline: [labeled("triager")], comments: [posted(3, "triager", evil)], permissions: { triager: "read" } }, /triager, who wrote .* cannot write to acme\/app \(read\)/],
-    // Another App labels and comments.
-    [{ timeline: [labeled("other-bot[bot]")], comments: [posted(4, "other-bot[bot]", evil, { id: 99, slug: "other-bot" })] }, /the GitHub App other-bot \(id 99\)'s, not your Factory App's \(id 42\)/],
-    // The Factory App's comment, but no App named to accept it.
-    [{ timeline: [labeled(`${APP.slug}[bot]`)], comments: [factoryComment] }, /name your Factory App's id with --app ID/, []],
+    [{ timeline: [labeled("triager")], comments: [posted(3, "triager", evil)], permissions: { triager: "read" } }, /triager, who wrote the hand-over comment, cannot write to acme\/app \(read\)/],
+    // Another App labels and comments: named only as not your Factory App, its id never offered.
+    [{ timeline: [labeled("other-bot[bot]")], comments: [posted(4, "other-bot[bot]", evil, { id: 99, slug: "other-bot" })] }, /from the GitHub App other-bot, not your Factory App \(id 42\)/],
+    // The job token: refused outright, even when its App id is the one named.
+    [{ timeline: [labeled("github-actions[bot]")], comments: [posted(8, "github-actions[bot]", evil, { id: 15368, slug: "github-actions" })] }, /github-actions\[bot\]'s, which any workflow can post as/, ["--app", "15368"]],
+    // Through the named App's id, but not by its bot.
+    [{ timeline: [labeled("someone[bot]")], comments: [posted(9, "someone[bot]", evil, APP)] }, /came through your Factory App \(id 42\), but its author someone\[bot\] is not that App's bot/],
+    // A bot account with no App on its comment, even one GitHub says can write.
+    [{ timeline: [labeled("machine[bot]")], comments: [posted(10, "machine[bot]", evil)], permissions: { "machine[bot]": "write" } }, /machine\[bot\]'s, a bot that is not the Factory App you named/],
     // A writer's comment whose permission cannot be read: no fallback.
     [{ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "broken" } }, /maintainer's permission on acme\/app could not be read/],
-    [{ timeline: [labeled("stranger")], comments: [posted(6, "stranger", evil)] }, /stranger, who wrote .* cannot write to acme\/app \(no access\)/],
+    [{ timeline: [labeled("stranger")], comments: [posted(6, "stranger", evil)] }, /stranger, who wrote the hand-over comment, cannot write to acme\/app \(no access\)/],
+    // A comment by someone who never applied the label is not a candidate.
+    [{ timeline: [labeled("triager")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "write", triager: "read" } }, /has no hand-over comment from anyone who applied factory:handover/],
     [{ timeline: [], comments: [factoryComment] }, /carries no workflow hand-over \(nobody applied factory:handover\)/],
     [{ timeline: [labeled(`${APP.slug}[bot]`)], comments: [posted(7, `${APP.slug}[bot]`, r.patch.replace("name: release", "name: re‮lease"), APP)] }, /control or format character .*; nothing was changed here/],
   ];
@@ -541,10 +566,28 @@ test("hand-over: `factory handover` trusts only the named Factory App or someone
     assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "main");
     assert.doesNotMatch(got.out, /pull_request_target/);
   }
-  // Someone who can write passes, by the permission GitHub gives now.
-  const writer = await run({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "write" } }, []);
-  assert.equal(writer.code, 0, writer.err);
-  assert.match(writer.out, /the hand-over is maintainer \(write permission\)'s comment/);
+  // The Factory App's comment with no id named: not verified, and the comment's own App id is never offered as the value.
+  const unnamed = await run({ timeline: [labeled(`${APP.slug}[bot]`)], comments: [factoryComment] }, []);
+  assert.equal(unnamed.code, 1);
+  assert.match(unnamed.err, /from the GitHub App acme-factory, not verified: name your Factory App's id with --app ID \(or FACTORY_LOCAL_APP_ID\); it is the repository's FACTORY_APP_ID, shown on the App's settings page/);
+  assert.doesNotMatch(unnamed.err, /42/);
+  // Passing: each in a clone of its own (a pass leaves the branch).
+  const passes = async (c, extra, whose) => {
+    const own = personClone(r);
+    const gh = await fakeGitHub(c);
+    try {
+      const got = await runCli(["handover", "7", "--repo", "acme/app", "--dir", own.person, ...extra], { cwd: own.person, env: own.envFor(gh) });
+      assert.equal(got.code, 0, got.err);
+      assert.match(got.out, whose);
+      assert.doesNotMatch(got.out, /pull_request_target/);
+    } finally {
+      await gh.close();
+    }
+  };
+  // Someone who can write, by the permission GitHub gives now.
+  await passes({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "write" } }, [], /the hand-over is maintainer \(write permission\)'s comment/);
+  // A: Factory's hand-over is there; a triager relabels and posts their own, newer comment. It is skipped, never a lock-out.
+  await passes({ timeline: [labeled(`${APP.slug}[bot]`), labeled("triager", "2031-03-02T02:00:00Z", "unlabeled"), labeled("triager", "2031-03-02T02:01:00Z")], comments: [factoryComment, posted(3, "triager", evil)], permissions: { triager: "read" } }, ["--app", "42"], /the hand-over is the Factory App acme-factory\[bot\] \(id 42\)'s comment/);
 });
 
 test("hand-over: when the branch cannot take the change, `factory handover` puts the clone back and deletes the branch", async () => {

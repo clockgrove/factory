@@ -25,7 +25,7 @@ import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, labeledBy, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -34,7 +34,7 @@ import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
-import { MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
+import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
@@ -1806,44 +1806,69 @@ async function deliver(issue, flags) {
 /** Why pushing a handed-over workflow waits for a person's read. */
 export const HANDOVER_RISK = "a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed";
 
-/** Repository permissions whose holders may hand a workflow over: they could push it themselves. */
-const HANDOVER_WRITERS = new Set(["admin", "maintain", "write"]);
+/** The job token's login on Actions: any workflow can post as it, so it never hands a workflow over. */
+const JOB_TOKEN_LOGIN = "github-actions[bot]";
 
 /**
  * The hand-over `factory handover` may apply, or a refusal (an Error whose message says why; nothing is changed then).
- * The comment must carry Factory's hand-over marker and be written by the login that last applied `factory:handover`,
- * and that login must be either the Factory App this person names (`appId`: --app or FACTORY_LOCAL_APP_ID), known by
- * GitHub's own `performed_via_github_app` on the comment (its id, and the comment's author being that App's bot), or a
- * person with write, maintain or admin permission on the repository (GitHub's collaborator permission, read now; local
- * mode's operator, who posts Factory's comments, is one). Any other App, a triager, anyone else is refused, and so is a
- * permission that cannot be read: there is no fallback. Returns {patch, who, url}.
+ * The comment's author is trusted directly, and must also have applied `factory:handover` at some time (another
+ * login's labelling, a triager's relabel included, neither adds nor takes away trust). Trusted are only:
+ *  - the Factory App this person names (`appId`: --app or FACTORY_LOCAL_APP_ID; it is the repository's
+ *    FACTORY_APP_ID), known by GitHub's own `performed_via_github_app` on the comment (that id, and the author being
+ *    that App's `<slug>[bot]`). An App's comment is never trusted without the id, and the comment's own App id is never
+ *    offered as the value to pass;
+ *  - a person (no `[bot]` login) whose repository permission, read from GitHub now, is write, maintain or admin; local
+ *    mode's operator, who posts Factory's comments, is one.
+ * `github-actions[bot]` (the job token, which any workflow can post as) is refused outright, and so is a permission
+ * that cannot be read: there is no fallback. The newest trusted comment wins; with none, the newest one's refusal is
+ * given. Returns {patch, who, url}.
  */
 export async function trustedHandover(repo, issue, opts, { appId = "" } = {}) {
   const refuse = (why) => Object.assign(new Error(why), { refusal: true });
-  const by = (await labeledBy(repo, issue, HANDOVER_LABEL, opts))?.actor?.login ?? "";
-  if (!by) throw refuse(`#${issue} carries no workflow hand-over (nobody applied ${HANDOVER_LABEL})`);
+  const id = String(appId ?? "").trim();
+  let events;
+  try {
+    events = (await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  } catch (e) {
+    throw refuse(`#${issue}'s timeline could not be read (${String(e?.message || e).slice(0, 120)}), so who applied ${HANDOVER_LABEL} is unknown`);
+  }
+  const labelers = new Set(events.filter((e) => e.event === "labeled" && e.label?.name === HANDOVER_LABEL).map((e) => e.actor?.login).filter(Boolean));
+  if (!labelers.size) throw refuse(`#${issue} carries no workflow hand-over (nobody applied ${HANDOVER_LABEL})`);
   const mark = `${handoverMarker(issue)}\n`;
-  const comment = (await listComments(repo, issue, opts)).filter((c) => c.user?.login === by && (c.body || "").startsWith(mark)).at(-1);
-  if (!comment) throw refuse(`#${issue} has no hand-over comment from ${by}, who applied ${HANDOVER_LABEL}`);
-  const app = comment.performed_via_github_app;
-  let who;
-  if (app) {
-    if (!String(appId).trim()) throw refuse(`the hand-over comment is the GitHub App ${app.slug} (id ${app.id})'s; name your Factory App's id with --app ID (or FACTORY_LOCAL_APP_ID) to accept it`);
-    if (String(app.id) !== String(appId).trim() || by !== `${app.slug}[bot]`) throw refuse(`the hand-over comment is the GitHub App ${app.slug} (id ${app.id})'s, not your Factory App's (id ${String(appId).trim()})`);
-    who = `the Factory App ${by} (id ${app.id})`;
-  } else {
+  const candidates = (await listComments(repo, issue, opts)).filter((c) => (c.body || "").startsWith(mark) && labelers.has(c.user?.login)).reverse();
+  if (!candidates.length) throw refuse(`#${issue} has no hand-over comment from anyone who applied ${HANDOVER_LABEL}`);
+  const verdict = async (c) => {
+    const login = c.user?.login ?? "";
+    const app = c.performed_via_github_app;
+    if (login === JOB_TOKEN_LOGIN || app?.slug === "github-actions") return { why: `the hand-over comment is ${JOB_TOKEN_LOGIN}'s, which any workflow can post as; it never hands a workflow over` };
+    if (app) {
+      if (!id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not verified: name your Factory App's id with --app ID (or FACTORY_LOCAL_APP_ID); it is the repository's FACTORY_APP_ID, shown on the App's settings page` };
+      if (String(app.id) !== id) return { why: `the hand-over comment is from the GitHub App ${app.slug}, not your Factory App (id ${id})` };
+      if (login !== `${app.slug}[bot]`) return { why: `the hand-over comment came through your Factory App (id ${id}), but its author ${login} is not that App's bot` };
+      return { who: `the Factory App ${login} (id ${id})` };
+    }
+    if (/\[bot\]$/i.test(login)) return { why: `the hand-over comment is ${login}'s, a bot that is not the Factory App you named` };
     let permission;
     try {
-      permission = await collaboratorPermission(repo, by, opts);
+      permission = await collaboratorPermission(repo, login, opts);
     } catch (e) {
-      throw refuse(`${by}'s permission on ${repo.full} could not be read (${String(e?.message || e).slice(0, 120)}), so the hand-over comment is not trusted`);
+      throw refuse(`${login}'s permission on ${repo.full} could not be read (${String(e?.message || e).slice(0, 120)}), so the hand-over comment is not trusted`);
     }
-    if (!HANDOVER_WRITERS.has(permission)) throw refuse(`${by}, who wrote the hand-over comment and applied ${HANDOVER_LABEL}, cannot write to ${repo.full} (${permission || "no access"}); only Factory's App or someone who can write hands a workflow over`);
-    who = `${by} (${permission} permission)`;
+    if (!HANDOVER_WRITERS.has(permission)) return { why: `${login}, who wrote the hand-over comment, cannot write to ${repo.full} (${permission || "no access"}); only Factory's App or someone who can write hands a workflow over` };
+    return { who: `${login} (${permission} permission)` };
+  };
+  let first = null;
+  for (const c of candidates) {
+    const v = await verdict(c);
+    if (!v.who) {
+      first ??= v.why;
+      continue;
+    }
+    const patch = handoverOf(c.body.slice(mark.length));
+    if (!patch) throw refuse(`${c.user.login}'s hand-over comment on #${issue} carries no patch`);
+    return { patch, who: v.who, url: c.html_url ?? "" };
   }
-  const patch = handoverOf(comment.body.slice(mark.length));
-  if (!patch) throw refuse(`${by}'s hand-over comment on #${issue} carries no patch`);
-  return { patch, who, url: comment.html_url ?? "" };
+  throw refuse(first);
 }
 
 /**

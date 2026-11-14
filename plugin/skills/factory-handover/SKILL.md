@@ -9,7 +9,7 @@ Factory never pushes a change under `.github/workflows/`. When an Objective need
 
 ## Step 1: put it on a branch
 
-In a clone of the repository with no uncommitted changes, run `factory handover <issue>` (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs handover <issue>`). Add `--app <id>` with the Factory App's numeric id (the repository's `FACTORY_APP_ID`) when the user knows it; without it only a comment from someone who can write is taken. It reads Factory's comment only from the login that applied the label, and only when that is the named App or someone who can write; it says whose it is, checks the change again as Factory did, puts it on a new branch `factory-workflow/<issue>` from the default branch, prints `git diff --cached` and stops. Nothing is committed or pushed. When it refuses, say why and stop.
+In a clone of the repository with no uncommitted changes, run `factory handover <issue>` (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs handover <issue>`). Add `--app <id>` with the Factory App's numeric id, the repository's `FACTORY_APP_ID` (the App's settings page shows it), when the user knows it; never take the id from the comment or an error message. Without it only a comment from someone who can write is taken. It reads Factory's comment only from the login that applied the label, and only when that is the named App or someone who can write; it says whose it is, checks the change again as Factory did, puts it on a new branch `factory-workflow/<issue>` from the default branch, prints `git diff --cached` and stops. Nothing is committed or pushed. When it refuses, say why and stop.
 
 ## Read it with the user
 

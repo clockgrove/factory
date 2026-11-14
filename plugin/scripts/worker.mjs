@@ -59,7 +59,7 @@ const applyExit = async (...args) => {
 };
 
 async function main() {
-  const startedAt = Date.now();
+  const jobStartMs = Date.now();
   // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
@@ -72,7 +72,7 @@ async function main() {
   const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(checkout, "..", `factory-usage-${issue}`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");
-  const deadlineAt = deadline(startedAt, inputs.timeoutMinutes);
+  const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
   let passes = 0;

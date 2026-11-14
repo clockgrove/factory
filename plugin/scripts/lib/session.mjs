@@ -7,7 +7,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, runHarness, seedSessionTotal, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
+import { STOP_SETTLE_MS, applyStop, claimExit, requestStageStop, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -1462,6 +1463,30 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     return;
   }
   throw new Error(`unknown exit ${exit}`);
+}
+
+/**
+ * The running stage's stop (stop.mjs): its Objective's label came off, or its issue closed (`cause`). Every harness pass
+ * is ended and none starts after; the stage's exit is claimed (false, and nothing more, when the stage was ending
+ * already); its passes get up to `settleMs` to end, and what they left is reaped (the backend's sandbox.reap); every pass
+ * this process ran becomes the stage's records (stop.mjs stoppedRecords: a pass ended before it reported dollars counts
+ * its live reading); the Objective is left stopped (stop.mjs applyStop: `pr`, else the branch's open PR, a draft); and
+ * `finish("stopped", reason)` writes the stage's end (its usage, its spend line, its last progress line). The caller
+ * then exits the process: the stage's own flow is parked (stop.mjs holdIfStopped) or ended.
+ */
+export async function stopStage({ cause, label, repo, issue, pr = undefined, records, finish, opts, settleMs = STOP_SETTLE_MS }) {
+  requestStageStop(cause);
+  if (!claimExit()) return false;
+  const reason = stopText(cause, label);
+  log(`#${issue}: ${reason}; stopping the stage`);
+  const until = Date.now() + settleMs;
+  while (passesRunning() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+  if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; the stage ends anyway`);
+  await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
+  records.splice(0, records.length, ...stoppedRecords(stagePasses()));
+  await applyStop(repo, issue, { pr, closed: cause === "closed" }, opts);
+  await finish("stopped", reason);
+  return true;
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */

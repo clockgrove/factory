@@ -45,6 +45,7 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, planStateNow, settled, trustedIssue } from "./lib/objective-trust.mjs";
+import { stopCause } from "./lib/stop.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -505,6 +506,11 @@ export class Local {
 
   ws(issue) {
     return join(this.dev, ".factory", String(issue));
+  }
+
+  /** The Objective label this repository's workflow names (factory:objective by default). */
+  objectiveLabel() {
+    return resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }).objectiveLabel;
   }
 
   domains() {
@@ -1040,6 +1046,8 @@ export class Local {
     for (const issue of issues) {
       if (running.has(issue.number) || out.includes(issue.number)) continue;
       if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
+      // A stopped Objective (its label removed: stop.mjs) is not resumed; the dispatcher's stopped pass tidies it.
+      if (stopCause(issue, this.objectiveLabel())) continue;
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
       if (!c || !sameMachineHolder(c.holder)) continue;
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
@@ -1376,7 +1384,8 @@ export class Local {
       const issue = reviewIssue(pr);
       if (!issue) continue;
       const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
-      if (!data || isBlocked(data) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
+      // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
+      if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
       out.push({ issue, pr: pr.number });
     }

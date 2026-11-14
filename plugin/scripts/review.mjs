@@ -37,7 +37,7 @@ import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import {
   TASK_CARD_TEMPLATE,
-  applyExit,
+  applyExit as applyExitNow,
   openAccess,
   commitAuthor,
   gitIdentity,
@@ -69,8 +69,10 @@ import {
   mergeBlockCause,
   mergeBlockReason,
   mergeReadyOne,
+  stopStage,
   unreadNow,
 } from "./lib/session.mjs";
+import { STOP_EXIT_MS, claimExit, holdIfStopped, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -152,6 +154,12 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     ...(recorded ? ["", recorded] : []),
   ].join("\n");
 }
+
+/** Every exit this stage applies waits while a stop of its Objective is under way: the stop's own exit stands (stop.mjs). */
+const applyExit = async (...args) => {
+  await holdIfStopped();
+  return applyExitNow(...args);
+};
 
 async function main() {
   const startedAt = Date.now();
@@ -254,7 +262,15 @@ async function main() {
   // finish saves it and every other session this stage ran (the reviewer's own), so the review's spend can be checked.
   const session = { id: null, canResume: true };
   let reentry = null;
+  // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
+  let watch = null;
+  // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason) => {
+    watch?.stop();
+    if (!claimExit()) return parked();
+    return finishNow(exit, reason);
+  };
+  const finishNow = async (exit, reason) => {
     keeper.stop();
     // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
     const known = await stageSpendSoFar().catch(() => null);
@@ -331,6 +347,27 @@ async function main() {
     await finish("skipped", "ready_for_review is not a review cue");
     return;
   }
+  // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review: the label comes off and nothing
+  // else changes. From here on the stage stops when a person stops it (session.mjs stopStage).
+  const stopped = stopCause(await getIssue(repo, issue, token), inputs.objectiveLabel);
+  if (stopped) {
+    log(`#${issue}: ${stopText(stopped, inputs.objectiveLabel)}; no review`);
+    await dropLabel();
+    await finish("skipped", `the Objective is stopped (${stopText(stopped, inputs.objectiveLabel)})`);
+    return;
+  }
+  const stopNow = async (cause) => {
+    const backstop = setTimeout(() => process.exit(1), STOP_EXIT_MS);
+    let took = true;
+    try {
+      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, pr, records, finish: finishNow, opts: token });
+    } catch (e) {
+      log(`the stop's end failed: ${String(e?.message || e).slice(0, 200)}`);
+    }
+    if (!took) return clearTimeout(backstop);
+    process.exit(0);
+  };
+  watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
@@ -820,6 +857,8 @@ async function main() {
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });
+  // Stopped meanwhile: nothing of this exit is applied (no merge, no ready mark, no label); the stop's end stands.
+  await holdIfStopped();
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
   if (decision.exit === "blocked") {
     decision.reason = relayReason(decision.reason);

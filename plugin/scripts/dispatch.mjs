@@ -12,7 +12,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -21,6 +21,7 @@ import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
+import { STOP_GRACE_MS, applyStop, stopCause } from "./lib/stop.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -627,11 +628,46 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       await setStateLabel(repo, number, null, opts);
       await moveCard(project, repo, number, "Done", opts).catch(() => {});
+      // Closing the issue stops its Objective: a PR it left open goes back to a draft without the review label, so the
+      // merge queue never merges it (a merged PR is no longer open; a split part's leaves the issue open).
+      await applyStop(repo, number, { closed: true, project }, opts);
       done.push(number);
     }
   }
 
   watch.mark("done");
+  // Stopped: an open issue still marked Running or In review whose Objective label a person removed (stop.mjs). Its PR
+  // goes back to a draft without the review label (no review starts, the merge queue drops it), its state label comes
+  // off and its card goes back to Queued, so re-applying the label starts it again. A running stage stops itself (its
+  // watch on the issue) and tidies the same way; a Running one is tidied here only STOP_GRACE_MS after its label came
+  // off, for a stage that died or never saw the stop. A local loop tidies only the Objectives it routes.
+  const stopped = [];
+  if (!dryRun) {
+    const seen = new Set();
+    for (const label of ["factory:in-review", "factory:running"]) {
+      const list = await listIssuesByLabel(repo, label, opts).catch((e) => {
+        retry(`the ${label} issues (${String(e.message).slice(0, 80)})`);
+        return [];
+      });
+      for (const issue of list) {
+        if (seen.has(issue.number) || stopCause(issue, inputs.objectiveLabel) !== "unlabeled" || !backend().trigger.tends(issue)) continue;
+        seen.add(issue.number);
+        if (label === "factory:running") {
+          const off = await labelRemovedAt(repo, issue.number, inputs.objectiveLabel, opts).catch(() => undefined);
+          if (off === undefined) {
+            retry(`#${issue.number}'s stop time`);
+            continue;
+          }
+          if (off && Date.now() - Date.parse(off) < STOP_GRACE_MS) continue;
+        }
+        await applyStop(repo, issue.number, { project }, opts);
+        stopped.push(issue.number);
+      }
+    }
+    if (stopped.length) log(`stopped (the label removed), left a draft and Queued: ${stopped.map((n) => `#${n}`).join(", ")}`);
+  }
+
+  watch.mark("stopped");
   // The launch locks (lib/lock.mjs) a launcher left behind (a job cut off mid-call) or someone else made: released here,
   // compare-and-swap on what was read, so a live holder's lock is never dropped.
   if (sandbox && !dryRun) {
@@ -669,7 +705,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -864,6 +900,7 @@ async function main() {
     blocking_source: result.relationSource,
     reset: result.reset,
     done: result.done,
+    stopped: result.stopped,
     vanished: result.vanished,
     paused: result.paused,
     sent_back_to_rebase: result.sentBack,

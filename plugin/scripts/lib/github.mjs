@@ -426,13 +426,19 @@ export async function listComments(repo, number, opts) {
   return (await rest(`repos/${repo.full}/issues/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [];
 }
 
-/** Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). */
-export async function upsertComment(repo, number, marker, body, opts) {
-  const text = `${marker}\n${body}`;
+/**
+ * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). `head`: Factory's own text
+ * after the marker on its first line (the plan comment's record, handoff.mjs planTextMarker); `keepHead` keeps the one an
+ * existing comment has instead.
+ */
+export async function upsertComment(repo, number, marker, body, opts, { head = "", keepHead = false } = {}) {
   // Only Factory's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
   // Before Factory knows its login (a failed read), one by someone who can push is.
   const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(marker);
   const existing = (await listComments(repo, number, opts)).find(ours);
+  // keepHead: the head the comment has now stays (a writer that knows none never erases one).
+  if (keepHead && existing) head = /^[^\n]*/.exec(existing.body)[0].slice(marker.length).replace(/\r$/, "");
+  const text = `${marker}${head}\n${body}`;
   if (existing) return rest(`repos/${repo.full}/issues/comments/${existing.id}`, { ...opts, method: "PATCH", body: { body: text } });
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body: text } });
 }
@@ -1125,6 +1131,14 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
     }
   }
   return out;
+}
+
+/** When the issue's title was last changed (its latest `renamed` event), or null. */
+export async function issueRenamedAt(repo, number, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  let last = null;
+  for (const e of events) if (e.event === "renamed" && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  return last;
 }
 
 /** When `label` (one name, or any of several) was last applied (a human's recovery re-applies the Objective label), or null. */

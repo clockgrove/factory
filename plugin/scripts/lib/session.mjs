@@ -53,6 +53,7 @@ import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bo
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
+import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
@@ -1748,10 +1749,11 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
  * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
  */
 /** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check is the work's; a drop is `report.cause`, else Factory's. */
-export const mergeBlockCause = (how, report = {}) => (how === "red" ? "work" : report.cause ?? "factory");
+export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" ? "work" : report.cause ?? "factory");
 
 export function mergeBlockReason(how, report = {}) {
   if (how === "red") return "a required check is red on the reviewed head";
+  if (how === "edited") return EDITED_REASON;
   if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Factory re-enqueued it";
   return null;
 }
@@ -1761,7 +1763,9 @@ export function mergeBlockReason(how, report = {}) {
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
- * "red" (a required check failed on the recorded head; the caller Blocks), "conflict" (the PR conflicts with the
+ * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title or body
+ * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
+ * of; the caller Blocks), "conflict" (the PR conflicts with the
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for the
  * one rebase, rebaseMarkers, and a conflict after that rebase Blocks with REBASED_TWICE), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
@@ -1797,6 +1801,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // Still in the queue: the caller has it watched until it merges or leaves (dispatch.mjs watchQueue), so a drop is
     // seen by a run nothing holds for approval, not only by the `dequeued` event's (#2683).
     if (!st?.stalled) {
+      // The Objective edited since its plan while its PR waits in the queue: taken out, so it does not merge (the
+      // caller Blocks). A dequeue GitHub refuses is logged.
+      if (await editedSincePlan(repo, issue, opts)) {
+        await dequeuePr(repo, pr.node_id, opts).catch((e) => log(`#${issue}: PR #${prNumber} could not be taken out of the merge queue (${errCode(e)})`));
+        return "edited";
+      }
       report.watch = true;
       return "in-queue";
     }
@@ -1848,6 +1858,9 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
     return "unread";
   }
+  // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
+  // earlier text does not merge; the caller Blocks.
+  if (await editedSincePlan(repo, issue, opts)) return "edited";
   // A PR the queue dropped (its checks never ran on the queue's commit, or failed there) goes back in once; dropped
   // again, it Blocks with the queue's reasons rather than waiting with no notice. GitHub's timeline is the record.
   let retry = null;

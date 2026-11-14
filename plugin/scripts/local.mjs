@@ -24,7 +24,7 @@ import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, objectiveLabeledAt, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -44,7 +44,7 @@ import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { authorGate, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, planStateNow, settled, trustedIssue } from "./lib/objective-trust.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -1565,6 +1565,9 @@ async function sessionInputs({ dir, repoFull, repo, opts }) {
   return { defaultBranch, inputs };
 }
 
+/** Where `factory issue` writes the issue for a session by default, and where `deliver` reads what the session was given. */
+const sessionIssueFile = (dir) => join(process.env.FACTORY_IN || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-in"), "issue.md");
+
 /** A session's refusal of an issue whose author or last editor cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
 
@@ -1572,18 +1575,29 @@ const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`
  * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
  * to --out (default $FACTORY_IN/issue.md, else <git dir>/factory-in/issue.md) as the worker writes it: the title and
  * body read with their author and last editor, only when both can push or are pinned maintainers. Otherwise nothing is
- * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Writes
- * nothing to GitHub.
+ * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Without
+ * --out, also plan.md beside it: the plan comment, only when the plan was made from this text (else none, and an
+ * earlier one is removed). Writes nothing to GitHub.
  */
 async function issueForSession(issue, flags) {
   const clone = sessionClone(flags);
   await sessionInputs(clone);
   const t = await trustedIssue(clone.repo, issue, await getIssue(clone.repo, issue, clone.opts), clone.opts);
   if (!t.ok) throw untrustedRefusal(t, `#${issue} is not given to this session`);
-  const file = resolve(flags.out || join(process.env.FACTORY_IN || resolve(clone.dir, sh("git", ["-C", clone.dir, "rev-parse", "--git-dir"]), "factory-in"), "issue.md"));
+  const file = resolve(flags.out || sessionIssueFile(clone.dir));
+  // In the session's hand-off directory, the plan beside the issue, only when it was made from this text
+  // (objective-trust.mjs planTextState, as a work stage hands its harness): after an edit the session plans again from
+  // the new text. No plan.md from an earlier run stays, even when the plan cannot be read: it goes before anything else.
+  const planFile = flags.out ? null : join(dirname(file), "plan.md");
+  if (planFile) rmSync(planFile, { force: true });
+  const { posted, state } = planFile ? await planStateNow(clone.repo, issue, t, clone.opts) : {};
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
+  if (!planFile) return 0;
+  const plan = state === "same" ? (posted.text ?? null) : null;
+  if (plan !== null) writeFileSync(planFile, plan);
+  log(plan !== null ? `#${issue}: its plan in ${planFile}` : state === "unplanned" ? `#${issue}: no plan yet` : `#${issue}: the plan comment was not made from this text, so no plan.md: plan from the issue`);
   return 0;
 }
 
@@ -1603,6 +1617,8 @@ async function deliver(issue, flags) {
   // Run from a session (/factory:factory-run --here), so the App's key is not read here: notices post with this token.
   if (process.env.FACTORY_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
   const { defaultBranch, inputs } = await sessionInputs(clone);
+  // When the label was last applied, read before the text, as the worker does (objective-trust.mjs planGate).
+  const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, opts);
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
   const trusted = await authorGate({ repo, issue, issueData: await getIssue(repo, issue, opts), notify: inputs.notify, opts, apply: applyExit });
   if (!trusted.ok) {
@@ -1610,6 +1626,18 @@ async function deliver(issue, flags) {
     return 1;
   }
   const { issueData } = trusted;
+  // The text the session planned from is the issue.md `factory issue` gave it: changed since, nothing is delivered, and
+  // the session reads the issue again. That text is the plan's record (objective-trust.mjs planGate); with no issue.md
+  // here (written elsewhere with --out), the plan comment keeps the record it has (handoff.mjs planSync).
+  const given = (() => {
+    try {
+      return readFileSync(sessionIssueFile(dir), "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
+  const planRecord = given === null ? null : { sha256: trusted.sha, label: labeledAt };
   const out = resolve(flags.out || process.env.FACTORY_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-out"));
   const { files, refused } = await readOut({ out }, process.env);
   if (refused.length) log(`hand-off files refused: ${refused.join(", ")}`);
@@ -1627,7 +1655,7 @@ async function deliver(issue, flags) {
   const needs = named ? { reason: named, repos: [] } : planNeedsOf(planText, { source: repo, label: inputs.objectiveLabel, answered });
   const planNeeds = needs.reason || "";
   if (planNeeds) {
-    await planSync(repo, issue, opts)(files["plan.md"]);
+    await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
     await postNote(repo, issue, files["note.md"], opts);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: planNeeds, notify: inputs.notify, stage: "work", askOnIssue: true }, opts);
     // A `--here` run is unmetered (skills/factory-score): its comment carries no spend line.
@@ -1648,7 +1676,7 @@ async function deliver(issue, flags) {
   } finally {
     dropOwned(tmp.factory);
   }
-  await planSync(repo, issue, opts)(files["plan.md"]);
+  await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
   const prior = await partsRecord(repo, issue, opts).catch(() => null);
   const open = await findPr(repo, branch, opts).catch(() => null);
   const left = record.part ? record.part.remaining.length : open && isSplitPart(prior, open.number) ? prior.remaining : 0;
@@ -1697,6 +1725,8 @@ async function postFindings(prNumber, file, flags) {
   await sessionInputs(clone);
   const trusted = await trustedIssue(repo, issue, await getIssue(repo, issue, opts), opts);
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
+  // The review job's second check: a review of code made from earlier text than the Objective's now is not posted.
+  if ((await planStateNow(repo, issue, trusted, opts)).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
   // The diff from this clone's history in a scratch repository (no file limit), GitHub's files API when that fails.
   const tmp = privateTmp({ ...process.env });
   let diff;

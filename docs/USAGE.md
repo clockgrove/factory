@@ -28,6 +28,16 @@ Ready Objectives start in priority order (`P0` to `P2`, then the lowest issue nu
 
 While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.
 
+## Edit an Objective
+
+Edit the issue as much as you like until the worker reads it: the first work stage makes its plan from the title and body as they are when it starts. After that, the plan and the code follow that text, and an edit to the title or body does not reach the run halfway:
+
+- The stage running when you edit finishes on the text it read. The next one (the review, the merge, or a work stage Factory starts on its own, such as a rebase) stops the Objective as Blocked, saying the Objective changed after its plan was made, and the PR, if there is one, becomes a draft. A PR already in the merge queue is taken out of it. Nothing goes on with a plan made from one text and an issue that says another.
+- Saving the issue without changing it is no edit: line endings and trailing spaces do not count. That needs the record of its text Factory keeps on the plan comment: a plan comment without one (an older plan) gets it at the next work stage, and until then any save after the plan counts as an edit.
+- Re-apply `factory:objective` to work from the new text: the work stage that starts after it makes its plan again from the text as it then is, on the same branch and PR. An edit made while the Objective is Blocked or has a Question is used the same way once you re-apply the label. Only the label counts: starting the Objective by hand (`gh workflow run factory.yml -f issue=<number>`, or `factory run <number>` in local mode) after such an edit Blocks it again.
+- Comments are not edits. A comment that answers a Question, or records a decision, leaves the plan as it is.
+- An edit is checked like the text you first wrote: when its editor cannot push and is not a maintainer the workflow names, the run Blocks (above).
+
 ## Blocked and Question
 
 A run that goes well needs nothing from you. When one needs you, Factory does all the work it can first and then hands the Objective back to you in one of two states. Neither holds up the queue: your other Objectives keep running.
@@ -37,7 +47,7 @@ A run that goes well needs nothing from you. When one needs you, Factory does al
 
 What to do with each:
 
-- **Blocked:** fix what the comment names, then re-apply `factory:objective` to run the Objective again.
+- **Blocked:** fix what the comment names, then re-apply `factory:objective` to run the Objective again. When your fix was an edit to the issue, the worker makes its plan again from the new text.
 - **Question:** comment the decision on the issue or the PR (a review or a line comment works too) and mark the PR ready: the review job applies it, and with no answer since the question the PR goes back to a Question rather than merging. Re-applying `factory:objective` instead reruns the worker with it.
 
 A comment counts when its author has write access to the repository or is a maintainer the workflow names (`notify`, and the optional `maintainers` list), since an App cannot always see an organization member's access.

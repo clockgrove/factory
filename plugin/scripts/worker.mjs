@@ -17,7 +17,7 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, objectiveLabeledAt, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
@@ -25,7 +25,7 @@ import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, c
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
-import { authorGate } from "./lib/objective-trust.mjs";
+import { authorGate, planGate } from "./lib/objective-trust.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -180,6 +180,9 @@ async function main() {
     return;
   }
 
+  // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
+  // landing between the two reads then count as after this stage's plan, never as before it.
+  const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, token);
   // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the body read with its author
   // and last editor, and Blocks before any harness when either cannot push and is not a pinned maintainer.
   const trusted = await authorGate({ repo, issue, issueData, notify: inputs.notify, opts: token, apply: applyExit });
@@ -189,6 +192,15 @@ async function main() {
     return;
   }
   issueData = trusted.issueData;
+  // The text its plan was made from (objective-trust.mjs planGate): changed since, with no label applied after the last
+  // work stage started from it, the stage Blocks; with one, the plan is made again from this text.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, labeledAt, work: true, pr: await findPr(repo, `factory/${issue}`, token).catch(() => null), objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
+  if (!planned.ok) {
+    log(planned.reason);
+    await finish("blocked", planned.reason);
+    return;
+  }
+  if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
 
   // One repository per Objective (lib/one-repo.mjs): a body that names another repository (declaredQuestion) is a
   // Question before any branch work or harness spend. An open PR the Objective already has goes back to a draft with
@@ -255,7 +267,8 @@ async function main() {
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
   const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => trustedAuthor(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
-  if (openPr && sentBack) {
+  // A plan made again needs the harness: no rebase-only stage for it.
+  if (openPr && sentBack && planned.state !== "replan") {
     const behind = await outbox.behind();
     if (behind > 0) {
       rebaseMode = true;
@@ -321,7 +334,7 @@ async function main() {
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   credentialBasis = cred.basis;
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
-  const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch });
+  const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.

@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { setMaintainers } from "../scripts/lib/logic.mjs";
 import { AUTHOR_FIX, authorGate, trustedIssue } from "../scripts/lib/objective-trust.mjs";
 import { blockedLine } from "../scripts/lib/session.mjs";
+import { inFiles, planTextMarker } from "../scripts/lib/handoff.mjs";
+import { objectiveSha } from "../scripts/lib/objective-trust.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const perms = { kirk: "admin", dev: "write", reader: "read" };
@@ -106,7 +108,7 @@ test("objective trust: the Blocked notice never tells anyone to edit an issue wh
 // The session's route (local.mjs issue, deliver, post-review) against a GitHub that answers like the real one.
 const LOCAL = join(import.meta.dirname, "..", "scripts", "local.mjs");
 const run = (args, env, cwd) => new Promise((ok) => execFile(process.execPath, [LOCAL, ...args, "--repo", "acme/app"], { cwd, env, encoding: "utf8", timeout: 60_000 }, (e, stdout, stderr) => ok({ code: e ? e.code : 0, stdout, stderr })));
-async function fakeGitHub({ author, editor = null, perms: p = perms }) {
+async function fakeGitHub({ author, editor = null, perms: p = perms, issueComments = [], commentsStatus = 200 }) {
   const calls = [];
   const send = (res, status, body) => {
     res.writeHead(status, { "content-type": "application/json" });
@@ -128,6 +130,7 @@ async function fakeGitHub({ author, editor = null, perms: p = perms }) {
       if (path === "/repos/acme/app") return send(res, 200, { full_name: "acme/app", default_branch: "main" });
       if (path === "/user") return send(res, 200, { login: "dev", type: "User" });
       if (path === "/repos/acme/app/issues/7") return send(res, 200, { number: 7, title: "REST title", body: "REST body.", state: "open", labels: [{ name: "factory:objective" }] });
+      if (path === "/repos/acme/app/issues/7/comments") return send(res, commentsStatus, commentsStatus === 200 ? issueComments : { message: "Not Found" });
       if (path === "/repos/acme/app/pulls/9") return send(res, 200, { number: 9, head: { ref: "factory/7", sha: "a".repeat(40) }, base: { ref: "main" } });
       const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(path);
       if (perm) return p[perm[1]] ? send(res, 200, { permission: p[perm[1]] }) : send(res, 404, { message: "Not Found" });
@@ -249,5 +252,89 @@ test("objective trust: the work and review stages Block through the gate before 
       const i = src.indexOf(later, src.indexOf("async function run()"));
       assert.ok(i === -1 || i > at, `${file}: ${later} only after the check`);
     }
+  }
+});
+
+// #205 on the session's route: the text the session planned from is what `factory issue` gave it.
+const CHECKED = { title: "Checked title", body: "Checked body.\n\n## Acceptance\n\n- A1: it works" };
+
+test("session route: `factory deliver` delivers nothing when the Objective changed after the session read it", async () => {
+  const c = clone({ branch: "factory/7" });
+  const given = join(c.work, ".git", "factory-in", "issue.md");
+  mkdirSync(join(c.work, ".git", "factory-in"), { recursive: true });
+  writeFileSync(given, inFiles({ issue: 7, issueTitle: CHECKED.title, issueBody: "The body as it was." })["issue.md"]);
+  const fake = await fakeGitHub({ author: user("kirk") });
+  try {
+    const r = await run(["deliver", "7", "--out", join(c.root, "out")], envFor(fake.url, c.root), c.work);
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stderr, /nothing was delivered: the Objective's title or body changed after this session read it; run `factory issue 7` again/);
+    assert.deepEqual(writes(fake.calls), [], "nothing written to GitHub");
+    assert.doesNotMatch(c.refs(), /factory\/7/, "nothing pushed");
+  } finally {
+    await fake.close();
+  }
+});
+
+test("session route: `factory post-review` posts nothing on an Objective edited since its plan", async () => {
+  const c = clone();
+  const file = join(c.root, "findings.json");
+  writeFileSync(file, JSON.stringify({ acceptance: [{ entry: "A1", met: true }], comments: [] }));
+  const plan = (body) => [{ id: 2, user: { login: "dev" }, body: `<!-- factory:7:plan -->${planTextMarker({ sha256: objectiveSha(CHECKED.title, body), label: null })}\n## Plan` }];
+  const fake = await fakeGitHub({ author: user("kirk"), issueComments: plan("The body the plan was made from.") });
+  try {
+    const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /nothing posted: the Objective's title or body changed after its plan was made/);
+    assert.deepEqual(writes(fake.calls), [], "no review posted");
+  } finally {
+    await fake.close();
+  }
+  // The plan's own text: the review goes on past the check (to the diff and the post).
+  const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
+  try {
+    const r = await run(["post-review", "9", file], envFor(same.url, c.root), c.work);
+    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title or body changed/);
+  } finally {
+    await same.close();
+  }
+});
+
+test("session route: `factory issue` hands the session the plan only when it was made from the issue's current text", async () => {
+  const c = clone();
+  const dir = join(c.work, ".git", "factory-in");
+  const plan = (body) => [{ id: 2, user: { login: "dev" }, created_at: "2026-11-13T10:00:00Z", body: `<!-- factory:7:plan -->${planTextMarker({ sha256: objectiveSha(CHECKED.title, body), label: null })}\r\n## Plan\r\n- [ ] item` }];
+  const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
+  try {
+    const r = await run(["issue", "7"], envFor(same.url, c.root), c.work);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, "issue.md"), "utf8"), inFiles({ issue: 7, issueTitle: CHECKED.title, issueBody: CHECKED.body })["issue.md"]);
+    assert.equal(readFileSync(join(dir, "plan.md"), "utf8"), "## Plan\r\n- [ ] item", "the plan comment, its marker line dropped");
+  } finally {
+    await same.close();
+  }
+  const edited = await fakeGitHub({ author: user("kirk"), issueComments: plan("The body the plan was made from.") });
+  try {
+    const r = await run(["issue", "7"], envFor(edited.url, c.root), c.work);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout + r.stderr, /the plan comment was not made from this text, so no plan\.md/);
+    assert.equal(existsSync(join(dir, "plan.md")), false, "the earlier plan.md is gone: the session plans from the new text");
+    assert.deepEqual(writes(edited.calls), [], "nothing written to GitHub");
+  } finally {
+    await edited.close();
+  }
+});
+
+test("session route: `factory issue` leaves no earlier plan.md when the plan comment cannot be read", async () => {
+  const c = clone();
+  const dir = join(c.work, ".git", "factory-in");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "plan.md"), "## A plan from an earlier run\n");
+  const fake = await fakeGitHub({ author: user("kirk"), commentsStatus: 404 });
+  try {
+    const r = await run(["issue", "7"], envFor(fake.url, c.root), c.work);
+    assert.notEqual(r.code, 0);
+    assert.equal(existsSync(join(dir, "plan.md")), false, "the stale plan is gone before anything can fail");
+  } finally {
+    await fake.close();
   }
 });

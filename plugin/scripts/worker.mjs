@@ -621,14 +621,20 @@ async function main() {
   const needs = needsOf(io.plan()).reason || !stoppedPlan ? needsOf(io.plan()) : needsOf(stoppedPlan);
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
-  let pushed = await outbox.push();
-  // A send-back's conflict pass that ended (no cap, death or refusal) with the branch still not on the base it was to
-  // rebase onto: the worker could not resolve the conflict. Blocked naming the files, with no validation run.
+  // A send-back's conflict pass that ended (no cap, death or refusal) with the checkout not the branch rebased onto the
+  // base Factory's rebase conflicted on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a commit
+  // dropped): the worker could not resolve the conflict. Nothing of it is pushed; Blocked naming the files, with no
+  // validation run.
   let unresolved = "";
-  if (rebaseOnto && pushed && !outbox.failed && !rec.timedOut && !rec.budgetExceeded && !rec.refusal && died < 2 && (await outbox.behind()) > 0) {
-    unresolved = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${rebaseOnto.base.slice(0, 7)} in ${conflictFiles(rebaseOnto.files)}: the branch it left is not rebased onto it`;
-    log(unresolved);
+  if (rebaseOnto && !rec.timedOut && !rec.budgetExceeded && !rec.refusal && died < 2) {
+    const left = await outbox.rebaseLeft({ from: rebaseOnto.from, onto: rebaseOnto.base });
+    if (left) {
+      unresolved = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${rebaseOnto.base.slice(0, 7)} in ${conflictFiles(rebaseOnto.files)}: ${left}; nothing of it was pushed`;
+      outbox.block(unresolved);
+      log(unresolved);
+    }
   }
+  let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a
   // send-back's conflict pass does, and Factory pushes again. A second conflict is refused there. A plan-time Question
@@ -762,7 +768,7 @@ async function main() {
     record: asked.record,
     recordBasis: asked.basis,
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
-    pushRejected: outbox.failed ? outbox.error : "",
+    pushRejected: outbox.failed && outbox.error !== unresolved ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,

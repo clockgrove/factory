@@ -83,7 +83,7 @@ Local mode reads the repository's `.github/workflows/factory.yml` `env:` block a
 
 | Variable | Effect |
 | --- | --- |
-| `FACTORY_HARNESS`, `FACTORY_MODEL`, `FACTORY_SUBAGENT_MODEL`, `FACTORY_REVIEWER_MODEL`, `FACTORY_REVIEWER_EFFORT`, `FACTORY_EFFORT` | pick another harness or model; another harness drops the workflow's models for its own defaults |
+| `FACTORY_HARNESS`, `FACTORY_MODEL`, `FACTORY_SUBAGENT_MODEL`, `FACTORY_REVIEWER_MODEL`, `FACTORY_REVIEWER_EFFORT`, `FACTORY_EFFORT` | pick another harness or model; another harness drops the workflow's models for its own defaults. These are this machine's defaults: an Objective's harness and model labels override them for that Objective, and one whose harness this machine cannot run (its CLI or its sandbox, or for Copilot its token) Blocks, and the loop's log names what is missing ([USAGE.md](USAGE.md), Choose the harness and models) |
 | `FACTORY_RESUME_POLICY`, `FACTORY_COMPACTION_WINDOW`, `FACTORY_PROMPT_CACHE_TTL` | the session settings, as on the Action |
 | `FACTORY_LOCAL_DOMAINS` | more hosts the sandboxes may reach, space or comma separated. Write host names (`example.com`) or `*.` ones; Codex's and Copilot's sandboxes get only those (no port, IP address or `localhost`): Copilot drops its whole network policy for a `host:port` entry and Codex's proxy ignores the port, admitting every port of the host, so serve leaves any other entry out of their policies and logs it, and doctor warns |
 | `FACTORY_LOCAL_ENV` | names of more variables the stage may see (the stage env is an allow-list, not your shell) |

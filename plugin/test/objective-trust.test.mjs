@@ -16,11 +16,11 @@ const repo = { owner: "acme", name: "app", full: "acme/app" };
 const perms = { kirk: "admin", dev: "write", reader: "read" };
 const user = (login, databaseId = 1) => ({ __typename: "User", login, databaseId });
 // GitHub's answer: the body with its author and last editor, read together; `permission` is the collaborator permission.
-const gh = ({ author, editor = null, lastEditedAt = editor ? "2026-11-09T10:00:00Z" : null, body = "Build the thing.", title = "Objective" }) => ({
+const gh = ({ author, editor = null, lastEditedAt = editor ? "2026-11-09T10:00:00Z" : null, body = "Build the thing.", title = "Objective", labels = ["factory:objective"] }) => ({
   graphql: async (q, vars) => {
-    assert.match(q, /issue\(number: \$number\) \{ body lastEditedAt author \{.*\} editor \{.*\} title \}/);
+    assert.match(q, /issue\(number: \$number\) \{ body lastEditedAt author \{.*\} editor \{.*\} title labels\(first: 100\) \{ nodes \{ name \} \} \}/);
     assert.deepEqual(vars, { owner: "acme", name: "app", number: 7 });
-    return { repository: { issue: { body, lastEditedAt, author, editor, title } } };
+    return { repository: { issue: { body, lastEditedAt, author, editor, title, labels: { nodes: labels.map((name) => ({ name })) } } } };
   },
   permission: async (_, login) => perms[login] ?? null,
 });
@@ -284,7 +284,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   try {
     const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /nothing posted: the Objective's title or body changed after its plan was made/);
+    assert.match(r.stderr, /nothing posted: the Objective's title, body or harness and model labels .* changed after its plan was made/);
     assert.deepEqual(writes(fake.calls), [], "no review posted");
   } finally {
     await fake.close();
@@ -293,7 +293,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
   try {
     const r = await run(["post-review", "9", file], envFor(same.url, c.root), c.work);
-    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title or body changed/);
+    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title, body or harness and model labels/);
   } finally {
     await same.close();
   }

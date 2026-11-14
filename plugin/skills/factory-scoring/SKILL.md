@@ -29,6 +29,8 @@ Per harness, from the usage artifact the worker job uploads, plus the reviewer c
 
 Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
 
+Name the harness and models that ran beside the dollars, so rows compare model to model: reference.md, "Harness and models".
+
 ## Reading the artifacts
 
 Which of the four sources gives which input: reference.md, "Reading the artifacts". `/factory:factory-score` reads all four and writes the row; a row with a missing input says which, rather than guessing.

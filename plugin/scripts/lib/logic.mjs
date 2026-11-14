@@ -2063,7 +2063,13 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
  * (the 1.0 streak counts per harness) reads it whatever the stage's model or exit, never from the prose phase lines.
  */
-export const harnessMarker = (harness, model = "") => `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}) })} -->`;
+/**
+ * The progress comment's harness line: the stage's harness and its own model (the worker's, or the reviewer's), and with
+ * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default) and the harness and model
+ * labels that chose them (`labels`, none on the repository's defaults).
+ */
+export const harnessMarker = (harness, model = "", ran = null) =>
+  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [] } : {}) })} -->`;
 const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
 /** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
 export function spendOf(body) {

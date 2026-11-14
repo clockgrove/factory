@@ -48,6 +48,7 @@ Factory itself is free. Every cost goes to a provider you already pick and pay d
 Factory never handles a payment, and no bill comes from Clockgrove. To keep those costs in check:
 
 - **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change costs a dollar or a few; a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Factory's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/factory:factory-run --here`) is neither capped nor counted.
+- **To run one Objective on a cheaper or a stronger model,** or another harness, label its issue (`factory:model:<id>`, `factory:harness:<name>`, and sub-agent and reviewer labels): the workflow's harness and models stay the defaults for the rest ([docs/USAGE.md](docs/USAGE.md), Choose the harness and models).
 - **Runs take from about ten minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run factory.yml -f issue=<number>`) runs it even when that limit is reached.
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Factory stops at a ready-for-review PR and you merge it yourself.

@@ -69,11 +69,13 @@ node <factory clone>/plugin/scripts/setup.mjs  --repo OWNER/NAME --yes --ci-chec
 gh workflow run factory.yml -f issue=811                              # one Objective now; the cron and the ticks do the rest
 ```
 
-Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
+Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, ran: {worker, subagent, reviewer, labels}, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`, `ran` being the three models the stage ran on and the harness and model labels that chose them); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
 
 ## Inputs that tune cost
 
-Seven optional inputs on the Action; each row gives its default. Every Claude call also shares one cached system-prompt prefix across runs.
+`harness`, `model`, `subagent_model` and `reviewer_model` (`FACTORY_HARNESS` and the three `FACTORY_*_MODEL` settings in the workflow's env block) are the repository's defaults. An Objective overrides any of them for itself with a label (`factory:harness:<name>`, `factory:model:<id>`, `factory:subagent-model:<id>`, `factory:reviewer-model:<id>`), so a small change can run on a cheaper model and a hard one on the strongest without editing the workflow: [USAGE.md](USAGE.md), Choose the harness and models.
+
+Seven more optional inputs on the Action; each row gives its default. Every Claude call also shares one cached system-prompt prefix across runs.
 
 | Input | What it does |
 | --- | --- |
@@ -82,7 +84,7 @@ Seven optional inputs on the Action; each row gives its default. Every Claude ca
 | `compaction_window` | The context size in tokens at which the worker and reviewer sessions compact; Claude and Codex, since Copilot has no such setting; the CLI default when empty, a measured lever for large Objectives. |
 | `resume_policy` | `fresh` by default: a review fix pass, an answer pass and a conflicting rebase start a fresh session; `fix-passes` resumes the worker's saved session for them, which on Objectives of about 30 turns cost three to seven times more at equal outcomes, so it is for adopters measuring larger ones; every harness, on Actions and in local mode. |
 | `prompt_cache_ttl` | Claude only; `off`, the CLI default, until measured: `auto` asks Claude Code for a one-hour prompt cache on the main conversation when the run bills an API key, which otherwise gets five minutes and so re-writes the prefix after every CI wait; `1h` or `5m` force one; the usage record's `cache` shows the writes after each wait, see bench/README.md. |
-| `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. |
+| `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. It pins the repository's harness only: another harness an Objective's label chooses installs its latest. |
 | `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. |
 
 ## Upgrade

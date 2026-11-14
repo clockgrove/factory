@@ -9,7 +9,7 @@ import { EDITED_FIX, EDITED_REASON, editedSincePlan, objectiveSha, planGate, pla
 import { blockedLine, mergeBlockCause, mergeBlockReason } from "../scripts/lib/session.mjs";
 import { BLOCK_CAUSES } from "../scripts/lib/logic.mjs";
 
-// #205: an edit to an Objective's title or body after its plan was made is never acted on halfway. The plan comment
+// #205: an edit to an Objective's title, body or harness and model labels after its plan was made is never acted on halfway. The plan comment
 // records the text it was made from; the next stage compares, and Blocks or (after a person re-applied the label) plans again.
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
@@ -35,7 +35,7 @@ function comments({ self, person, record = null, none = false, plan = "## Plan\n
 }
 
 /** A stage's gate against the plan comment `list`, the latest label event at `labeledAt`; GitHub's writes recorded. */
-async function gate(list, { sha, work, labeledAt = L0, before = null, editedAt = null, renamedAt = null }) {
+async function gate(list, { sha, work, labeledAt = L0, before = null, editedAt = null, changedAt = null }) {
   const applied = [];
   const writes = [];
   const real = globalThis.fetch;
@@ -45,7 +45,7 @@ async function gate(list, { sha, work, labeledAt = L0, before = null, editedAt =
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    const r = await planGate({ repo, issue: 7, sha, editedAt, work, pr: { number: 9 }, notify: "boss", opts: { token: "t" }, apply: async (_, exit) => applied.push(exit), before, stage: work ? "work" : "review", read: { planComment: async () => planOf(list, 7), labeledAt: async () => labeledAt, renamedAt: async () => renamedAt } });
+    const r = await planGate({ repo, issue: 7, sha, editedAt, work, pr: { number: 9 }, notify: "boss", opts: { token: "t" }, apply: async (_, exit) => applied.push(exit), before, stage: work ? "work" : "review", read: { planComment: async () => planOf(list, 7), labeledAt: async () => labeledAt, changedAt: async () => changedAt } });
     return { r, applied, writes };
   } finally {
     globalThis.fetch = real;
@@ -92,8 +92,8 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(review.applied[0].pr.number, 9, "the PR goes back to a draft");
     assert.equal(BLOCK_CAUSES[review.applied[0].cause].external, false, "an edit is a person's action, never External");
     const notice = blockedLine({ issue: 7, pr: { number: 9 }, stage: "review", reason: EDITED_REASON, fix: EDITED_FIX });
-    assert.match(notice, /title or body changed after its plan was made/);
-    assert.match(notice, /Re-apply `factory:objective` to work from the new text: the worker makes its plan again from it/);
+    assert.match(notice, /title, body or harness and model labels \(`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`\) changed after its plan was made/);
+    assert.match(notice, /Re-apply `factory:objective` to work from the issue as it is now, its text and its harness and model labels: the worker makes its plan again from it/);
   });
 
   test(`edit after plan (${route}): an edit while Blocked, then the label re-applied, plans again from the new text`, async () => {
@@ -220,8 +220,8 @@ test("edit after plan: a plan comment whose record cannot be read is decided on 
       const edited = await gate(list, { sha: B, work, labeledAt: T("09:00"), editedAt: T("11:00") });
       assert.deepEqual([edited.r.ok, edited.applied[0]?.reason, edited.writes], [false, EDITED_REASON, []], head);
     }
-    // The title changed after it: the same.
-    assert.equal((await gate(list, { sha: B, work: false, editedAt: T("09:30"), renamedAt: T("11:00") })).r.ok, false);
+    // The title, or a harness or model label, changed after it: the same.
+    assert.equal((await gate(list, { sha: B, work: false, editedAt: T("09:30"), changedAt: T("11:00") })).r.ok, false);
     // The label applied after the edit: the plan is made again, and the old one is not handed on.
     const again = await gate(list, { sha: B, work: true, labeledAt: T("12:00"), editedAt: T("11:00") });
     assert.equal(again.r.state, "replan");
@@ -276,11 +276,13 @@ test("edit after plan: the work stage's label time is the one read before the te
   const r = await planGate({ repo, issue: 7, sha: A, labeledAt: L0, work: true, opts: { token: "t" }, apply: async () => {}, stage: "work", read: { planComment: async () => null, labeledAt: async () => (read += 1, L1) } });
   assert.deepEqual([r.record, read], [{ sha256: A, label: L0 }, 0]);
   const src = readFileSync(join(SCRIPTS, "worker.mjs"), "utf8");
-  assert.ok(src.indexOf("await objectiveLabeledAt(") < src.indexOf("await authorGate("), "worker.mjs reads the label time before the text");
+  assert.ok(src.indexOf("await startedAt(") > 0 && src.indexOf("await startedAt(") < src.indexOf("await authorGate("), "worker.mjs reads the label time before the text");
+  // run() sits inside main(): a local of that name there would hide the import (every work stage crashed on it once).
+  assert.doesNotMatch(src, /\b(?:const|let|var)\s+startedAt\b/, "no local hides the imported startedAt");
   assert.match(src, /planGate\(\{[^)]*labeledAt,/);
   const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
   const deliver = local.slice(local.indexOf("async function deliver("));
-  assert.ok(deliver.indexOf("await objectiveLabeledAt(") < deliver.indexOf("await authorGate("), "so does deliver");
+  assert.ok(deliver.indexOf("await startedAt(") > 0 && deliver.indexOf("await startedAt(") < deliver.indexOf("await authorGate("), "so does deliver");
 });
 
 test("edit after plan: with Factory's own login unknown, the merge and a session's review stop rather than see no plan", async () => {
@@ -306,7 +308,7 @@ test("edit after plan: another App's marker never hides Factory's plan comment o
     ["github-actions[bot]", app(9, "github-actions[bot]", "<!-- factory:7:plan -->\n## From a workflow")],
     ["another App's forged record of the new text", app(10, "other-app[bot]", `<!-- factory:7:plan -->${planTextMarker({ sha256: B, label: later })}\n## Forged`)],
   ];
-  const issueNow = { gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing.", lastEditedAt: L1 } } }) }, renamed: async () => null };
+  const issueNow = { gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing.", lastEditedAt: L1 } } }) }, changed: async () => null };
   for (const [name, c] of cases) {
     const list = [mine, c];
     const read = async () => planOf(list, 7);
@@ -315,7 +317,7 @@ test("edit after plan: another App's marker never hides Factory's plan comment o
     assert.equal((await gate(list, { sha: B, work: false, editedAt: L1 })).r.ok, false, `${name}: the review`);
     assert.equal((await gate(list, { sha: B, work: true, labeledAt: L0, editedAt: L1 })).r.ok, false, `${name}: the next work stage`);
     assert.equal(await editedSincePlan(repo, 7, { token: "t" }, { ...issueNow, read }), true, `${name}: the merge and the queue`);
-    assert.equal((await planStateNow(repo, 7, { sha: B, editedAt: L1 }, { token: "t" }, { planComment: read, renamedAt: async () => null })).state, "changed", `${name}: post-review`);
+    assert.equal((await planStateNow(repo, 7, { sha: B, editedAt: L1 }, { token: "t" }, { planComment: read, changedAt: async () => null })).state, "changed", `${name}: post-review`);
   }
   // With no plan comment of Factory's, an App's marker only makes the check stricter: its time, never its record.
   const alone = planOf([cases[2][1]], 7);

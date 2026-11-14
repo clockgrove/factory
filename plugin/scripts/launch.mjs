@@ -35,6 +35,8 @@ import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TR
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
+import { objectiveInputs } from "./lib/objective-trust.mjs";
+import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
@@ -75,6 +77,17 @@ const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "repo", "sandbox", "app_id
 /** The harness's credentials, by harness: only the one the stage's harness needs goes into the sandbox. */
 const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexGatewayKey", "codexApiKey"], copilot: ["copilotGithubToken"] };
 const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
+/** The secrets that carry each harness's credential to the launch job (workflow-template.yml), for a refusal's fix. */
+const HARNESS_SECRET_NAMES = { claude: "ANTHROPIC_API_KEY (CLAUDE_CODE_OAUTH_TOKEN with credential: plan)", codex: "FACTORY_CODEX_GATEWAY_KEY or CODEX_API_KEY", copilot: "COPILOT_GITHUB_TOKEN" };
+/**
+ * {reason, fix} when the launcher holds no credential for the stage's harness (HARNESS_SECRETS), else null: the stage
+ * would Block on it inside its sandbox, after the sandbox's cost, so the launcher Blocks first.
+ */
+export function missingCredential(inputs) {
+  if ((HARNESS_SECRETS[inputs.harness] || []).some((k) => inputs[k])) return null;
+  return { reason: `no ${inputs.harness} credential reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness"} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
+}
+
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
 const GITHUB_CONTEXT = ["GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REPOSITORY_OWNER", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_GRAPHQL_URL", "GITHUB_WORKFLOW_REF"];
 
@@ -308,15 +321,19 @@ export const stageProgressKey = (runId, claim) => (/^\d{1,20}$/.test(String(runI
  * context, the stage's own names, the two tokens, only the credential its harness needs and the worker secrets' values
  * (the work stage's harness and the review stage's fix and answer passes get them; its reviewer never does).
  */
-export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
+export function stageEnvironment({ inputs, defaults = inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
   const out = {};
   for (const name of Object.keys(DEFAULTS)) {
     if (NOT_FOR_STAGE.has(name)) continue;
     const v = input(name, { env });
     if (v !== "") out[`FACTORY_${name.toUpperCase()}`] = v;
   }
-  // The harness and its models as this run resolved them (a harness override takes its own defaults), not as written.
-  Object.assign(out, { FACTORY_HARNESS: inputs.harness, FACTORY_MODEL: inputs.model, FACTORY_SUBAGENT_MODEL: inputs.subagentModel, FACTORY_REVIEWER_MODEL: inputs.reviewerModel, FACTORY_REVIEWER_EFFORT: inputs.reviewerEffort, FACTORY_EFFORT: inputs.effort });
+  // The repository's harness and models as this run resolved them (`defaults`: a harness override takes that harness's own
+  // defaults), not as written, and never the Objective's labels: the stage reads those itself (objective-trust.mjs
+  // choiceGate), so a label changed after this read is seen there. FACTORY_STAGE_HARNESS: the harness this start prepared
+  // the stage for (`inputs`, the labels' choice: its credential below, its CLI in the sandbox); a stage whose labels name
+  // another by then Blocks.
+  Object.assign(out, { FACTORY_HARNESS: defaults.harness, FACTORY_STAGE_HARNESS: inputs.harness, FACTORY_MODEL: defaults.model, FACTORY_SUBAGENT_MODEL: defaults.subagentModel, FACTORY_REVIEWER_MODEL: defaults.reviewerModel, FACTORY_REVIEWER_EFFORT: defaults.reviewerEffort, FACTORY_EFFORT: defaults.effort });
   for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) if (!out[k]) delete out[k];
   for (const k of GITHUB_CONTEXT) if (env[k]) out[k] = env[k];
   // Codex with both keys gets the gateway's only: the one it runs on (harness.mjs credentialEnv).
@@ -567,7 +584,8 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
     if (!usage) {
       const dir = join(process.env.RUNNER_TEMP || tmpdir(), `factory-usage-${n}-${record.claim}`);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
+      // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
+      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
 `);
       usage = { dir, name: record.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
     }
@@ -702,7 +720,9 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
     return out({ exit: decision.skip ? "skipped" : "start", start: !decision.skip, reason: decision.skip ? `#${n} (${ev.kind}): ${decision.skip}` : `#${n} (${ev.kind})` });
   }
   if (decision.skip) return out({ exit: "skipped", reason: `#${n} (${ev.kind}): ${decision.skip}` });
-  const run = { inputs, eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
+  // The repository's own harness and models (`defaults`), taken once before any start applies an Objective's labels to
+  // `inputs`: for the stage's env (stageEnvironment) and the CLI version pin, however many starts this run makes.
+  const run = { inputs, defaults: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]])), eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
   if (decision.block) return out(await block(run, `launcher: ${decision.block}`));
   if (decision.requeue) return out(await requeue(run, ctx.project, decision.requeue));
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
@@ -792,8 +812,8 @@ export function startFailure({ code }) {
 export const failedStartCause = (kind) => (kind === "quota" ? "provider-quota" : "factory");
 
 /** The Objective Blocked with Factory's own reason (codes and times) and its cause (logic.mjs BLOCK_CAUSES). */
-async function block({ repo, n, inputs, opts }, reason, cause = "factory") {
-  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch" }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
+async function block({ repo, n, inputs, opts }, reason, cause = "factory", fix = null) {
+  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch", ...(fix ? { fix } : {}) }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
   return { exit: "blocked", reason, failed: true };
 }
 
@@ -959,9 +979,21 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // A review starts on its PR: the event's, else the Objective's open PR on its factory branch; without one nothing starts.
   const pr = stage === "review" ? (wanted ?? (await findPr(repo, `factory/${n}`, opts))?.number ?? null) : null;
   if (stage === "review" && !Number.isInteger(pr)) return out({ exit: "skipped", reason: `#${n}: a review is due but the Objective has no open PR` });
+  // The harness and models this Objective runs on (objective-trust.mjs objectiveInputs), before the claim and any sandbox
+  // call: a label no writer applied, two of one kind or a model its harness cannot run Blocks here, before any spend. The
+  // stage then gets that harness's credential, its CLI checked in the sandbox, and FACTORY_STAGE_HARNESS (stageEnvironment).
+  await primeWriters(repo, opts, { maintainers: inputs.maintainers });
+  // The gateway key from this launcher's inputs: main() has taken the secrets out of its environment by now.
+  // Over the repository's defaults, never an earlier start's choice in `inputs`.
+  const chosen = await objectiveInputs({ repo, issue: n, env: process.env, opts, gateway: !!inputs.codexGatewayKey });
+  if (!chosen.ok) return out(await block(run, `launcher: ${chosen.reason}`, "setup", chosen.fix));
+  Object.assign(inputs, run.defaults, chosen.inputs);
+  const noKey = missingCredential(inputs);
+  if (noKey) return out(await block(run, `launcher: ${noKey.reason}`, "setup", noKey.fix));
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;
-  const base = { vendor: inputs.sandbox, stage, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };
+  // `harness`: the one this stage runs on (the Objective's), for a usage record the launcher or the sweep writes for it.
+  const base = { vendor: inputs.sandbox, stage, harness: inputs.harness, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };
   const write = (next) => writeSandboxRecord(repo, n, opts, next, { base: run.base });
   const launches = (entry, list = prior?.launches) => [...(list || []), { ...entry, cue }].slice(-KEEP_LAUNCHES);
 
@@ -1001,7 +1033,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   try {
     // The vendor's list of the Objective's sandboxes, from after the claim, beside the check.
     const listing = quiet(adapter.list({ tag: ["factory-issue", String(n)] }));
-    const env = stageEnvironment({ inputs, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId });
+    const env = stageEnvironment({ inputs, defaults: run.defaults, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId });
     const plugin = pluginPackage();
     const failed = (await ciToken).filter((c) => c.status === "FAIL");
     watch.mark("doctor");
@@ -1009,7 +1041,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     // Stopped since the earlier stage's end when the record says it stopped then; its storage is this stage's to book.
     const stoppedAt = prior?.state === "stopped" && !prior.stopError ? (prior.stoppedAt ?? null) : null;
     const handoff = { progress: stageProgressKey(runId, claim), launch: startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }) };
-    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: inputs.harnessVersion, plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
+    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: harnessVersionFor(inputs.harness, run.defaults.harness, inputs.harnessVersion), plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
   } catch (e) {
     // The log gets the whole message; GitHub gets the error's code and HTTP status only.
     log(`#${n}: the stage did not start: ${String(e.message).slice(0, 800)}`);

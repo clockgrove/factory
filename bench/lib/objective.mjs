@@ -20,7 +20,7 @@
 //   cost       lib/cost.mjs, with unit and basis per harness.
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, factoryLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
-import { costOf } from "./cost.mjs";
+import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf } from "../../plugin/scripts/lib/logic.mjs";
 
 export const ROW_VERSION = 1;
@@ -589,13 +589,39 @@ export function stageHarnessOf(body) {
   if (line) {
     try {
       const v = JSON.parse(line[1]);
-      if (HARNESSES.has(v?.harness)) return { harness: v.harness, model: typeof v.model === "string" && v.model ? v.model : null };
+      // The line's `models` and `labels` (plugin logic.mjs harnessMarker): the Objective's three models and the labels that chose them.
+      const str = (x) => (typeof x === "string" && x ? x : null);
+      const ran = v?.models && typeof v.models === "object" ? { ran: { worker: str(v.models.worker), subagent: str(v.models.subagent), reviewer: str(v.models.reviewer), labels: Array.isArray(v.labels) ? v.labels.filter((l) => typeof l === "string") : [] } } : {};
+      if (HARNESSES.has(v?.harness)) return { harness: v.harness, model: str(v.model), ...ran };
     } catch {
       // a malformed line: read the progress line instead
     }
   }
   const ran = /^- \d\d:\d\dZ harness (claude|codex|copilot)(?: \(([^)\s]+)\))? attempt \d+/m.exec(body || "");
   return ran ? { harness: ran[1], model: ran[2] ?? null } : null;
+}
+
+/**
+ * The harness and models an Objective ran on: the worker's model as its harness reported it (the cost row's), else as
+ * its last work stage recorded it; that stage's sub-agent model; its last review stage's reviewer model; and the
+ * harness and model labels that chose them, none when it ran on the repository's defaults. Each from a usage record's
+ * `ran` (plugin choice.mjs ranWith: the usage artifact's result.json, or a local stage's progress line); null where no
+ * record names one (an older stage, or a harness's own default).
+ */
+export function objectiveModels(usage, cost) {
+  const last = (stage) => (usage || []).filter((r) => r?.ran && stageOf(r) === stage).at(-1)?.ran ?? null;
+  const work = last("work");
+  const review = last("review");
+  return { worker: cost?.model ?? work?.worker ?? null, subagent: work?.subagent ?? review?.subagent ?? null, reviewer: review?.reviewer ?? work?.reviewer ?? null, labels: [...new Set([...(work?.labels || []), ...(review?.labels || [])])].sort() };
+}
+
+/** The scorecard's Harness cell: the harness, the worker model, the sub-agent and reviewer models, and the labels that chose them. */
+export function harnessCell(r) {
+  const m = r.models || {};
+  const parts = [`${r.harness ?? "?"}${(m.worker ?? r.model) ? ` ${m.worker ?? r.model}` : ""}`];
+  if (m.subagent) parts.push(`sub-agents ${m.subagent}`);
+  if (m.reviewer) parts.push(`reviewer ${m.reviewer}`);
+  return `${parts.join("; ")}${m.labels?.length ? ` (by label: ${m.labels.join(", ")})` : ""}`;
 }
 
 /**
@@ -649,7 +675,7 @@ export function spendRecords(collected, { app = null } = {}) {
     const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!out.some((r) => r.usd !== null || r.vendor)) return [];
@@ -838,6 +864,7 @@ export function scoreObjective(collected, opts = {}) {
     harness: ran.mixed ? null : cost.harness ?? ran.harness,
     harnessMixed: ran.mixed,
     model: cost.model,
+    models: objectiveModels(usage, cost),
     exit,
     parked,
     pr: (merged ?? open ?? pulls[0])?.number ?? null,
@@ -894,7 +921,7 @@ export function markdownTable(rows) {
     const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
     const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
-    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), `${r.harness ?? "?"}${r.model ? ` ${r.model}` : ""}`];
+    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), harnessCell(r)];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];

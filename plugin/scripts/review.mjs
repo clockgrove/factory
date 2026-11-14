@@ -31,7 +31,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -564,7 +564,9 @@ async function main() {
   const part = splitPartOf(parts, pr.number);
   // A PR GitHub would read as closing anything but this Objective's issue Blocks the stage (handoff.mjs closingChecked).
   let publishRefused = "";
-  const publish = (current) => publishPr(repo, { branch, base: defaultBranch, issue, prText: io.files()["pr.md"], splitPart, pr: current }, token).catch((e) => {
+  // The answer pass may change the workflow hand-over too (handoff.mjs handoverChecker); one that cannot go out Blocks.
+  const handover = handoverChecker(() => io.files(), outbox);
+  const publish = async (current) => publishPr(repo, { branch, base: defaultBranch, issue, prText: io.files()["pr.md"], splitPart, pr: current, handover: await handover.now() }, token).catch((e) => {
     log(`PR body: ${e.message.slice(0, 160)}`);
     if (e.code === "closing-refs") publishRefused = e.message;
     return e.pr || current;
@@ -900,6 +902,7 @@ async function main() {
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
+    handoverRefused: handover.refused(),
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });

@@ -23,6 +23,10 @@ Only when the prompt says the PR is a part of a split Objective and not the last
 
 The last part and an Objective in one PR are judged against every entry, never deferred.
 
+## Workflow hand-over
+
+Factory never pushes a change under `.github/workflows/`; the worker hands one over, and Factory puts its patch in the PR body under `## Workflow hand-over`, for a person to apply after the merge. That patch is part of the change: review it like the diff, against the acceptance entries and the repository's rules. A finding on it names the workflow file as `path` and the patch's new-side line as `line`; Factory moves it onto the diff with a note naming where it is. Each workflow change the body's Undone names and the patch lacks, or the patch makes and Undone does not explain, is a finding too. Never ask for the workflow change to be committed instead.
+
 ## The final message
 
 `{"acceptance": [...], "comments": [...]}`, only JSON, no prose around it.

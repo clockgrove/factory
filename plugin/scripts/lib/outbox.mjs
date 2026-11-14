@@ -13,11 +13,12 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
+import { handoverProblem } from "./handover.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
@@ -64,8 +65,6 @@ export function gitError(stderr) {
   const text = (blocks.length ? blocks.join("; ") : lines[0] ?? "").replace(/(\w+:\/\/)[^\s/@'"]+@/g, "$1***@").replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, "***");
   return text.slice(0, 300);
 }
-/** Where GitHub reads workflows from: a token without the Workflows permission may not create or update a file here. */
-const WORKFLOWS = ".github/workflows/";
 
 /**
  * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
@@ -686,7 +685,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // Nothing to merge (the branch already has the default), or nothing of the branch's own to merge it into: a merge
     // there would be Factory's alone, a commit whose tree is the default branch's.
     if (!SHA.test(mb) || mb === tip || mb === head) return { head };
-    const paths = (await names([mb, tip]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
+    const paths = (await names([mb, tip]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
     if (!paths.length) return { head };
     // From here on the mirror's default branch is the one GitHub has now: the bundle, media and scope checks count from it.
     await must(["update-ref", `refs/remotes/origin/${defaultBranch}`, tip]);
@@ -740,9 +739,44 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
 
   /** The workflow files `head` has unlike the default branch, and whether the branch itself changed any of them. */
   const workflowDrift = async (head) => {
-    const differ = (await names([base, head]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
-    const own = (await names([`${base}...${head}`]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
+    const differ = (await names([base, head]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
+    const own = (await names([`${base}...${head}`]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
     return { paths: differ, own: own.filter((f) => differ.includes(f)) };
+  };
+
+  /**
+   * Whether the worker's workflow hand-over (handover.mjs) can go out: git's own reading of `patch` in this mirror, the
+   * files it names (`git apply --numstat -z`) and whether it applies to the tree of the branch as GitHub has it (the
+   * default branch's when there is none), checked on a scratch index (`git apply --check --cached`): nothing is written.
+   * {ok: true} or {ok: false, problem} (handoverProblem's words, or git's refusal in Factory's words).
+   */
+  box.handover = async (patch) => {
+    const text = String(patch ?? "");
+    const stat = await git(["apply", "--numstat", "-z", "-"], { input: text });
+    if (stat.code !== 0) return { ok: false, problem: "is no patch git can read" };
+    // -z: `added\tdeleted\tpath\0`, or for a rename `added\tdeleted\t\0from\0to\0`; `-` counts mark a binary change.
+    const fields = String(stat.stdout).split("\0");
+    const files = [];
+    let binary = false;
+    for (let i = 0; i < fields.length; i += 1) {
+      const m = /^([0-9-]+)\t([0-9-]+)\t(.*)$/s.exec(fields[i]);
+      if (!m) continue;
+      if (m[1] === "-" || m[2] === "-") binary = true;
+      if (m[3]) files.push(m[3]);
+      else files.push(fields[++i] ?? "", fields[++i] ?? "");
+    }
+    const problem = handoverProblem(text, { files: files.filter(Boolean), binary });
+    if (problem) return { ok: false, problem };
+    const index = join(scratch, `handover-${Date.now()}.index`);
+    try {
+      const env = { ...gitEnv(), GIT_INDEX_FILE: index };
+      if ((await git(["read-tree", expected || base], { env })).code !== 0) return { ok: false, problem: "could not be checked: Factory's mirror could not read the branch's tree" };
+      const check = await git(["apply", "--check", "--cached", "-"], { env, input: text });
+      if (check.code !== 0) return { ok: false, problem: `does not apply to ${expected ? branch : defaultBranch} as GitHub has it` };
+    } finally {
+      rmSync(index, { force: true });
+    }
+    return { ok: true };
   };
 
   /** How many commits the default branch has that the Objective's branch (as GitHub has it) lacks. */
@@ -925,7 +959,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const files = await stageChanges(mirror, start, gitEnv()).catch((e) => e);
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
-    if (hits.length) return refuse(`touched protected path ${hits.join(", ")}`, { kind: "protected" });
+    if (hits.length) return refuse(protectedReason(hits), { kind: "protected" });
     // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
     const leak = await secretScan(git, `${base}..${head}`);
     if (leak) return refuse(leak);

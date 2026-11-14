@@ -15,6 +15,7 @@ import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-dri
 import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
 import { usdText } from "../../plugin/scripts/lib/logic.mjs";
+import { handoverSection } from "../../plugin/scripts/lib/handover.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const USAGE = join(import.meta.dirname, "fixtures", "usage");
@@ -51,6 +52,23 @@ test("human push: a maintainer's commit on the branch after the label breaks wal
   assert.equal(row.operator.minutes, "unknown");
   const timed = scoreObjective(humanPush(43, usage("claude")), { prices, minutes: 12, now: NOW });
   assert.deepEqual(timed.operator, { minutes: 12, basis: "--minutes (stopwatch)" });
+});
+
+test("workflow hand-over: a merged PR carrying Factory's hand-over leaves a person's step, asked for, counted like any other operator minute", () => {
+  const c = cleanMerge(45, usage("claude"));
+  const patch = "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1 +1 @@\n-on: push\n+on: [push, pull_request]\n";
+  c.pulls[0].body = `## Undone\n- the CI trigger: handed over\n\n${handoverSection({ issue: 45, patch, defaultBranch: "main" })}\n\nCloses #45\n`;
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.exit, "merged");
+  assert.equal(row.walkAway.value, false);
+  assert.deepEqual(row.walkAway.firstHumanAction, { at: c.pulls[0].merged_at, where: "PR #100", kind: "workflow hand-over", by: "a person (applies the patch)", detail: ".github/workflows/ci.yml", asked: "workflow hand-over" });
+  assert.equal(row.walkAway.askedOnly.value, false);
+  assert.equal(row.walkAway.bucket, "miss");
+  assert.deepEqual(row.operator, { minutes: "unknown", basis: "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" });
+  assert.deepEqual(scoreObjective(c, { prices, minutes: 4, now: NOW }).operator, { minutes: 4, basis: "--minutes (stopwatch)" });
+  // The same body without Factory's marker (a person's copy, or none) is no hand-over.
+  c.pulls[0].body = "## Undone\n- nothing\n\nCloses #45\n";
+  assert.equal(scoreObjective(c, { prices, now: NOW }).walkAway.value, true);
 });
 
 test("human push: the bot's own commits and comments never count, nor the label that starts the clock", () => {

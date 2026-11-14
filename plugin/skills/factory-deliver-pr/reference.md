@@ -7,3 +7,15 @@ Detail for the factory-deliver-pr skill that applies only on some passes. SKILL.
 The reviewer posts one pass of line comments; they are in `$FACTORY_IN/review-comments.json` (`id`, `path`, `line`, `body`). Handle them once: for each comment, either make the change and reply with the commit, or reply with a rebuttal that names the acceptance entry or repository rule that makes the comment wrong. Write the replies to `$FACTORY_OUT/replies.json` as `[{"id": <comment id>, "body": "..."}]`, one per comment; Factory posts each in its thread after it pushes your commits. Never leave one unanswered or answer one twice. A comment that names a real defect is fixed, not argued. A comment that flags an assumption as behaviour-changing is answered, when the Question rule's test is met, by marking that assumption `QUESTION` under `## Assumptions` in pr.md and writing a `question` exit record.
 
 After the replies: rebase onto `origin/<default branch>` again, run the validation commands (when the task card names required checks, only the tests your replies touched), commit, and stop.
+
+## Workflow hand-over
+
+Factory never pushes a change under `.github/workflows/`: `.github/` is a protected path, and GitHub refuses a workflow file from Factory's token. When the Objective needs one:
+
+1. Make the change in the checkout and check what you can here (the file parses; a workflow linter, when the repository has one).
+2. Write it as git's own diff, new files included, and put the workflow files back as `HEAD` has them:
+   `git add --intent-to-add -- .github/workflows && git diff HEAD -- .github/workflows > "$FACTORY_OUT/workflow.patch" && git reset -q -- .github/workflows; git checkout HEAD -- .github/workflows 2>/dev/null; git clean -fdq -- .github/workflows`
+3. In pr.md, under `## Undone`, one line per workflow file: what it changes and why a person applies it. An acceptance entry only the workflow proves says so in `## Acceptance`.
+4. Commit and deliver the rest as usual; a hand-over is no Block or Question, so the exit record is `delivered` when the rest is. Factory checks the patch, puts it in the PR body with the one command a person runs after the merge, and labels the issue `factory:handover`.
+
+`$FACTORY_IN/workflow.patch` is the hand-over the PR carries now. A later pass that changes it writes the whole patch to `$FACTORY_OUT/workflow.patch` again (start from that file); an empty file drops it; no file keeps it. Factory refuses a patch that is not git's diff, changes anything outside `.github/workflows/`, does not apply to the branch, or carries a binary or symlink change, and the stage Blocks with the reason. With nothing else to commit there is no PR: Factory posts the hand-over on the issue and Blocks it for a person.

@@ -31,7 +31,8 @@ import { ranWith } from "./lib/choice.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
-import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
+import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -293,6 +294,11 @@ async function main() {
     await finish("question", named);
     return;
   }
+  // A workflow change the Objective names (handover.mjs): Factory never pushes one, so the issue says so now, before any
+  // harness runs, and how it goes instead (the hand-over). Most needs show only in the plan or the work: the plan's
+  // Needs-Workflow line is said as the harness writes it, and the PR's hand-over carries any found later.
+  const namedWorkflows = workflowPathsNamed(`${issueData.title || ""}\n${issueData.body || ""}`);
+  if (await handoverUpFront(repo, issue, { named: namedWorkflows }, token).catch((e) => log(`hand-over notice: ${e.message.slice(0, 120)}`))) log(`the issue names ${namedWorkflows.join(", ")}: the workflow hand-over notice is on the issue`);
 
   // 3. Branch, plugin, git identity. Factory's git runs only in its own mirror (lib/outbox.mjs); what the agent's
   // checkout needs (the default branch, the Objective's branch, Factory's rebase) reaches it as a bundle, and every git
@@ -489,6 +495,18 @@ async function main() {
   // The plan.md the mid-run stop read (the hand-off tick), when it stopped the harness.
   let stoppedPlan = null;
   const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
+  // The plan's Needs-Workflow lines (handover.mjs plannedWorkflows): the hand-over notice goes on the issue as the plan
+  // is written, once, unless one is there already.
+  let workflowsNoticed = false;
+  const planWorkflows = (plan) => {
+    const named = plannedWorkflows(plan);
+    if (workflowsNoticed || !named.length) return;
+    workflowsNoticed = true;
+    handoverUpFront(repo, issue, { named, from: "plan" }, token).then(
+      (wrote) => wrote && log(`the plan needs ${named.join(", ")}: the workflow hand-over notice is on the issue`),
+      (e) => log(`hand-over notice: ${e.message.slice(0, 120)}`),
+    );
+  };
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
@@ -500,6 +518,7 @@ async function main() {
     const planStop = new AbortController();
     const tick = () =>
       io.tick((plan) => {
+        planWorkflows(plan);
         if (planStop.signal.aborted || !needsOf(plan, new Set([...answered, ...replied])).reason) return;
         log("plan-time Question: the plan needs another repository; stopping the harness");
         stoppedPlan = plan;
@@ -621,10 +640,13 @@ async function main() {
   const priorParts = await partsRecord(repo, issue, token).catch(() => null);
   const partLeft = (record) => (record?.part ? record.part.remaining.length : (pr || found) && isSplitPart(priorParts, (pr || found).number) ? priorParts.remaining : 0);
   const splitNow = () => partLeft(exitFromOut(io.files())) > 0;
+  // The worker's workflow hand-over (handoff.mjs handoverChecker): one that cannot go out Blocks the stage.
+  const handover = handoverChecker(() => io.files(), outbox);
+  const handoverNow = handover.now;
   // A PR GitHub would read as closing anything but this Objective's issue Blocks the stage (handoff.mjs closingChecked).
   let publishRefused = "";
-  const publish = (current) =>
-    publishPr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, prText: io.files()["pr.md"], fallbackBody: lastMessage(inputs.harness, rec), splitPart: splitNow(), pr: current }, token).catch((e) => {
+  const publish = async (current) =>
+    publishPr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, prText: io.files()["pr.md"], fallbackBody: lastMessage(inputs.harness, rec), splitPart: splitNow(), pr: current, handover: await handoverNow() }, token).catch((e) => {
       log(`PR could not be ${current ? "updated" : "opened"}: ${e.message.slice(0, 200)}`);
       if (e.code === "closing-refs") publishRefused = e.message;
       return e.pr || current;
@@ -692,6 +714,8 @@ async function main() {
   // A PR that started conflicting during validation is not red: every other gate still decides, and a delivered exit
   // goes to In review for the dispatcher's send-back (a rebase onto the default branch first), not to the reviewer.
   const conflict = !!validation?.conflict;
+  // With nothing pushed there is no PR to carry the hand-over: it goes on the issue (handoff.mjs handoverOnIssue).
+  const handoverLeft = !pr && !delta.count ? await handoverNow() : undefined;
   const decision = decideExit({
     harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
@@ -706,6 +730,8 @@ async function main() {
     lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
+    handoverRefused: handover.refused(),
+    handoverOnly: !pr && !delta.count && !!handoverLeft,
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no ready
@@ -716,6 +742,7 @@ async function main() {
   await beforeExit?.(true);
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
+  if (decision.exit === "blocked" && !pr && !delta.count && handoverLeft) await handoverOnIssue(repo, { issue, patch: handoverLeft, defaultBranch }, token).catch((e) => log(`hand-over on the issue: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {
     // A split Objective: this part's PR joins the record, with the items left for the next part (none for the last).
     const remaining = partLeft(asked.record);

@@ -105,6 +105,16 @@ Two Objectives running at once that edit the same lines can conflict: when one m
 
 Factory works in one repository per Objective. An Objective that needs a change in another repository stops with a Question on the issue before any code is written (after its plan, or before the worker starts when the issue names another repository on a `Factory-Repository:` line): split it into one Objective per repository and re-apply the label. When the Question came from the plan, you can instead answer on the issue how to do the work in this repository alone.
 
+## Workflow changes
+
+Factory never pushes a change under `.github/workflows/`, on any route: its token has no Workflows permission. When an Objective needs one, the run hands that part over and the rest lands as usual:
+
+- **Before any model spend,** an issue that names a path under `.github/workflows/` gets a comment saying so. Name the workflow files you know of in the issue to get it then. A need the issue does not name shows in the plan (a `Needs-Workflow:` line), with the same comment, or only in the PR.
+- **In the PR,** a `Workflow hand-over` section holds the exact patch inside one command, and the PR's Undone section says why. After the PR merges, run it in a clone: it applies the patch on a new branch from the default branch and opens a pull request for it. Then remove the `factory:handover` label from the issue. Until then the Objective is done with that step pending.
+- **When the workflow change is all there is,** there is no PR: the command is in the comment on the issue, and the Objective is Blocked until you apply it and close the issue.
+
+To have Factory build on a workflow change instead, land that change yourself first, then start the Objective.
+
 ## Commands
 
 With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words and use the full name, Clockgrove Factory: each request below loads the Factory skill that does it, and the full name keeps your agent from picking up another product called Factory. Where your agent offers skills as slash commands, the command works too.

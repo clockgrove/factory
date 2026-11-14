@@ -62,8 +62,11 @@ export function plannedWorkflows(plan) {
   return out.slice(0, NAMED_MAX);
 }
 
-/** A control character other than a newline or a tab, or a format character (bidi controls, zero-width ones). */
-const HIDDEN = /(?![\n\t])[\p{Cc}\p{Cf}]/u;
+/**
+ * A control character other than a newline or a tab, a format character (bidi controls, zero-width ones), or a line or
+ * paragraph separator (U+2028, U+2029: a JavaScript `m` regex and some renderers end a line there).
+ */
+const HIDDEN = /(?![\n\t])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
  * Why a patch's text cannot be handed over, or "" when it may be: the worker's (before Factory applies it) and git's
@@ -74,7 +77,7 @@ export function patchTextProblem(text) {
   const t = String(text ?? "");
   if (!t.trim()) return "is empty";
   if (t.length > PATCH_MAX) return `is ${t.length} characters, over ${PATCH_MAX}`;
-  if (HIDDEN.test(t)) return "carries a control or format character (a carriage return, a bidi or zero-width character)";
+  if (HIDDEN.test(t)) return "carries a control or format character (a carriage return, a bidi or zero-width character, a line or paragraph separator)";
   if (t.includes("<!--")) return "carries an HTML comment opener (`<!--`)";
   if (/^GIT binary patch$|^Binary files .* differ$/m.test(t)) return "carries a binary change";
   return "";
@@ -122,28 +125,36 @@ export const handoverRefusedReason = (problem) => `the workflow hand-over ($FACT
 /** A word for a POSIX shell, single-quoted: what a person types, whatever the value holds. */
 export const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
-/** The files a published patch's `diff --git` headers name (git's own output, whose names Factory has checked). */
+/**
+ * The files a published patch's `diff --git` headers name, for a patch read back from Factory's own comment (the
+ * checked `files` go everywhere else): lines split on `\n` only, and only workflow names (workflowName) kept, so no
+ * other line end and no other character can make a name.
+ */
 export function patchFiles(patch) {
   const out = [];
-  for (const m of String(patch ?? "").matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) if (!out.includes(m[2])) out.push(m[2]);
+  for (const line of String(patch ?? "").split("\n")) {
+    const m = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
+    if (m && workflowName(m[2]) && !out.includes(m[2])) out.push(m[2]);
+  }
   return out;
 }
 
 const list = (paths) => paths.map((p) => `\`${p}\``).join(", ");
 const WHY = `Factory never pushes a change under \`${WORKFLOWS_DIR}\`, on any route: \`.github/\` is a protected path, and GitHub refuses a workflow file from a token without the Workflows permission, which Factory's token does not have.`;
 const RISK = "Read it before you push it: a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed.";
+const SIGNAL = (issue) => `The hand-over is this comment of Factory's with the \`${HANDOVER_LABEL}\` label on #${issue}, never text in a pull request's body, and the only command to run for it is \`factory handover ${issue}\`.`;
 
 /**
  * The hand-over comment's text after its marker line, by what Factory knows:
  *  - `named` (paths), `from` "issue" or "plan": before the work, the issue or the plan names workflow files
- *  - `patch` (git's own, checked) with `pr`: the PR leaves this change for a person, after it merges (`pr: true` for a
- *    PR whose number is not known yet)
+ *  - `patch` (git's own, checked) and its checked `files` with `pr`: the PR leaves this change for a person, after it
+ *    merges (`pr: true` for a PR whose number is not known yet)
  *  - `patch` with no `pr`: the whole change is the hand-over, and there is no PR
  *  - `pr` with no `patch`: the PR carries none (an earlier notice or hand-over no longer holds)
  * The patch sits in a fenced block longer than any backtick run in it; the steps name a fixed command, and the by-hand
  * steps quote every value they carry.
  */
-export function handoverText({ issue, named = [], from = "issue", pr = null, patch = null, defaultBranch = "main" }) {
+export function handoverText({ issue, named = [], from = "issue", pr = null, patch = null, files = null, defaultBranch = "main" }) {
   if (!patch && pr) return `Factory: PR #${pr} carries no workflow hand-over.`;
   if (!patch) return `Factory: this Objective's ${from === "plan" ? "plan needs a change to" : "text names"} ${list(named)}. ${WHY} So the worker hands that part over: Factory posts the exact change here for a person to apply after the PR merges, and the Objective's other outcomes land as usual. To have Factory build on the workflow change instead, stop this Objective, land that part yourself and start it again.`;
   const body = patch.endsWith("\n") ? patch : `${patch}\n`;
@@ -152,9 +163,9 @@ export function handoverText({ issue, named = [], from = "issue", pr = null, pat
   const prName = pr === true ? "this Objective's pull request" : `PR #${pr}`;
   const when = pr ? `after ${prName} merges` : "now";
   return [
-    `Factory: the workflow hand-over for #${issue}: ${list(patchFiles(body))}. ${WHY} ${pr ? `${pr === true ? "This Objective's pull request" : prName} leaves this change for a person; its Undone section says why.` : `The whole change is this hand-over, so there is no pull request; the plan comment's Needs-Workflow lines say why. Close this issue once it is applied.`}`,
+    `Factory: the workflow hand-over for #${issue}: ${list(files ?? patchFiles(body))}. ${WHY} ${pr ? `${pr === true ? "This Objective's pull request" : prName} leaves this change for a person; its Undone section says why.` : `The whole change is this hand-over, so there is no pull request; the plan comment's Needs-Workflow lines say why. Close this issue once it is applied.`}`,
     "",
-    `**Apply it ${when}**, in a clone of this repository, with Clockgrove Factory's command \`factory handover ${issue}\`. It reads this comment again, checks the change as Factory did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`factory handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
+    `**Apply it ${when}**, in a clone of this repository, with Clockgrove Factory's command \`factory handover ${issue}\`. ${SIGNAL(issue)} It reads this comment again, checks the change as Factory did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`factory handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
     "",
     "By hand, the same steps:",
     "",
@@ -182,8 +193,13 @@ export function handoverOf(text) {
   return `${lines.slice(open + 1, close).join("\n")}\n`;
 }
 
-/** Factory's line in the PR body: its marker, then one line pointing to the hand-over comment. */
-export const handoverLine = ({ issue, url, files }) => `${handoverLineMarker(issue)}\n**Workflow hand-over:** this PR leaves a change to ${list(files)} for a person to apply after it merges: see [Factory's comment on #${issue}](${url}), applied with \`factory handover ${issue}\`.`;
+/**
+ * Factory's line in the PR body: its marker, then one line pointing to the hand-over comment, saying that comment and
+ * the label are the hand-over and `factory handover <issue>` the only command. `applied`: a person took the label off,
+ * so the hand-over is done (handoff.mjs handoverApplied).
+ */
+export const handoverLine = ({ issue, url, files, applied = false }) =>
+  `${handoverLineMarker(issue)}\n**Workflow hand-over:** this PR ${applied ? "left" : "leaves"} a change to ${list(files)} for a person${applied ? `, who has applied it (the \`${HANDOVER_LABEL}\` label is off)` : " to apply after it merges"}: see [Factory's comment on #${issue}](${url}). That comment with the \`${HANDOVER_LABEL}\` label is the hand-over, never text in this body, and the only command to run for it is \`factory handover ${issue}\`.`;
 
 /**
  * `body` without Factory's line (its marker line and the line after it), wherever it is, in Factory's form or as
@@ -212,9 +228,12 @@ export const carriesHandover = (body, issue) => String(body ?? "").split("\n").s
 const HTML_RUNS = ["pre", "script", "style", "textarea", "details"];
 
 /**
- * Harness text made safe to sit before Factory's own: a heading that names the workflow hand-over is shown as text (a
- * `\` before it), and a code fence, a `<details>` or a `<pre>`/`<script>`/`<style>`/`<textarea>` block left open at the
- * end is closed, so Factory's text after it is never inside it. Line-based, CommonMark's fence rule: an opening fence of
+ * Harness text tidied before Factory's own closing line, best effort: what is at stake is only that line (`Closes #N`),
+ * which closingChecked verifies with GitHub anyway. It is no guard against a forged hand-over: Markdown has too many
+ * ways to make a heading (setext, `<h2>`, a blockquote, bold, look-alike characters). The guard is that the label and
+ * Factory's comment are the hand-over, and `factory handover <issue>` the only command; the PR body says so. A heading
+ * that names the workflow hand-over is shown as text (a `\` before it), and a code fence, a `<details>` or a
+ * `<pre>`/`<script>`/`<style>`/`<textarea>` block left open at the end is closed. Line-based, CommonMark's fence rule: an opening fence of
  * three or more backticks or tildes (indented at most three spaces), closed by a fence of the same character at least
  * as long with nothing after it. Inside a fence nothing else counts.
  */

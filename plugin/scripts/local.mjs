@@ -4,7 +4,7 @@
 //   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all] [--interval SECONDS (30)]
 //   node scripts/local.mjs issue <issue> | deliver <issue> | post-review <pr> <findings.json>   (a session's route)
-//   node scripts/local.mjs handover <issue> [--push]   (a person applies Factory's workflow hand-over: read it, then --push)
+//   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
 // serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
@@ -25,7 +25,7 @@ import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, labeledBy, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, labeledBy, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -77,7 +77,7 @@ export const COMMANDS = {
   issue: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "the issue as a session reads it" },
   deliver: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "Factory's half of an Objective worked in a session" },
   "post-review": { args: ["pr", "findings.json"], flags: WHERE, about: "post a session's reviewer pass" },
-  handover: { args: ["issue"], flags: { ...WHERE, push: "bool" }, about: "put Factory's workflow hand-over on a new branch and show it, then stop for you to read it (--push: commit, push and open its pull request)" },
+  handover: { args: ["issue"], flags: { ...WHERE, push: "bool", app: { value: "ID", number: true } }, about: "put Factory's workflow hand-over on a new branch and show it, then stop for you to read it (--push: commit, push and open its pull request)" },
 };
 const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
 /** The usage text: one command's, or every command's. */
@@ -1777,7 +1777,7 @@ async function deliver(issue, flags) {
   const only = !ahead && !openNow && handover ? decideExit({ harness: { ok: true }, pr: null, commits: 0, record, handoverOnly: true }) : null;
   if (only?.handoverOnly) {
     await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
-    await handoverOnIssue(repo, { issue, patch: handover, defaultBranch }, opts);
+    await handoverOnIssue(repo, { issue, handover, defaultBranch }, opts);
     await applyExit(repo, { issue, pr: null, exit: only.exit, reason: only.reason, cause: only.cause, notify: inputs.notify, stage: "work" }, opts);
     log(`#${issue}: blocked: ${only.reason}`);
     return 1;
@@ -1806,15 +1806,55 @@ async function deliver(issue, flags) {
 /** Why pushing a handed-over workflow waits for a person's read. */
 export const HANDOVER_RISK = "a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed";
 
+/** Repository permissions whose holders may hand a workflow over: they could push it themselves. */
+const HANDOVER_WRITERS = new Set(["admin", "maintain", "write"]);
+
 /**
- * `factory handover <issue> [--push]`: a person applies Factory's workflow hand-over (handover.mjs) in their clone, in
- * two steps. The first reads the hand-over from Factory's comment on the issue, and only from the login that applied
- * its `factory:handover` label (which only Factory, or someone who can push, can apply; never `github-actions[bot]`),
- * checks it again here as Factory did (outbox.mjs checkHandover, against the default branch as fetched now), puts
- * git's own result on a new branch `factory-workflow/<issue>` from the default branch, shows `git diff --cached` and
- * stops: nothing is committed or pushed, because pushing a workflow can run it. The second, `--push`, on that branch
- * with only workflow files staged, commits, pushes it and opens its pull request with `gh`. Nothing here runs a
- * shell: every value goes to git or gh as one argument. Returns the exit code.
+ * The hand-over `factory handover` may apply, or a refusal (an Error whose message says why; nothing is changed then).
+ * The comment must carry Factory's hand-over marker and be written by the login that last applied `factory:handover`,
+ * and that login must be either the Factory App this person names (`appId`: --app or FACTORY_LOCAL_APP_ID), known by
+ * GitHub's own `performed_via_github_app` on the comment (its id, and the comment's author being that App's bot), or a
+ * person with write, maintain or admin permission on the repository (GitHub's collaborator permission, read now; local
+ * mode's operator, who posts Factory's comments, is one). Any other App, a triager, anyone else is refused, and so is a
+ * permission that cannot be read: there is no fallback. Returns {patch, who, url}.
+ */
+export async function trustedHandover(repo, issue, opts, { appId = "" } = {}) {
+  const refuse = (why) => Object.assign(new Error(why), { refusal: true });
+  const by = (await labeledBy(repo, issue, HANDOVER_LABEL, opts))?.actor?.login ?? "";
+  if (!by) throw refuse(`#${issue} carries no workflow hand-over (nobody applied ${HANDOVER_LABEL})`);
+  const mark = `${handoverMarker(issue)}\n`;
+  const comment = (await listComments(repo, issue, opts)).filter((c) => c.user?.login === by && (c.body || "").startsWith(mark)).at(-1);
+  if (!comment) throw refuse(`#${issue} has no hand-over comment from ${by}, who applied ${HANDOVER_LABEL}`);
+  const app = comment.performed_via_github_app;
+  let who;
+  if (app) {
+    if (!String(appId).trim()) throw refuse(`the hand-over comment is the GitHub App ${app.slug} (id ${app.id})'s; name your Factory App's id with --app ID (or FACTORY_LOCAL_APP_ID) to accept it`);
+    if (String(app.id) !== String(appId).trim() || by !== `${app.slug}[bot]`) throw refuse(`the hand-over comment is the GitHub App ${app.slug} (id ${app.id})'s, not your Factory App's (id ${String(appId).trim()})`);
+    who = `the Factory App ${by} (id ${app.id})`;
+  } else {
+    let permission;
+    try {
+      permission = await collaboratorPermission(repo, by, opts);
+    } catch (e) {
+      throw refuse(`${by}'s permission on ${repo.full} could not be read (${String(e?.message || e).slice(0, 120)}), so the hand-over comment is not trusted`);
+    }
+    if (!HANDOVER_WRITERS.has(permission)) throw refuse(`${by}, who wrote the hand-over comment and applied ${HANDOVER_LABEL}, cannot write to ${repo.full} (${permission || "no access"}); only Factory's App or someone who can write hands a workflow over`);
+    who = `${by} (${permission} permission)`;
+  }
+  const patch = handoverOf(comment.body.slice(mark.length));
+  if (!patch) throw refuse(`${by}'s hand-over comment on #${issue} carries no patch`);
+  return { patch, who, url: comment.html_url ?? "" };
+}
+
+/**
+ * `factory handover <issue> [--push] [--app ID]`: a person applies Factory's workflow hand-over (handover.mjs) in their
+ * clone, in two steps. The first takes the hand-over trustedHandover accepts, says whose it is, checks it again here as
+ * Factory did (outbox.mjs checkHandover, against the default branch as fetched now), puts git's own result on a new
+ * branch `factory-workflow/<issue>` from the default branch (or, when that fails, leaves the clone as it was), shows
+ * `git diff --cached` and stops: nothing is committed or pushed, because pushing a workflow can run it. The second,
+ * `--push`, on that branch, takes and checks the hand-over again and goes on only when the staged change is exactly
+ * that, then commits (hooks off, as in step one), pushes the branch and opens its pull request with `gh`. Nothing here
+ * runs a shell: every value goes to git or gh as one argument. Returns the exit code.
  */
 async function handoverForPerson(issue, flags) {
   const clone = sessionClone(flags);
@@ -1827,54 +1867,66 @@ async function handoverForPerson(issue, flags) {
     process.stderr.write(`factory handover: ${why}\n`);
     return 1;
   };
+  const check = async (patch, tree, against) => {
+    const scratch = mkdtempSync(join(tmpdir(), "factory-handover-"));
+    try {
+      return await checkHandover(git, { patch, tree, index: join(scratch, "index"), against });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
   const defaultBranch = (await rest(`repos/${repo.full}`, opts)).default_branch;
   if ((await exec("git", ["check-ref-format", "--branch", String(defaultBranch)], { env })).code !== 0) return fail(`GitHub's default branch name ${JSON.stringify(defaultBranch)} is no branch name git takes`);
+  let trusted;
+  try {
+    trusted = await trustedHandover(repo, issue, opts, { appId: flags.app ?? process.env.FACTORY_LOCAL_APP_ID ?? "" });
+  } catch (e) {
+    if (!e.refusal) throw e;
+    return fail(`${e.message}; nothing was changed here`);
+  }
+  log(`#${issue}: the hand-over is ${trusted.who}'s comment${trusted.url ? ` (${trusted.url})` : ""}`);
   if (flags.push) {
     const on = (await git(["symbolic-ref", "--short", "-q", "HEAD"])).stdout.trim();
     if (on !== branch) return fail(`run it on ${branch}, after \`factory handover ${issue}\` put the change there and you read it`);
-    const staged = (await git(["diff", "--cached", "--name-only", "-z", "--no-renames"])).stdout.split("\0").filter(Boolean);
-    if (!staged.length) return fail(`nothing is staged on ${branch}`);
-    const outside = staged.filter((f) => !workflowName(f));
-    if (outside.length) return fail(`${outside.length} staged file(s) are not workflow files under ${WORKFLOWS_DIR}; unstage them`);
+    // The staged change must be exactly the hand-over as checked on this branch's commit, which step one showed.
+    const checked = await check(trusted.patch, "HEAD", branch);
+    if (!checked.ok) return fail(`the hand-over ${checked.problem}; nothing was pushed`);
+    const staged = await git(["diff-index", "--cached", "-p", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"]);
+    if (staged.code !== 0 || staged.stdout !== checked.patch) return fail(`what is staged on ${branch} is not the hand-over as shown; nothing was pushed. Start again: switch back, delete ${branch} and run \`factory handover ${issue}\``);
+    if ((await git(["diff", "--name-only"])).stdout.trim()) return fail(`${branch} has unstaged changes; nothing was pushed`);
     const steps = [
-      ["git", ["-C", dir, "commit", "-q", "-m", `#${issue}: the workflow change Factory handed over`]],
+      ["git", ["-C", dir, "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", `#${issue}: the workflow change Factory handed over`]],
       ["git", ["-C", dir, "push", "-u", "origin", `HEAD:refs/heads/${branch}`]],
       ["gh", ["pr", "create", "--repo", repo.full, "--base", defaultBranch, "--head", branch, "--fill"]],
     ];
     for (const [cmd, args] of steps) {
       const r = await exec(cmd, args, { env, cwd: dir });
-      if (r.code !== 0) return fail(`${cmd} ${args.filter((a) => a !== dir && a !== "-C").slice(0, 2).join(" ")} failed: ${String(r.stderr || r.stdout).trim().split("\n").at(-1)?.slice(0, 200)}`);
+      if (r.code !== 0) return fail(`${cmd} ${cmd === "gh" ? "pr create" : args.find((a) => a === "commit" || a === "push")} failed: ${String(r.stderr || r.stdout).trim().split("\n").at(-1)?.slice(0, 200)}`);
       if (cmd === "gh") process.stdout.write(`${String(r.stdout).trim()}\n`);
     }
     log(`#${issue}: the workflow hand-over is on ${branch} and in a pull request; remove the ${HANDOVER_LABEL} label from #${issue} once it merges`);
     return 0;
   }
-  // Factory's comment, from the login that applied the label: anyone can paste the marker into a comment of theirs.
-  const by = (await labeledBy(repo, issue, HANDOVER_LABEL, opts))?.actor?.login ?? "";
-  if (!by || by === "github-actions[bot]") return fail(`#${issue} carries no workflow hand-over from Factory (no ${HANDOVER_LABEL} label Factory applied)`);
-  const mark = `${handoverMarker(issue)}\n`;
-  const comment = (await listComments(repo, issue, opts)).find((c) => c.user?.login === by && (c.body || "").startsWith(mark));
-  const patch = comment ? handoverOf(comment.body.slice(mark.length)) : null;
-  if (!patch) return fail(`#${issue} has no hand-over comment from ${by}, who applied ${HANDOVER_LABEL}`);
   if ((await git(["status", "--porcelain", "--untracked-files=no"])).stdout.trim()) return fail("this clone has uncommitted changes; commit or stash them first");
   if ((await git(["rev-parse", "--verify", "-q", `refs/heads/${branch}`])).code === 0) return fail(`${branch} exists already; finish it with --push, or delete it to start again`);
   const fetched = await git(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`]);
   if (fetched.code !== 0) return fail(`git fetch failed: ${String(fetched.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
   const base = (await git(["rev-parse", "--verify", `refs/remotes/origin/${defaultBranch}^{commit}`])).stdout.trim();
-  const scratch = mkdtempSync(join(tmpdir(), "factory-handover-"));
-  let checked;
-  try {
-    checked = await checkHandover(git, { patch, tree: base, index: join(scratch, "index"), against: defaultBranch });
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-  if (!checked.ok) return fail(`Factory's hand-over ${checked.problem}; nothing was changed here`);
+  const checked = await check(trusted.patch, base, defaultBranch);
+  if (!checked.ok) return fail(`the hand-over ${checked.problem}; nothing was changed here`);
+  // Where the clone was, to go back to when the branch cannot take the change.
+  const was = (await git(["symbolic-ref", "--short", "-q", "HEAD"])).stdout.trim() || (await git(["rev-parse", "HEAD"])).stdout.trim();
   if ((await git(["switch", "-q", "--no-track", "-c", branch, base])).code !== 0) return fail(`git could not make ${branch} from ${defaultBranch}`);
   const applied = await git(["apply", "--index", "-"], { input: checked.patch });
-  if (applied.code !== 0) return fail(`git could not apply the hand-over on ${branch}: ${String(applied.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
+  if (applied.code !== 0) {
+    await git(["reset", "-q", "--hard"]);
+    await git(["switch", "-q", ...(/^[0-9a-f]{40,64}$/.test(was) ? ["--detach"] : []), was]);
+    await git(["branch", "-q", "-D", branch]);
+    return fail(`git could not apply the hand-over on ${branch} (${String(applied.stderr).trim().split("\n").at(-1)?.slice(0, 200)}); the clone is back on ${was} and ${branch} is deleted`);
+  }
   const shown = await git(["diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color"]);
   process.stdout.write(shown.stdout);
-  log(`#${issue}: the workflow hand-over (from ${by}'s comment) is staged on ${branch}, from ${defaultBranch}; nothing is committed or pushed.`);
+  log(`#${issue}: the workflow hand-over (${trusted.who}'s) is staged on ${branch}, from ${defaultBranch}; nothing is committed or pushed.`);
   log(`Read the diff above before you push it: ${HANDOVER_RISK}. When you have, run \`factory handover ${issue} --push\` to commit it, push ${branch} and open its pull request.`);
   return 0;
 }

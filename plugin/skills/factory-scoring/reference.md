@@ -39,3 +39,7 @@ The walk-away rule's stall, as `bench/score.mjs` applies it:
 - Factory's acts are its App's (or, in local mode, the operator's within a run) labels, comments, reviews, enqueues and merge, each run's job, and each run's progress comment from its creation to the stage's own last write (the comment's header, not its last edit). Booking a sandbox stage's cost is not an act: the stage's vendor comment (`<!-- factory:<n>:vendor:<stage>:<key> -->`) is written at its end, or by the sweep hours later for a stage that died, so that stage shows as idle; an older stage's booking edited its progress comment instead.
 - Another machine's act (the queue dropping a PR) is not one, and time a Question or Blocked notice had a person's turn is not idle.
 - The span runs from Factory's first act after the label: the wait from the label to that first act is not a stall but the first run's `dispatch` seconds (a slot wait apart as `slotWaitSeconds`), because the bench cannot yet tell a slot wait behind other Objectives from a missed tick.
+
+## Workflow hand-over
+
+Each merged PR whose body carries Factory's workflow hand-over line (`<!-- factory:N:handover-line -->`; every part of a split Objective) leaves a person's step: applying the change Factory handed over. It is one human action at that merge, asked for, so the Objective is no walk-away, and its minutes are operator minutes from a stopwatch, like any other.

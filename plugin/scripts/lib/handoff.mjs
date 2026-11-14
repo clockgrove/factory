@@ -11,7 +11,7 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { addLabels, closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, removeLabel, rest, updatePr, upsertComment } from "./github.mjs";
 import { HANDOVER_FILE, HANDOVER_LABEL, closedHarnessText, handoverLine, handoverMarker, handoverOf, handoverRefusedReason, handoverText, patchFiles, withoutHandoverLine } from "./handover.mjs";
-import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
+import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, selfLogin, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
 import { log } from "./inputs.mjs";
@@ -502,8 +502,9 @@ export async function postNote(repo, issue, text, opts) {
  * Open or update the branch's one PR from pr.md. A new PR opens as a draft (Factory marks it ready once its own
  * validation is green); its body ends with Factory's closing line. Without pr.md an existing PR is left as it is, and
  * a new one gets the issue's title and `fallbackBody`, sanitised. Returns the PR, or null when there is nothing to open.
- * `handover`: the workflow hand-over as Factory publishes it (git's own patch, outbox.mjs checkHandover); "" for none;
- * undefined keeps the one Factory's comment on the issue carries (handoverPosted). With one, that comment holds it
+ * `handover`: the workflow hand-over as Factory publishes it ({patch, files}: git's own patch and the files it checked,
+ * outbox.mjs checkHandover); "" for none; undefined keeps the one Factory's comment on the issue carries (handoverPosted),
+ * unlabelled once a person has applied it (handoverApplied). With one, that comment holds it
  * (handoverText), the issue carries the factory:handover label, and the PR body's first line is Factory's, pointing to
  * the comment (handoverLine); with none, the label comes off and a notice there says the PR carries none. The label and
  * the comment are put right on every publish, so a write GitHub refused is made again on the next. The harness's text
@@ -515,14 +516,19 @@ export async function publishPr(repo, { branch, base, issue, issueTitle, prText,
   const parsed = prText ? parsePrText(prText, issue) : null;
   const existing = pr || (await findPr(repo, branch, opts));
   const posted = await handoverPosted(repo, issue, opts);
-  const given = handover && !handover.endsWith("\n") ? `${handover}\n` : handover;
-  const patch = given === undefined ? (posted?.patch ?? null) : given || null;
+  // The hand-over this publish carries: the stage's checked one, none, or (undefined) the one Factory's comment holds,
+  // its files read back from Factory's own text (patchFiles). A kept one a person has applied (they took the label off)
+  // is not labelled again: the label is the person's step, and it is done.
+  const kept = handover === undefined;
+  const current = kept ? (posted?.patch ? { patch: posted.patch, files: patchFiles(posted.patch) } : null) : handover || null;
+  const patch = current?.patch ?? null;
+  const applied = kept && patch ? await handoverApplied(repo, issue, opts) : false;
   // The hand-over's comment first, so the PR's line can point to it.
   let comment = posted;
   let line = "";
   if (patch) {
-    comment = await syncHandover(repo, { issue, posted, text: handoverText({ issue, pr: existing?.number ?? true, patch, defaultBranch: base }), label: true }, opts);
-    line = handoverLine({ issue, url: comment?.html_url || `https://github.com/${repo.full}/issues/${issue}`, files: patchFiles(patch) });
+    comment = await syncHandover(repo, { issue, posted, text: handoverText({ issue, pr: existing?.number ?? true, patch, files: current.files, defaultBranch: base }), label: applied ? null : true }, opts);
+    line = handoverLine({ issue, url: comment?.html_url || `https://github.com/${repo.full}/issues/${issue}`, files: current.files, applied });
   }
   const head = line ? `${line}\n\n` : "";
   const footer = prFooter(issue, splitPart);
@@ -541,7 +547,7 @@ export async function publishPr(repo, { branch, base, issue, issueTitle, prText,
   out = await closingChecked(repo, out, { issue, splitPart, harnessBody, footer, head }, opts);
   // Now the PR's number is known: a new PR's comment names it; with no hand-over, an earlier notice or hand-over there
   // is put right (the PR carries none).
-  if (patch && !existing) await syncHandover(repo, { issue, posted: comment, text: handoverText({ issue, pr: out.number, patch, defaultBranch: base }), label: true }, opts);
+  if (patch && !existing) await syncHandover(repo, { issue, posted: comment, text: handoverText({ issue, pr: out.number, patch, files: current.files, defaultBranch: base }), label: applied ? null : true }, opts);
   else if (!patch && posted) await syncHandover(repo, { issue, posted, text: handoverText({ issue, pr: out.number }), label: false }, opts);
   return out;
 }
@@ -562,14 +568,15 @@ const postedOf = (c, issue) => {
 };
 
 /**
- * The issue's hand-over comment and label as `text` and `label` say: the label added or removed (both safe to repeat),
+ * The issue's hand-over comment and label as `text` and `label` say: the label added (true) or removed (false), both
+ * safe to repeat, or left as a person left it (null: they took it off once they applied the hand-over);
  * the comment written when it differs. A refused write is logged, never thrown: the PR stands, and the next publish
  * puts it right. Returns the comment (GitHub's answer, or the one there), or null.
  */
 async function syncHandover(repo, { issue, posted, text, label }, opts) {
   try {
-    if (label) await addLabels(repo, issue, [HANDOVER_LABEL], opts);
-    else await removeLabel(repo, issue, HANDOVER_LABEL, opts);
+    if (label === true) await addLabels(repo, issue, [HANDOVER_LABEL], opts);
+    else if (label === false) await removeLabel(repo, issue, HANDOVER_LABEL, opts);
   } catch (e) {
     log(`hand-over label on #${issue}: ${String(e?.message || e).slice(0, 120)}`);
   }
@@ -583,8 +590,8 @@ async function syncHandover(repo, { issue, posted, text, label }, opts) {
 /**
  * The stage's workflow hand-over (handover.mjs), from `files()` (the hand-off files as last collected), checked in
  * Factory's mirror against the branch as GitHub has it (outbox.mjs handover), once per text. `now()`: undefined when no
- * pass left workflow.patch (the one Factory published stands), "" for an empty one (none), else git's own regenerated
- * patch (never the worker's text); undefined too
+ * pass left workflow.patch (the one Factory published stands), "" for an empty one (none), else {patch, files}: git's
+ * own regenerated patch (never the worker's text) and the files git read back; undefined too
  * for one that cannot go out, which `refused()` then names (handoverRefusedReason): its stage Blocks.
  */
 export function handoverChecker(files, outbox) {
@@ -599,7 +606,7 @@ export function handoverChecker(files, outbox) {
       if (!text.trim()) return "";
       if (!seen.has(text)) seen.set(text, await outbox.handover(text).catch((e) => ({ ok: false, problem: `could not be checked: ${String(e?.message || e).slice(0, 120)}` })));
       const checked = seen.get(text);
-      if (checked.ok) return checked.patch;
+      if (checked.ok) return { patch: checked.patch, files: checked.files };
       refused = handoverRefusedReason(checked.problem);
       log(refused);
       return undefined;
@@ -624,8 +631,27 @@ export async function handoverUpFront(repo, issue, { named, from = "issue" }, op
  * The whole change is a hand-over (nothing to push, so no PR): Factory's comment on the issue carries it, with the
  * factory:handover label.
  */
-export async function handoverOnIssue(repo, { issue, patch, defaultBranch }, opts) {
-  await syncHandover(repo, { issue, posted: await handoverPosted(repo, issue, opts), text: handoverText({ issue, patch, defaultBranch }), label: true }, opts);
+export async function handoverOnIssue(repo, { issue, handover, defaultBranch }, opts) {
+  await syncHandover(repo, { issue, posted: await handoverPosted(repo, issue, opts), text: handoverText({ issue, patch: handover.patch, files: handover.files, defaultBranch }), label: true }, opts);
+}
+
+/**
+ * Whether a person has applied the hand-over: someone other than Factory took the factory:handover label off after
+ * Factory last applied it (the issue's timeline, actors by login). A timeline that cannot be read reads as not applied:
+ * the label goes on again, which a person can take off again.
+ */
+export async function handoverApplied(repo, issue, opts) {
+  const self = String(selfLogin() || "").toLowerCase();
+  const events = await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
+  if (!Array.isArray(events) || !self) return false;
+  let applied = false;
+  for (const e of [...events].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
+    if (e.label?.name !== HANDOVER_LABEL) continue;
+    const mine = String(e.actor?.login || "").toLowerCase() === self;
+    if (e.event === "labeled" && mine) applied = false;
+    if (e.event === "unlabeled" && !mine) applied = true;
+  }
+  return applied;
 }
 
 /** Every issue reference made inert: `#12`, `o/r#12` and issue links keep their text and link nothing. */

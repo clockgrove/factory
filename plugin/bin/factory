@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json> | handover <issue> [--push]
+// factory run <issue> [--wait] | serve [--once] [--all] [--interval N] | review <pr> [--wait] | issue <issue> [--out FILE] | deliver <issue> [--out DIR] | post-review <pr> <findings.json> | handover <issue> [--push] [--app ID]
 // Local mode from a clone of the repository: the same worker and reviewer as the Action, on this machine, in its
 // sandboxes (docs/LOCAL.md). A thin front for plugin/scripts/local.mjs, which checks the command line (--help, -h, every
 // flag) before it does anything; Claude Code puts a plugin's bin/ on PATH.

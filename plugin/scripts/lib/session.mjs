@@ -55,6 +55,7 @@ import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bo
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { outageOf, outageReason, stopWaiting } from "./network.mjs";
+import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -1567,13 +1568,20 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
 }
 
 /**
+ * What an outage Block off the local route says next: the dispatcher relaunches the stage (dispatch.mjs, lib/relaunch.mjs
+ * RELAUNCH_MAX), so the notice mentions no one (the stage passes no `notify`); the dispatcher's own notice does, once
+ * the relaunches are used up.
+ */
+export const RELAUNCH_NOTE = `Factory relaunches a stage lost to its network, at most ${RELAUNCH_MAX} times since the Objective was last started; past that it Blocks it for you.`;
+
+/**
  * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level
  * failure), which is no crash. The process stops waiting first, so what it still writes fails at once rather than waiting
  * again. Its records are every pass it ran (stagePasses, the ones still running at their live reading), so the usage
  * counts a pass the outage cut off. On the local route (`local`) the stage ends `paused` with the outage in result.json
  * and nothing written to GitHub: serve keeps the claim and resumes the Objective once the host answers (local.mjs). On
- * any other route nothing resumes a stage, so it Blocks with the External cause `outage` through `block(reason)` (one try,
- * which lands only if GitHub answers again by then).
+ * any other route it Blocks with the External cause `outage` through `block(reason)` (one try, which lands only if
+ * GitHub answers again by then), and the dispatcher relaunches it (RELAUNCH_NOTE).
  */
 export async function outageExit(e, { local, records, finish, block }) {
   stopWaiting();
@@ -1587,7 +1595,7 @@ export async function outageExit(e, { local, records, finish, block }) {
     await finish("paused", reason, outage);
     return;
   }
-  const blocked = `${reason}; the stage waited for the network until its time ran out. Re-apply the label to run it again.`;
+  const blocked = `${reason}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`;
   log(`blocked: ${blocked}`);
   await block(blocked).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", blocked, outage);
@@ -1602,7 +1610,7 @@ export async function outageExit(e, { local, records, finish, block }) {
 export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null }) {
   stopWaiting();
   const lost = outageOf(e);
-  const reason = local ? outageReason(lost) : `${outageReason(lost)}; the stage waited for the network until its time ran out. Re-apply the label to run it again.`;
+  const reason = local ? outageReason(lost) : `${outageReason(lost)}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`;
   const outage = { host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}) };
   const exit = local ? "paused" : "blocked";
   log(`${exit} before the stage began: ${reason}`);

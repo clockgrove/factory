@@ -731,3 +731,115 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
   assert.deepEqual(quiet.r.vanished, [7]);
   assert.match(quiet.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's comments could not be read \(502\)\)[^]*"cause":"factory"/);
 });
+
+/**
+ * One dispatcher tick on a repository whose workflow sets a cloud sandbox and which runs both routes (#235): #50 a
+ * factory:local Objective Running on a live local claim, whose record holds three dispatch markers older than
+ * START_LOST_MS (a local loop wrote them before #235: each reads as a `lost` start); #51 a factory:local Objective
+ * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
+ * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
+ */
+async function sandboxRepoTick(env, { localSlots = null } = {}) {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const { marker, sandboxMarkerLine, setSelf, START_LOST_MS } = await import("../scripts/lib/logic.mjs");
+  const { BASE, BOT, REPO, githubStore } = await import("./fixtures/github-records.mjs");
+  const now = Date.now();
+  const iso = (ms) => new Date(ms).toISOString();
+  const iss = (number, labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, [])];
+  const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
+  const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(START_LOST_MS + 30 * 60_000), named(START_LOST_MS + 20 * 60_000), named(START_LOST_MS + 10 * 60_000)] };
+  const comments = {
+    50: [
+      { id: 500, user: BOT, updated_at: iso(now), body: `${marker(50, "sandbox")}\n${sandboxMarkerLine(lostRecord)}` },
+      { id: 501, user: { login: "maintainer", type: "User" }, updated_at: iso(now), body: `${marker(50, "local")}\n${claimBody("box-a", new Date(now - 30_000))}` },
+    ],
+  };
+  const LOCK = "refs/factory-launch/60/work-book-abc";
+  const refs = new Map([[LOCK, "c".repeat(40)]]);
+  const calls = [];
+  const store = githubStore({ seed: 5 });
+  setSelf(BOT.login);
+  const realFetch = globalThis.fetch;
+  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
+  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    const p = u.pathname.replace(`/repos/${REPO.full}/`, "");
+    const n = Number(/^issues\/(\d+)\//.exec(p)?.[1]);
+    if (u.pathname === "/graphql") {
+      const { query, variables } = JSON.parse(init.body);
+      if (/defaultBranchRef/.test(query)) return json({ data: { repository: { id: BASE.repositoryId, defaultBranchRef: { target: { tree: { oid: BASE.tree } } } } } });
+      if (/updateRefs/.test(query)) {
+        const [r] = variables.refUpdates;
+        calls.push(`updateRefs ${r.name}`);
+        if (refs.get(r.name) === r.beforeOid) refs.delete(r.name);
+        return json({ data: { updateRefs: { clientMutationId: null } } });
+      }
+      return json({});
+    }
+    if (p.startsWith("git/")) calls.push(`${method} ${p}`);
+    if (method === "GET" && p === "git/matching-refs/factory-launch/") return json([...refs].map(([ref, sha]) => ({ ref, object: { sha, type: "commit" } })));
+    if (method === "GET" && p.startsWith("git/ref/factory-launch/")) return refs.has(`refs/${p.slice(8)}`) ? json({ ref: `refs/${p.slice(8)}`, object: { sha: refs.get(`refs/${p.slice(8)}`), type: "commit" } }) : json({ message: "Not Found" }, 404);
+    if (method === "GET" && p === `git/commits/${"c".repeat(40)}`) return json({ sha: "c".repeat(40), message: `${LOCK}\n\n0123`, author: { name: "Factory", email: "factory@users.noreply.github.com", date: iso(now - 60 * 60_000) } });
+    if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
+    if (method === "GET" && p === "issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
+    if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
+    if (method === "GET" && /^issues\/\d+\/timeline$/.test(p)) return json(n === 50 ? [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 60 * 60_000) }] : []);
+    if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && /comments$/.test(p)) return json(comments[n] || []);
+    if (method !== "GET") return json({}, 200);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, recordWrites: { api: store.api, base: BASE } });
+    const markers = (k) => store.bodyOf(k, marker(k, "sandbox"));
+    return { r, calls, refs, markers };
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    setSelf(null);
+  }
+}
+
+test("serve on a repository with a cloud sandbox: no sandbox record or launch entry on a local Objective (#235)", async () => {
+  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  assert.deepEqual(serve.r.ready, [51], "the local loop picks its Queued Objective");
+  assert.equal(serve.markers(51), null, "no sandbox record for the local pick");
+  assert.equal(serve.markers(50), null, "no launch entry added to the local Running one");
+  // --all routes every Objective to the loop, which runs each on its box: still no record.
+  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3 });
+  assert.deepEqual(all.r.ready, [51, 60]);
+  for (const n of [50, 51, 60]) assert.equal(all.markers(n), null, `#${n}`);
+});
+
+test("serve leaves the sandbox route's launch locks to that route; the Action's dispatcher still clears them (#235)", async () => {
+  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  assert.deepEqual(serve.calls, [], "no lock listed, read or released");
+  assert.ok(serve.refs.has("refs/factory-launch/60/work-book-abc"));
+  const actions = await sandboxRepoTick({});
+  assert.ok(actions.calls.includes("updateRefs refs/factory-launch/60/work-book-abc"), "the sandbox route releases its stale lock");
+  assert.equal(actions.refs.size, 0);
+});
+
+test("lost launch entries never count as failed starts for a local Objective; the Action's dispatcher still marks its own picks (#235)", async () => {
+  // serve: #50's three lost entries are no failed starts: it is not named again and holds nothing; its live claim keeps it.
+  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  assert.deepEqual(serve.r.relaunch, []);
+  assert.deepEqual(serve.r.vanished, []);
+  assert.ok(!serve.r.deadlines.some((d) => d.issue === 50 && d.kind === "start-retry"), "no retry wake for a start the sandbox route never made");
+  // The Action's dispatcher: #60 is its pick, marked as it is named; the local Objectives are not its to mark or name.
+  const actions = await sandboxRepoTick({});
+  assert.deepEqual(actions.r.ready, [60]);
+  assert.deepEqual(actions.r.relaunch, []);
+  const { sandboxRecordOf } = await import("../scripts/lib/logic.mjs");
+  const marked = sandboxRecordOf(actions.markers(60)).launches.at(-1);
+  assert.deepEqual([marked.stage, marked.event, marked.ok], ["work", "dispatch", null]);
+  assert.equal(actions.markers(50), null);
+  assert.equal(actions.markers(51), null);
+});

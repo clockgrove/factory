@@ -77,6 +77,11 @@ const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToda
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
+  // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
+  // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
+  // entry or lock and reads none, and a lost launch never counts against one of them (#235). The repository's spend is
+  // read as the sandbox setting says either way (todaysSpend), since that is where the Action's stages record it.
+  const sandbox = !!inputs.sandbox && backend().trigger.sandboxRoute === true;
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
   // Actions reads (live jobs, usage artifacts) use the job token (actions: read), which the App has not.
@@ -172,7 +177,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     // Whether a stage of the Objective may still run. A read that fails is a maybe.
     const mayRun = async (issue) => {
       const n = issue.number;
-      if (!inputs.sandbox) {
+      if (!sandbox) {
         jobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
         if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
       } else {
@@ -277,7 +282,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // whose launch was lost (an event GitHub dropped, a pending launcher a newer one replaced) leaves the Question
   // waiting: past a grace for that launch, the sweep requeues it as the launcher would.
   const answered = [];
-  if (inputs.sandbox) {
+  if (sandbox) {
     for (const issue of wanted) {
       if (reset.includes(issue.number)) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
@@ -332,7 +337,6 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // With a cloud sandbox (FACTORY_SANDBOX) no work job holds an Objective: its sandbox record does (launch.mjs). A
   // Running Objective with no work start since it became Running lost its launch (an event GitHub dropped, a pending
   // launcher a newer one replaced): past a grace for the launch job to start, the sweep names it again.
-  const sandbox = !!inputs.sandbox;
   const relaunch = [];
   // A local loop's hold on an Objective that waits on one (Running, or In review with work owed): "unread" when its
   // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one

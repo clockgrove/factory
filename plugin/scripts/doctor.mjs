@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessOuterSettings, localBaseEnv, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessOuterSettings, localBaseEnv, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1301,31 +1301,55 @@ export function localDomainChecks({ inputs, env = process.env, local }) {
   return [WARN("FACTORY_LOCAL_DOMAINS", `not host names, so ${inputs.harness === "copilot" ? "Copilot's" : "Codex's"} sandbox does not allow them (serve leaves them out: ${why}): ${dropped.map((d) => JSON.stringify(d)).join(", ")}`, "write each as a host name (example.com) or *. and one (*.example.com), comma or space separated; no scheme, port, path, IP address or localhost")];
 }
 
+/**
+ * The settings doctor checks with (#236). On Actions the workflow's env block is this process's own. Off Actions it is
+ * not: with `--checkout`, or in local mode from a clone, it is read as local mode does, from the default branch's
+ * committed workflow (#122), else from the checkout; without either, from the default branch's committed workflow
+ * through GitHub's contents API with `token` (else the developer's gh login). Only its settings, as local mode takes
+ * them (#119): any other FACTORY_* name there is repository content; this shell still wins. GitHub's copy unreadable:
+ * the checkout's copy if there is one, and one WARN naming the harness that leaves. `committed`: local mode's read of
+ * the clone (local.mjs committedWorkflowEnv), or null. Returns {wf, committed, env, inputs, checks}.
+ */
+export async function doctorSettings({ args, checkout, repo, token, committed = null, env = process.env }) {
+  const settle = (wf, from, checks = []) => {
+    const merged = env.GITHUB_ACTIONS ? env : { ...workflowSettings(wf).kept, ...env };
+    return { wf, committed: from, env: merged, inputs: resolveInputs({ args, env: merged }), checks };
+  };
+  if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);
+  const path = ".github/workflows/factory.yml";
+  try {
+    return settle(workflowEnv(String(await rest(`repos/${repo.full}/contents/${path}`, { token, raw: "Accept: application/vnd.github.raw+json" }))), null);
+  } catch (e) {
+    const here = existsSync(join(checkout, path));
+    const s = settle(readWorkflowEnv(checkout), null);
+    const status = e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80);
+    s.checks.push(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (factory:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
+    return s;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const local = args.local === "true" || backend().name === "local";
-  // Outside Actions the workflow's env block is not in this process: read it as local mode does, from the default
-  // branch's committed workflow (#122), else (doctor before local mode) from the checkout; this shell still wins. Only
-  // its settings, as local mode takes them (#119): any other FACTORY_* name there is repository content.
-  const committed = !process.env.GITHUB_ACTIONS && local ? committedWorkflowEnv(checkout) : null;
-  const wf = committed ? committed.wf : readWorkflowEnv(checkout);
-  const env = process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(wf).kept, ...process.env };
-  const inputs = resolveInputs({ args, env });
-  if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
-  const repo = repoOf(inputs.repo);
-  let token = inputs.appToken || null;
+  const found = !process.env.GITHUB_ACTIONS && local ? committedWorkflowEnv(checkout) : null;
+  // The repository and the App's credentials doctorSettings reads GitHub with: this shell's, else the local workflow's.
+  const pre = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(found ? found.wf : readWorkflowEnv(checkout)).kept, ...process.env } });
+  if (!pre.repo) throw new Error("--repo OWNER/NAME is required");
+  const repo = repoOf(pre.repo);
+  let token = pre.appToken || null;
   let app = null;
-  if (!token && inputs.appId && inputs.appPrivateKey) {
+  if (!token && pre.appId && pre.appPrivateKey) {
     try {
-      app = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name });
+      app = await mintInstallationToken({ appId: pre.appId, privateKey: pre.appPrivateKey, owner: repo.owner, repo: repo.name });
       token = app.token;
       mask(token);
     } catch (e) {
       app = { error: e.message };
     }
   }
-  const results = [defaultsCheck(inputs)];
+  const { wf, committed, env, inputs, checks: source } = await doctorSettings({ args, checkout, repo, token, committed: found });
+  const results = [defaultsCheck(inputs), ...source];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

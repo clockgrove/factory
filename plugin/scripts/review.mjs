@@ -186,7 +186,7 @@ async function main() {
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const deadlineAt = deadline(startedAt, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs), as for the worker: a wait in place, fifteen minutes on the local route
-  // (then paused, for serve to resume) and up to the work's deadline elsewhere.
+  // (then paused, for serve to resume) and up to the work's deadline elsewhere; GitHub's spent rate limit too, to its reset.
   const local = backend().name === "local";
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
@@ -272,7 +272,7 @@ async function main() {
   } catch (e) {
     if (!unreachable(e)) throw e;
     const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
-    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) : null });
+    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) : null });
     if (issue) setOutput("issue", String(issue));
     return;
   }
@@ -352,16 +352,16 @@ async function main() {
       await finish("blocked", refused.reason);
       return;
     }
-    // This machine's network, not the stage: paused locally (its review label stays, for serve's resume), an `outage`
-    // Block elsewhere (session.mjs outageExit).
+    // This machine's network or GitHub's spent rate limit, not the stage: paused locally (its review label stays, for
+    // serve's resume), an External Block elsewhere (`outage` or `provider-quota`: session.mjs outageExit).
     if (unreachable(e)) {
       await outageExit(e, {
         local,
         records,
         finish,
-        block: async (reason) => {
+        block: async (reason, cause) => {
           await dropLabel();
-          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token);
+          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token);
         },
       });
       return;

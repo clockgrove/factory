@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { UNREACHABLE, causeCode, downFor, networkBack, outageOn, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, noteSpent, outageOn, spentOn, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -146,6 +146,29 @@ const notDone = (e) => e?.unsent === true || (e?.rateLimited === true && (e.stat
  */
 const rateLimitOf = (status, headers, message) => status === 429 || (status === 403 && (headers.get("x-ratelimit-remaining") === "0" || headers.has("retry-after") || /secondary rate limit/i.test(String(message || ""))));
 
+/**
+ * When GitHub's primary rate limit resets (ms), for an answer it refused because that limit is spent: x-ratelimit-remaining
+ * 0 with an x-ratelimit-reset, and no sign of the secondary limit (Retry-After, its message), which keeps its own
+ * handling. Else null.
+ */
+const spentReset = (headers, message) => {
+  if (headers?.get?.("x-ratelimit-remaining") !== "0" || headers.has("retry-after") || /secondary rate limit/i.test(String(message || ""))) return null;
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  return Number.isFinite(reset) && reset > 0 ? reset * 1000 : null;
+};
+
+/**
+ * Mark a rate-limited GitHubError `err` from `url` as the primary limit spent, when it is: code RATE_LIMIT_SPENT and
+ * `resetAt` (ms), so any caller can tell, and the process's record of it (network.mjs noteSpent).
+ */
+function markSpent(err, url, headers, message) {
+  const resetAt = err.rateLimited ? spentReset(headers, message) : null;
+  if (resetAt === null) return;
+  err.code = RATE_LIMIT_SPENT;
+  err.resetAt = resetAt;
+  noteSpent(new URL(url).origin, resetAt);
+}
+
 /** The wait GitHub asks for, in ms, or null: Retry-After (seconds or an HTTP date), else a spent quota's x-ratelimit-reset. */
 function askedWaitMs(headers, now = Date.now()) {
   const after = headers?.get?.("retry-after");
@@ -182,6 +205,13 @@ const LANDED = Symbol("landed");
  * callers) and goes again then, a create included, since it did nothing. A request is not sent at all while an outage on
  * `origin` is under way; it waits for it first. Past the process's limit or `deadlineAt` the wait throws NetworkDown.
  * Once the process has stopped waiting (stopWaiting: a stage ending on the outage), such a request fails at once.
+ *
+ * GitHub's primary rate limit spent (`e.code` RATE_LIMIT_SPENT) is, in such a process, an outage of `origin` until its
+ * reset: no try either, whatever `noRateWait` says. The request waits for the reset (networkBack with `resetAt`, one
+ * sleep for all callers, and no request goes to `origin` meanwhile) and goes again then, a create included, since the
+ * refusal did nothing. A reset past the process's limit or `deadlineAt` throws NetworkDown at once (with `resetAt`), and
+ * once the process has stopped waiting no request goes to `origin` until the reset. Any other process keeps the bound:
+ * the error, with its code and `resetAt`, goes to the caller when the reset is beyond it.
  */
 async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false, origin = null } = {}) {
   // The bound starts again after a wait for the network: the time the host was unreachable is no retry's.
@@ -190,13 +220,23 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
   for (let n = 1; ; n += 1) {
     let e;
     if (origin && waitingOutages() && outageOn(origin)) {
-      await networkBack(origin, outageOn(origin).code, { deadlineAt });
+      const on = outageOn(origin);
+      await networkBack(origin, on.code, { deadlineAt, resetAt: on.resetAt ?? null });
       end = bound();
     }
+    // Stopped waiting on a rate limit whose reset is still ahead: not sent, as the limit this process gave up on.
+    const spent = origin && stoppedWaiting() ? spentOn(origin) : null;
+    if (spent) throw spent;
     try {
       return await attempt(n);
     } catch (err) {
       e = err;
+    }
+    if (origin && e?.code === RATE_LIMIT_SPENT && Number.isFinite(e.resetAt) && (waitingOutages() || stoppedWaiting())) {
+      await networkBack(origin, RATE_LIMIT_SPENT, { deadlineAt, resetAt: e.resetAt });
+      end = bound();
+      n -= 1;
+      continue;
     }
     if (origin && e?.transport === true && e.unsent === true && e.status === 0) {
       // Stopped waiting: at once, as the outage this process gave up on (its host and first loss), when it was this host's.
@@ -281,10 +321,11 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     } catch {
       // not JSON
     }
-    const rateLimited = rateLimitOf(r.status, r.headers, msg);
-    const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited });
+    const limited = rateLimitOf(r.status, r.headers, msg);
+    const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited: limited });
     const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
     if (asked !== null) err.waitMs = asked;
+    markSpent(err, url, r.headers, msg);
     throw err;
   };
   const pages = [];
@@ -328,10 +369,11 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
       // not JSON
     }
     if (!r.ok) {
-      const rateLimited = rateLimitOf(r.status, r.headers, data?.message);
-      const err = new GitHubError(`graphql failed (${r.status}): ${(data?.message || text).slice(0, 300)}`, r.status, text, { rateLimited });
+      const limited = rateLimitOf(r.status, r.headers, data?.message);
+      const err = new GitHubError(`graphql failed (${r.status}): ${(data?.message || text).slice(0, 300)}`, r.status, text, { rateLimited: limited });
       const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
       if (asked !== null) err.waitMs = asked;
+      markSpent(err, url, r.headers, data?.message);
       throw err;
     }
     if (data?.errors?.length) {
@@ -341,6 +383,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
         err.unsent = true;
         const asked = askedWaitMs(r.headers, RETRY.now());
         if (asked !== null) err.waitMs = asked;
+        markSpent(err, url, r.headers, err.message);
       }
       throw err;
     }

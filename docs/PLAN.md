@@ -49,7 +49,7 @@ Counting rules:
 
 1.0.0 is tagged when five consecutive real Objectives merge with zero operator input, pooled across the real adopters:
 
-- **Real adopters only:** `clockgrove/clockgrove`, `clockgrove/assetforge` and `clockgrove/raccoon-world` together, never the scratch drill repositories.
+- **Real adopters only:** `clockgrove/clockgrove`, `clockgrove/assetgrove` and `clockgrove/raccoon-world` together, never the scratch drill repositories.
 - **One pooled streak:** the Objectives of all three, ordered by when each ended, on any harness (Claude Code, Codex or Copilot). Any miss on any of them resets it.
 - **It spans 0.9.x releases:** the streak counts from v0.9.0 and keeps counting when the adopters move to a later 0.9.x release; only a miss resets it.
 - **The same counting rules as above:** any human input (an answer, un-block, hand-started run or re-run by anyone, an owner's agent session included), a Blocked card, a stall, an unmerged end, an input source the scorer could not read, or a P1 defect found later in a counted merge breaks the streak; an External Objective is skipped. The owner reads the counted diffs.

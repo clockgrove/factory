@@ -1845,7 +1845,7 @@ export async function queueEntryState(repo, prNumber, opts, now = Date.now(), ga
  * recovery is a new condition, so it notifies again.
  */
 export function rebaseBlock({ issue, pr, why, record = null, since = null, notify, stage }) {
-  const reason = rebaseBlockReason(why, { record, defaultBranch: pr?.base?.ref || "main" });
+  const reason = rebaseBlockReason(why, { record, defaultBranch: pr?.base?.ref || "main", behind: pr?.mergeable_state === "behind" });
   return { issue, pr, exit: "blocked", reason, cause: "work", notify, stage, key: `rebase-${why}:${pr?.head?.sha || "none"}:${since || ""}` };
 }
 
@@ -1858,13 +1858,24 @@ export function rebaseBlock({ issue, pr, why, record = null, since = null, notif
  * for it. `record` is the newest rebase record of a pass that pushed, and `stuck` that record when the PR still needs
  * a rebase and the default branch is still the base it was made onto: the conflict came back after its resolution,
  * with nothing merged since (a failed read of the branch leaves `stuck` null: the send-back goes ahead, and the worker
- * Blocks a conflict it cannot resolve itself). `since` is that label's time.
+ * Blocks a conflict it cannot resolve itself). `since` is that label's time. Only Factory's own comments count (isSelf);
+ * `unread` says the label's time, Factory's login or the comments could not be read: the caller holds the PR this tick.
  */
 export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, now = Date.now()) {
   const prefix = marker(issue, "rebase").replace(/ -->$/, "");
-  const since = await objectiveLabeledAt(repo, issue, objectiveLabel, opts).catch(() => null);
-  if (!pr) return { effective: 0, recent: 0, already: false, since, record: null, stuck: null };
-  const comments = (await listComments(repo, pr.number, opts).catch(() => [])).filter((c) => trustedAuthor(c) && (!since || Date.parse(c.created_at) > Date.parse(since)));
+  const none = { effective: 0, recent: 0, already: false, record: null, stuck: null };
+  // A read that fails leaves the count unknown: `unread`, so the caller holds the PR this tick rather than count none.
+  let unread = null;
+  const since = await objectiveLabeledAt(repo, issue, objectiveLabel, opts).catch((e) => ((unread = e), null));
+  if (!pr) return { ...none, since };
+  // Only Factory's own comments: a writer's pasted marker is no send-back or rebase of Factory's.
+  if (!unread && !(selfLogin() || (await primeSelf(opts)))) unread = new Error("Factory's own login is unknown");
+  const listed = unread ? [] : await listComments(repo, pr.number, opts).catch((e) => ((unread = e), []));
+  if (unread) {
+    log(`#${issue}: the send-backs on PR #${pr.number} could not be read (${errCode(unread)}); held this tick`);
+    return { ...none, since, unread: true };
+  }
+  const comments = listed.filter((c) => isSelf(c) && (!since || Date.parse(c.created_at) > Date.parse(since)));
   const markers = comments.filter((c) => (c.body || "").includes(prefix));
   const here = (c) => (c.body || "").includes(`${prefix}:${pr.head?.sha} -->`);
   const pushed = markers.filter((c) => !here(c));
@@ -1907,6 +1918,50 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
   return [];
 }
 
+/** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
+export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
+
+const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
+
+/** Factory's record of the merge queue's last conflict removal of the Objective's PR (queueConflictWait), or null. */
+export function queueConflictRecord(comments, issue) {
+  const mark = marker(issue, "queue-conflict");
+  const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
+  try {
+    const v = JSON.parse(QUEUE_CONFLICT_LINE.exec(c?.body || "")?.[1] || "null");
+    return v && typeof v.removal === "string" && typeof v.main === "string" && typeof v.seen === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A PR the merge queue took out for a conflict (logic.mjs queueRetry `conflict`) and that does not conflict with the
+ * default branch: the conflict was with a PR ahead of it. The first time the merge pass sees that removal, it records on
+ * the issue the default branch's head then (a record Factory owns: a commit's date says nothing of when a queue merged
+ * it). The PR goes back in once the head is another commit, the queue is empty, or QUEUE_CONFLICT_WAIT_MS has passed
+ * since the record (read on the first tick after it: then the queue's next answer decides). Returns null to enqueue it
+ * now, else "queue-wait", or "pending" when GitHub could not be read.
+ */
+export async function queueConflictWait(repo, { issue, prNumber, base, removal }, opts, now = Date.now()) {
+  const branch = await branchState(repo, base, opts).catch((e) => log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`));
+  if (!branch) return "pending";
+  let rec = queueConflictRecord(await listComments(repo, issue, opts).catch(() => []), issue);
+  if (rec?.removal !== removal) {
+    rec = { removal, main: branch.head, seen: new Date(now).toISOString() };
+    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it. It goes back in once \`${base}\` moves past ${branch.head.slice(0, 7)}, the queue empties, or ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h pass.`;
+    await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).catch((e) => log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); it is written again next tick`));
+  }
+  const moved = branch.head !== rec.main;
+  const late = now - Date.parse(rec.seen) >= QUEUE_CONFLICT_WAIT_MS;
+  if (!moved && branch.queued > 0 && !late) {
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it; it waits for the queue to move (${branch.queued} waiting, ${base} still ${branch.head.slice(0, 7)})`);
+    return "queue-wait";
+  }
+  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${moved ? `${base} has moved since` : branch.queued ? `${QUEUE_CONFLICT_WAIT_MS / 3600_000} h have passed` : "the queue is empty now"}, so it goes back in`);
+  return null;
+}
+
 /**
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
  * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
@@ -1924,7 +1979,7 @@ export function mergeBlockReason(how, report = {}) {
 /**
  * Merge the PR when, and only when, its head is the one recorded as mergeable (or GitHub's signed update-branch merge
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
- * what happened: "merged", "queued", "pending" (checks not done yet), "in-queue", "not-recorded", "re-review" (a new
+ * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
@@ -2073,19 +2128,11 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return "held";
     }
     // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or
-    // the send-back would have taken it): no drop. It goes back in once that queue has moved: the default branch got a
-    // commit since the removal (a merge; one that made it conflict sends it back for a rebase instead), or no PR waits
-    // in the queue. Until then nothing re-enqueues it, so it never bounces off the same entry; a sibling's merge or
-    // drop ticks the dispatcher.
+    // the send-back would have taken it): no drop. It waits for that queue to move (queueConflictWait) rather than
+    // bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
     if (retry.conflict) {
-      const branch = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); next tick`));
-      if (!branch) return "pending";
-      const moved = Date.parse(branch.headAt) > Date.parse(retry.conflict.at);
-      if (!moved && branch.queued > 0) {
-        log(`#${issue}: the merge queue took PR #${prNumber} out for a conflict with a PR ahead of it at ${retry.conflict.at}; it goes back in once the queue moves (${branch.queued} waiting)`);
-        return "pending";
-      }
-      log(`#${issue}: the merge queue took PR #${prNumber} out for a conflict at ${retry.conflict.at}; ${moved ? `${pr.base?.ref} has moved since` : "the queue is empty now"}, so it goes back in`);
+      const wait = await queueConflictWait(repo, { issue, prNumber, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
+      if (wait) return wait;
     }
     if (retry.block) {
       delete report.watch;

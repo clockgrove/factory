@@ -46,7 +46,8 @@ function world({ queue = false } = {}) {
     if (method === "GET" && p === "/rulesets") return json(queue ? [{ id: 1, target: "branch", enforcement: "active" }] : []);
     if (method === "GET" && p === "/rulesets/1") return json({ conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue" }] });
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
-    if (method === "GET" && /^\/issues\/7\/timeline$/.test(p)) return json([{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(30 * HOUR) }]);
+    if (method === "GET" && /^\/issues\/7\/timeline$/.test(p)) return state.timelineStatus ? json({ message: "Server Error" }, state.timelineStatus) : json([{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(30 * HOUR) }]);
+    if (method === "PUT" && p === "/pulls/12/update-branch") return state.updateStatus ? json({ message: "refused" }, state.updateStatus) : json({ message: "Updating pull request branch." }, 202);
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(state.comments[m[1]] || []);
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
       const c = { id: id++, user: { login: SELF, type: "Bot" }, body: body.body, created_at: new Date().toISOString() };
@@ -186,4 +187,45 @@ test("#243: the worker's rebase record reads back as written, whatever the file 
   assert.deepEqual(decideExit({ harness: { ok: true }, pr, commits: 1, unresolved, record: { exit: "delivered", reason: "", questions: [] } }), { exit: "blocked", reason: unresolved, cause: "work" });
   assert.equal(decideExit({ harness: { ok: true, timedOut: true }, pr, commits: 1, unresolved }).reason, "time cap reached", "a cap keeps its own reason");
   assert.equal(decideExit({ harness: { ok: true, budgetExceeded: true }, pr, commits: 1, unresolved }).cause, "max-usd");
+});
+
+test("#243: a behind PR (no queue) whose update-branch fails for now waits for the next tick; one GitHub refuses goes to a worker; neither is listed as updated", async () => {
+  const w = world();
+  Object.assign(w.state.pr, { mergeable: true, mergeable_state: "behind" });
+  w.state.updateStatus = 502;
+  let t = await tick(w);
+  assert.deepEqual([t.r.updated, t.r.sentBack, t.blocked], [[], [], undefined], "no Block saying it conflicts");
+  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"), "a retry is due");
+  w.state.updateStatus = 422;
+  t = await tick(w);
+  assert.deepEqual([t.r.updated, t.r.sentBack, t.blocked], [[], [7], undefined]);
+  assert.match(notices(w)[0].body, /is behind `main` and GitHub could not update it/);
+  w.state.updateStatus = null;
+  t = await tick(w);
+  assert.deepEqual(t.r.updated, [7], "updated by GitHub");
+});
+
+test("#243: send-backs that cannot be counted (the issue's timeline unread) hold the PR this tick, never counting old markers as new", async () => {
+  const w = world();
+  await tick(w);
+  for (let n = 0; n < REBASE_LIMIT; n += 1) {
+    await w.workerRebases(["docs/decisions.md"], sha(String.fromCharCode(97 + n)));
+    w.siblingMerges(sha(String(n + 1)));
+    if (n < REBASE_LIMIT - 1) await tick(w);
+  }
+  w.state.timelineStatus = 502;
+  const t = await tick(w);
+  assert.deepEqual([t.r.sentBack, t.blocked], [[], undefined], "no send-back and no Block on an unread count");
+  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"));
+  w.state.timelineStatus = null;
+  assert.match((await tick(w)).blocked, /rebased 5 times in 24 h/, "read again: the bound");
+});
+
+test("#243: only Factory's own markers and records count: a writer's pasted ones are neither rebases toward the bound nor a stuck base", async () => {
+  const w = world();
+  const writer = { user: { login: "maintainer", type: "User" }, created_at: new Date().toISOString() };
+  for (let n = 0; n < REBASE_LIMIT; n += 1) w.state.comments[12].push({ ...writer, id: n + 1, body: `${marker(7, "rebase", sha(String(n + 1)))}\npasted` });
+  w.state.comments[12].push({ ...writer, id: 9, body: ontoRecord(7, { from: sha("9"), base: w.state.main, files: ["x"] }) });
+  const t = await tick(w);
+  assert.deepEqual([t.r.sentBack, t.blocked], [[7], undefined]);
 });

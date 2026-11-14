@@ -197,29 +197,46 @@ test("#2647: two sibling PRs on one file: the second conflicts at its merge, goe
   });
 });
 
-test("#243: a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move, then goes back in; such removals count toward no drop Block", async () => {
+test("#243: a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move (main's head as Factory recorded it, or an empty queue, or 2 h), then goes back in; such removals count toward no drop Block", async () => {
+  const { QUEUE_CONFLICT_WAIT_MS, queueConflictRecord } = await import("../scripts/lib/session.mjs");
   await withGitHub(async (g, gh) => {
     const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const later = (s) => new Date(Date.now() + s * 1000).toISOString();
-    // Dropped twice for a conflict with the sibling ahead of it, which still waits in the queue; main has not moved.
+    // Dropped twice for a conflict with the sibling ahead of it, which still waits in the queue.
     gh.state.removals = [{ at: later(1), reason: "merge_conflict" }, { at: later(2), reason: "merge_conflict" }];
     gh.state.waiting = 1;
     const report = {};
-    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "pending", "no Block, no enqueue that would bounce off the same entry");
-    assert.equal(mergeBlockReason("pending", report), null);
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "queue-wait", "no Block, no enqueue that would bounce off the same entry");
+    assert.equal(mergeBlockReason("queue-wait", report), null);
     assert.deepEqual(gh.attempts, []);
-    // The sibling merged without making this PR conflict (main moved since the removal): back in.
-    gh.state.mainAt = later(5);
+    const main0 = g.main();
+    let rec = queueConflictRecord(gh.comments[2], 2);
+    assert.deepEqual([rec.removal, rec.main], [gh.state.removals[1].at, main0], "main's head when the removal was first seen, recorded on the issue");
+    // Main's commit time says nothing (a queue's commit is dated before it merges): only its head as recorded counts.
+    gh.state.mainAt = later(60);
+    assert.equal(await merge(2, 12), "queue-wait");
+    assert.equal(gh.comments[2].filter((c) => c.body.startsWith(marker(2, "queue-conflict"))).length, 1, "one record, kept");
+    // The sibling merged without making this PR conflict: main is another commit, so it goes back in.
+    g.git("checkout", "-q", "main");
+    g.git("commit", "-q", "--allow-empty", "-m", "sibling");
     assert.equal(await merge(2, 12), "queued");
     assert.deepEqual(gh.enqueued, [{ pr: 12, sha: two }]);
-    // Or it left the queue unmerged (the queue is empty now): back in too.
-    gh.state.mainAt = "2026-01-01T00:00:00Z";
+    // Dropped again for a conflict: a new record at main now; the queue empties, so it goes back in.
+    gh.state.removals.push({ at: later(3), reason: "merge_conflict" });
+    assert.equal(await merge(2, 12), "queue-wait");
+    assert.equal(queueConflictRecord(gh.comments[2], 2).main, g.main());
     gh.state.waiting = 0;
     assert.equal(await merge(2, 12), "queued");
+    // A busy queue and an unmoved main still put it back once the wait's bound has passed since the record.
+    gh.state.waiting = 1;
+    const c = gh.comments[2].find((x) => x.body.startsWith(marker(2, "queue-conflict")));
+    rec = queueConflictRecord(gh.comments[2], 2);
+    c.body = c.body.replace(rec.seen, new Date(Date.now() - QUEUE_CONFLICT_WAIT_MS - 1000).toISOString());
+    assert.equal(await merge(2, 12), "queued");
     // Two drops for failed checks still Block, as before.
-    gh.state.removals = [{ at: later(1), reason: "failed_checks" }, { at: later(2), reason: "failed_checks" }];
+    gh.state.removals = [{ at: later(4), reason: "failed_checks" }, { at: later(5), reason: "failed_checks" }];
     assert.equal(await merge(2, 12), "dropped");
   });
 });

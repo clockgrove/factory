@@ -12,7 +12,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -584,7 +584,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -625,6 +625,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
+      // The send-backs could not be counted (session.mjs rebaseMarkers `unread`): no update, send-back or Block this tick.
+      if (unread && decision !== "ignore") {
+        retry(`#${issue.number}'s send-backs`);
+        continue;
+      }
       if (decision === "update") {
         // Behind, not conflicting: one API call brings the branch up to date and its checks re-run. No worker, no
         // model; GitHub's signed merge commit is the one new head the merge pass accepts without another review.
@@ -634,16 +639,22 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             await updatePrBranch(repo, open.number, opts);
             log(`  #${issue.number}: PR #${open.number} was behind ${pr.base?.ref}; branch updated by GitHub`);
           } catch (e) {
-            // A worker rebases it instead, under the send-back's rules (staleDecision).
-            const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue });
-            if (instead === "rebase") {
-              log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
-              sentBack.push(issue.number);
-              if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+            updated.splice(updated.indexOf(issue.number), 1);
+            if (transientError(e)) {
+              // GitHub failing for now: the next tick updates it, with no worker run.
+              log(`  #${issue.number}: update-branch failed for now (${String(e.message).slice(0, 120)}); the next tick tries again`);
+              retry(`#${issue.number}'s update-branch`);
             } else {
-              updated.splice(updated.indexOf(issue.number), 1);
-              statuses[issue.number] = "Blocked";
-              await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+              // GitHub refused: a worker rebases it instead, under the send-back's rules (staleDecision).
+              const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue });
+              if (instead === "rebase") {
+                log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
+                sentBack.push(issue.number);
+                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+              } else {
+                statuses[issue.number] = "Blocked";
+                await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+              }
             }
           }
         }
@@ -664,7 +675,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         });
         if (how === "merged" || how === "queued") merged.push(issue.number);
         if (report.watch) queueWatch.push(open.number);
-        if (how && !["not-recorded", "pending", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
+        if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
         if (why) {
           statuses[issue.number] = "Blocked";

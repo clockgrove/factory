@@ -1452,7 +1452,7 @@ export class Local {
    * again, each time other PRs merged since its last rebase; Blocked when rebasing cannot progress or at the bound
    * (logic.mjs staleDecision), as the dispatcher Blocks it. Returns followMerge's answer, or "retry": the PR no longer
    * conflicts, its rebase's worker run ended delivered with the PR conflicting again (another sibling landed meanwhile),
-   * or GitHub failed for now, so followMerge's next poll decides again. `gh` is for tests.
+   * its send-backs could not be counted, or GitHub failed for now, so followMerge's next poll decides again. `gh` is for tests.
    */
   async sendBack(issue, prNumber, inputs, { gh = { getPrSettled, rebaseMarkers, prComment, applyExit } } = {}) {
     const conflicting = (pr) => pr?.state === "open" && !pr.merged && pr.mergeable_state === "dirty";
@@ -1464,6 +1464,8 @@ export class Local {
         return "retry";
       }
       const seen = await gh.rebaseMarkers(this.repo, { issue, pr, objectiveLabel: inputs.objectiveLabel }, this.opts);
+      // The send-backs could not be counted: followMerge's next poll reads them again.
+      if (seen.unread) return "retry";
       const why = staleDecision({ pr, rebases: seen.recent, stuck: seen.stuck, queue: true });
       if (why === "stuck" || why === "limit") {
         await gh.applyExit(this.repo, rebaseBlock({ issue, pr, why, record: seen.stuck || seen.record, since: seen.since, notify: inputs.notify, stage: "merge" }), this.opts);

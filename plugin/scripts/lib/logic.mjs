@@ -756,8 +756,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              "mark ready" answers it)
  *  reviewUnaddressed: number (review pass: comments without a worker reply)
  *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
- *  unresolved: string, why a send-back's conflict pass left the branch off the base it was to rebase onto (worker.mjs):
- *              Blocked with it after the hard stops, as the work's
+ *  unresolved: string, why what a send-back's conflict pass left is not the branch rebased onto its base (worker.mjs,
+ *              outbox.mjs rebaseLeft): Blocked with it after the hard stops, as the work's
  *  lfsRefused: boolean, the refusal was Git LFS's (quota, storage, cap, pointers)
  *  lfsQuota:   boolean, that refusal was GitHub's Git LFS quota or storage (outbox.mjs errorKind "lfs-quota")
  *  lfsPlain:   string[], files .gitattributes routes to Git LFS but committed as plain blobs
@@ -1591,12 +1591,14 @@ export function conflictFiles(files = []) {
 
 /**
  * Why a send-back Blocks (staleDecision): "stuck" with the record whose conflict came back on the same base, or
- * "limit" with the last record seen (its files, when there is one).
+ * "limit" with the last record seen (its files, when there is one). `behind`: the PR only fell behind (no merge queue)
+ * and GitHub's update-branch refused it, so it is said as behind, not conflicting.
  */
-export function rebaseBlockReason(why, { record = null, defaultBranch = "main" } = {}) {
-  if (why === "stuck") return `rebasing makes no progress: the branch still conflicts with \`${defaultBranch}\` at ${String(record?.base).slice(0, 7)}, the base the worker's last rebase resolved a conflict against (in ${conflictFiles(record?.files)})`;
+export function rebaseBlockReason(why, { record = null, defaultBranch = "main", behind = false } = {}) {
+  const against = behind ? `is behind \`${defaultBranch}\`` : `conflicts with \`${defaultBranch}\``;
+  if (why === "stuck") return `rebasing makes no progress: the branch still ${against} at ${String(record?.base).slice(0, 7)}, the base the worker's last rebase resolved a conflict against (in ${conflictFiles(record?.files)})`;
   const last = record ? ` (last conflict: ${conflictFiles(record.files)})` : "";
-  return `the branch was rebased ${REBASE_LIMIT} times in 24 h as other PRs merged, and it conflicts with \`${defaultBranch}\` again${last}: these Objectives keep overlapping. order them (\`blocked_by\`) or set \`max_concurrent: 1\` for the stretch`;
+  return `the branch was rebased ${REBASE_LIMIT} times in 24 h as other PRs merged, and it ${against} again${behind ? " with GitHub unable to update it" : ""}${last}: these Objectives keep overlapping. Order them (\`blocked_by\`) or set \`max_concurrent: 1\` for the stretch`;
 }
 
 /**

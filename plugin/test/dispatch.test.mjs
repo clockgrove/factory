@@ -590,10 +590,10 @@ test("local claim read: an author that cannot be checked (the writer list unread
   const unread = await localTick({ repo: "acme/unread", open, timeline, writers: 502, comments: (n) => (n === 7 ? [{ id: 5, user: { login: "dev", type: "User" }, body: body("box-a:1:abc:m:b"), updated_at: ago(0) }] : []) });
   assert.deepEqual(unread.r.vanished, []);
   assert.ok(unread.r.deadlines.some((d) => d.kind === "retry"));
-  // With the writers read, a marker by someone who cannot push is no claim: the unclaimed Running one Blocks as before.
+  // With the writers read, a marker by someone who cannot push is no claim: the unclaimed Running one is a lost runner
+  // job, relaunched (its Block once the relaunches are used, relaunch.test.mjs).
   const stranger = await localTick({ open, timeline, comments: (n) => (n === 7 ? [{ id: 6, user: { login: "stranger", type: "User" }, body: body("box-x:1:abc:m:b"), updated_at: ago(0) }] : []) });
-  assert.deepEqual(stranger.r.vanished, [7]);
-  assert.match(stranger.blocked(7), /worker job vanished/);
+  assert.deepEqual([stranger.r.vanished, stranger.r.relaunched], [[], [7]]);
   assert.ok(!stranger.writes.includes("DELETE /issues/comments/6"), "a stranger's comment is not Factory's to delete");
 });
 
@@ -624,10 +624,10 @@ test("local deadlines: a factory:local Objective with no claim waits a day, Runn
   // In review with no review owed (reviewed, waiting on a person): no deadline.
   const reviewed = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: () => labelled("factory:in-review", ago(25 * HOUR)), pulls: () => [{ ...pr(8)[0], labels: [] }] });
   assert.deepEqual(reviewed.r.vanished, []);
-  // An unlabelled Objective's runner job still gets 15 minutes.
+  // An unlabelled Objective's runner job still gets 15 minutes; then it is lost, and relaunched (relaunch.test.mjs).
   const runner = await localTick({ open: [{ ...localIssue(9, "factory:running", []) }], timeline: () => labelled("factory:running", ago(20 * 60_000)) });
-  assert.deepEqual(runner.r.vanished, [9]);
-  assert.match(runner.blocked(9), /worker job vanished[^]*<!-- factory:block \{"cause":"factory"\} -->/, "a lost runner job is Factory's own");
+  assert.deepEqual([runner.r.vanished, runner.r.relaunched], [[], [9]]);
+  assert.ok(!runner.writes.some((w) => w.includes("<!-- factory:9:blocked:")), "no Block notice");
 });
 
 test("local claim age: GitHub's update time, not the machine's clock in the body; an expired claim's Block names its holder (#167)", async () => {

@@ -22,6 +22,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
+import { RELAUNCH_MAX, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, stintKey, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -73,7 +74,7 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
 }
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
@@ -435,6 +436,79 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     else await blockLocalWait(n, hold, `in review with no local loop running its review for over a day (no claim); ${SERVE_FIX}`, "setup");
     return true;
   };
+  // A stage lost to a network failure on the Action's runners or the cloud sandbox (lib/relaunch.mjs): one that ended on
+  // an `outage` (its Block, below) or vanished with no exit (the Running pass) starts its work again on its branch, in
+  // the slot it held, at most RELAUNCH_MAX times since a person last started the Objective; then it Blocks. A local loop
+  // pauses and resumes its own stages; a stopped or draft Objective is never here (not in `issues`), and a restarting one
+  // is left to its restart.
+  const relaunched = [];
+  const relaunchesUsed = [];
+  const relaunches = backend().name !== "local";
+  // One lost stage: `{relaunch: true, tries}` once its relaunch is recorded and its new Running stint begun, `{block:
+  // true, tries}` with the relaunches used up, `{left: true}` when a read or write failed (next tick tries again).
+  const lostStage = async (issue, { lost, key, comments = null }) => {
+    const n = issue.number;
+    const [events, list] = await Promise.all([timelineOf(repo, n, opts).catch(() => null), comments ?? listComments(repo, n, opts).catch(() => null)]);
+    if (!events || !list) {
+      retry(`#${n}'s relaunch record`);
+      return { left: true };
+    }
+    const d = relaunchDecision({ record: relaunchRecordOf(list, n), start: personStart(events, list, inputs.objectiveLabel), key, lost, at: new Date().toISOString() });
+    if (d.block) return d;
+    if (!dryRun) {
+      try {
+        // The count first: a relaunch the record does not hold could repeat without end.
+        if (d.record) await writeRelaunchRecord(repo, n, d.record, d.tries, opts);
+        await newStint(repo, n, { project, wasRunning: lost === "vanished" }, opts);
+      } catch (e) {
+        log(`  #${n}: its relaunch could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
+        retry(`#${n}'s relaunch`);
+        return { left: true };
+      }
+    }
+    relaunched.push(n);
+    relaunch.push(n);
+    relaunchStage[n] = "work";
+    statuses[n] = "Running";
+    issue.labels = [...(issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name)), { name: "factory:running" }];
+    log(`  #${n}: its stage was lost (${lost === "outage" ? "it ended on its network" : "it vanished with no exit"}); relaunched, ${d.tries} of ${RELAUNCH_MAX}`);
+    return d;
+  };
+  // A stage that ended on its network wrote an `outage` Block (session.mjs outageExit), the issue's newest Blocked notice.
+  // Its relaunch takes the slot the stage held: none is taken while max_concurrent is reached, and relaunches go before
+  // new picks. Used up, the dispatcher's own notice says so and mentions the person.
+  if (relaunches) {
+    const lostHere = wanted.filter((i) => !hasLocalLabel(i) && !restarting[i.number] && stateOf(i, statuses[i.number] ?? null) === "Blocked");
+    const read = {};
+    await pooled(lostHere, RELATION_READS, async (i) => {
+      read[i.number] = await listComments(repo, i.number, opts).catch(() => null);
+    });
+    let busy = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
+    for (const issue of lostHere) {
+      const n = issue.number;
+      if (!read[n]) {
+        retry(`#${n}'s comments`);
+        continue;
+      }
+      const block = outageBlockOf(read[n], n);
+      if (!block) continue;
+      if (busy >= inputs.maxConcurrent) {
+        log(`  #${n}: its stage ended on its network; relaunched once a slot frees (max_concurrent reached)`);
+        continue;
+      }
+      const d = await lostStage(issue, { lost: "outage", key: block.key, comments: read[n] });
+      if (d.relaunch) busy += 1;
+      if (!d.block) continue;
+      relaunchesUsed.push(n);
+      if (dryRun) continue;
+      const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+      const reason = `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)`;
+      await applyExit(repo, { issue: n, pr, exit: "blocked", reason, fix: "Re-apply `factory:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
+        log(`  #${n}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
+        retry(`#${n}'s Block`);
+      });
+    }
+  }
   const runningIssues = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running");
   if (runningIssues.length) {
     const alive = sandbox
@@ -446,7 +520,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         });
     if (alive) {
       for (const issue of runningIssues) {
-        if (alive.has(issue.number)) continue;
+        if (alive.has(issue.number) || relaunched.includes(issue.number)) continue;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
         // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
         if (!sandbox && inputs.sandbox) {
@@ -523,11 +597,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
           continue;
         }
+        // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first.
+        let tries = 0;
+        if (relaunches && !hold && !local && !restarting[issue.number]) {
+          const d = await lostStage(issue, { lost: "vanished", key: stintKey(since) });
+          if (!d.block) continue;
+          tries = d.tries;
+        }
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : "worker job vanished: Running with no job in progress", hold || local ? "setup" : "factory");
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : `worker job vanished: Running with no job in progress${tries ? `; Factory relaunched its stage ${tries} times since the Objective was last started` : ""}`, hold || local ? "setup" : "factory");
       }
     }
   }
@@ -842,7 +923,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -1011,6 +1092,8 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
     stopped: result.stopped,
     restarted: result.restarted,
     vanished: result.vanished,
+    relaunched: result.relaunched,
+    relaunches_used: result.relaunchesUsed,
     paused: result.paused,
     sent_back_to_rebase: result.sentBack,
     next_parts: result.nextParts,
@@ -1024,6 +1107,8 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
     log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
+    for (const n of result.relaunched || []) log(`  #${n}: its stage was lost to a network failure or vanished; relaunched`);
+    for (const n of result.relaunchesUsed || []) log(`  #${n}: its stage ended on its network with its relaunches used; Blocked`);
     for (const n of result.paused || []) log(`  #${n}: paused; the local machine holding it is away, and its serve resumes it`);
     for (const n of result.sentBack) log(`  #${n}: behind the default branch; sent back to rebase`);
     for (const s of result.skipped) log(`  skip #${s.number}: ${s.reason}`);
@@ -1066,7 +1151,7 @@ async function main() {
   const summary = reportDispatch(result, inputs, { json: !!args.json });
   // With a cloud sandbox the matrix also carries the sweep's re-launches; the launcher decides each one's stage.
   const named = [...result.ready, ...(result.relaunch || [])];
-  for (const n of result.relaunch || []) log(`  #${n}: its launch was lost; launching again`);
+  for (const n of result.relaunch || []) if (!result.relaunched?.includes(n)) log(`  #${n}: its launch was lost; launching again`);
   setOutput("issues", named);
   setOutput("count", String(named.length));
   setOutput("reason", result.reason || "");

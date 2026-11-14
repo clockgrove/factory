@@ -800,6 +800,17 @@ export async function mergeGroupRuns(repo, number, base, since, opts) {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
 }
 
+/**
+ * The branch as GitHub has it now: `{head, headAt}` its head commit and that commit's time, and `queued` how many PRs
+ * wait in its merge queue (0 with no queue). One GraphQL read. Throws when the branch is not there.
+ */
+export async function branchState(repo, branch, opts) {
+  const d = await graphql(`query($owner: String!, $name: String!, $ref: String!, $branch: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { target { oid ... on Commit { committedDate } } } mergeQueue(branch: $branch) { entries { totalCount } } } }`, { owner: repo.owner, name: repo.name, ref: `refs/heads/${branch}`, branch }, opts);
+  const target = d?.repository?.ref?.target;
+  if (!target?.oid) throw new Error(`the branch ${branch} could not be read`);
+  return { head: target.oid, headAt: target.committedDate ?? null, queued: Number(d.repository.mergeQueue?.entries?.totalCount) || 0 };
+}
+
 /** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */
 export async function dequeuePr(repo, nodeId, opts) {
   await graphql(`mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }`, { id: nodeId }, opts);

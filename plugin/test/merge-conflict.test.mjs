@@ -5,8 +5,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { REBASED_TWICE, applyExit, mergeBlockReason, mergeReadyOne, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, recordMergeable } from "../scripts/lib/session.mjs";
-import { marker, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
+import { applyExit, mergeBlockReason, mergeReadyOne, rebaseBlock, rebaseMarkers, rebaseNotice, recordMergeable } from "../scripts/lib/session.mjs";
+import { REBASE_LIMIT, marker, ontoRecord, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
 import { RETRY, transientError } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
@@ -16,7 +16,7 @@ import { EDITED_REASON, objectiveSha } from "../scripts/lib/objective-trust.mjs"
 RETRY.sleep = async () => {};
 
 // #2647: two sibling Objectives add a function to one module. The first merges; the second, reviewed and green, then
-// conflicts at its merge. It goes back for one rebase (no Block), merges after it, and a conflict after that rebase Blocks.
+// conflicts at its merge. It goes back for a rebase (no Block) and merges after it; a third sibling's conflict sends it back again.
 
 const SELF = "factory-app[bot]";
 const repo = { full: "o/r", owner: "o", name: "r" };
@@ -49,7 +49,8 @@ function fakeGitHub(g) {
   const attempts = [];
   // The PRs a test put in the merge queue, and `race`: another merge pass that runs just before a merge call lands (#2669).
   const queued = new Set();
-  const state = { race: null };
+  // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `mainAt`: main's commit time.
+  const state = { race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z" };
   let id = 1;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
   const prView = (pr) => {
@@ -75,7 +76,8 @@ function fakeGitHub(g) {
     if (/\/graphql$/.test(u)) {
       const q = body.query;
       if (q.includes("isInMergeQueue")) return json(200, { data: { repository: { pullRequest: { isInMergeQueue: queued.has(body.variables.n) } } } });
-      if (q.includes("timelineItems")) return json(200, { data: { repository: { pullRequest: { timelineItems: { nodes: [] } } } } });
+      if (q.includes("timelineItems")) return json(200, { data: { repository: { pullRequest: { timelineItems: { nodes: state.removals.map((r) => ({ createdAt: r.at, reason: r.reason, actor: { login: "github-merge-queue", __typename: "Bot" } })) } } } } });
+      if (q.includes("mergeQueue(branch")) return json(200, { data: { repository: { ref: { target: { oid: g.main(), committedDate: state.mainAt } }, mergeQueue: { entries: { totalCount: state.waiting ?? queued.size } } } } });
       if (q.includes("enqueuePullRequest")) {
         const pr = Object.values(prs).find((p) => p.node_id === body.variables.id);
         attempts.push(pr.number);
@@ -115,6 +117,7 @@ function fakeGitHub(g) {
     if (method === "DELETE" && /\/repos\/o\/r\/issues\/\d+\/labels\//.test(u)) return json(404, { message: "Label does not exist" });
     if (method === "GET" && /\/check-runs/.test(u)) return json(200, { total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }] });
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(u)) return json(200, { statuses: [] });
+    if (method === "GET" && (m = /\/repos\/o\/r\/commits\/([0-9a-f]+)$/.exec(u))) return json(200, { sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
     if (method === "GET" && /\/timeline/.test(u)) return json(200, []);
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
@@ -141,7 +144,7 @@ async function withGitHub(fn) {
   }
 }
 
-test("#2647: two sibling PRs on one file: the second conflicts at its merge, goes back for one rebase, merges; a second conflict Blocks", async () => {
+test("#2647: two sibling PRs on one file: the second conflicts at its merge, goes back for a rebase, merges; a third sibling's conflict sends it back again", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();
     const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
@@ -163,16 +166,18 @@ test("#2647: two sibling PRs on one file: the second conflicts at its merge, goe
     assert.deepEqual(gh.attempts, [11], "no enqueue is even attempted for a PR read as conflicting");
     assert.equal(mergeBlockReason("conflict"), null, "a conflict at the merge is not a Block");
 
-    // The send-back (dispatch.mjs): the first is one rebase, with its notice on the PR naming the head it saw.
+    // The send-back (dispatch.mjs): a rebase, with its notice on the PR naming the head it saw.
     let seen = await rebaseMarkers(repo, { issue: 2, pr: { ...pr12, mergeable_state: "dirty" } }, { token: "t" });
     assert.deepEqual([seen.effective, seen.already], [0, false]);
-    assert.equal(staleDecision({ pr: { ...pr12, mergeable_state: "dirty" }, rebaseMarkers: seen.effective, queue: true }), "rebase");
+    assert.equal(staleDecision({ pr: { ...pr12, mergeable_state: "dirty" }, rebases: seen.recent, stuck: seen.stuck, queue: true }), "rebase");
     const notice = rebaseNotice(2, { ...pr12, mergeable_state: "dirty" });
-    assert.match(notice, /conflicts with `main` after a sibling merged; sending it back to the worker once/);
+    assert.match(notice, /conflicts with `main` after other PRs merged; sending it back to the worker to rebase/);
     assert.ok(notice.startsWith(marker(2, "rebase", two)));
     await gh.fetch("https://api.github.com/repos/o/r/issues/12/comments", { method: "POST", body: JSON.stringify({ body: notice }) });
     seen = await rebaseMarkers(repo, { issue: 2, pr: pr12 }, { token: "t" });
-    assert.deepEqual([seen.effective, seen.already], [0, true], "the same head again: no second notice, still the one rebase");
+    assert.deepEqual([seen.effective, seen.already], [0, true], "the same head again: no second notice, no rebase counted");
+    // The worker's rebase onto main conflicts in store.mjs: its record.
+    await gh.fetch("https://api.github.com/repos/o/r/issues/12/comments", { method: "POST", body: JSON.stringify({ body: ontoRecord(2, { from: two, base: one, files: ["store.mjs"] }) }) });
 
     // The worker rebases keeping both functions, and the review records the new head: it merges with no person.
     const rebased = g.commit("factory/2", "main", "export const version = 1;\nexport function saveOne() {}\nexport function saveTwo() {}\n", "two, rebased");
@@ -181,15 +186,41 @@ test("#2647: two sibling PRs on one file: the second conflicts at its merge, goe
     assert.equal(await merge(2, 12), "queued");
     assert.deepEqual(gh.enqueued.at(-1), { pr: 12, sha: rebased });
 
-    // A third sibling lands on the same lines first: a second conflict after the one rebase Blocks, as today.
+    // A third sibling lands on the same lines first: a new base, so it goes back again rather than Blocking.
     const three = g.commit("factory/3", one, "export const version = 1;\nexport function saveOne() {}\nexport function saveThree() {}\n", "three");
     g.git("update-ref", "refs/heads/main", three);
     assert.equal(await merge(2, 12), "conflict");
     assert.deepEqual(gh.attempts, [11, 12], "the second conflict is read before any enqueue too");
-    seen = await rebaseMarkers(repo, { issue: 2, pr: pr12 }, { token: "t" });
-    assert.equal(seen.effective, 1);
-    assert.equal(staleDecision({ pr: { ...pr12, mergeable_state: "dirty" }, rebaseMarkers: seen.effective, queue: true }), "blocked");
-    assert.match(REBASED_TWICE, /^integration failed twice/);
+    seen = await rebaseMarkers(repo, { issue: 2, pr: { ...pr12, mergeable_state: "dirty" } }, { token: "t" });
+    assert.deepEqual([seen.effective, seen.recent, seen.stuck, seen.record?.base], [1, 1, null, one], "the last rebase was onto the first sibling's main");
+    assert.equal(staleDecision({ pr: { ...pr12, mergeable_state: "dirty" }, rebases: seen.recent, stuck: seen.stuck, queue: true }), "rebase");
+  });
+});
+
+test("#243: a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move, then goes back in; such removals count toward no drop Block", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const later = (s) => new Date(Date.now() + s * 1000).toISOString();
+    // Dropped twice for a conflict with the sibling ahead of it, which still waits in the queue; main has not moved.
+    gh.state.removals = [{ at: later(1), reason: "merge_conflict" }, { at: later(2), reason: "merge_conflict" }];
+    gh.state.waiting = 1;
+    const report = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "pending", "no Block, no enqueue that would bounce off the same entry");
+    assert.equal(mergeBlockReason("pending", report), null);
+    assert.deepEqual(gh.attempts, []);
+    // The sibling merged without making this PR conflict (main moved since the removal): back in.
+    gh.state.mainAt = later(5);
+    assert.equal(await merge(2, 12), "queued");
+    assert.deepEqual(gh.enqueued, [{ pr: 12, sha: two }]);
+    // Or it left the queue unmerged (the queue is empty now): back in too.
+    gh.state.mainAt = "2026-01-01T00:00:00Z";
+    gh.state.waiting = 0;
+    assert.equal(await merge(2, 12), "queued");
+    // Two drops for failed checks still Block, as before.
+    gh.state.removals = [{ at: later(1), reason: "failed_checks" }, { at: later(2), reason: "failed_checks" }];
+    assert.equal(await merge(2, 12), "dropped");
   });
 });
 
@@ -287,13 +318,13 @@ test("#2669: a refusal whose read-again fails for now throws that read's transie
   });
 });
 
-test("#2647: local --wait sends a conflicting PR back once (notice, worker rebase, review again), then Blocks", async () => {
+test("#243: local --wait sends a conflicting PR back each time other PRs merged; Blocks when the conflict comes back on the same base or at the bound", async () => {
   const pr = { number: 12, state: "open", head: { sha: "a".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty" };
   const posted = [];
   const exits = [];
   const ran = [];
   const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async (issue, o) => (ran.push([issue, o]), { exit: "delivered" }) });
-  const gh = (effective, already) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective, already }), prComment: async (_r, n, body) => posted.push([n, body]), applyExit: async (_r, x) => exits.push(x) });
+  const gh = (recent, already, stuck = null) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: recent, recent, already, stuck, record: stuck }), prComment: async (_r, n, body) => posted.push([n, body]), applyExit: async (_r, x) => exits.push(x) });
   const inputs = { objectiveLabel: "factory:objective", notify: "" };
 
   assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(0, false) }), true);
@@ -307,11 +338,22 @@ test("#2647: local --wait sends a conflicting PR back once (notice, worker rebas
   assert.equal(posted.length, 1);
   assert.equal(ran.length, 2);
 
-  // A conflict after the one rebase: Blocked, no third worker run.
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1, false) }), false);
-  assert.equal(ran.length, 2);
-  assert.deepEqual(exits.map((x) => [x.exit, x.reason]), [["blocked", REBASED_TWICE]]);
-  assert.equal(exits[0].key, rebasedTwiceBlock({ issue: 2, pr }).key, "the Block the dispatcher would write too, one comment");
+  // A conflict after a rebase, on a new base: sent back again.
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1, false) }), true);
+  assert.deepEqual([ran.length, posted.length, exits.length], [3, 2, 0]);
+
+  // The same conflict on the same base: Blocked naming the files, no worker run.
+  const stuck = { from: "9".repeat(40), base: "b".repeat(40), files: ["docs/decisions.md"] };
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1, false, stuck) }), false);
+  assert.equal(ran.length, 3);
+  assert.match(exits[0].reason, /no progress: the branch still conflicts with `main` at bbbbbbb.*`docs\/decisions\.md`/);
+  assert.equal(exits[0].cause, "work");
+  assert.equal(exits[0].key, rebaseBlock({ issue: 2, pr, why: "stuck" }).key, "the Block the dispatcher would write too, one comment");
+
+  // The bound: Blocked, no worker run.
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(REBASE_LIMIT, false) }), false);
+  assert.equal(ran.length, 3);
+  assert.match(exits[1].reason, new RegExp(`rebased ${REBASE_LIMIT} times in 24 h`));
 });
 
 /** A Local loop whose GitHub calls are `gh` (sendBack's seam) and whose worker run answers `workAnswers` in turn. */
@@ -343,7 +385,7 @@ test("#2647: --wait follows a merge-time conflict into the send-back, and polls 
 test("#2647: a send-back whose GitHub read or comment fails never throws: a transient error retries, any other Blocks with its reason", async () => {
   const exits = [];
   const posted = [];
-  const base = { rebaseMarkers: async () => ({ effective: 0, already: false, since: null }), prComment: async (_r, n, b) => posted.push([n, b]), applyExit: async (_r, x) => exits.push(x) };
+  const base = { rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, since: null }), prComment: async (_r, n, b) => posted.push([n, b]), applyExit: async (_r, x) => exits.push(x) };
 
   // GitHub 502 reading the PR: no worker run, no Block, followMerge polls again.
   let { loop, ran } = sendBackLoop([]);
@@ -357,9 +399,9 @@ test("#2647: a send-back whose GitHub read or comment fails never throws: a tran
   assert.deepEqual(exits.map((x) => [x.exit, x.stage]), [["blocked", "merge"]]);
   assert.match(exits[0].reason, /send-back .* failed \(HTTP 403\)/);
 
-  // The REBASED_TWICE Block itself hitting a 503: retried on the next poll, never thrown.
+  // The bound's Block itself hitting a 503: retried on the next poll, never thrown.
   ({ loop, ran } = sendBackLoop([]));
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => dirtyPr(), rebaseMarkers: async () => ({ effective: 1, already: false }), applyExit: async () => { throw failing(503); } } }), "retry");
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: { ...base, getPrSettled: async () => dirtyPr(), rebaseMarkers: async () => ({ effective: REBASE_LIMIT, recent: REBASE_LIMIT, already: false }), applyExit: async () => { throw failing(503); } } }), "retry");
 
   // Even the Block for a non-transient failure failing leaves sendBack returning, not throwing.
   ({ loop, ran } = sendBackLoop([]));
@@ -367,22 +409,13 @@ test("#2647: a send-back whose GitHub read or comment fails never throws: a tran
   assert.equal(posted.length, 0);
 });
 
-test("#2647: after the one rebase, a worker that delivers unlabelled with the PR still conflicting Blocks under --wait", async () => {
+test("#243: a rebase whose worker delivers unlabelled with the PR conflicting again (another sibling landed) is sent back by the next poll, not Blocked", async () => {
   const exits = [];
-  const reads = [dirtyPr(), dirtyPr({ head: { sha: "b".repeat(40) } })];
-  const gh = { getPrSettled: async () => reads.shift(), rebaseMarkers: async () => ({ effective: 0, already: false, since: "2026-11-09T00:00:00Z" }), prComment: async () => {}, applyExit: async (_r, x) => exits.push(x) };
+  const gh = { getPrSettled: async () => dirtyPr(), rebaseMarkers: async () => ({ effective: 0, recent: 0, already: false, since: "2026-11-09T00:00:00Z" }), prComment: async () => {}, applyExit: async (_r, x) => exits.push(x) };
   const { loop, ran } = sendBackLoop([{ exit: "delivered", unreviewed: true }]);
-  assert.equal(await loop.sendBack(2, 12, inputs, { gh }), false, "not a clean exit with a dirty PR");
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh }), "retry", "followMerge's next poll decides under the same rules");
   assert.equal(ran.length, 1);
-  assert.deepEqual(exits.map((x) => [x.exit, x.reason, x.stage]), [["blocked", REBASED_TWICE, "merge"]]);
-  assert.equal(exits[0].pr.head.sha, "b".repeat(40), "the Block names the rebased head it read");
-
-  // The same worker answer with the conflict gone by the re-read: no Block, the merge pass reads it again.
-  const clean = [dirtyPr(), dirtyPr({ mergeable_state: "clean" })];
-  const exits2 = [];
-  const { loop: loop2 } = sendBackLoop([{ exit: "delivered", unreviewed: true }]);
-  assert.equal(await loop2.sendBack(2, 12, inputs, { gh: { ...gh, getPrSettled: async () => clean.shift(), applyExit: async (_r, x) => exits2.push(x) } }), "retry");
-  assert.deepEqual(exits2, []);
+  assert.deepEqual(exits, []);
 });
 
 test("#2647: a PR that stopped conflicting before the send-back read it is neither Blocked nor sent to a worker", async () => {
@@ -397,16 +430,16 @@ test("#2647: a PR that stopped conflicting before the send-back read it is neith
   assert.deepEqual([exits.length, posted.length], [0, 0]);
 });
 
-test("#2647: the dispatcher and a --wait loop Blocking the same second conflict write one Blocked comment", async () => {
+test("#243: the dispatcher and a --wait loop Blocking the same send-back condition write one Blocked comment", async () => {
   await withGitHub(async (g, gh) => {
     const pr = gh.open(12, 2, g.main());
     const since = "2026-11-09T00:00:00Z";
-    await applyExit(repo, rebasedTwiceBlock({ issue: 2, pr, since, notify: "kirk", stage: "dispatch" }), { token: "t" });
-    await applyExit(repo, rebasedTwiceBlock({ issue: 2, pr, since, notify: "kirk", stage: "merge" }), { token: "t" });
+    await applyExit(repo, rebaseBlock({ issue: 2, pr, why: "limit", since, notify: "kirk", stage: "dispatch" }), { token: "t" });
+    await applyExit(repo, rebaseBlock({ issue: 2, pr, why: "limit", since, notify: "kirk", stage: "merge" }), { token: "t" });
     const blocked = (gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "blocked").replace(/ -->$/, "")));
     assert.equal(blocked.length, 1, "one comment, one @mention");
     // A new head (or a human recovery) is a new condition: it notifies again.
-    await applyExit(repo, rebasedTwiceBlock({ issue: 2, pr: { ...pr, head: { sha: "c".repeat(40) } }, since, notify: "kirk", stage: "merge" }), { token: "t" });
+    await applyExit(repo, rebaseBlock({ issue: 2, pr: { ...pr, head: { sha: "c".repeat(40) } }, why: "limit", since, notify: "kirk", stage: "merge" }), { token: "t" });
     assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "blocked").replace(/ -->$/, ""))).length, 2);
   });
 });

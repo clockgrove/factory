@@ -19,7 +19,7 @@ import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
-import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
+import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 
@@ -533,10 +533,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   watch.mark("running");
-  // Integration failures go back to the worker once, then Blocked (PLAN.md "Merge"): with a merge queue, a
-  // PR the queue evicted as conflicting; without one, a PR that fell behind or conflicts after a sibling
-  // merged, which strict required checks refuse and nothing updates. The worker rebases, revalidates and
-  // pushes, and records the rebased head as the one to merge. Every other In-review PR gets the merge pass.
+  // Integration failures go back to the worker (PLAN.md "Merge"): with a merge queue, a PR the queue evicted as
+  // conflicting; without one, a PR that fell behind or conflicts after other PRs merged, which strict required checks
+  // refuse and nothing updates. The worker rebases, revalidates and pushes, and records the rebased head as the one to
+  // merge. Each new base is a new send-back; it Blocks only when rebasing cannot progress or at the bound
+  // (logic.mjs staleDecision). Every other In-review PR gets the merge pass.
   const sentBack = [];
   const updated = [];
   const nextParts = [];
@@ -581,9 +582,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
-      // worker job never ran, or died), so it does not count as the one rebase allowed; the issue is sent again.
+      // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { effective, already, since } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -623,7 +624,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
-      const decision = staleDecision({ pr, rebaseMarkers: effective, queue, reviewing, reviewRunning });
+      const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
       if (decision === "update") {
         // Behind, not conflicting: one API call brings the branch up to date and its checks re-run. No worker, no
         // model; GitHub's signed merge commit is the one new head the merge pass accepts without another review.
@@ -633,17 +634,25 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             await updatePrBranch(repo, open.number, opts);
             log(`  #${issue.number}: PR #${open.number} was behind ${pr.base?.ref}; branch updated by GitHub`);
           } catch (e) {
-            log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
-            sentBack.push(issue.number);
-            if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+            // A worker rebases it instead, under the send-back's rules (staleDecision).
+            const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue });
+            if (instead === "rebase") {
+              log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
+              sentBack.push(issue.number);
+              if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+            } else {
+              updated.splice(updated.indexOf(issue.number), 1);
+              statuses[issue.number] = "Blocked";
+              await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+            }
           }
         }
       } else if (decision === "rebase") {
         sentBack.push(issue.number);
         if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr), opts);
-      } else if (decision === "blocked") {
+      } else if (decision === "stuck" || decision === "limit") {
         statuses[issue.number] = "Blocked";
-        if (!dryRun) await applyExit(repo, rebasedTwiceBlock({ issue: issue.number, pr, since, notify: inputs.notify, stage: "dispatch" }), opts);
+        if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
       } else if (!dryRun && inputs.autoMerge && pr && !reviewing) {
         // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
         // green, with no unread maintainer decision. Nothing is armed between ticks.

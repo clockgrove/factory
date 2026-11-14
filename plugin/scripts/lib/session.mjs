@@ -39,6 +39,7 @@ import {
   objectiveLabeledAt,
   listReviewComments,
   moveCard,
+  branchState,
   prComment,
   primeSelf,
   primeWriters,
@@ -73,7 +74,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTo
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -1836,36 +1837,50 @@ export async function queueEntryState(repo, prNumber, opts, now = Date.now(), ga
   return { ...entry, ...queueStall(entry, { started, now, hung }) };
 }
 
-/** Why the second send-back of one Objective's PR Blocks (PLAN.md "Merge"): one rebase per Objective, then a person. */
-export const REBASED_TWICE = "integration failed twice: the branch fell behind again after one rebase";
-
 /**
- * applyExit's input for that Block. Its key names the PR's head and the objective label's time (`since`, rebaseMarkers),
- * so the dispatcher and a `run --wait` loop Blocking the same condition write one comment, not two @mentions; a new head
- * or a human recovery is a new condition, so it notifies again.
+ * applyExit's input for a send-back that Blocks (logic.mjs staleDecision): `why` "stuck" (the conflict came back on the
+ * base the last rebase resolved, `record` its rebase record, files named) or "limit" (REBASE_LIMIT rebases in a day).
+ * Its key names the condition, the PR's head and the objective label's time (`since`, rebaseMarkers), so the dispatcher
+ * and a `run --wait` loop Blocking the same condition write one comment, not two @mentions; a new head or a human
+ * recovery is a new condition, so it notifies again.
  */
-export function rebasedTwiceBlock({ issue, pr, since = null, notify, stage }) {
-  return { issue, pr, exit: "blocked", reason: REBASED_TWICE, cause: "work", notify, stage, key: `rebased-twice:${pr?.head?.sha || "none"}:${since || ""}` };
+export function rebaseBlock({ issue, pr, why, record = null, since = null, notify, stage }) {
+  const reason = rebaseBlockReason(why, { record, defaultBranch: pr?.base?.ref || "main" });
+  return { issue, pr, exit: "blocked", reason, cause: "work", notify, stage, key: `rebase-${why}:${pr?.head?.sha || "none"}:${since || ""}` };
 }
 
 /**
- * The rebase send-backs on the Objective's PR (PLAN.md "Merge"), counted as the one rebase allowed: the marker comments
- * Factory left since the issue's last objective label (a human recovery starts the count over). `effective` leaves out
- * a marker that names the PR's head now (that send-back produced no push: its worker never ran or died, so it is sent
- * again); `already` says one does, so no second comment is posted for the same head. `since` is that label's time.
+ * The rebase send-backs on the Objective's PR (PLAN.md "Merge") since the issue's last objective label (a human
+ * recovery starts the count over): the marker comments Factory left and the worker's records of the rebases that
+ * conflicted (logic.mjs ontoRecord). `effective` counts the markers whose send-back pushed (one that names the PR's
+ * head now produced no push: its worker never ran or died, so it is sent again), `recent` those of the last
+ * REBASE_WINDOW_MS (staleDecision's bound); `already` says a marker names the head now, so no second comment is posted
+ * for it. `record` is the newest rebase record of a pass that pushed, and `stuck` that record when the PR still needs
+ * a rebase and the default branch is still the base it was made onto: the conflict came back after its resolution,
+ * with nothing merged since (a failed read of the branch leaves `stuck` null: the send-back goes ahead, and the worker
+ * Blocks a conflict it cannot resolve itself). `since` is that label's time.
  */
-export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts) {
+export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, now = Date.now()) {
   const prefix = marker(issue, "rebase").replace(/ -->$/, "");
   const since = await objectiveLabeledAt(repo, issue, objectiveLabel, opts).catch(() => null);
-  if (!pr) return { effective: 0, already: false, since };
-  const markers = (await listComments(repo, pr.number, opts).catch(() => [])).filter((c) => trustedAuthor(c) && (c.body || "").includes(prefix) && (!since || Date.parse(c.created_at) > Date.parse(since)));
+  if (!pr) return { effective: 0, recent: 0, already: false, since, record: null, stuck: null };
+  const comments = (await listComments(repo, pr.number, opts).catch(() => [])).filter((c) => trustedAuthor(c) && (!since || Date.parse(c.created_at) > Date.parse(since)));
+  const markers = comments.filter((c) => (c.body || "").includes(prefix));
   const here = (c) => (c.body || "").includes(`${prefix}:${pr.head?.sha} -->`);
-  return { effective: markers.filter((c) => !here(c)).length, already: markers.some(here), since };
+  const pushed = markers.filter((c) => !here(c));
+  const recent = pushed.filter((c) => now - Date.parse(c.created_at) < REBASE_WINDOW_MS).length;
+  const record = comments.map((c) => parseOnto(issue, c.body)).filter((r) => r && r.from !== pr.head?.sha).at(-1) ?? null;
+  let stuck = null;
+  if (record && ["behind", "dirty"].includes(pr.mergeable_state)) {
+    const tip = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); the send-back goes ahead`));
+    if (tip?.head === record.base) stuck = record;
+  }
+  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck };
 }
 
 /** The send-back's notice on the PR: its marker (naming the head it saw) and why the worker rebases it. */
 export function rebaseNotice(issue, pr) {
-  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after a sibling merged; sending it back to the worker once to rebase and revalidate.`;
+  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate.`;
 }
 
 /**
@@ -1914,8 +1929,8 @@ export function mergeBlockReason(how, report = {}) {
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
  * of; the caller Blocks), "conflict" (the PR conflicts with the
- * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for the
- * one rebase, rebaseMarkers, and a conflict after that rebase Blocks with REBASED_TWICE), "dropped" (the merge queue
+ * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for a
+ * rebase under logic.mjs staleDecision's rules), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
  * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
@@ -2056,6 +2071,21 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     if (retry.hold) {
       log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
       return "held";
+    }
+    // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or
+    // the send-back would have taken it): no drop. It goes back in once that queue has moved: the default branch got a
+    // commit since the removal (a merge; one that made it conflict sends it back for a rebase instead), or no PR waits
+    // in the queue. Until then nothing re-enqueues it, so it never bounces off the same entry; a sibling's merge or
+    // drop ticks the dispatcher.
+    if (retry.conflict) {
+      const branch = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); next tick`));
+      if (!branch) return "pending";
+      const moved = Date.parse(branch.headAt) > Date.parse(retry.conflict.at);
+      if (!moved && branch.queued > 0) {
+        log(`#${issue}: the merge queue took PR #${prNumber} out for a conflict with a PR ahead of it at ${retry.conflict.at}; it goes back in once the queue moves (${branch.queued} waiting)`);
+        return "pending";
+      }
+      log(`#${issue}: the merge queue took PR #${prNumber} out for a conflict at ${retry.conflict.at}; ${moved ? `${pr.base?.ref} has moved since` : "the queue is empty now"}, so it goes back in`);
     }
     if (retry.block) {
       delete report.watch;

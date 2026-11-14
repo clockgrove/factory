@@ -756,6 +756,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              "mark ready" answers it)
  *  reviewUnaddressed: number (review pass: comments without a worker reply)
  *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
+ *  unresolved: string, why a send-back's conflict pass left the branch off the base it was to rebase onto (worker.mjs):
+ *              Blocked with it after the hard stops, as the work's
  *  lfsRefused: boolean, the refusal was Git LFS's (quota, storage, cap, pointers)
  *  lfsQuota:   boolean, that refusal was GitHub's Git LFS quota or storage (outbox.mjs errorKind "lfs-quota")
  *  lfsPlain:   string[], files .gitattributes routes to Git LFS but committed as plain blobs
@@ -772,7 +774,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "", handoverRefused = "", handoverOnly = false }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", unresolved = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "", handoverRefused = "", handoverOnly = false }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
   // GitHub's Git LFS quota or storage (the outbox's `lfs-quota` refusal) is a plan limit a person raises; any other LFS refusal is setup.
   if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: lfsQuota ? "provider-quota" : "setup" };
@@ -785,6 +787,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
   if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "factory" : "max-usd" };
+  if (unresolved) return { exit: "blocked", reason: unresolved, cause: "work" };
   if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
   // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
   if (handoverRefused) return { exit: "blocked", reason: handoverRefused, cause: "work" };
@@ -1519,6 +1522,11 @@ export function acceptanceEntries(body) {
 
 // ------------------------------------------------------- no-queue fallback
 
+/** Send-backs for a rebase one Objective gets in REBASE_WINDOW_MS before it Blocks: a batch of five parallel Objectives
+ * on one area has at most four siblings merging ahead of it, plus one merge from outside the batch. */
+export const REBASE_LIMIT = 5;
+export const REBASE_WINDOW_MS = 24 * 3600_000;
+
 /**
  * The dispatcher's decision for an In-review PR (its review pass is done) that cannot merge:
  *  - with a merge queue, a conflicting PR ("dirty") is evicted by the queue; a PR merely behind
@@ -1527,10 +1535,13 @@ export function acceptanceEntries(body) {
  *    nothing updates it.
  * A PR merely behind without a queue is "update": GitHub merges the default branch into it in
  * one API call (no runner, no model) and its checks re-run; only a conflicting PR needs a worker.
- * "rebase" sends it back to a worker job once; "blocked" is the second time (integration failed
- * twice); "ignore" covers drafts, clean and unknown states.
+ * "rebase" sends it back to a worker job, again each time other PRs merged since its last rebase (a new base is
+ * progress). It Blocks only when rebasing cannot progress: "stuck" (`stuck`, session.mjs rebaseMarkers: the default
+ * branch is still the base the last rebase resolved a conflict against, and the branch still conflicts with it), or
+ * "limit" (`rebases`: REBASE_LIMIT send-backs that pushed in REBASE_WINDOW_MS, so two Objectives cannot chase each
+ * other forever). "ignore" covers drafts, clean and unknown states.
  */
-export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing = false, reviewRunning = false }) {
+export function staleDecision({ pr, rebases = 0, stuck = null, queue = false, reviewing = false, reviewRunning = false }) {
   if (!pr || pr.draft) return "ignore";
   // A review job is running on it (the label comes off at that job's exit): its answer pass may
   // push and its own validation decides; a send-back now would race it (two jobs on one branch).
@@ -1540,7 +1551,52 @@ export function staleDecision({ pr, rebaseMarkers = 0, queue = false, reviewing 
   const stale = queue ? pr.mergeable_state === "dirty" : ["behind", "dirty"].includes(pr.mergeable_state);
   if (!stale) return "ignore";
   if (!queue && pr.mergeable_state === "behind") return "update";
-  return rebaseMarkers >= 1 ? "blocked" : "rebase";
+  if (stuck) return "stuck";
+  return rebases >= REBASE_LIMIT ? "limit" : "rebase";
+}
+
+/** At most this many conflicting files go into a rebase record (ontoRecord) and its Block. */
+const ONTO_FILES = 30;
+
+/**
+ * The worker's record of a send-back rebase that conflicted, on the PR: the head it started `from`, the default
+ * branch's `base` it rebased onto, and the `files` that conflicted. A record whose `from` is no longer the PR's head
+ * belongs to a pass that pushed; the dispatcher compares its base with the default branch now (staleDecision "stuck").
+ */
+export function ontoRecord(issue, { from, base, files = [], defaultBranch = "main" }) {
+  const list = [...new Set((files || []).map(String).filter(Boolean))].slice(0, ONTO_FILES);
+  // JSON inside an HTML comment: `>` escaped, so no file name can close it.
+  const data = markerJson({ files: list });
+  return `${marker(issue, "onto", `${from}:${base}`).replace(/ -->$/, "")} ${data} -->\nFactory: rebasing onto \`${defaultBranch}\` at ${String(base).slice(0, 7)} conflicts in ${conflictFiles(list)}; the worker resolves it.`;
+}
+
+/** The record ontoRecord wrote, read from a comment's body, or null: `{from, base, files}`. */
+export function parseOnto(issue, body) {
+  const m = new RegExp(`^<!-- factory:${Number(issue)}:onto:([0-9a-f]{40,64}):([0-9a-f]{40,64}) (\\{[^\\n]*\\}) -->`).exec(String(body || ""));
+  if (!m) return null;
+  try {
+    const files = JSON.parse(m[3])?.files;
+    return { from: m[1], base: m[2], files: Array.isArray(files) ? files.filter((f) => typeof f === "string" && f).slice(0, ONTO_FILES) : [] };
+  } catch {
+    return null;
+  }
+}
+
+/** Files named in a notice: code-quoted, at most ten, then how many more. */
+export function conflictFiles(files = []) {
+  if (!files.length) return "no file git named";
+  const shown = files.slice(0, 10).map((f) => `\`${f}\``).join(", ");
+  return files.length > 10 ? `${shown} and ${files.length - 10} more` : shown;
+}
+
+/**
+ * Why a send-back Blocks (staleDecision): "stuck" with the record whose conflict came back on the same base, or
+ * "limit" with the last record seen (its files, when there is one).
+ */
+export function rebaseBlockReason(why, { record = null, defaultBranch = "main" } = {}) {
+  if (why === "stuck") return `rebasing makes no progress: the branch still conflicts with \`${defaultBranch}\` at ${String(record?.base).slice(0, 7)}, the base the worker's last rebase resolved a conflict against (in ${conflictFiles(record?.files)})`;
+  const last = record ? ` (last conflict: ${conflictFiles(record.files)})` : "";
+  return `the branch was rebased ${REBASE_LIMIT} times in 24 h as other PRs merged, and it conflicts with \`${defaultBranch}\` again${last}: these Objectives keep overlapping. order them (\`blocked_by\`) or set \`max_concurrent: 1\` for the stretch`;
 }
 
 /**
@@ -1716,6 +1772,9 @@ export function queueSince(times, now = Date.now()) {
   return known.length ? known.reduce((a, b) => (b[1] > a[1] ? b : a))[0] : null;
 }
 
+/** GitHub's code for a merge queue removal because the PR conflicts (with the default branch or a PR ahead of it). */
+export const CONFLICT_CODE = "merge_conflict";
+
 /**
  * What the merge pass does with a reviewed, green PR that is not in the merge queue, from GitHub's own record of its
  * removals from the queue (timeline `removed_from_merge_queue` events: `{at, reason, actor, person}`, or `{self: true}`
@@ -1726,7 +1785,11 @@ export function queueSince(times, now = Date.now()) {
  *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
- * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code.
+ * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
+ *   conflict (CONFLICT_CODE): the PR conflicts with the default branch or with a PR ahead of it in the queue, which a
+ *   sibling's merge resolves into the send-back's rebase (staleDecision), so it counts toward no Block here. When the
+ *   newest removal is one, `{conflict: {at}}` says so: the caller re-enqueues it only once the queue it conflicted
+ *   with has moved (session.mjs mergeReadyOne).
  * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop `{at, code}`); at
  * QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop codes); `last` has
  * `factory: true` when Factory made that removal. Codes are
@@ -1742,9 +1805,12 @@ export function queueRetry(removals, { since, self = null }) {
       const who = botless(r.actor);
       // Factory's own removal names why: this pass's (`self`), or one read back from Factory's requeue record (`code`).
       if (r.self === true || (me && who === me)) return { at: r.at, code: r.code ? queueCode(r.code) : STALL_CODE, drop: true, factory: true };
-      return { at: r.at, code: queueCode(r.reason), drop: r.person !== true || who === QUEUE_BOT };
+      const drop = r.person !== true || who === QUEUE_BOT;
+      const code = queueCode(r.reason);
+      return drop && code === CONFLICT_CODE ? { at: r.at, code, drop: false, conflict: true } : { at: r.at, code, drop };
     });
   const newest = after.at(-1);
+  if (newest?.conflict) return { conflict: { at: newest.at }, drops: after.filter((r) => r.drop).length };
   if (newest && !newest.drop) return { hold: { at: newest.at, code: newest.code }, drops: after.filter((r) => r.drop).length };
   const drops = after.filter((r) => r.drop);
   const last = drops.length ? { at: drops.at(-1).at, code: drops.at(-1).code, ...(drops.at(-1).factory ? { factory: true } : {}) } : null;

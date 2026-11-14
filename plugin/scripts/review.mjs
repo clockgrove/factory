@@ -1019,10 +1019,10 @@ async function main() {
         recorded = true;
         const report = {};
         const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back once for a rebase` }[how] || how}`);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
-        // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back once to
-        // rebase (dispatch.mjs, logic.mjs staleDecision), and a conflict after that rebase Blocks there.
+        // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
+        // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.
         // Stopped since the stage's last read: nothing merged, and the stage ends as a stop does.
         if (how === "stopped") stoppedAtMerge = stopCause(await getIssue(repo, issue, token).catch(() => null), inputs.objectiveLabel) || "unlabeled";
         if (how === "conflict") decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;

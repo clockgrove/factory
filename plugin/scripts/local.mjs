@@ -34,9 +34,9 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -1442,21 +1442,21 @@ export class Local {
     if (work.exit !== "delivered") return work;
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     // A delivered PR without the review label conflicts with the default branch: the dispatcher's send-back takes it
-    // (`unreviewed` tells sendBack its rebase did not take).
+    // (`unreviewed` tells sendBack it conflicts again after its rebase).
     return pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL) ? this.review(issue, pr.number, { wait }) : { ...work, unreviewed: true };
   }
 
   /**
    * --wait, a PR that conflicts with the default branch at its merge (a sibling merged first, #2647): the dispatcher's
-   * send-back, here, since this loop holds the Objective. The first time, its notice on the PR and one worker rebase,
-   * then the review again; after one rebase, Blocked (session.mjs REBASED_TWICE), also when the rebase's worker run ends
-   * delivered with the PR still conflicting. Returns followMerge's answer, or "retry": the PR no longer conflicts, or
-   * GitHub failed for now, so followMerge's next poll decides again. `gh` is for tests.
+   * send-back, here, since this loop holds the Objective: its notice on the PR and a worker rebase, then the review
+   * again, each time other PRs merged since its last rebase; Blocked when rebasing cannot progress or at the bound
+   * (logic.mjs staleDecision), as the dispatcher Blocks it. Returns followMerge's answer, or "retry": the PR no longer
+   * conflicts, its rebase's worker run ended delivered with the PR conflicting again (another sibling landed meanwhile),
+   * or GitHub failed for now, so followMerge's next poll decides again. `gh` is for tests.
    */
   async sendBack(issue, prNumber, inputs, { gh = { getPrSettled, rebaseMarkers, prComment, applyExit } } = {}) {
     const conflicting = (pr) => pr?.state === "open" && !pr.merged && pr.mergeable_state === "dirty";
     let pr = null;
-    let since = null;
     try {
       pr = await gh.getPrSettled(this.repo, prNumber, this.opts);
       if (!conflicting(pr)) {
@@ -1464,30 +1464,21 @@ export class Local {
         return "retry";
       }
       const seen = await gh.rebaseMarkers(this.repo, { issue, pr, objectiveLabel: inputs.objectiveLabel }, this.opts);
-      since = seen.since;
-      if (seen.effective >= 1) {
-        await gh.applyExit(this.repo, rebasedTwiceBlock({ issue, pr, since, notify: inputs.notify, stage: "merge" }), this.opts);
+      const why = staleDecision({ pr, rebases: seen.recent, stuck: seen.stuck, queue: true });
+      if (why === "stuck" || why === "limit") {
+        await gh.applyExit(this.repo, rebaseBlock({ issue, pr, why, record: seen.stuck || seen.record, since: seen.since, notify: inputs.notify, stage: "merge" }), this.opts);
         return false;
       }
       if (!seen.already) await gh.prComment(this.repo, prNumber, rebaseNotice(issue, pr), this.opts);
     } catch (e) {
       return this.sendBackFailed(issue, pr, e, inputs, gh);
     }
-    log(`#${issue}: PR #${prNumber} conflicts with ${pr.base?.ref || "the default branch"} after a sibling merged; sending it back to the worker once to rebase`);
+    log(`#${issue}: PR #${prNumber} conflicts with ${pr.base?.ref || "the default branch"} after other PRs merged; sending it back to the worker to rebase`);
     const r = await this.work(issue, { wait: true });
     if (r.next) return "next";
     if (r.exit !== "delivered") return false;
-    if (!r.unreviewed) return true;
-    // The worker delivered without the review label: its rebase still conflicts (another sibling landed meanwhile).
-    // That is the second conflict after the one rebase, so it Blocks here rather than leaving the PR dirty In review.
-    try {
-      const now = await gh.getPrSettled(this.repo, prNumber, this.opts);
-      if (!conflicting(now)) return "retry";
-      await gh.applyExit(this.repo, rebasedTwiceBlock({ issue, pr: now, since, notify: inputs.notify, stage: "merge" }), this.opts);
-      return false;
-    } catch (e) {
-      return this.sendBackFailed(issue, pr, e, inputs, gh);
-    }
+    // Delivered without the review label: its rebase conflicts again, so the next poll sends it back under the same rules.
+    return r.unreviewed ? "retry" : true;
   }
 
   /** A GitHub error in sendBack: a transient one waits for followMerge's next poll; any other Blocks with its reason. */

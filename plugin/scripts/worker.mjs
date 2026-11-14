@@ -17,10 +17,10 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -372,6 +372,8 @@ async function main() {
   let rebaseMode = false;
   let rebaseConflict = false;
   let rebasedTo = null;
+  // The default branch's head a conflicting rebase was made onto, and the files that conflicted.
+  let rebaseOnto = null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
   const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => trustedAuthor(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
@@ -393,6 +395,12 @@ async function main() {
         if (moved.warning) log(`warning: ${moved.warning}`);
       }
       log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);
+      if (rebaseConflict) {
+        // The record of this rebase on the PR (logic.mjs ontoRecord): once this pass pushes, the dispatcher reads the
+        // same conflict on the same base as no progress, and a new base as a new send-back.
+        rebaseOnto = { from: outbox.expected(), base: outbox.base, files: outbox.conflicts };
+        await prComment(repo, openPr.number, ontoRecord(issue, { ...rebaseOnto, defaultBranch }), token).catch((e) => log(`rebase record: ${String(e.message).slice(0, 120)}`));
+      }
     }
   }
   const written = await installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel }, env: childBase });
@@ -614,6 +622,13 @@ async function main() {
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
   let pushed = await outbox.push();
+  // A send-back's conflict pass that ended (no cap, death or refusal) with the branch still not on the base it was to
+  // rebase onto: the worker could not resolve the conflict. Blocked naming the files, with no validation run.
+  let unresolved = "";
+  if (rebaseOnto && pushed && !outbox.failed && !rec.timedOut && !rec.budgetExceeded && !rec.refusal && died < 2 && (await outbox.behind()) > 0) {
+    unresolved = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${rebaseOnto.base.slice(0, 7)} in ${conflictFiles(rebaseOnto.files)}: the branch it left is not rebased onto it`;
+    log(unresolved);
+  }
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a
   // send-back's conflict pass does, and Factory pushes again. A second conflict is refused there. A plan-time Question
@@ -681,7 +696,7 @@ async function main() {
   // 7. Factory's own validation passes (validationLoop caps them), failures back to the harness.
   let validation = null;
   // Hard stops only; a harness that errored but left commits still gets Factory's validation pass.
-  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
+  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
   if (early.exit !== "blocked" && !planNeeds) {
     validation = await validationLoop({
       onPhase: progress,
@@ -743,6 +758,7 @@ async function main() {
     commits: delta.count,
     validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
+    unresolved,
     record: asked.record,
     recordBasis: asked.basis,
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
+import { OUTAGE } from "../scripts/lib/network.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
 // fails every one of its tries.
@@ -632,6 +633,85 @@ test("runObjective: a stage of this Objective still running on this machine is n
     assert.equal(starts, 0);
     assert.deepEqual(gh.writes, [], "no claim written or dropped");
   } finally {
+    gh.restore();
+  }
+});
+
+test("withClaim: a stage that paused on this machine's network keeps its claim with no lapse; it is resumed once its host answers, and Blocked with cause outage past the bound (#228)", async () => {
+  const gh = claimGitHub();
+  const inner = globalThis.fetch;
+  let down = true;
+  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" && down ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
+  try {
+    const loop = await claimLoop();
+    const since = Date.parse("2026-11-14T08:47:00Z");
+    let t = since + 20 * 60_000;
+    loop.clock = () => t;
+    const outage = (at) => ({ host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: new Date(at).toISOString() });
+    const paused = (at) => async () => ({ exit: "paused", stage: "work", code: 0, outage: outage(at) });
+    assert.equal((await loop.withClaim(7, paused(since))).exit, "paused");
+    assert.equal(gh.comments.length, 1, "the claim stays");
+    assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
+    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "not resumed while its host does not answer");
+    down = false;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed once it answers");
+    // Paused again within fifteen minutes of a resume: the same outage, counted from its first loss.
+    loop.offline.get(7).resumedAt = t;
+    await loop.withClaim(7, paused(t + 60_000));
+    assert.equal(loop.offline.get(7).since, since);
+    // Past the bound: Blocked with the External cause, naming the host and since when, and the claim goes.
+    t = since + OUTAGE.blockMs;
+    assert.equal((await loop.resume(7)).exit, "blocked");
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Factory's 12 h bound for an outage\. The network is back: re-apply the label/);
+    assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
+    // A later pause long after a resume is a new outage: its own since.
+    gh.labels.delete("factory:blocked");
+    gh.labels.add("factory:running");
+    await loop.withClaim(7, paused(t));
+    loop.offline.get(7).resumedAt = t;
+    await loop.withClaim(7, paused(t + OUTAGE.stageWaitMs + 60_000));
+    assert.equal(loop.offline.get(7).since, t + OUTAGE.stageWaitMs + 60_000);
+    // A stage that ends with an exit record clears it.
+    await loop.withClaim(7, async () => ({ exit: "delivered" }));
+    assert.ok(!loop.offline.has(7));
+  } finally {
+    globalThis.fetch = inner;
+    gh.restore();
+  }
+});
+
+test("pausedHere: an Objective paused on a provider that never answers again is taken up past the bound, so resume Blocks it; a stopped one's pause is forgotten (#228)", async () => {
+  const gh = claimGitHub();
+  const inner = globalThis.fetch;
+  // GitHub answers; the provider never does.
+  globalThis.fetch = async (url, init) => (new URL(url).origin === "https://api.anthropic.test" ? Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "EAI_AGAIN" } })) : inner(url, init));
+  try {
+    const loop = await claimLoop();
+    const since = Date.parse("2026-11-14T08:47:00Z");
+    let t = since + 60 * 60_000;
+    loop.clock = () => t;
+    const paused = async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: new Date(since).toISOString() } });
+    await loop.withClaim(7, paused);
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "inside the bound: waits for its host");
+    t = since + OUTAGE.blockMs;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "past it: taken up whatever the probe says");
+    assert.equal((await loop.resume(7)).exit, "blocked");
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"'));
+    assert.match(notice, /bound for an outage\. api\.anthropic\.test is still unreachable from this machine: re-apply the label once it answers/);
+    assert.ok(!/The network is back/.test(notice));
+    // Paused again, then stopped by a person: its pause is over with it.
+    gh.labels.delete("factory:blocked");
+    gh.labels.add("factory:running");
+    await loop.withClaim(7, paused);
+    assert.ok(loop.offline.has(7));
+    gh.labels.delete("factory:objective");
+    await loop.pausedHere(new Map());
+    assert.ok(!loop.offline.has(7));
+  } finally {
+    globalThis.fetch = inner;
     gh.restore();
   }
 });

@@ -23,6 +23,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
+import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
@@ -909,7 +910,7 @@ export class Local {
           // no record: the child failed before writing one
         }
         dropStage();
-        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile });
+        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}) });
       });
     });
   }
@@ -1042,7 +1043,17 @@ export class Local {
       log(`#${issue}: another local loop claimed it first; leaving it alone`);
       return { exit: "skipped" };
     }
-    const beat = setInterval(() => writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`)), HEARTBEAT_MS);
+    // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
+    // beats due meanwhile are skipped rather than queued behind it.
+    let beating = null;
+    const beat = setInterval(() => {
+      if (beating) return;
+      beating = writeClaim(this.repo, issue, this.holder, this.opts)
+        .catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`))
+        .finally(() => {
+          beating = null;
+        });
+    }, HEARTBEAT_MS);
     let result = null;
     let failure = null;
     try {
@@ -1056,11 +1067,17 @@ export class Local {
       // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it. A failed
       // start is unstart's to settle.
       if (!this.stopping && !failure?.startFailed) {
+        // A stage this machine's network ended (`paused`): no lapse, the claim stays, and pausedHere resumes it once
+        // the host answers again (outagePaused).
+        if (result?.exit === "paused") this.outagePaused(issue, result);
         // Only a stage's own end (or a throw) without an exit record lapses; anything else that ends (a merge followed
         // and not merged yet) releases the claim as an exit does.
-        if (!result?.exit && (failure || result?.stage)) await this.lapse(issue, result, failure);
-        else {
+        else if (!result?.exit && (failure || result?.stage)) {
+          this.offline?.delete(issue);
+          await this.lapse(issue, result, failure);
+        } else {
           this.lapsed?.delete(issue);
+          this.offline?.delete(issue);
           await dropClaim(this.repo, issue, this.holder, this.opts);
         }
       }
@@ -1094,6 +1111,25 @@ export class Local {
   }
 
   /**
+   * A stage that ended `paused` on this machine's network (session.mjs outageExit): the outage it names (`result.outage`:
+   * host, origin, code, since) is kept in this loop's memory. A pause that comes within OUTAGE.stageWaitMs of this loop
+   * resuming the Objective from an earlier one is the same outage (a network that comes and goes): its `since` stays the
+   * earlier one, so OUTAGE.blockMs counts from when the Objective first lost the network. No lapse is counted; the claim
+   * stays. The memory is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
+   */
+  outagePaused(issue, result) {
+    const o = result?.outage || {};
+    const at = Date.parse(o.since);
+    const own = Number.isFinite(at) ? at : (this.clock ?? Date.now)();
+    const earlier = this.offline?.get(issue);
+    const same = earlier && Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs;
+    const since = same ? Math.min(own, earlier.since) : own;
+    (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer" });
+    this.lapsed?.delete(issue);
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`);
+  }
+
+  /**
    * Running or In-review Objectives a loop on this machine held when it went away (serve stopped, the machine slept or
    * restarted): ours to resume, at once when that loop's process is gone, else once its heartbeat is stale. One of this
    * loop's own counts too: at once when its stage ended here with no exit record (its one resume, lapse), else once
@@ -1106,10 +1142,22 @@ export class Local {
     for (const issue of issues) {
       if (running.has(issue.number) || out.includes(issue.number)) continue;
       if (!BACKENDS.local.trigger.routes(issue, this.baseEnv())) continue;
-      // A stopped Objective (its label removed: stop.mjs) is not resumed; the dispatcher's stopped pass tidies it.
-      if (stopCause(issue, this.objectiveLabel())) continue;
+      // A stopped Objective (its label removed: stop.mjs) is not resumed; the dispatcher's stopped pass tidies it. Its
+      // outage pause, if it had one, is over with it.
+      if (stopCause(issue, this.objectiveLabel())) {
+        this.offline?.delete(issue.number);
+        continue;
+      }
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
       if (!c || !sameMachineHolder(c.holder)) continue;
+      // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
+      // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
+      // answers would otherwise leave it Running with no notice).
+      const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
+      if (off) {
+        if (!off.origin || (this.clock ?? Date.now)() - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
+        continue;
+      }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
     }
     return out;
@@ -1148,8 +1196,30 @@ export class Local {
     }
   }
 
-  /** Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions. */
+  /**
+   * Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions.
+   * One paused on this machine's network for OUTAGE.blockMs or more is Blocked instead, with the External cause
+   * `outage`, naming the host and since when.
+   */
   async resume(issue) {
+    const off = this.offline?.get(issue);
+    const now = (this.clock ?? Date.now)();
+    if (off && now - off.since >= OUTAGE.blockMs) {
+      // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
+      const back = !off.origin || (await probeHost(off.origin)) === null;
+      const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
+      log(`#${issue}: ${reason}`);
+      try {
+        await this.block(issue, off.stage || "work", reason, { cause: "outage" });
+        await dropClaim(this.repo, issue, this.holder, this.opts);
+        this.offline.delete(issue);
+        return { exit: "blocked" };
+      } catch (e) {
+        log(`#${issue}: the outage's Block could not be written (${String(e?.message || e).slice(0, 120)}); the next tick tries again`);
+        return { exit: "skipped" };
+      }
+    }
+    if (off) off.resumedAt = now;
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) {
@@ -1523,6 +1593,9 @@ export class Local {
       });
     const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
     log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+    // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
+    // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause.
+    waitOutages();
     this.stopOnSignals(() => Promise.allSettled(running.values()));
     let cleaned = 0;
     // The token GitHub refused (401: expired or revoked), or null. While set, nothing new starts; each tick reads the
@@ -1593,6 +1666,7 @@ export class Local {
       for (const n of result.restarted || []) {
         this.startFailures?.delete(n);
         this.lapsed?.delete(n);
+        this.offline?.delete(n);
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));

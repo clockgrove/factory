@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { STEP_BASELINE_RUNS, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
+import { UNREACHABLE, causeCode, downFor, networkBack, outageOn, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -122,12 +123,6 @@ async function tailOf(stream, maxBytes) {
  */
 export const RETRY = { tries: 4, maxWaitMs: 90_000, baseMs: 2_000, sleep: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => Date.now(), random: Math.random };
 
-/** Node fetch's connect-level failures: no byte of the request left this machine, so even a create may go again. */
-const UNSENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
-const causeCode = (e) => {
-  for (let c = e, i = 0; c && i < 4; c = c.cause, i += 1) if (typeof c.code === "string" && /^[A-Z0-9_]+$/.test(c.code)) return c.code;
-  return "";
-};
 
 /**
  * Whether a REST call means the same when sent twice: a read; a PUT, PATCH or DELETE, which sets a state (except a
@@ -181,15 +176,37 @@ const LANDED = Symbol("landed");
  * `deadlineAt`) is spent, or `again(e)` (asked after the wait) says no. `again` returns true to send again, false to
  * throw `e`, or {value} to end with that value (under LANDED). The wait is GitHub's ask (`e.waitMs`), a minute for a
  * rate limit that names none, else 2, 4, 8 s. Each retry is logged once, with its cause and try number; never a token.
+ *
+ * In a process that waits outages out (network.mjs waitOutages), a request that never left this machine (`unsent` with
+ * no answer) is no try: it waits for `origin` to answer again (networkBack, one probe loop and one log line for all its
+ * callers) and goes again then, a create included, since it did nothing. A request is not sent at all while an outage on
+ * `origin` is under way; it waits for it first. Past the process's limit or `deadlineAt` the wait throws NetworkDown.
+ * Once the process has stopped waiting (stopWaiting: a stage ending on the outage), such a request fails at once.
  */
-async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false } = {}) {
-  const end = Math.min(RETRY.now() + RETRY.maxWaitMs, Number.isFinite(deadlineAt) ? deadlineAt : Infinity);
+async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false, origin = null } = {}) {
+  // The bound starts again after a wait for the network: the time the host was unreachable is no retry's.
+  const bound = () => Math.min(RETRY.now() + RETRY.maxWaitMs, Number.isFinite(deadlineAt) ? deadlineAt : Infinity);
+  let end = bound();
   for (let n = 1; ; n += 1) {
     let e;
+    if (origin && waitingOutages() && outageOn(origin)) {
+      await networkBack(origin, outageOn(origin).code, { deadlineAt });
+      end = bound();
+    }
     try {
       return await attempt(n);
     } catch (err) {
       e = err;
+    }
+    if (origin && e?.transport === true && e.unsent === true && e.status === 0) {
+      // Stopped waiting: at once, as the outage this process gave up on (its host and first loss), when it was this host's.
+      if (stoppedWaiting()) throw downFor(origin) ?? e;
+      if (waitingOutages()) {
+        await networkBack(origin, e.code, { deadlineAt });
+        end = bound();
+        n -= 1;
+        continue;
+      }
     }
     if (n >= RETRY.tries || !transientError(e) || (noRateWait && e.rateLimited) || (again.possible && !again.possible(e))) throw e;
     // GitHub's ask: its header, or the minute it documents for a rate limit that names none. Spread only upward.
@@ -212,7 +229,7 @@ function transportError(what, e) {
   const code = causeCode(e);
   const err = new GitHubError(`${what} failed: ${e.message}${code ? ` (${code})` : ""}`, 0, "", { transport: true });
   err.code = code;
-  err.unsent = UNSENT.has(code);
+  err.unsent = UNREACHABLE.has(code);
   return err;
 }
 
@@ -272,7 +289,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   };
   const pages = [];
   for (;;) {
-    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait });
+    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin });
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { r, text } = res;
@@ -330,7 +347,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
     return { data: data?.data };
   };
   const again = isMutation(query) ? createAgain(landed) : async () => true;
-  const res = await withRetry("graphql", one, again, { deadlineAt, noRateWait });
+  const res = await withRetry("graphql", one, again, { deadlineAt, noRateWait, origin: new URL(url).origin });
   return LANDED in res ? res[LANDED] : res.data;
 }
 

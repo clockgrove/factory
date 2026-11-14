@@ -26,6 +26,7 @@ import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilo
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
+import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
@@ -51,6 +52,8 @@ import {
   liveActivity,
   maskFile,
   mirrorDiff,
+  earlyOutageEnd,
+  outageExit,
   restoreTranscript,
   saveTranscript,
   saveAgentTranscript,
@@ -180,6 +183,10 @@ async function main() {
   const repo = repoOf(inputs.repo);
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const deadlineAt = deadline(startedAt, inputs.timeoutMinutes);
+  // This machine's network (lib/network.mjs), as for the worker: a wait in place, fifteen minutes on the local route
+  // (then paused, for serve to resume) and up to the work's deadline elsewhere.
+  const local = backend().name === "local";
+  waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
   let passes = 0;
@@ -228,31 +235,46 @@ async function main() {
   };
 
   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
+  // These first steps (the token, the writers, the PR, the local loop's hold) end on an outage the same way the stage
+  // does (session.mjs earlyOutageEnd): paused locally, an `outage` Block elsewhere once the issue is known.
   const factoryTree = checkout;
-  const access = await openAccess({ inputs, repo, args, given: factoryTree });
-  const { keeper } = access;
-  checkout = access.checkout;
-  // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).
-  const token = { token: keeper.getter, notice: access.notice };
-  // No agent uid on this runner (no sudo, no systemd): the run Blocks before anything else.
-  const agentError = access.agentError || null;
-  await primeWriters(repo, token, { maintainers: inputs.maintainers });
+  let keeper;
+  let token = null;
+  let agentError = null;
+  let pr = null;
+  let issue = null;
+  let access;
+  try {
+    access = await openAccess({ inputs, repo, args, given: factoryTree });
+    keeper = access.keeper;
+    checkout = access.checkout;
+    // notice: local mode's App, for the notices that @mention a person (session.mjs applyExit).
+    token = { token: keeper.getter, notice: access.notice };
+    // No agent uid on this runner (no sudo, no systemd): the run Blocks before anything else.
+    agentError = access.agentError || null;
+    await primeWriters(repo, token, { maintainers: inputs.maintainers });
+    pr = await getPr(repo, inputs.pr, token);
+    const m = /^factory\/(\d+)$/.exec(pr.head?.ref || "");
+    if (!m) {
+      log(`PR #${pr.number} is not on a factory/<issue> branch; nothing to review`);
+      setOutput("exit", "skipped");
+      return;
+    }
+    issue = Number(m[1]);
+    if (await backend().trigger.stepsAside(repo, issue, token)) {
+      log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
+      setOutput("exit", "skipped");
+      setOutput("issue", "");
+      return;
+    }
+  } catch (e) {
+    if (!unreachable(e)) throw e;
+    const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
+    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) : null });
+    if (issue) setOutput("issue", String(issue));
+    return;
+  }
   const app = keeper.app;
-
-  let pr = await getPr(repo, inputs.pr, token);
-  const m = /^factory\/(\d+)$/.exec(pr.head?.ref || "");
-  if (!m) {
-    log(`PR #${pr.number} is not on a factory/<issue> branch; nothing to review`);
-    setOutput("exit", "skipped");
-    return;
-  }
-  const issue = Number(m[1]);
-  if (await backend().trigger.stepsAside(repo, issue, token)) {
-    log(`#${issue} is held by a local loop, which runs its own review; nothing to do here`);
-    setOutput("exit", "skipped");
-    setOutput("issue", "");
-    return;
-  }
   const usageDir = resolve(args.usage_dir || process.env.FACTORY_USAGE_DIR || join(factoryTree, "..", `factory-usage-${issue}-review`));
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");
@@ -275,12 +297,12 @@ async function main() {
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
-  const finish = async (exit, reason) => {
+  const finish = async (exit, reason, outage = null) => {
     watch?.stop();
     if (!claimExit()) return parked();
-    return finishNow(exit, reason);
+    return finishNow(exit, reason, outage);
   };
-  const finishNow = async (exit, reason) => {
+  const finishNow = async (exit, reason, outage = null) => {
     keeper.stop();
     // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
     const known = await stageSpendSoFar().catch(() => null);
@@ -294,7 +316,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -307,6 +329,8 @@ async function main() {
       progress.spend(line.usd, line.parts);
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
+    // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
+    stopWaiting();
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("issue", String(issue));
@@ -324,6 +348,20 @@ async function main() {
       await dropLabel();
       await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, cause: "setup", notify: inputs.notify, stage: "review" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
       await finish("blocked", refused.reason);
+      return;
+    }
+    // This machine's network, not the stage: paused locally (its review label stays, for serve's resume), an `outage`
+    // Block elsewhere (session.mjs outageExit).
+    if (unreachable(e)) {
+      await outageExit(e, {
+        local,
+        records,
+        finish,
+        block: async (reason) => {
+          await dropLabel();
+          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token);
+        },
+      });
       return;
     }
     log(`review crashed: ${e.message.slice(0, 300)}`);

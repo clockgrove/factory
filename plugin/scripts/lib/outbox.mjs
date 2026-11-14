@@ -16,6 +16,7 @@ import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion,
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
+import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
 import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 
@@ -241,7 +242,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -259,11 +260,27 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * A git network command in the mirror, sent again on a transport failure (gitTransport) within GIT_RETRY and the
    * stage's end. `landed()`, asked after each wait, says the earlier try took effect after all (a push whose answer was
    * lost): then it is not sent again. Each retry is logged once with its try number; git's text is not logged here.
+   * In a stage that waits outages out (network.mjs), a transport failure while the remote's host does not answer a probe
+   * is no try: the command waits for the host (networkBack, which throws NetworkDown past the stage's limit) and goes
+   * again, its bound started afresh. `networkOrigin`: the host probed, the remote's own (none for a path).
    */
+  const remoteOrigin = networkOrigin;
   const net = async (what, args, { ref = null, landed = null } = {}) => {
-    const end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
+    let end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
     for (let n = 1; ; n += 1) {
       const r = await git(args);
+      if (r.code !== 0 && remoteOrigin && (waitingOutages() || stoppedWaiting()) && gitTransport(r, ref)) {
+        const down = await unreachableNow([remoteOrigin]);
+        // Stopped waiting: the stage ends on the outage (NetworkDown), never on a push refused for it.
+        if (down && stoppedWaiting()) throw downFor(down.origin) ?? new NetworkDown({ ...down, since: OUTAGE.now() });
+        if (down) {
+          await networkBack(down.origin, down.code, { deadlineAt: stageEnd() });
+          if (landed && (await landed().catch(() => false))) return { ...r, code: 0, landed: true };
+          end = Math.min(RETRY.now() + GIT_RETRY.maxWaitMs, stageEnd());
+          n -= 1;
+          continue;
+        }
+      }
       if (r.code === 0 || n >= GIT_RETRY.tries || !gitTransport(r, ref)) return r;
       const wait = Math.round(RETRY.baseMs * 2 ** (n - 1) * (0.7 + 0.6 * RETRY.random()));
       if (RETRY.now() + wait > end) return r;

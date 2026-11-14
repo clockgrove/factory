@@ -448,3 +448,29 @@ test("rest: a host that comes and goes is one outage: its first loss and limit c
     },
   );
 });
+
+test("rest: a flap that then stays down past a minute is logged as its own loss, and its return too", async () => {
+  // By the clock: down for the first 20 s, back, lost again at 65 s (a flap, 30 s after it answered), then down 6 h.
+  const t0 = Date.parse("2026-11-14T08:47:00Z");
+  await offline(
+    (req, seen) => {
+      if (seen.length > 5000) throw new Error("runaway");
+      const t = RETRY.now() - t0;
+      const up = (t >= 20_000 && t < 65_000) || t >= 65_000 + 6 * 60 * 60_000;
+      if (req.probe) return up ? new Response(null, { status: 200 }) : Promise.reject(dns());
+      if (!up) throw dns();
+      return json({ ok: true });
+    },
+    async ({ lines }) => {
+      waitOutages({ until: () => Infinity });
+      assert.deepEqual(await rest("repos/o/r/issues/1", { token: "t" }), { ok: true });
+      await RETRY.sleep(30_000);
+      assert.deepEqual(await rest("repos/o/r/issues/2", { token: "t" }), { ok: true });
+      const net = netLines(lines);
+      assert.equal(net.length, 4, net.join(""));
+      assert.match(net[1], /answers again after 35 s/);
+      assert.match(net[2], /api\.github\.test is unreachable from this machine again \(EAI_AGAIN\) since 2026-11-14T08:48:05\.000Z; on and off since 2026-11-14T08:47:00\.000Z/);
+      assert.match(net[3], /api\.github\.test answers again after 6 h \(unreachable since 2026-11-14T08:48:05\.000Z; on and off since 2026-11-14T08:47:00\.000Z\)/);
+    },
+  );
+});

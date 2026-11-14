@@ -664,7 +664,7 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
     t = since + OUTAGE.blockMs;
     assert.equal((await loop.resume(7)).exit, "blocked");
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Factory's 12 h bound for an outage/);
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Factory's 12 h bound for an outage\. The network is back: re-apply the label/);
     assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     // A later pause long after a resume is a new outage: its own since.
@@ -699,7 +699,9 @@ test("pausedHere: an Objective paused on a provider that never answers again is 
     t = since + OUTAGE.blockMs;
     assert.deepEqual(await loop.pausedHere(new Map()), [7], "past it: taken up whatever the probe says");
     assert.equal((await loop.resume(7)).exit, "blocked");
-    assert.ok(gh.writes.some((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"')));
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"'));
+    assert.match(notice, /bound for an outage\. api\.anthropic\.test is still unreachable from this machine: re-apply the label once it answers/);
+    assert.ok(!/The network is back/.test(notice));
     // Paused again, then stopped by a person: its pause is over with it.
     gh.labels.delete("factory:blocked");
     gh.labels.add("factory:running");

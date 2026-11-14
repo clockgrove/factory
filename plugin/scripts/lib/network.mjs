@@ -177,7 +177,8 @@ function episode(origin, code) {
   const known = EPISODES.get(origin);
   if (known) return known;
   // A host lost again within OUTAGE.flapMs of answering (a network that comes and goes): the same outage, its first loss
-  // and its limit carried over, and no new log line, so a flapping network neither floods the log nor waits afresh.
+  // and its limit carried over, and no new log line, so a flapping network neither floods the log nor waits afresh. One
+  // that then stays down past OUTAGE.flapMs is a loss of its own in the log: one line when it has, one when it answers.
   const last = RECENT.get(origin);
   const flap = !!last && OUTAGE.now() - last.back < OUTAGE.flapMs;
   const since = flap ? last.since : OUTAGE.now();
@@ -188,6 +189,8 @@ function episode(origin, code) {
   EPISODES.set(origin, ep);
   const host = hostOf(origin);
   if (!flap) log(`network: ${host} is unreachable from this machine (${code || "no answer"}); waiting for it to answer again${Number.isFinite(end) ? `, for up to ${minutesText(end - since)}` : ""}`);
+  const lostAt = OUTAGE.now();
+  let quiet = flap;
   ep.done = (async () => {
     for (let i = 0; ; i += 1) {
       const left = ep.end - OUTAGE.now();
@@ -196,9 +199,13 @@ function episode(origin, code) {
       if (stop.signal.aborted) break;
       if ((await probe(origin)) === null) {
         ep.back = OUTAGE.now();
-        if (!flap) log(`network: ${host} answers again after ${minutesText(ep.back - since)} (unreachable since ${iso(since)})`);
+        if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${iso(lostAt)}${flap ? `; on and off since ${iso(since)}` : ""})`);
         if (gen === GEN) RECENT.set(origin, { since, end, code: ep.code, back: ep.back });
         return true;
+      }
+      if (quiet && OUTAGE.now() - lostAt >= OUTAGE.flapMs) {
+        quiet = false;
+        log(`network: ${host} is unreachable from this machine again (${ep.code || "no answer"}) since ${iso(lostAt)}; on and off since ${iso(since)}; waiting for it to answer again${Number.isFinite(end) ? `, until ${iso(end)}` : ""}`);
       }
     }
     if (!stop.signal.aborted) {

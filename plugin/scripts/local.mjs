@@ -1205,7 +1205,9 @@ export class Local {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
     if (off && now - off.since >= OUTAGE.blockMs) {
-      const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. The network is back: re-apply the label to run it again.`;
+      // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
+      const back = !off.origin || (await probeHost(off.origin)) === null;
+      const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
         await this.block(issue, off.stage || "work", reason, { cause: "outage" });

@@ -298,3 +298,28 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
     await same.close();
   }
 });
+
+test("session route: `factory issue` hands the session the plan only when it was made from the issue's current text", async () => {
+  const c = clone();
+  const dir = join(c.work, ".git", "factory-in");
+  const plan = (body) => [{ id: 2, user: { login: "dev" }, created_at: "2026-11-13T10:00:00Z", body: `<!-- factory:7:plan -->${planTextMarker({ sha256: objectiveSha(CHECKED.title, body), label: null })}\r\n## Plan\r\n- [ ] item` }];
+  const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
+  try {
+    const r = await run(["issue", "7"], envFor(same.url, c.root), c.work);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(join(dir, "issue.md"), "utf8"), inFiles({ issue: 7, issueTitle: CHECKED.title, issueBody: CHECKED.body })["issue.md"]);
+    assert.equal(readFileSync(join(dir, "plan.md"), "utf8"), "## Plan\r\n- [ ] item", "the plan comment, its marker line dropped");
+  } finally {
+    await same.close();
+  }
+  const edited = await fakeGitHub({ author: user("kirk"), issueComments: plan("The body the plan was made from.") });
+  try {
+    const r = await run(["issue", "7"], envFor(edited.url, c.root), c.work);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout + r.stderr, /the plan comment was not made from this text, so no plan\.md/);
+    assert.equal(existsSync(join(dir, "plan.md")), false, "the earlier plan.md is gone: the session plans from the new text");
+    assert.deepEqual(writes(edited.calls), [], "nothing written to GitHub");
+  } finally {
+    await edited.close();
+  }
+});

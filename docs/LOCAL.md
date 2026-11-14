@@ -51,7 +51,7 @@ Factory's worker and reviewer, run on your own machine instead of a GitHub runne
 factory serve [--once] [--all] [--interval 30]   # a loop: the dispatcher's rules, every 30 s (/factory:factory-serve)
 factory run <issue> [--wait]                     # one Objective, from the stage its state calls for (and, with --wait, to merged) (/factory:factory-run)
 factory review <pr> [--wait]                     # a review re-run
-factory issue <issue> [--out FILE]               # the issue for a session (/factory:factory-run --here, /factory:factory-review), only when its author and last editor can push
+factory issue <issue> [--out FILE]               # the issue for a session (/factory:factory-run --here, /factory:factory-review), only when its author and last editor can push; without --out, its plan.md too when made from this text
 factory deliver <issue> [--out DIR]              # Factory's half of /factory:factory-run --here: push, PR, plan, replies, exit
 factory post-review <pr> <findings.json>         # post a /factory:factory-review pass made in a session
 ```

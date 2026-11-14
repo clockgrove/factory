@@ -428,3 +428,33 @@ test("#205: an Objective edited since its plan does not merge; with its plan's t
     assert.equal(await merge(2, 12), "queued", "the plan's own text merges as before");
   });
 });
+
+test("#205: an Objective edited while its PR waits in the merge queue is taken out of it and does not merge", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const issue = { title: "Objective", body: "Save two." };
+    (gh.comments[2] ||= []).push({ id: 900, user: { login: SELF }, body: `${marker(2, "plan")}${planTextMarker({ sha256: objectiveSha("Objective", "Save two."), label: null })}\n## Plan`, created_at: new Date().toISOString() });
+    const dequeued = [];
+    const real = gh.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      const q = /\/graphql$/.test(String(url)) ? JSON.parse(init.body) : null;
+      if (q && /issue\(number/.test(q.query)) return new Response(JSON.stringify({ data: { repository: { issue } } }), { status: 200 });
+      if (q && q.query.includes("dequeuePullRequest")) {
+        dequeued.push(q.variables);
+        gh.queued.delete(12);
+        return new Response(JSON.stringify({ data: { dequeuePullRequest: { mergeQueueEntry: { id: "e" } } } }), { status: 200 });
+      }
+      return real(url, init);
+    };
+    assert.equal(await merge(2, 12), "queued");
+    gh.queued.add(12);
+    const report = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "in-queue", "the plan's own text waits in the queue");
+    issue.body = "Save two, and three.";
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report: {} }, { token: "t" }), "edited");
+    assert.equal(dequeued.length, 1, "taken out of the queue");
+    assert.equal(mergeBlockReason("edited"), EDITED_REASON);
+  });
+});

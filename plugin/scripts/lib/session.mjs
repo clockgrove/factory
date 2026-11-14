@@ -1764,7 +1764,8 @@ export function mergeBlockReason(how, report = {}) {
  * what happened: "merged", "queued", "pending" (checks not done yet), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title or body
- * changed since its plan was made; the caller Blocks), "conflict" (the PR conflicts with the
+ * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
+ * of; the caller Blocks), "conflict" (the PR conflicts with the
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for the
  * one rebase, rebaseMarkers, and a conflict after that rebase Blocks with REBASED_TWICE), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
@@ -1800,6 +1801,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // Still in the queue: the caller has it watched until it merges or leaves (dispatch.mjs watchQueue), so a drop is
     // seen by a run nothing holds for approval, not only by the `dequeued` event's (#2683).
     if (!st?.stalled) {
+      // The Objective edited since its plan while its PR waits in the queue: taken out, so it does not merge (the
+      // caller Blocks). A dequeue GitHub refuses is logged.
+      if (await editedSincePlan(repo, issue, opts)) {
+        await dequeuePr(repo, pr.node_id, opts).catch((e) => log(`#${issue}: PR #${prNumber} could not be taken out of the merge queue (${errCode(e)})`));
+        return "edited";
+      }
       report.watch = true;
       return "in-queue";
     }

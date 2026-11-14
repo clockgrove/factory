@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, rest, updatePr, upsertComment } from "./github.mjs";
-import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, snapComments } from "./logic.mjs";
+import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
 import { log } from "./inputs.mjs";
@@ -412,16 +412,25 @@ export function planTextOf(head) {
 }
 
 /**
- * Factory's own plan comment among `comments`: {id, text (the harness's plan, the marker line dropped), record (the
- * plan-text record, or null)}, or null when there is none. Factory's own by its login (logic.mjs isSelf).
+ * The Objective's plan comment among `comments`: the newest written (its last update) of those that carry the marker on
+ * their first line and come from Factory's own login or a person who can push (local mode writes as its developer), or
+ * from another App (Factory's App when this process is a local one): {id, at (when it was posted), text (the plan, the
+ * marker line dropped; null for another App's, whose text no harness is handed), record (the plan-text record, or null)}.
+ * Null when there is none. A record no stage can read (none, one that does not parse, another App's) leaves the stage to
+ * decide on GitHub's edit times (objective-trust.mjs planTextState).
  */
 export function planOf(comments, issue) {
   const mark = marker(issue, "plan");
-  const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
+  const seen = (x) => Date.parse(x.updated_at ?? x.created_at) || 0;
+  const c = (comments || [])
+    .filter((x) => (x.body || "").startsWith(mark) && (trustedAuthor(x) || x.user?.type === "Bot"))
+    .sort((a, b) => seen(b) - seen(a))[0];
   if (!c) return null;
   const nl = c.body.indexOf("\n");
-  const first = nl < 0 ? c.body : c.body.slice(0, nl);
-  return { id: c.id, text: nl < 0 ? "" : c.body.slice(nl + 1), record: planTextOf(first.slice(mark.length)) };
+  // GitHub's web editor saves a comment with CRLF line ends: the marker line's `\r` is no part of the record.
+  const first = (nl < 0 ? c.body : c.body.slice(0, nl)).replace(/\r$/, "");
+  const foreign = !trustedAuthor(c);
+  return { id: c.id, at: c.created_at ?? null, own: isSelf(c), text: foreign ? null : nl < 0 ? "" : c.body.slice(nl + 1), record: foreign ? null : planTextOf(first.slice(mark.length)) };
 }
 
 /** The plan comment as planOf reads it; a failed read throws (a stage's gate must not take it for no plan). */
@@ -430,10 +439,10 @@ export async function planComment(repo, issue, opts) {
 }
 
 /**
- * The plan comment's text a stage hands its harness as $FACTORY_IN/plan.md: none when the plan was recorded from other
- * text than the stage's `record` (the plan is made again from the new text), else the plan as it stands.
+ * The plan comment's text a stage hands its harness as $FACTORY_IN/plan.md: only a plan recorded from the stage's text
+ * (`record`, or neither recorded), so a plan made from other text is made again from the new one; never another App's.
  */
-export const planHanded = (posted, record) => (posted && !(record && posted.record && posted.record.sha256 !== record.sha256) ? posted.text : null);
+export const planHanded = (posted, record) => (posted && posted.text !== null && (posted.record?.sha256 ?? null) === (record?.sha256 ?? null) ? posted.text : null);
 
 /** The plan comment's text as the harness wrote it last (Factory's marker line dropped), or null when there is none. */
 export async function currentPlan(repo, issue, opts) {
@@ -453,15 +462,16 @@ export function planSync(repo, issue, opts, record = null) {
     if (typeof text !== "string" || !text.trim()) return false;
     const body = sanitize(text.trim());
     if (body === last) return false;
-    await upsertComment(repo, issue, marker(issue, "plan"), body, opts, { head });
+    // A stage that knows no record keeps the one the comment has: it never erases it.
+    await upsertComment(repo, issue, marker(issue, "plan"), body, opts, record ? { head } : { keepHead: true });
     last = body;
     return true;
   };
 }
 
-/** Write `record` on the plan comment `plan` (planOf), its text unchanged. */
+/** Write `record` with the plan `plan` (planOf) on this login's own plan comment, its text unchanged. */
 export async function stampPlan(repo, issue, plan, record, opts) {
-  await rest(`repos/${repo.full}/issues/comments/${plan.id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "plan")}${planTextMarker(record)}\n${plan.text}` } });
+  await upsertComment(repo, issue, marker(issue, "plan"), plan.text, opts, { head: planTextMarker(record) });
 }
 
 /** Post note.md, the harness's account of what blocked it, as one comment on the issue. */

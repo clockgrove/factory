@@ -345,7 +345,7 @@ async function main() {
   const { issueData } = trusted;
   // The text its plan was made from (objective-trust.mjs planGate): changed since, the review, the answer pass and the
   // merge do not go on with code made for the earlier text. The stage Blocks before anything is set up for it.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
+  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
   if (!planned.ok) {
     log(planned.reason);
     await finish("blocked", planned.reason);

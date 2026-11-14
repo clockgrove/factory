@@ -33,7 +33,7 @@ import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin } from "./lib/logic.mjs";
-import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planComment, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
+import { MAX_PARTS, currentPlan, exitFromOut, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebasedTwiceBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -44,7 +44,7 @@ import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, planTextState, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, planStateNow, settled, trustedIssue } from "./lib/objective-trust.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -1575,8 +1575,9 @@ const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`
  * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
  * to --out (default $FACTORY_IN/issue.md, else <git dir>/factory-in/issue.md) as the worker writes it: the title and
  * body read with their author and last editor, only when both can push or are pinned maintainers. Otherwise nothing is
- * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Writes
- * nothing to GitHub.
+ * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Without
+ * --out, also plan.md beside it: the plan comment, only when the plan was made from this text (else none, and an
+ * earlier one is removed). Writes nothing to GitHub.
  */
 async function issueForSession(issue, flags) {
   const clone = sessionClone(flags);
@@ -1587,6 +1588,16 @@ async function issueForSession(issue, flags) {
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
+  if (flags.out) return 0;
+  // In the session's hand-off directory, the plan beside it, only when it was made from this text (objective-trust.mjs
+  // planTextState, as a work stage hands its harness): after an edit the session plans again from the new text, and no
+  // plan.md from an earlier run stays.
+  const { posted, state } = await planStateNow(clone.repo, issue, t, clone.opts);
+  const planFile = join(dirname(file), "plan.md");
+  const plan = state === "same" ? (posted.text ?? null) : null;
+  if (plan !== null) writeFileSync(planFile, plan);
+  else rmSync(planFile, { force: true });
+  log(plan !== null ? `#${issue}: its plan in ${planFile}` : state === "unplanned" ? `#${issue}: no plan yet` : `#${issue}: the plan comment was not made from this text, so no plan.md: plan from the issue`);
   return 0;
 }
 
@@ -1606,6 +1617,8 @@ async function deliver(issue, flags) {
   // Run from a session (/factory:factory-run --here), so the App's key is not read here: notices post with this token.
   if (process.env.FACTORY_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
   const { defaultBranch, inputs } = await sessionInputs(clone);
+  // When the label was last applied, read before the text, as the worker does (objective-trust.mjs planGate).
+  const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, opts);
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
   const trusted = await authorGate({ repo, issue, issueData: await getIssue(repo, issue, opts), notify: inputs.notify, opts, apply: applyExit });
   if (!trusted.ok) {
@@ -1615,7 +1628,7 @@ async function deliver(issue, flags) {
   const { issueData } = trusted;
   // The text the session planned from is the issue.md `factory issue` gave it: changed since, nothing is delivered, and
   // the session reads the issue again. That text is the plan's record (objective-trust.mjs planGate); with no issue.md
-  // here (written elsewhere with --out), the plan comment records none.
+  // here (written elsewhere with --out), the plan comment keeps the record it has (handoff.mjs planSync).
   const given = (() => {
     try {
       return readFileSync(sessionIssueFile(dir), "utf8");
@@ -1623,8 +1636,8 @@ async function deliver(issue, flags) {
       return null;
     }
   })();
-  if (given !== null && given !== inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"]) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
-  const planRecord = given === null ? null : { sha256: trusted.sha, label: await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, opts) };
+  if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
+  const planRecord = given === null ? null : { sha256: trusted.sha, label: labeledAt };
   const out = resolve(flags.out || process.env.FACTORY_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-out"));
   const { files, refused } = await readOut({ out }, process.env);
   if (refused.length) log(`hand-off files refused: ${refused.join(", ")}`);
@@ -1713,8 +1726,7 @@ async function postFindings(prNumber, file, flags) {
   const trusted = await trustedIssue(repo, issue, await getIssue(repo, issue, opts), opts);
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
   // The review job's second check: a review of code made from earlier text than the Objective's now is not posted.
-  if (!selfLogin()) await primeSelf(opts);
-  if (planTextState({ sha: trusted.sha, record: (await planComment(repo, issue, opts))?.record ?? null }) === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
+  if ((await planStateNow(repo, issue, trusted, opts)).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
   // The diff from this clone's history in a scratch repository (no file limit), GitHub's files API when that fails.
   const tmp = privateTmp({ ...process.env });
   let diff;

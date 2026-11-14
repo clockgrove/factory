@@ -6,7 +6,7 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { after as afterAll, test } from "node:test";
 import { CALL_LOG, UNIX_SOCKET_PATH_MAX, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
 import { RELAY_SOCKET_DIR_ENV, RELAY_SOCKET_ROOT, SOCKET_DIR_RECORD, checkSocketRoot, closeWorkerRelay, dropSocketDir, handSocketDir, localRelayDir, makeSocketDir, openWorkerRelay, readSocketDirRecord, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
@@ -21,6 +21,16 @@ import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 
 const KEY = "vck_worker_relay_0123456789abcdef";
 const IMAGE = "/v4/ai/image-model";
+
+/** Stand-in gateways not closed yet. A test that throws before its `gw.close()` (openRelay refusing a socket path over the
+ * system's limit, under a long TMPDIR) would leave one listening and keep the file's process alive after its last test. */
+const openGateways = new Set();
+afterAll(() => {
+  for (const server of openGateways) {
+    server.closeAllConnections();
+    server.close();
+  }
+});
 
 /**
  * A stand-in AI Gateway on this machine's loopback: each path answers as `routes` says (a function gets the request's
@@ -62,7 +72,8 @@ async function fakeGateway(routes) {
     res.end(typeof r.body === "string" ? r.body : JSON.stringify(r.body));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return { origin: `http://127.0.0.1:${server.address().port}`, seen, close: () => new Promise((r) => server.close(r)) };
+  openGateways.add(server);
+  return { origin: `http://127.0.0.1:${server.address().port}`, seen, close: () => (openGateways.delete(server), new Promise((r) => server.close(r))) };
 }
 
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

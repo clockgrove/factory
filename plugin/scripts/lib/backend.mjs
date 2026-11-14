@@ -91,6 +91,11 @@ const ACTIONS = {
      * machine the scorer never counts as a person.
      */
     tends: () => true,
+    /**
+     * With a cloud sandbox (the workflow's FACTORY_SANDBOX), the Objectives this route takes run there: its dispatcher
+     * marks their launches, re-launches lost ones and clears the launch locks.
+     */
+    sandboxRoute: true,
     asPerson: false,
     /** A runner job steps aside from an Objective a local loop holds: labelled factory:local, or freshly claimed. */
     stepsAside: async (repo, issue, opts, issueData) => hasLocalLabel(issueData ?? (await getIssue(repo, issue, opts).catch(() => null))) || (await claimedLocally(repo, issue, opts)),
@@ -144,6 +149,12 @@ const LOCAL = {
     routes: (issue, env = process.env) => env.FACTORY_LOCAL_ALL === "1" || hasLocalLabel(issue),
     /** A local loop acts as its developer, so its sweep touches only the Objectives it routes (#2668). */
     tends: (issue, env = process.env) => LOCAL.trigger.routes(issue, env),
+    /**
+     * A local loop's Objectives run on its box, whatever the workflow's FACTORY_SANDBOX says: its dispatcher writes no
+     * sandbox record, launch entry or lock, since those are the sandbox route's (#235); it reads a record only to see a
+     * live lease.
+     */
+    sandboxRoute: false,
     /** Under the developer's login: a label change the scorer cannot tell from a person's is recorded as Factory's first. */
     asPerson: true,
     /** The local loop's claim is how it holds an Objective (local.mjs withClaim); a stage never steps aside. */

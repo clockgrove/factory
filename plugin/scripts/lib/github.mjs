@@ -1150,6 +1150,14 @@ export async function objectiveLabeledAt(repo, number, label, opts) {
   return last;
 }
 
+/** The issue's latest `labeled` event of `label`: {at, actor} (the actor as GitHub gives it), or null when it has none. */
+export async function labeledBy(repo, number, label, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  let last = null;
+  for (const e of events) if (e.event === "labeled" && e.label?.name === label && (!last || Date.parse(e.created_at) > Date.parse(last.at))) last = { at: e.created_at, actor: e.actor ?? null };
+  return last;
+}
+
 /** When `label` last came off the issue (its latest `unlabeled` event), or null when it never did. */
 export async function labelRemovedAt(repo, number, label, opts) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];

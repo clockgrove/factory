@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, rest, updatePr, upsertComment } from "./github.mjs";
-import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, snapComments, trustedAuthor } from "./logic.mjs";
+import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
 import { log } from "./inputs.mjs";
@@ -423,7 +423,8 @@ export function planTextOf(head) {
  */
 export function planOf(comments, issue) {
   const mark = marker(issue, "plan");
-  const marked = (comments || []).filter((x) => (x.body || "").startsWith(mark));
+  // A plan comment from before the Objective's last restart is no plan of the restarted run, whoever wrote it.
+  const marked = sinceRestart(comments).filter((x) => (x.body || "").startsWith(mark));
   const seen = (x) => Date.parse(x.updated_at ?? x.created_at) || 0;
   const c = marked.filter((x) => trustedAuthor(x)).sort((a, b) => seen(b) - seen(a))[0];
   if (!c) {
@@ -436,6 +437,12 @@ export function planOf(comments, issue) {
   // GitHub's web editor saves a comment with CRLF line ends: the marker line's `\r` is no part of the record.
   const first = (nl < 0 ? c.body : c.body.slice(0, nl)).replace(/\r$/, "");
   return { id: c.id, at: c.created_at ?? null, own: isSelf(c), text: nl < 0 ? "" : c.body.slice(nl + 1), record: planTextOf(first.slice(mark.length)) };
+}
+
+/** The comments made after the Objective's last restart (logic.mjs restartedAt), or all of them when it has none. */
+export function sinceRestart(comments) {
+  const since = Date.parse(restartedAt(comments || []));
+  return Number.isFinite(since) ? (comments || []).filter((x) => !(Date.parse(x.created_at) <= since)) : comments || [];
 }
 
 /** The plan comment as planOf reads it; a failed read throws (a stage's gate must not take it for no plan). */
@@ -576,7 +583,7 @@ const PARTS = (issue) => `<!-- factory:${issue}:parts `;
 
 /** The split record on the issue ({prs: [numbers], remaining: count}, Factory's own comment only), or null. */
 export async function partsRecord(repo, issue, opts) {
-  const c = (await listComments(repo, issue, opts)).find((x) => isSelf(x) && (x.body || "").startsWith(PARTS(issue)));
+  const c = sinceRestart(await listComments(repo, issue, opts)).find((x) => isSelf(x) && (x.body || "").startsWith(PARTS(issue)));
   if (!c) return null;
   try {
     const v = JSON.parse(/^<!-- factory:\d+:parts (\{[^\n]*\}) -->/.exec(c.body)?.[1] || "null");

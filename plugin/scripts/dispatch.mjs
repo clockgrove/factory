@@ -12,11 +12,11 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
@@ -143,37 +143,55 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("board");
 
   // Restart (`factory:restart`, lib/stop.mjs): an Objective a person asked to restart from its issue's current text, in
-  // any state. A stage of it that may still run stops itself first (its watch on the issue sees the label); until then the
-  // Objective is held, never picked. Then the earlier run's PR is closed, its branch deleted and its plan retired, and it
-  // is Queued again, picked like any other below. A stage that has not stopped STOP_GRACE_MS after the label is taken for
-  // gone. One on a stopped Objective (no factory:objective) waits for the label.
+  // any state. Only someone who can push (or a maintainer the workflow names) restarts one: anyone else's label comes off
+  // with a comment. A stage of it that may still run (an Actions job, a sandbox lease, a local loop's live claim, in any
+  // state: a review's answer pass runs on a Question too) stops itself first (its watch on the issue sees the label);
+  // until then the Objective is held, never picked, and no merge or send-back touches it. A stage that has not stopped
+  // STOP_GRACE_MS after the label is taken for gone. Then the earlier run's PR is closed, its branch deleted and its plan
+  // retired, and it is Queued again, picked like any other below. A branch GitHub keeps (a ruleset) Blocks it with the
+  // fix. One on a stopped Objective (no factory:objective) waits for the label.
   const restarted = [];
   const restarting = {};
   const restarts = wanted.filter((i) => stopCause(i, inputs.objectiveLabel) === "restart");
   if (restarts.length) {
     let jobs = null;
-    // Whether a stage of the Objective may still run: an Actions job, its sandbox's lease, a local loop's live claim. A
-    // read that fails is a maybe.
+    // Whether a stage of the Objective may still run. A read that fails is a maybe.
     const mayRun = async (issue) => {
       const n = issue.number;
-      const state = stateOf(issue, statuses[n] ?? null);
-      if (state !== "Running" && state !== "In review") return false;
       if (!inputs.sandbox) {
         jobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
         if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
-      } else if (stageHolds(sandboxRecord(await listComments(repo, n, opts).catch(() => null), n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
+      } else {
+        const comments = await listComments(repo, n, opts).catch(() => null);
+        if (!comments || stageHolds(sandboxRecord(comments, n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
+      }
       const hold = await backend().trigger.localHold(repo, n, opts).catch(() => ({ state: "unread" }));
       return hold?.state === "alive" || hold?.state === "unread";
     };
+    // Who may restart: a writer the repository lists, a pinned maintainer, else one whose permission reads write or more.
+    const mayRestart = async (actor) => {
+      if (!actor?.login) return false;
+      if (knownWriter(actor.login) === true || pinnedMaintainer(actor)) return true;
+      const perm = await collaboratorPermission(repo, actor.login, opts).catch(() => null);
+      return ["admin", "maintain", "write"].includes(perm);
+    };
     for (const issue of restarts) {
       const n = issue.number;
-      const at = await objectiveLabeledAt(repo, n, RESTART_LABEL, opts).catch(() => undefined);
-      if (at === undefined) {
-        restarting[n] = "restarting: its restart time is unread; next tick";
+      const ev = await labeledBy(repo, n, RESTART_LABEL, opts).catch(() => undefined);
+      if (ev === undefined) {
+        restarting[n] = "restarting: its restart's label event is unread; next tick";
         retry(`#${n}'s restart time`);
         continue;
       }
-      const since = at || new Date().toISOString();
+      if (!dryRun && !(await mayRestart(ev?.actor))) {
+        const who = ev?.actor?.login || "someone";
+        log(`  #${n}: ${RESTART_LABEL} by ${who}, who cannot push and is no maintainer the workflow names: ignored, the label taken off`);
+        await upsertComment(repo, n, marker(n, "restart-refused", String(ev?.at || "").replace(/[^0-9TZ]/g, "")), `Factory: \`${RESTART_LABEL}\` applied by ${who} was ignored: only someone who can push to this repository, or a maintainer the workflow names, can restart an Objective.`, opts).catch((e) => log(`  #${n}: restart refusal note: ${String(e?.message || e).slice(0, 120)}`));
+        await removeLabel(repo, n, RESTART_LABEL, opts).catch((e) => log(`  #${n}: ${RESTART_LABEL}: ${String(e?.message || e).slice(0, 120)}`));
+        issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== RESTART_LABEL);
+        continue;
+      }
+      const since = ev?.at || new Date().toISOString();
       if (Date.now() - Date.parse(since) < STOP_GRACE_MS && (await mayRun(issue))) {
         restarting[n] = "restarting: its running stage stops first";
         due(n, "retry", Date.now() + RETRY_WAKE_MS);
@@ -181,12 +199,26 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       if (dryRun) continue;
       try {
-        const r = await restartObjective(repo, n, { at: since, project }, opts);
+        const r = await restartObjective(repo, n, { at: since, by: ev?.actor?.login ?? null, project }, opts);
+        if (!r.finished) {
+          restarting[n] = "restarted by another loop just now";
+          continue;
+        }
         restarted.push(n);
         statuses[n] = "Queued";
         issue.labels = (issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review|restart)$/.test(typeof l === "string" ? l : l.name));
-        log(`  #${n}: restarted from its current text${r.pr ? `; PR #${r.pr} closed and its branch deleted` : ""}`);
+        log(`  #${n}: restarted from its current text${r.pr ? `; PR #${r.pr} closed` : ""}${r.head ? `; factory/${n} deleted at ${r.head.slice(0, 7)}` : ""}`);
       } catch (e) {
+        if (e?.code === "restart-refused") {
+          // The branch stays: a Block with the fix, and the label off, so the person re-applies it once fixed.
+          restarting[n] = "Blocked: its restart could not delete its branch";
+          statuses[n] = "Blocked";
+          log(`  #${n}: ${e.message}`);
+          const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+          await applyExit(repo, { issue: n, pr, exit: "blocked", reason: e.message, fix: e.fix, cause: "setup", notify: inputs.notify, stage: "restart" }, opts).catch((x) => log(`  #${n}: the Block could not be written (${String(x?.message || x).slice(0, 120)})`));
+          await removeLabel(repo, n, RESTART_LABEL, opts).catch(() => {});
+          continue;
+        }
         restarting[n] = "restarting: the restart did not finish; next tick";
         log(`  #${n}: restart: ${String(e?.message || e).slice(0, 160)}; next tick tries again`);
         retry(`#${n}'s restart`);
@@ -479,6 +511,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
       // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
       if (!backend().trigger.routes(issue)) continue;
+      // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
+      if (restarting[issue.number]) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
       const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
       if (!open) {

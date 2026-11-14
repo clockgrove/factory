@@ -89,7 +89,7 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
 
 /** The Blocked reason and fix when the Objective's text changed after its plan was made (planGate). */
 export const EDITED_REASON = "the Objective's title or body changed after its plan was made, and its plan and code follow the earlier text, so Factory does not go on with the two mixed";
-export const EDITED_FIX = "Re-apply `factory:objective` to work from the new text: the worker makes its plan again from it, on the same branch and PR.";
+export const EDITED_FIX = "Re-apply `factory:objective` to work from the new text: the worker makes its plan again from it, on the same branch and PR. To start over from the new text instead (the earlier PR closed, a new branch from the default one), apply `factory:restart`.";
 
 /** Factory's own login, read once (logic.mjs selfLogin): unknown, no plan comment could be told apart, so a stage stops. */
 export async function knowSelf(opts) {

@@ -19,7 +19,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
+import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, listComments, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
@@ -73,7 +73,7 @@ import {
   stoppedEnd,
   unreadNow,
 } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -380,8 +380,11 @@ async function main() {
     }
     if (took) process.exit(0);
   };
-  watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
-  beforeExit = (commit = false) => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
+  // The issue as the watch and the last checks read it: a restart recorded after this stage began stops it too, its
+  // label gone or not (stop.mjs objectiveReader).
+  const readObjective = objectiveReader({ read: () => getIssue(repo, issue, token), list: () => listComments(repo, issue, token), startedAt });
+  watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
@@ -411,6 +414,8 @@ async function main() {
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
   const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
+  // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
+  outbox.beforePush = () => beforeExit?.();
   const identity = await gitIdentity(app, keeper.token);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);

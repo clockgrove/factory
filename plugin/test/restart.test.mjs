@@ -45,10 +45,15 @@ test("restartedAt and the decisions: a comment from before the restart feeds no 
   }
 });
 
-/** A fetch fake: one Objective (#7) with an open PR (#70, in the merge queue), a plan comment and a split record. */
-function fakeApi({ open = () => [], pr = { number: 70, draft: false, node_id: "PR_70" }, queued = true, comments = null, timeline = () => [], jobs = [] } = {}) {
+/**
+ * A fetch fake: one Objective (#7, `labels`) with an open PR (#70, in the merge queue), its branch at HEAD7 (a ruleset
+ * keeps it with `keepBranch`), a plan comment and a split record. `timeline(n)` its label events; `jobs` live Actions jobs.
+ */
+const HEAD7 = "7".repeat(40);
+function fakeApi({ open = () => [], labels = ["factory:objective", RESTART_LABEL], pr = { number: 70, draft: false, node_id: "PR_70", state: "open", mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "factory/7" }, base: { ref: "main" }, labels: [] }, queued = true, comments = null, timeline = () => [], jobs = [], keepBranch = false, writers = ["maintainer"] } = {}) {
   const writes = [];
-  const state = { comments: comments ?? [{ id: 11, user: BOT, created_at: "2031-03-02T01:05:00Z", body: "<!-- factory:7:plan -->\n## Plan\n- [ ] old item" }, { id: 12, user: BOT, created_at: "2031-03-02T01:40:00Z", body: '<!-- factory:7:parts {"prs":[70],"remaining":2} -->\nparts' }] };
+  const reads = [];
+  const state = { labels: new Set(labels), branch: HEAD7, prOpen: !!pr, comments: comments ?? [{ id: 11, user: BOT, created_at: "2031-03-02T01:05:00Z", body: "<!-- factory:7:plan -->\n## Plan\n- [ ] old item" }, { id: 12, user: BOT, created_at: "2031-03-02T01:40:00Z", body: '<!-- factory:7:parts {"prs":[70],"remaining":2} -->\nparts' }] };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -61,14 +66,35 @@ function fakeApi({ open = () => [], pr = { number: 70, draft: false, node_id: "P
       if (/mergeQueueEntry \{/.test(body?.query || "")) return json({ data: { repository: { pullRequest: { mergeQueueEntry: queued ? { state: "QUEUED" } : null } } } });
       return json({ data: {} });
     }
+    if (method === "GET") reads.push(path);
     if (method !== "GET") writes.push(`${method} ${path}${method === "PATCH" && body?.body ? ` ${body.body.split("\n")[0]}` : method === "PATCH" && body?.state ? ` ${body.state}` : method === "POST" && body?.body ? ` ${body.body.split("\n")[0]}` : ""}`);
     if (method === "GET" && path === "/issues") return json(u.searchParams.get("state") === "closed" ? [] : open(u.searchParams.get("labels")));
-    if (method === "GET" && path === "/pulls") return json(pr && u.searchParams.get("head") === "acme:factory/7" ? [pr] : []);
+    if (method === "GET" && path === "/issues/7") return json({ number: 7, state: "open", comments: state.comments.length, labels: [...state.labels].map((name) => ({ name })) });
+    if (method === "DELETE" && path.startsWith("/issues/7/labels/")) {
+      state.labels.delete(path.slice("/issues/7/labels/".length));
+      return json([]);
+    }
+    if (method === "POST" && path === "/issues/7/labels") {
+      for (const l of body.labels) state.labels.add(l);
+      return json([]);
+    }
+    if (method === "GET" && path === "/git/ref/heads/factory/7") return state.branch ? json({ object: { sha: state.branch } }) : json({ message: "Not Found" }, 404);
+    if (method === "DELETE" && path === "/git/refs/heads/factory/7") {
+      if (keepBranch) return json({ message: "Cannot delete this protected branch" }, 422);
+      state.branch = null;
+      return json({}, 200);
+    }
+    if (method === "GET" && path === "/pulls") return json(pr && state.prOpen && u.searchParams.get("head") === "acme:factory/7" ? [pr] : []);
     if (method === "GET" && path === "/pulls/70") return json(pr);
+    if (method === "PATCH" && path === "/pulls/70") {
+      state.prOpen = false;
+      return json({});
+    }
     if (method === "GET" && /^\/issues\/7\/comments$/.test(path)) return json(state.comments);
     if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path)) return json([]);
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(path)) return json(timeline(Number(/issues\/(\d+)\//.exec(path)[1])));
-    if (method === "GET" && path.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && path.endsWith("/collaborators")) return json(writers.map((login) => ({ login })));
+    if (method === "GET" && /^\/collaborators\/[^/]+\/permission$/.test(path)) return json({ permission: "read" });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
     if (method === "GET" && path === "/issues/comments") return json([]);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(path)) return json({ workflow_runs: u.searchParams.get("status") === "in_progress" && jobs.length ? [{ id: 5 }] : [] });
@@ -78,11 +104,16 @@ function fakeApi({ open = () => [], pr = { number: 70, draft: false, node_id: "P
       if (c) c.body = body.body;
       return json(c || {});
     }
-    if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path)) return json({ id: 99, html_url: "https://github.test/acme/app/issues/7#issuecomment-99", user: BOT, body: body.body });
+    if (method === "POST" && /^\/issues\/7\/comments$/.test(path)) {
+      const c = { id: 100 + state.comments.length, html_url: "https://github.test/acme/app/issues/7#issuecomment-99", user: BOT, created_at: new Date().toISOString(), body: body.body };
+      state.comments.push(c);
+      return json(c);
+    }
+    if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path)) return json({ id: 99, user: BOT, body: body.body });
     if (method === "DELETE" || method === "POST" || method === "PATCH") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
-  return { writes, state, restore: () => (globalThis.fetch = realFetch) };
+  return { writes, reads, state, restore: () => (globalThis.fetch = realFetch) };
 }
 
 const withEnv = async (env, fn) => {
@@ -103,15 +134,15 @@ test("restartObjective: the record first; the earlier PR out of the queue, comme
     await withEnv({}, async () => {
       const api = fakeApi();
       try {
-        const r = await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
-        assert.deepEqual(r, { pr: 70 });
+        const r = await restartObjective(REPO, 7, { at: AT, by: "maintainer", project: null }, { token: "t" });
+        assert.deepEqual(r, { pr: 70, head: HEAD7, finished: true });
         assert.deepEqual(api.writes, [
           `POST /issues/7/comments ${restartMarker(7, AT)}`,
           "dequeue PR_70",
           "DELETE /issues/70/labels/factory:review",
+          "DELETE /git/refs/heads/factory/7",
           "POST /issues/70/comments <!-- factory:7:restarted:20310302T020000Z -->",
           "PATCH /pulls/70 closed",
-          "DELETE /git/refs/heads/factory/7",
           "PATCH /issues/comments/11 <!-- factory:7:restarted-plan -->",
           'PATCH /issues/comments/12 <!-- factory:7:restarted-parts {"prs":[70],"remaining":2} -->',
           "DELETE /issues/7/labels/factory:running",
@@ -120,6 +151,10 @@ test("restartObjective: the record first; the earlier PR out of the queue, comme
           "DELETE /issues/7/labels/factory:in-review",
           "DELETE /issues/7/labels/factory:restart",
         ]);
+        // The record names who, the earlier PR and the deleted branch's last commit (to restore it).
+        const record = api.state.comments.find((c) => c.body.startsWith(restartMarker(7, AT)));
+        assert.match(record.body, new RegExp(`"by":"maintainer","pr":70,"head":"${HEAD7}"`));
+        assert.match(record.body, new RegExp(`git push origin ${HEAD7}:refs/heads/factory/7`));
         // The restarted run reads no plan and no split, and the old texts are still there to read.
         assert.equal(await currentPlan(REPO, 7, { token: "t" }), null);
         assert.equal(await partsRecord(REPO, 7, { token: "t" }), null);
@@ -139,7 +174,7 @@ test("dispatcher: a restart waits for a running stage to stop, never picked mean
   const run = (labels, { jobs = [], restartAgo = 60_000, dailyUsd = 100 } = {}) =>
     withEnv({}, async () => {
       setSelf(BOT.login);
-      const api = fakeApi({ open: (label) => (label === "factory:objective" ? [issue(["factory:objective", RESTART_LABEL, ...labels])] : []), jobs, timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, created_at: ago(restartAgo) }] });
+      const api = fakeApi({ labels: ["factory:objective", RESTART_LABEL, ...labels], open: (label) => (label === "factory:objective" ? [issue(["factory:objective", RESTART_LABEL, ...labels])] : []), jobs, timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, actor: { login: "maintainer", type: "User" }, created_at: ago(restartAgo) }] });
       try {
         const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
         return { r, writes: api.writes };
@@ -180,4 +215,144 @@ test("setup creates factory:restart, and applying it ticks the dispatcher on eve
     assert.ok(wf.on.issues.types.includes("labeled"));
     assert.match(wf.jobs.dispatch.if, /github\.event\.action == 'labeled' && github\.event\.label\.name == 'factory:restart'/);
   }
+});
+
+
+/** One dispatcher tick over #7 with `labels` and a restart applied `restartAgo` ms ago by `by`. */
+async function tick({ labels, jobs = [], restartAgo = 60_000, by = "maintainer", keepBranch = false } = {}) {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  return withEnv({}, async () => {
+    setSelf(BOT.login);
+    const all = ["factory:objective", RESTART_LABEL, ...labels];
+    const api = fakeApi({ labels: all, keepBranch, open: (label) => (label === "factory:objective" ? [issue(all)] : []), jobs, timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, actor: { login: by, type: "User" }, created_at: ago(restartAgo) }] });
+    try {
+      const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, autoMerge: true }, { token: "t" });
+      return { r, writes: api.writes, reads: api.reads, state: api.state };
+    } finally {
+      api.restore();
+      setSelf(null);
+    }
+  });
+}
+
+test("restart while a stage runs in any state: a review's answer pass on a Question, a Blocked one's job: held, nothing discarded", async () => {
+  for (const [labels, job] of [[["factory:question"], "review (factory/7)"], [["factory:blocked"], "work (7)"], [["factory:in-review"], "review (factory/7)"]]) {
+    const t = await tick({ labels, jobs: [{ name: job, status: "in_progress" }] });
+    assert.deepEqual(t.r.restarted, [], labels.join());
+    assert.ok(!t.writes.some((w) => w.includes("/pulls/70") || w.includes("git/refs")), `${labels.join()}: nothing of the earlier run touched`);
+    assert.equal(t.state.branch, HEAD7);
+  }
+});
+
+test("a held restart is out of the merge pass: its PR is not read for a merge, an update or a send-back", async () => {
+  const t = await tick({ labels: ["factory:in-review"], jobs: [{ name: "review (factory/7)", status: "in_progress" }] });
+  assert.deepEqual(t.r.restarted, []);
+  assert.ok(!t.reads.includes("/pulls/70"), t.reads.join("\n"));
+  assert.deepEqual(t.r.merged, []);
+});
+
+test("a branch a ruleset keeps: the restart Blocks with the fix, its label off, the earlier PR open and the branch where it was", async () => {
+  const t = await tick({ labels: ["factory:in-review"], keepBranch: true });
+  assert.deepEqual(t.r.restarted, []);
+  assert.equal(t.state.branch, HEAD7);
+  assert.equal(t.state.prOpen, true, "the PR is not closed");
+  assert.ok(!t.writes.includes("PATCH /pulls/70 closed"));
+  assert.ok(t.writes.some((w) => w.startsWith("POST /issues/7/comments <!-- factory:7:blocked")), t.writes.join("\n"));
+  assert.ok(t.state.labels.has("factory:blocked") && !t.state.labels.has(RESTART_LABEL));
+  assert.deepEqual(t.r.ready, []);
+});
+
+test("a restart label applied by someone who cannot push is taken off with a comment, and nothing restarts", async () => {
+  const t = await tick({ labels: ["factory:in-review"], by: "stranger" });
+  assert.deepEqual(t.r.restarted, []);
+  assert.ok(!t.state.labels.has(RESTART_LABEL));
+  assert.ok(t.writes.some((w) => w.startsWith("POST /issues/7/comments <!-- factory:7:restart-refused")));
+  assert.equal(t.state.branch, HEAD7);
+  assert.equal(t.state.prOpen, true);
+});
+
+test("a retry of a restart keeps what the first try recorded (the PR, the branch's head), and another loop's finished restart is left alone", async () => {
+  setSelf(BOT.login);
+  try {
+    await withEnv({}, async () => {
+      // The first try closed the PR and deleted the branch, then was cut off.
+      const first = { id: 50, user: BOT, created_at: "2031-03-02T02:01:00Z", body: `${restartMarker(7, AT)}\n${restartRecord({ issue: 7, at: AT, by: "maintainer", pr: 70, head: HEAD7 })}` };
+      const api = fakeApi({ comments: [first] });
+      api.state.prOpen = false;
+      api.state.branch = null;
+      try {
+        await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
+        assert.match(first.body, new RegExp(`"by":"maintainer","pr":70,"head":"${HEAD7}"`), first.body);
+      } finally {
+        api.restore();
+      }
+      // Another loop finished it (the label is off): its Running label stays.
+      const other = fakeApi({ labels: ["factory:objective", "factory:running"] });
+      try {
+        const r = await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
+        assert.equal(r.finished, false);
+        assert.ok(!other.writes.some((w) => w.startsWith("DELETE /issues/7/labels/")), other.writes.join("\n"));
+      } finally {
+        other.restore();
+      }
+    });
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("readers after a restart: a plan comment or a split record from before it is no one's any more, whoever wrote it", async () => {
+  const { planOf } = await import("../scripts/lib/handoff.mjs");
+  setSelf(BOT.login);
+  try {
+    const otherApp = { id: 30, user: { login: "other-app[bot]", type: "Bot" }, created_at: "2031-03-02T01:00:00Z", body: "<!-- factory:7:plan -->\n## Plan" };
+    assert.ok(planOf([otherApp], 7), "without a restart another App's plan comment gives its time");
+    assert.equal(planOf([otherApp, recordComment()], 7), null);
+    const newPlan = { id: 31, user: BOT, created_at: "2031-03-02T03:00:00Z", body: "<!-- factory:7:plan -->\n## New plan" };
+    assert.equal(planOf([otherApp, recordComment(), newPlan], 7).id, 31);
+    await withEnv({}, async () => {
+      const api = fakeApi({ comments: [{ id: 12, user: BOT, created_at: "2031-03-02T01:40:00Z", body: '<!-- factory:7:parts {"prs":[70],"remaining":2} -->\nparts' }, recordComment()] });
+      try {
+        assert.equal(await partsRecord(REPO, 7, { token: "t" }), null);
+      } finally {
+        api.restore();
+      }
+    });
+  } finally {
+    setSelf(null);
+  }
+  const { EDITED_FIX } = await import("../scripts/lib/objective-trust.mjs");
+  assert.match(EDITED_FIX, /factory:restart/);
+});
+
+test("a stage that missed the restart's label learns of it from the record newer than its start; an older record is no restart", async () => {
+  const { objectiveReader } = await import("../scripts/lib/stop.mjs");
+  setSelf(BOT.login);
+  try {
+    let lists = 0;
+    const comments = [recordComment()];
+    const read = (startedAt) => objectiveReader({ read: async () => ({ ...issue(["factory:objective"]), comments: comments.length }), list: async () => (lists++, comments), startedAt });
+    const before = read(Date.parse(AT) - 60_000);
+    assert.equal(stopCause(await before(), "factory:objective"), "restart");
+    const after = read(Date.parse(AT) + 60_000);
+    assert.equal(stopCause(await after(), "factory:objective"), null);
+    const n = lists;
+    await after();
+    assert.equal(lists, n, "the comments are read again only when their count changes");
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("the merge pass never merges an Objective waiting for its restart, whoever runs it", async () => {
+  const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
+  await withEnv({}, async () => {
+    const api = fakeApi();
+    try {
+      assert.equal(await mergeReadyOne(REPO, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective" }, { token: "t" }), "stopped");
+    } finally {
+      api.restore();
+    }
+  });
 });

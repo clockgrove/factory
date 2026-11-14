@@ -1,0 +1,93 @@
+# Install, tune, upgrade, uninstall
+
+What Factory adds to a repository, how to set it up and check it, the inputs that tune cost, and how to upgrade or remove it. The README has the short version; [USAGE.md](USAGE.md) covers filing and following Objectives, and [LOCAL.md](LOCAL.md) covers local mode.
+
+## Requirements
+
+- A GitHub repository you administer (rulesets need admin), with a CI workflow that runs on `pull_request`.
+- The `gh` CLI, logged in, and Node 22 or newer on the machine you run setup from.
+- A model credential for the harness you choose: Claude Code, Codex or GitHub Copilot (the table below).
+- A merge queue is used where GitHub offers one: public repositories and Enterprise Cloud. Elsewhere Factory runs on strict required checks (the table below).
+
+## Where Factory runs
+
+Every stage runs behind three interfaces: trigger, sandbox and gate (`plugin/scripts/lib/backend.mjs`). GitHub is the only state on every backend: the branch, the PR, the issue's comments and labels, the board and the usage artifact.
+
+- **Actions (the default):** every job is a fresh hosted runner. It installs the adopter's toolchain, runs the harness, pushes, waits for the required checks, and is discarded. The install is this Action plus the App's two secrets.
+- **Local mode:** the same worker and reviewer on a developer's own machine, started by `factory serve` or `factory run <issue>` (the plugin's `bin/`; `/factory:serve` and `/factory:run` in a session). The harness runs on its own login, and every command the model or Factory runs goes through a sandbox. That means no credential stores, writes only in the Objective's clone, and the network limited to GitHub and an allow-list. Its GitHub reach is one fine-grained token for this repository (plus, optionally, the Factory App's key for Blocked and Question notices). An Objective labelled `factory:local` is the local loop's, and the Action leaves it alone. Linux and WSL2 with Claude Code, Codex and Copilot; macOS with Claude Code and Codex only (no Copilot), sandbox verified, not run end to end. See [LOCAL.md](LOCAL.md).
+- **Cloud sandbox (opt-in):** one pausable cloud sandbox per Objective on Vercel Sandbox, started from an image built by the adopter's own setup command. Short Action jobs start each stage in it on GitHub events and exit within about thirty seconds; the sandbox stops at every wait between stages, and its cost is booked beside the model's on the progress comment. Turn it on with setup's `--sandbox vercel` and the `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID` secrets. Limits: a stage runs in one sandbox session, which Factory asks to be `timeout_minutes` plus about 16 minutes; Vercel Pro grants up to 24 hours, and on a plan that caps sessions lower the stage is cut to the session granted and Blocks naming the cap if it outruns it; Claude Code, Copilot and Codex (through the Vercel AI Gateway) are proven there. See [ADAPTERS.md](ADAPTERS.md).
+
+The rest of this page is the Actions route; the other two have their own pages.
+
+## Install footprint
+
+| Added | What |
+| --- | --- |
+| `.github/workflows/factory.yml` | About 190 lines (about 350 with the cloud sandbox), written by `/factory:setup` from the plugin's `workflow-template.yml`: a `dispatch` job, a `queue-watch` job, a `wake` job, a `work` job matrixed over ready Objectives and a `review` job (on the sandbox route, launch, image and sweep jobs instead of work and review, with two short wake jobs for the sweep). Triggers: a `*/10` cron as the backstop, manual dispatch, an issue opened or labelled `factory:objective` or any issue closed, `pull_request` (the App labels a PR `factory:review`, a human marks a Question draft ready, a Factory PR merges, the merge queue drops one), and CI finishing on a `factory/` branch (`workflow_run`, `check_suite`). The worker, review and launch jobs fire the next dispatch at their end, and a `wake` job sleeps to the next deadline only time ends; on the sandbox route the sweep arms its own wakes of minutes and the dispatcher's tick runs an owed image build (docs/PLAN.md). Never from a fork. |
+| A Factory GitHub App | Two secrets, `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY`. Permissions, one list: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. Checks and commit statuses are how Factory reads required checks; actions read lets a cloud-sandbox stage, which has no job token, read a red job's log. Every push, PR, label, board move and enqueue uses its short-lived installation token, minted for this one repository. |
+| A model credential | Claude: `ANTHROPIC_API_KEY` (or workload identity federation with `id-token: write`). Codex: `FACTORY_CODEX_GATEWAY_KEY`, a Vercel AI Gateway key passed as `codex_gateway_key` (Codex then runs through the gateway and bills its credits; it wins over `CODEX_API_KEY`), or `CODEX_API_KEY`; either passed only to the harness step. Copilot: `COPILOT_GITHUB_TOKEN`, a fine-grained token with only the Copilot Requests permission from a user with a Copilot seat, passed as `copilot_github_token` to the harness step only and billed to that seat; doctor checks it cannot write to the repository. `credential: plan` with `CLAUDE_CODE_OAUTH_TOKEN` is allowed for your own repository only. |
+| Merge queue, branch protection, label, Project board | GitHub settings, not files. `node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --yes --ci-checks "<your CI check names>"`, run in your repository's clone, applies them with your `gh` login (rulesets need admin) and creates the board (five columns) and the labels. Private repositories outside Enterprise Cloud cannot have a merge queue; Factory runs them on strict required checks and sends a PR that fell behind or conflicts back to the worker once. |
+| A CI workflow on `pull_request` and `merge_group` | Most repositories have one; add `merge_group:` under `on:` if yours lacks it. |
+
+What each credential can do:
+
+- **The job token:** `contents: read`, `issues: write`, `actions: read` (usage artifacts and the CI workflow's triggers), and on the jobs that tick the dispatcher `actions: write` (work and review also use it to rerun flaky CI jobs); it never writes code. Set your repository's default workflow token to read-only: doctor requires it.
+- **The harness:** it holds no GitHub write access: on Actions it runs as its own uid with a read-only token (the runner needs passwordless sudo, as GitHub's hosted runners have); Factory makes every write.
+- **Secrets:** they are scrubbed from every non-harness child and masked in the uploaded event log.
+- **Cost:** it is capped by `max_usd` per job and `daily_usd` per day; Claude (`--max-budget-usd`) and Copilot (`--max-ai-credits`) enforce the per-job cap inside the run; Codex is checked after each run.
+- **What persists:** the worker runs on an ephemeral runner; what persists is the branch, the PR, the plan comment and a usage artifact.
+
+## Set it up
+
+With the plugin, `/factory:setup` in a session in your repository's clone walks every step below and waits for a yes before each change. Without it, the steps are:
+
+1. **The workflow file and the GitHub settings.** In your repository's clone, with a clone of Factory beside it:
+
+   ```sh
+   node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>"        # preview: prints each step, changes nothing
+   node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>" --yes  # apply
+   ```
+
+   It writes `.github/workflows/factory.yml` pinned to the latest release, and creates the labels, the Project board and the `factory` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step. If your CI workflow lacks `merge_group:` under `on:`, add it.
+2. **The GitHub App.** Open `https://github.com/settings/apps/new` (or your organization's `/organizations/<org>/settings/apps/new`). Uncheck webhooks and grant exactly the repository permissions in the table above. Create it, generate a private key, note its App ID, and install it on this repository only.
+3. **The secrets.** `gh secret set FACTORY_APP_ID`, `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, and your model credential from the table above.
+4. **Commit the workflow file** on the default branch; its cron starts then.
+
+## The plugin and the Action are one tree
+
+`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned for Claude Code and Codex; Copilot's only when `subagent_model` or `reviewer_model` is set), the task card, the scripts and the workflow template. The Action (`action.yml` at the repository root) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`). Commands: `/factory:run`, `/factory:serve`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`. The marketplaces install the plugin from `main`, so a session's commands follow `main`, not the tag your Action pins.
+
+## Check and run
+
+```sh
+# in your repository's clone
+node <factory clone>/plugin/scripts/doctor.mjs --repo OWNER/NAME --checkout .   # PASS/WARN/FAIL per check with the fix; changes nothing
+node <factory clone>/plugin/scripts/setup.mjs  --repo OWNER/NAME --yes --ci-checks "quality"   # GitHub fixes and the workflow file
+gh workflow run factory.yml -f issue=811                              # one Objective now; the cron and the ticks do the rest
+```
+
+Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
+
+## Inputs that tune cost
+
+Seven optional inputs on the Action, all off or at the harness default unless set. Every Claude call also shares one cached system-prompt prefix across runs.
+
+| Input | What it does |
+| --- | --- |
+| `effort` | The worker's effort level, for every harness, its answer pass after the review included; pinned to `medium` for Claude so a CLI default change cannot move cost silently. |
+| `reviewer_effort` | The reviewer's effort level, passed on every reviewer call; `high` for Codex as its reviewer agent file says, Claude and Copilot keep their CLI default unless you set one; the job log says `reviewer on <model> at <effort>` and the run's event record carries it. |
+| `compaction_window` | The context size in tokens at which the worker and reviewer sessions compact; Claude and Codex, since Copilot has no such setting; the CLI default when empty, a measured lever for large Objectives. |
+| `resume_policy` | `fresh` by default: a review fix pass, an answer pass and a conflicting rebase start a fresh session; `fix-passes` resumes the worker's saved session for them, which on Objectives of about 30 turns cost three to seven times more at equal outcomes, so it is for adopters measuring larger ones; every harness, on Actions and in local mode. |
+| `prompt_cache_ttl` | Claude only; `off`, the CLI default, until measured: `auto` asks Claude Code for a one-hour prompt cache on the main conversation when the run bills an API key, which otherwise gets five minutes and so re-writes the prefix after every CI wait; `1h` or `5m` force one; the usage record's `cache` shows the writes after each wait, see bench/README.md. |
+| `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. |
+| `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. |
+
+## Upgrade
+
+1. Read the release notes between your tag and the new one.
+2. Re-render the workflow with that release's setup: in your repository's clone, `node <factory clone at vX.Y.Z>/plugin/scripts/setup.mjs --repo OWNER/NAME --apply workflow --action clockgrove/factory@vX.Y.Z --yes`. It keeps your settings, moves the pin and brings the template's jobs to that release. Re-render on every upgrade: the template belongs to its release, and an older file misses jobs the new Action expects (doctor names some, such as `merge ticks`).
+3. Commit the file on the default branch, then run doctor.
+
+## Uninstall
+
+Delete `.github/workflows/factory.yml`, the App and its two secrets, and any model key. Optionally delete the `factory` ruleset, the labels and the Project. For local mode, also delete `~/.config/factory` (the tokens), `~/.cache/factory`, the `.factory/` directory in each clone that ran it, and the `factory:local` label. For the cloud sandbox, also delete the three `VERCEL_*` secrets, the Vercel project's sandboxes and snapshots, the image issue and the `factory:image` label. Nothing else is installed.

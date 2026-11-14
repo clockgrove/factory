@@ -21,6 +21,15 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund --prefix tools/deps
           node tools/deps/sync.mjs --check
+      # Every skill follows the Agent Skills standard (agentskills.io): its name matches its folder, its description and
+      # frontmatter are what Claude Code, Codex and Copilot accept. A skill they would drop silently fails here instead.
+      - name: Every skill follows the Agent Skills standard
+        run: |
+          python3 -m venv "$RUNNER_TEMP/skills-ref"
+          "$RUNNER_TEMP/skills-ref/bin/pip" install --quiet --require-hashes --only-binary :all: -r tools/deps/requirements-skills.txt
+          for d in plugin/skills/*/; do "$RUNNER_TEMP/skills-ref/bin/skills-ref" validate "$d"; done
+          # The check bites: a skill that breaks the rules must fail it.
+          if "$RUNNER_TEMP/skills-ref/bin/skills-ref" validate bench/test/fixtures/skills/bad-name/; then echo "::error::skills-ref accepted a skill that breaks the rules"; exit 1; fi
       # The tests run with an empty temp folder of their own, and must leave it empty: a developer's box runs them many
       # times a day, and what they left behind once filled /tmp's inodes (#2565).
       - name: An empty temp folder for the tests

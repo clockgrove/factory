@@ -151,7 +151,8 @@ const LOCAL = {
     tends: (issue, env = process.env) => LOCAL.trigger.routes(issue, env),
     /**
      * A local loop's Objectives run on its box, whatever the workflow's FACTORY_SANDBOX says: its dispatcher writes no
-     * sandbox record, launch entry or lock, and reads none, since those are the sandbox route's (#235).
+     * sandbox record, launch entry or lock, since those are the sandbox route's (#235); it reads a record only to see a
+     * live lease.
      */
     sandboxRoute: false,
     /** Under the developer's login: a label change the scorer cannot tell from a person's is recorded as Factory's first. */

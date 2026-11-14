@@ -739,7 +739,7 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
  * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
  * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
  */
-async function sandboxRepoTick(env, { localSlots = null } = {}) {
+async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const { marker, sandboxMarkerLine, setSelf, START_LOST_MS } = await import("../scripts/lib/logic.mjs");
@@ -747,7 +747,9 @@ async function sandboxRepoTick(env, { localSlots = null } = {}) {
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
   const iss = (number, labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
-  const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, [])];
+  // `extra`: more Objectives for one test, `{ open, comments, timeline }` from this tick's helpers.
+  const more = extra({ now, iso, iss, marker, sandboxMarkerLine, BOT });
+  const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, []), ...(more.open || [])];
   const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
   const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(START_LOST_MS + 30 * 60_000), named(START_LOST_MS + 20 * 60_000), named(START_LOST_MS + 10 * 60_000)] };
   const comments = {
@@ -755,7 +757,9 @@ async function sandboxRepoTick(env, { localSlots = null } = {}) {
       { id: 500, user: BOT, updated_at: iso(now), body: `${marker(50, "sandbox")}\n${sandboxMarkerLine(lostRecord)}` },
       { id: 501, user: { login: "maintainer", type: "User" }, updated_at: iso(now), body: `${marker(50, "local")}\n${claimBody("box-a", new Date(now - 30_000))}` },
     ],
+    ...more.comments,
   };
+  const timeline = { 50: [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 60 * 60_000) }], ...more.timeline };
   const LOCK = "refs/factory-launch/60/work-book-abc";
   const refs = new Map([[LOCK, "c".repeat(40)]]);
   const calls = [];
@@ -789,7 +793,7 @@ async function sandboxRepoTick(env, { localSlots = null } = {}) {
     if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
     if (method === "GET" && p === "issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
-    if (method === "GET" && /^issues\/\d+\/timeline$/.test(p)) return json(n === 50 ? [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 60 * 60_000) }] : []);
+    if (method === "GET" && /^issues\/\d+\/timeline$/.test(p)) return json(timeline[n] || []);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /comments$/.test(p)) return json(comments[n] || []);
     if (method !== "GET") return json({}, 200);
@@ -842,4 +846,36 @@ test("lost launch entries never count as failed starts for a local Objective; th
   assert.deepEqual([marked.stage, marked.event, marked.ok], ["work", "dispatch", null]);
   assert.equal(actions.markers(50), null);
   assert.equal(actions.markers(51), null);
+});
+
+/** A sandbox stage of Objective `n` holding its lease for another half hour: the record a launcher writes as it starts one. */
+const leased = ({ now, iso, marker, sandboxMarkerLine, BOT }, n) => [{ id: 900 + n, user: BOT, updated_at: iso(now), body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", id: `factory-${n}`, stage: "work", state: "running", claim: "abcabcabcabc", at: iso(now - 20 * 60_000), leaseUntil: iso(now + 30 * 60_000), launches: [{ stage: "work", event: "issues", ok: true, run: "1", at: iso(now - 20 * 60_000) }] })}` }];
+
+test("serve waits out a live sandbox lease before it restarts an Objective relabelled factory:local mid-stage (#235)", async () => {
+  // #63 ran on the sandbox route; a person relabelled it factory:local and asked for a restart while its stage still holds its lease.
+  const extra = (h) => ({
+    open: [h.iss(63, ["factory:local", "factory:running", "factory:restart"])],
+    comments: { 63: leased(h, 63) },
+    timeline: { 63: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }, { event: "labeled", label: { name: "factory:restart" }, actor: { login: "maintainer" }, created_at: h.iso(h.now - 60_000) }] },
+  });
+  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 3, extra });
+  assert.deepEqual(serve.r.restarted, [], "not restarted while the sandbox still runs it");
+  assert.ok(!serve.r.ready.includes(63), "nor picked here");
+  assert.ok(serve.r.deadlines.some((d) => d.issue === 63 && d.kind === "retry"), "held until its stage stops: looked at again next tick");
+  assert.equal(serve.markers(63), null, "the record is read, never written");
+  assert.deepEqual(serve.calls, [], "and no lock is touched");
+});
+
+test("serve --all keeps a sandbox-route Objective whose stage holds a live lease: no 'worker job vanished' Block (#235)", async () => {
+  // #62: Running on the sandbox route for 20 minutes, no Actions job, no local claim, its sandbox stage within its lease.
+  const extra = (h) => ({
+    open: [h.iss(62, ["factory:running"])],
+    comments: { 62: leased(h, 62) },
+    timeline: { 62: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }] },
+  });
+  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, extra });
+  assert.deepEqual(all.r.vanished, []);
+  assert.ok(all.r.deadlines.some((d) => d.issue === 62 && d.kind === "lease"), "looked at again when its lease ends");
+  assert.equal(all.markers(62), null, "no record written for it here");
+  assert.deepEqual(all.r.relaunch, []);
 });

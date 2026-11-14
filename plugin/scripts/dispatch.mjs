@@ -79,8 +79,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
-  // entry or lock and reads none, and a lost launch never counts against one of them (#235). The repository's spend is
-  // read as the sandbox setting says either way (todaysSpend), since that is where the Action's stages record it.
+  // entry or lock, and a lost launch never counts against one of them (#235). It reads a record only to see a live lease
+  // (stageHolds), so it neither restarts nor Blocks a stage the sandbox still runs. The repository's spend is read as
+  // the sandbox setting says either way (todaysSpend), since that is where the Action's stages record it.
   const sandbox = !!inputs.sandbox && backend().trigger.sandboxRoute === true;
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
@@ -180,7 +181,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!sandbox) {
         jobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
         if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
-      } else {
+      }
+      // A sandbox lease (any route's, when the repository has a sandbox): a local loop sees one left from before the
+      // Objective was relabelled factory:local, and waits for it like a job.
+      if (inputs.sandbox) {
         const comments = await listComments(repo, n, opts).catch(() => null);
         if (!comments || stageHolds(sandboxRecord(comments, n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
       }
@@ -443,6 +447,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (alive) {
       for (const issue of runningIssues) {
         if (alive.has(issue.number)) continue;
+        // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
+        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
+        if (!sandbox && inputs.sandbox) {
+          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
+            leaseDue(issue.number, record);
+            continue;
+          }
+        }
         if (sandbox && backend().trigger.routes(issue)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {

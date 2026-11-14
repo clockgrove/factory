@@ -173,7 +173,7 @@ const RUNNER_PREFIX = new RegExp(`(?:file://)?(?:/${PC}+?)?/_?work/${SEG}/${SEG}
  */
 export function foldPaths(line) {
   return String(line)
-    .replace(WIN_PATH, (_, drive, rest) => `/${drive.toUpperCase()}${rest.replace(/\\/g, "/")}`)
+    .replace(WIN_PATH, (_, drive, tail) => `/${drive.toUpperCase()}${tail.replace(/\\/g, "/")}`)
     .replace(TEMP_PATH, "<tmp>")
     .replace(RUNNER_PREFIX, "")
     .replace(/([./-])(?:(?=[0-9a-f]*\d)[0-9a-f]{6,}|(?=[A-Za-z0-9_-]*(?:\d|[a-z][A-Za-z0-9_-]*[A-Z]|[A-Z][A-Za-z0-9_-]*[a-z]))[A-Za-z0-9_-]{8})(?=\.(?:[cm]?js|css|map)\b)/g, "$1HASH")

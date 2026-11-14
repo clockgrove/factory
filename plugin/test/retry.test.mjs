@@ -45,7 +45,7 @@ async function withFetch(answer, fn) {
   const clock = fakeClock();
   const lines = [];
   const write = process.stdout.write;
-  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
   try {
     return await fn({ seen, waits: clock.waits, lines, now: clock.now });
   } finally {
@@ -404,10 +404,10 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
     runObjective: async () => ({ exit: "delivered" }),
   });
   const write = process.stdout.write;
-  process.stdout.write = (chunk, ...rest) => {
+  process.stdout.write = (chunk, ...more) => {
     lines.push(String(chunk));
     if (/GitHub refused the local token/.test(chunk)) setTimeout(() => onRefused(file), 30);
-    return write.call(process.stdout, chunk, ...rest);
+    return write.call(process.stdout, chunk, ...more);
   };
   const stopper = setTimeout(() => (loop.stopping = true), stopMs);
   try {

@@ -52,7 +52,6 @@ async function agentCheck() {
     return 1;
   }
   const { prepareAgent } = await import("../plugin/scripts/lib/agent.mjs");
-  const { exec } = await import("../plugin/scripts/lib/proc.mjs");
   const agent = await prepareAgent();
   console.log(`agent launcher: ${agent.launcher}`);
   const secret = join(homedir(), ".factory-check-secret");
@@ -131,7 +130,6 @@ if curl -s -m 3 -o /dev/null http://127.0.0.1:23456/; then echo "vendor listener
   await lists("without the wrapper");
   // A worker the stage ends (its watchdog, a lost claim) dies mid-command: the agent's command, under sudo and unshare,
   // outlives it. The stage's reap (proc.mjs reapNamespace) must leave none; the control is the same death with no reap.
-  const { spawn } = await import("node:child_process");
   const { reapNamespace } = await import("../plugin/scripts/lib/proc.mjs");
   const procUrl = new URL("../plugin/scripts/lib/proc.mjs", import.meta.url).href;
   const orphan = async (reap) => {

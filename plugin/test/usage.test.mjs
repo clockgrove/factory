@@ -289,8 +289,7 @@ test("scrubbedEnv: an undefined or null extra value removes the key (the dispatc
 });
 
 test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach the job's later children", async () => {
-  const { mkdtempSync, writeFileSync: write } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
+  const { writeFileSync: write } = await import("node:fs");
   const { runnerFileEnv } = await import("../scripts/lib/checkout.mjs");
   const dir = mkdtempSync(join(tmpdir(), "factory-runner-"));
   write(join(dir, "path"), "/usr/lib/postgresql/18/bin\n/usr/bin\n\n");
@@ -368,7 +367,6 @@ test("sessions: a stage saves every session it ran (the reviewer's own too), mas
 });
 
 test("a resumed Claude pass counts its own share, not the session's running total", async () => {
-  const { parseUsage, sinceSession, mergeUsage } = await import("../scripts/lib/usage.mjs");
   // Shapes and numbers from a real run: the fix pass resumed the work session and reported the session's totals.
   const result = (turns, usd, opus, sonnet) => JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: turns, session_id: "s1", total_cost_usd: usd,
     modelUsage: { "claude-opus-5-5": { inputTokens: 500, cacheReadInputTokens: opus[0], cacheCreationInputTokens: opus[1], outputTokens: opus[2], costUSD: opus[3] },
@@ -386,7 +384,7 @@ test("a resumed Claude pass counts its own share, not the session's running tota
 });
 
 test("a session restored from an earlier job counts its own share: the transcript's last cost-state is the prior total", async () => {
-  const { parseUsage, sinceSession, transcriptTotal } = await import("../scripts/lib/usage.mjs");
+  const { transcriptTotal } = await import("../scripts/lib/usage.mjs");
   // Shapes and numbers from a real resumed session: Claude Code writes a cost-state line as each process ends.
   const state = (usd, input, output, written) => JSON.stringify({ type: "cost-state", sessionId: "s1", totalCostUSD: usd, modelUsage: { "claude-haiku-5-5": { inputTokens: input, outputTokens: output, cacheReadInputTokens: 0, cacheCreationInputTokens: written, costUSD: usd } } });
   const transcript = [JSON.stringify({ type: "user", message: { content: "say hi" } }), state(0.0040019, 1, 90, 20000), JSON.stringify({ type: "assistant" }), state(0.0060084, 2, 150, 21446), ""].join("\n");
@@ -465,7 +463,6 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
 });
 
 test("a session total is only subtracted when it is a running total", async () => {
-  const { sinceSession } = await import("../scripts/lib/usage.mjs");
   const rec = (usd) => ({ usd, tokens: { input: 1, output: 1, cached: 1, written: 1 }, models: null, turns: 3 });
   assert.equal(sinceSession(rec(2), rec(5)).usd, 2, "below the prior total: not cumulative, counted as reported");
   assert.equal(sinceSession(rec(7), rec(null)).usd, 7, "a prior pass with no total subtracts nothing");

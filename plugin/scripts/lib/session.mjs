@@ -489,21 +489,21 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   const name = appSlug ? `${appSlug}[bot]` : login || "factory[bot]";
   const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
   // In the agent's sandbox (backend.mjs sandbox.git): Factory runs no git on the host in the agent's checkout.
-  const git = async (_, args) => {
+  const sandboxGit = async (_, args) => {
     const r = await exec(...backend(env).sandbox.git(["git", "-C", checkout, ...args], env), { env });
     if (r.code !== 0) throw new Error(`git ${args.join(" ")} in the checkout failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 160)}`);
     return r;
   };
-  await git(checkout, ["config", "user.name", name]);
-  await git(checkout, ["config", "user.email", email]);
+  await sandboxGit(checkout, ["config", "user.name", name]);
+  await sandboxGit(checkout, ["config", "user.email", email]);
   // `credential.helper` is multi-valued: the generic empty entry clears every inherited helper, for any host, then ours
   // is added for https://github.com only. Git LFS's storage host (its upload URLs carry their own signed auth) and any
   // host a planted .lfsconfig names get no token. A rerun in the same checkout already has these, so replace-all.
-  await git(checkout, ["config", "--replace-all", "credential.helper", ""]);
-  await git(checkout, ["config", "--replace-all", `credential.${GITHUB_HELPER_SCOPE}.helper`, ""]);
+  await sandboxGit(checkout, ["config", "--replace-all", "credential.helper", ""]);
+  await sandboxGit(checkout, ["config", "--replace-all", `credential.${GITHUB_HELPER_SCOPE}.helper`, ""]);
   // On Actions the agent's read-only helper; locally none (Factory's own git gets the token by env config, openAccess).
-  if (credentialHelper) await git(checkout, ["config", "--add", `credential.${GITHUB_HELPER_SCOPE}.helper`, credentialHelper]);
-  await git(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"]).catch(() => {});
+  if (credentialHelper) await sandboxGit(checkout, ["config", "--add", `credential.${GITHUB_HELPER_SCOPE}.helper`, credentialHelper]);
+  await sandboxGit(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"]).catch(() => {});
   // The job refuses a commit on a protected path; Factory's push refuses it again (outbox.mjs).
   // A rule keeps a leading `/` (root-anchored, logic.mjs protectedCovers); `./` is dropped.
   const rules = protectedList.map((p) => p.replace(/^\.\//, "")).filter((p) => p.replace(/^\/+/, ""));
@@ -1344,7 +1344,7 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false, workerKey = null, ran = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
@@ -1388,7 +1388,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // sub-agent threads (each in `children`) and the worker key, and after a pass with no total stays at the last one.
     sessionTotal: lineageTotal(session?.id, records),
     // Counted by the dispatcher from the progress comment's spend line, not from this record (dispatch.mjs todaysSpend).
-    ...(spendInProgress ? { spendInProgress: true } : {}),
+    ...(inProgress ? { spendInProgress: true } : {}),
     // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
     ...kb.fields,
     // A relayed call whose cost could not be determined: the dollars are a lower bound. One booked at its upper-bound

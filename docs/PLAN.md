@@ -23,7 +23,7 @@ Factory uses an existing SDK or library before writing its own (AGENTS.md). The 
 
 - **Vendored, byte for byte:** `plugin/vendor/<name>/` holds the files the library itself published, as `tools/deps/package-lock.json` pins them, never rebuilt. `node tools/deps/sync.mjs` copies them after an `npm ci --ignore-scripts --prefix tools/deps`, and CI checks the copy matches. Dependabot bumps the pin; the bump's PR stays red until `sync.mjs` is run on it and the copy committed. Today: `yaml` (workflows, `pnpm-workspace.yaml`, agent frontmatter) and `smol-toml` (Cargo and uv workspace members).
 - **Installed for one job:** the cloud-sandbox jobs install `@vercel/sandbox` from `plugin/package-lock.json` (docs/ADAPTERS.md).
-- **CI only:** the Quality workflow checks every skill with the Agent Skills standard's reference validator, `skills-ref`, installed from `tools/deps/requirements-skills.txt` with hashes, wheels only.
+- **CI only:** the Quality workflow checks every skill with the Agent Skills standard's reference validator, `skills-ref`, installed from `tools/deps/requirements-skills.txt` with hashes, wheels only. It lints plugin/, bench/ and tools/ with ESLint for correctness only (`tools/deps/eslint.config.mjs`), from the `tools/deps` lockfile's devDependencies, which `sync.mjs` never vendors.
 
 What stays Factory's own code, and why:
 

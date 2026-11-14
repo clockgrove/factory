@@ -261,7 +261,7 @@ function copilotToken() {
  * once its line is complete. `end()` relays a last line with no newline.
  */
 export function stageRelay({ logFile, prefix, write = (s) => process.stdout.write(s) }) {
-  let rest = "";
+  let partial = "";
   const emit = (raw) => {
     const line = redactSecrets(raw);
     appendOwn(logFile, `${line}\n`);
@@ -269,13 +269,13 @@ export function stageRelay({ logFile, prefix, write = (s) => process.stdout.writ
   };
   return {
     push: (chunk) => {
-      const parts = `${rest}${chunk}`.split("\n");
-      rest = parts.pop();
+      const parts = `${partial}${chunk}`.split("\n");
+      partial = parts.pop();
       for (const p of parts) emit(p);
     },
     end: () => {
-      if (rest) emit(rest);
-      rest = "";
+      if (partial) emit(partial);
+      partial = "";
     },
   };
 }
@@ -937,10 +937,10 @@ export class Local {
   /**
    * SIGINT, SIGTERM or SIGHUP to `run`, `review` or `serve`: stop. Nothing new starts, every stage process gets SIGTERM
    * (it stops its harness's process group before it exits: proc.mjs stopGroups), and the claims stay, so the Objectives
-   * pause and this machine's next `factory run` or `factory serve` takes them up again. Exits once `settled()` resolves
+   * pause and this machine's next `factory run` or `factory serve` takes them up again. Exits once `whenSettled()` resolves
    * (the work in flight, wound down) or 30 s pass.
    */
-  stopOnSignals(settled) {
+  stopOnSignals(whenSettled) {
     let stoppedAt = 0;
     const stop = async (sig) => {
       const code = 128 + (osConstants.signals[sig] || 2);
@@ -954,7 +954,7 @@ export class Local {
       for (const wake of this.wakers || []) wake();
       log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
-      await Promise.race([Promise.resolve(settled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
+      await Promise.race([Promise.resolve(whenSettled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(code);
     };
     for (const s of STOP_SIGNALS) process.on(s, () => void stop(s));

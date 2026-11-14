@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, repoOf, requiredChecks, rest } from "./lib/github.mjs";
+import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, repoOf, requiredChecks, rest } from "./lib/github.mjs";
 import { DEFAULTS, FACTORY_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
@@ -91,7 +91,9 @@ async function applyLabels(repo, opts) {
   return made.length ? `created ${made.join(", ")}` : "all labels present";
 }
 
-async function applyProject(repo, opts) {
+export async function applyProjectStep(repo, opts) {
+  // A personal account's board is out of every GitHub App's reach (Projects is an organization permission, #199).
+  if ((await getRepo(repo, opts)).owner?.type === "User") return "skipped: a repository a user owns gets no board Factory can move; labels carry each Objective's state";
   const existing = await findProject(repo, opts);
   if (existing) {
     const names = (existing.field?.options || []).map((o) => o.name);
@@ -108,12 +110,42 @@ async function applyProject(repo, opts) {
   return `created project "Factory" (#${p.number}) with ${COLUMNS.join(", ")} and linked it to ${repo.full}`;
 }
 
-async function applyProtection(repo, { ciChecks, queue }, opts) {
-  const branch = (await getRepo(repo, opts)).default_branch;
-  await ensureRuleset(repo, { branch, checks: ciChecks, queue }, opts);
+/**
+ * Why GitHub offers no merge queue on this repository, from its own record, or null when it may: GitHub offers one on a
+ * repository an organization owns (public, or private on Enterprise Cloud), never on one a user owns. A private
+ * organization repository outside Enterprise Cloud is not told apart here: GitHub refuses the rule, and applyProtection
+ * then makes the ruleset without it.
+ */
+export const noQueueReason = (repoData) => (repoData?.owner?.type && repoData.owner.type !== "Organization" ? "GitHub offers no merge queue on a repository a user owns" : null);
+
+/** Whether the repository's `factory` ruleset holds a merge_queue rule now. */
+async function rulesetHasQueue(repo, opts) {
+  const existing = (await listRulesets(repo, opts)).find((r) => r.name === "factory");
+  if (!existing) return false;
+  const full = await rest(`repos/${repo.full}/rulesets/${existing.id}`, opts);
+  return (full?.rules || []).some((r) => r.type === "merge_queue");
+}
+
+export async function applyProtection(repo, { ciChecks, queue }, opts) {
+  const repoData = await getRepo(repo, opts);
+  const branch = repoData.default_branch;
+  let why = queue ? noQueueReason(repoData) : "--merge-queue false";
+  if (queue && !why) {
+    // Whether GitHub took a queue here before: then a refusal now is a real error, never "not offered".
+    const hadQueue = await rulesetHasQueue(repo, opts).catch(() => true);
+    try {
+      await ensureRuleset(repo, { branch, checks: ciChecks, queue: true }, opts);
+    } catch (e) {
+      // Only a private organization repository can lack a queue (outside Enterprise Cloud); GitHub offers one on every
+      // public organization repository, so a 422 there, or where a queue stood before, is a real error and surfaces.
+      if (e?.status !== 422 || repoData.private !== true || hadQueue) throw e;
+      why = `GitHub refused a merge queue on this private repository: ${String(e.message || "").slice(0, 160)}`;
+    }
+  }
+  if (why) await ensureRuleset(repo, { branch, checks: ciChecks, queue: false }, opts);
   // A squash commit's message is the PR's title and body (Factory's own text), never the branch's commit messages.
   await rest(`repos/${repo.full}`, { ...opts, method: "PATCH", body: { squash_merge_commit_title: "PR_TITLE", squash_merge_commit_message: "PR_BODY" } });
-  return `ruleset "factory" on ${branch}: ${queue ? "merge queue, " : "no merge queue (--merge-queue false), "}${ciChecks.length ? `required checks ${ciChecks.join(", ")}` : "no required checks (pass --ci-checks)"}, no deletion or force push; squash commits take the PR's title and body`;
+  return `ruleset "factory" on ${branch}: ${why ? `no merge queue (${why}; Factory runs on strict required checks), ` : "merge queue, "}${ciChecks.length ? `required checks ${ciChecks.join(", ")}` : "no required checks (pass --ci-checks)"}, no deletion or force push; squash commits take the PR's title and body`;
 }
 
 /** `login#id` for the workflow's notify user, so Factory trusts the account and not whoever holds the login later. */
@@ -535,8 +567,8 @@ async function main() {
   const opts = { token };
   const plan = {
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,
-    project: `create the Factory Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns`,
-    protection: `create or update the "factory" ruleset on the default branch (merge queue, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and turn on Allow auto-merge${inputs.autoMerge ? "" : " (skipped: auto_merge false)"}; runs as your gh login (needs admin), not the App`,
+    project: `create the Factory Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns (none on a repository a user owns: no GitHub App can move its cards)`,
+    protection: `create or update the "factory" ruleset on the default branch (a merge queue where GitHub offers one, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and set squash commits to take the PR's title and body; runs as your gh login (needs admin), not the App`,
     workflow: `write ${args.out || ".github/workflows/factory.yml"} from workflow-template.yml${args.sandbox ? ` with launch jobs for the ${args.sandbox} sandbox (secrets VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)` : ""}${before ? `, keeping the settings the existing file states unless a flag gives one` : ""}`,
   };
   if (!yes) {
@@ -547,7 +579,7 @@ async function main() {
   for (const s of steps) {
     let note;
     if (s === "labels") note = await applyLabels(repo, opts);
-    else if (s === "project") note = await applyProject(repo, opts);
+    else if (s === "project") note = await applyProjectStep(repo, opts);
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });
     else if (s === "workflow") note = await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts });
     else throw new Error(`unknown step ${s}`);

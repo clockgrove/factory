@@ -353,7 +353,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   checks = [...new Set(checks)];
   // Without the queue a single Objective still merges once its required checks are green; what is lost is the integrated
   // re-run that catches a conflict after a sibling merges, so concurrent Objectives need it (PLAN.md).
-  out.push(queue ? PASS("merge queue", `on for ${branch}`) : checks.length ? WARN("merge queue", `no merge_queue rule on ${branch}; required checks gate merges, but concurrent Objectives are not re-tested on the integrated head`, "node scripts/setup.mjs --apply protection (or Settings > Rules)") : FAIL("merge queue", `no merge_queue rule on ${branch}`, "node scripts/setup.mjs --apply protection (or Settings > Rules)"));
+  out.push(queue ? PASS("merge queue", `on for ${branch}`) : checks.length ? WARN("merge queue", `no merge_queue rule on ${branch}; required checks gate merges, but concurrent Objectives are not re-tested on the integrated head`, repoData.owner?.type === "User" ? "GitHub offers no merge queue on a repository a user owns; keep max_concurrent low, or move it to an organization" : "node scripts/setup.mjs --apply protection (or Settings > Rules)") : FAIL("merge queue", `no merge_queue rule on ${branch}`, "node scripts/setup.mjs --apply protection (or Settings > Rules)"));
   // Only a merge queue drops PRs: without one, the dequeued run never fires and the policy is not read.
   if (queue) out.push(...approvalPolicyCheck(await rest(`repos/${repo.full}/actions/permissions/fork-pr-contributor-approval`, { token: inputs.githubToken || token }).catch((e) => ({ error: e.status || "error" }))));
   out.push(checks.length ? PASS("required checks", checks.join(", ")) : FAIL("required checks", `none required on ${branch}`, "require the CI workflow's checks: setup --apply protection --ci-checks <names>"));
@@ -393,7 +393,10 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   // board is then out of view, card moves are skipped, and the labels carry the state, as the dispatcher already does.
   // A local token is scoped to one repository: an organisation's board may be out of its sight with or without an error
   // (an empty list), and labels carry the state either way.
-  if (!project && backend().name === "local") out.push(WARN("project board", "not visible to the local token; cards will not move and labels carry the state", "grant the token the organisation's Projects read and write permission to move cards"));
+  // A personal account's board is out of every GitHub App's reach (Projects is an organization permission): no board,
+  // labels carry the state (#199).
+  if (!project && repoData.owner?.type === "User") out.push(WARN("project board", "a repository a user owns has no board Factory can move: labels carry each Objective's state", "none needed; move the repository to an organization for the board"));
+  else if (!project && backend().name === "local") out.push(WARN("project board", "not visible to the local token; cards will not move and labels carry the state", "grant the token the organisation's Projects read and write permission to move cards"));
   else if (!project) out.push(FAIL("project board", "no Factory project linked to the repository", "setup --apply project"));
   else {
     const names = (project.field?.options || []).map((o) => o.name);

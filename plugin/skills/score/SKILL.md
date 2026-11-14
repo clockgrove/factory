@@ -1,6 +1,6 @@
 ---
 name: score
-description: "/factory:score [issue...]. Build or print the Factory scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean."
+description: "/factory:score [issue...]. Build or print the Clockgrove Factory scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean."
 ---
 
 # /factory:score

@@ -1,11 +1,11 @@
 ---
 name: implement-split
-description: Second step of working a Factory Objective, after objective-plan. Use to implement the plan's checklist with implementer sub-agents on the pinned model, run disjoint-file items concurrently, integrate once, and split an Objective too large for one session into sequential PRs. Load when a task card says to use implement-split.
+description: Second step of working a Clockgrove Factory Objective, after objective-plan. Use to implement the plan's checklist with implementer sub-agents on the pinned model, run disjoint-file items concurrently, integrate once, and split an Objective too large for one session into sequential PRs. Load when a task card says to use implement-split.
 ---
 
 # Implement the checklist
 
-You are the worker session on the strong model. You plan, integrate and deliver; the implementer sub-agent writes the code of each checklist item. Keep the whole Objective in your own context so you can see which items are independent.
+You are the worker session on the strong model. You plan, integrate and deliver; the implementer sub-agent writes the code of each checklist item. Keep the whole Objective in your own context to see which items are independent.
 
 ## Implementer sub-agents
 

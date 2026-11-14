@@ -1,14 +1,14 @@
 # Using Factory
 
-How to write an Objective, what you see while it runs, and what to do when a run ends Blocked or with a Question. [INSTALL.md](INSTALL.md) covers setup; [PLAN.md](PLAN.md) has the full contracts.
+How to write an Objective, what you see while it runs, and what to do when Factory hands one back to you Blocked or with a Question. [INSTALL.md](INSTALL.md) covers setup; [PLAN.md](PLAN.md) has the full contracts.
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: the worker cannot ask you for more detail while it runs. Ask a session to file one for you ("File a Factory Objective: ...", the file skill), or write the issue yourself:
+An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the file skill), or write the issue yourself:
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading such as `Acceptance` (`Done when`, `Definition of done`, `Must be true` and `Criteria` are read the same way). The reviewer judges each entry, met or not, with the line that shows it. Without such a section, the reviewer names the entries from the issue text itself.
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
-- **Label it yourself, or have a maintainer do it.** Factory acts on an issue only when its author and, once the body was edited, its last editor can push to the repository or are maintainers the workflow names. Otherwise the run Blocks before any model sees the text.
+- **File it yourself, or have someone who can push file it.** Factory acts on an issue only when its author and, once the body was edited, its last editor can push to the repository or are maintainers the workflow names. Otherwise the run Blocks before any model sees the text. A maintainer labelling someone else's issue is not enough: who applies the label is not checked, and the author is checked on every run, so such an issue needs refiling by someone who can push.
 - **Keep it to one repository** (below).
 
 ```markdown
@@ -22,7 +22,7 @@ An Objective is a GitHub issue with the `factory:objective` label. The issue is 
 - A test covers it.
 ```
 
-Ready Objectives start in priority order (`P0` to `P2`, then the lowest issue number), up to `max_concurrent` at once. An Objective too large for one session is delivered as up to six pull requests in sequence, one open at a time.
+Ready Objectives start in priority order (`P0` to `P2`, then the lowest issue number), up to `max_concurrent` at once; one started by hand with `gh workflow run factory.yml -f issue=<number>` runs even when that limit is reached. An Objective too large for one session is delivered as up to six pull requests in sequence, one open at a time.
 
 ## What you see on the issue
 
@@ -30,10 +30,10 @@ While a job runs, one comment on the issue (edited in place, one per run) carrie
 
 ## Blocked and Question
 
-A run never pauses halfway to wait for you. When it cannot merge on its own it ends in one of two states, and neither stops the queue:
+A run that goes well needs nothing from you. When one needs you, Factory does all the work it can first and then hands the Objective back to you in one of two states. Neither holds up the queue: your other Objectives keep running.
 
-- **Blocked** means the run could not get there. You get a draft PR, the card in the Blocked column, and one comment with the reason.
-- **Question** means the work depends on a decision that should be yours: one that would change or remove an existing public contract, contradict a recorded decision or grant new access. The worker takes the simplest reading, finishes everything else, and leaves a draft PR whose body asks the one thing a human must decide.
+- **Blocked** means Factory could not finish. One comment on the issue gives the reason, the issue's card moves to the Blocked column (on a repository a user owns there is no board; the `factory:blocked` label says it), and the PR, if it opened one, becomes a draft.
+- **Question** means the work depends on a decision that should be yours: one that would change or remove an existing public contract, contradict a recorded decision or grant new access. The worker takes the simplest reading, finishes everything else, and leaves a draft PR whose body asks what a human must decide. A Question about working in another repository comes earlier, on the issue itself, with no PR (One repository per Objective, below).
 
 What to do with each:
 
@@ -48,25 +48,25 @@ Code lands with no human read. The gate is your CI workflow's checks on the revi
 
 ## Siblings that touch the same files
 
-Two Objectives running at once that edit the same files cost a rebase run each time one merges (ten minutes, a dollar or a few) and, without a merge queue, strict checks refuse the one left behind until the worker rebases it. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
+Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
 
 ## One repository per Objective
 
-Factory works in one repository per Objective. An Objective that needs a change in another repository stops after its plan with a Question on the issue, before any work: split it into one Objective per repository and re-apply the label, or answer on the issue how to do the work in this repository alone.
+Factory works in one repository per Objective. An Objective that needs a change in another repository stops with a Question on the issue before any code is written (after its plan, or before the worker starts when the issue names another repository on a `Factory-Repository:` line): split it into one Objective per repository and re-apply the label. When the Question came from the plan, you can instead answer on the issue how to do the work in this repository alone.
 
 ## Commands
 
-With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words: each request below loads the Factory skill that does it. Where your agent offers skills as slash commands, the command works too.
+With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words and use the full name, Clockgrove Factory: each request below loads the Factory skill that does it, and the full name keeps your agent from picking up another product called Factory. Where your agent offers skills as slash commands, the command works too.
 
 | Say | Command | What it does |
 | --- | --- | --- |
-| "Set up Factory for this repository." | `/factory:setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
-| "Is Factory set up correctly here?" | `/factory:doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
-| "File a Factory Objective: ..." | `/factory:file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
-| "Run Objective 42 here." | `/factory:run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
-| "Review Factory PR 57." | `/factory:review <pr>` | Runs the reviewer on one Factory PR in your session |
-| "Start Factory's local loop." | `/factory:serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
-| "Start the Factory queue." | `/factory:queue` | Starts the unattended scheduler for the repository |
-| "Show the Factory scorecard." | `/factory:score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
+| "Set up Clockgrove Factory for this repository." | `/factory:setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
+| "Is Clockgrove Factory set up correctly here?" | `/factory:doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
+| "File a Clockgrove Factory Objective: ..." | `/factory:file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
+| "Run Clockgrove Factory Objective 42 here." | `/factory:run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
+| "Review Clockgrove Factory PR 57." | `/factory:review <pr>` | Runs the reviewer on one Factory PR in your session |
+| "Start the Clockgrove Factory local loop." | `/factory:serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
+| "Start the Clockgrove Factory queue." | `/factory:queue` | Starts the unattended scheduler for the repository |
+| "Show the Clockgrove Factory scorecard." | `/factory:score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
 On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).

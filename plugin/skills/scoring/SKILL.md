@@ -1,6 +1,6 @@
 ---
 name: scoring
-description: How Factory scores an Objective. Use to read the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective) from the issue, the PR, the job log and the harness's usage artifact, with the unit and basis for each harness. Load when asked to score, explain or compare Factory runs, or when building a scorecard row (the `score` command skill loads it).
+description: How Clockgrove Factory scores an Objective. Use to read the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective) from the issue, the PR, the job log and the harness's usage artifact, with the unit and basis for each harness. Load when asked to score, explain or compare Clockgrove Factory runs, or when building a scorecard row (the `score` command skill loads it).
 ---
 
 # Score an Objective

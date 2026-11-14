@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "/factory:setup. Install Factory in the current repository on the user's consent: add .github/workflows/factory.yml through a pull request, walk the Factory GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Factory for a repository."
+description: "/factory:setup. Install Clockgrove Factory in the current repository on the user's consent: add .github/workflows/factory.yml through a pull request, walk the GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Clockgrove Factory for a repository."
 ---
 
 # /factory:setup
@@ -9,7 +9,7 @@ Everything here changes the repository or its GitHub settings, so each step says
 
 ## 1. The workflow file (`--apply workflow`)
 
-Ask once for the template's inputs and pass them as flags: `--harness` (claude, codex, copilot), `--model`, `--subagent-model`, `--reviewer-model`, `--max-concurrent`, `--daily-usd`, `--max-usd`, `--timeout-minutes` (under 360 on hosted runners), `--auto-merge` (default `true`: code lands with no human read, gated by CI, the reviewer and the merge queue), `--credential` (`api`, or `plan` for the user's own repository only), `--notify`, `--runs-on` (default: the CI workflow's runner), `--setup`, `--validation`, `--budget-command`, `--protected-paths`, `--ci-checks`. Show the rendered `.github/workflows/factory.yml`; on yes, write it (After lands it). A re-render keeps the file's settings: pass only changes (`--name=` clears one); show the kept and changed lines. It never triggers from a fork. `--sandbox vercel` writes the cloud-sandbox jobs instead (docs/ADAPTERS.md).
+Ask once for the template's inputs, passed as flags: `--harness` (claude, codex, copilot), `--model`, `--subagent-model`, `--reviewer-model`, `--max-concurrent`, `--daily-usd`, `--max-usd`, `--timeout-minutes` (under 360 on hosted runners), `--auto-merge` (default `true`: code lands with no human read, gated by CI, the reviewer and the merge queue), `--credential` (`api`, or `plan` for the user's own repository only), `--notify`, `--runs-on` (default: the CI workflow's runner), `--setup`, `--validation`, `--budget-command`, `--protected-paths`, `--ci-checks`. Show the rendered `.github/workflows/factory.yml`; on yes, write it (After lands it). A re-render keeps the file's settings: pass only changes (`--name=` clears one); show the kept and changed lines. It never triggers from a fork. `--sandbox vercel` writes the cloud-sandbox jobs instead (docs/ADAPTERS.md).
 
 ## 2. The GitHub App
 
@@ -25,7 +25,7 @@ Then the model credential, by the user (`gh secret set`): `ANTHROPIC_API_KEY` (n
 ## 3. GitHub settings
 
 - **Labels** (`--apply labels`) and **Project board** (`--apply project`): as the App when the user exported `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, else as their `gh` login; never read the key.
-- **Merge queue and branch protection** (`--apply protection`): the `factory` ruleset on the default branch (merge queue, required checks from `--ci-checks`, no deletion or force push) and squash commits from the PR's title and body. Rulesets need admin, which the App does not have, so this step runs as the user's own `gh` login. If the CI workflow lacks `merge_group:` under `on:`, offer to add the line.
+- **Merge queue and branch protection** (`--apply protection`): the `factory` ruleset on the default branch (a merge queue where GitHub offers one, required checks from `--ci-checks`, no deletion or force push) and squash commits from the PR's title and body. Rulesets need admin, which the App lacks, so this runs as the user's `gh` login. If the CI workflow lacks `merge_group:` under `on:`, offer to add the line.
 
 ## 4. Skills in the repository
 

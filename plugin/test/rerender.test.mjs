@@ -195,3 +195,82 @@ test("a credential or setup-only flag never lands in the workflow env; the file'
   assert.equal(r.after.env.FACTORY_APP_PRIVATE_KEY, "${{ secrets.FACTORY_APP_PRIVATE_KEY }}");
   assert.doesNotMatch(r.text, /123456|BEGIN KEY/);
 });
+
+test("setup's protection step: no merge queue on a user's repository, and a ruleset without one where GitHub refuses the rule", async () => {
+  const { applyProtection, noQueueReason } = await import("../scripts/setup.mjs");
+  assert.equal(noQueueReason({ owner: { type: "User" } }), "GitHub offers no merge queue on a repository a user owns");
+  assert.equal(noQueueReason({ owner: { type: "Organization" } }), null);
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const run = async (ownerType, refuseQueue, queue = true, { priv = false, existing = null } = {}) => {
+    const sent = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const u = new URL(url);
+      const method = init.method || "GET";
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (method === "GET" && u.pathname === "/repos/o/r") return json({ default_branch: "main", private: priv, owner: { type: ownerType } });
+      if (method === "GET" && u.pathname === "/repos/o/r/rulesets") return json(existing ? [{ id: 7, name: "factory" }] : []);
+      if (method === "GET" && u.pathname === "/repos/o/r/rulesets/7") return json({ id: 7, rules: existing.map((type) => ({ type })) });
+      if ((method === "POST" && u.pathname === "/repos/o/r/rulesets") || (method === "PUT" && u.pathname === "/repos/o/r/rulesets/7")) {
+        const types = body.rules.map((x) => x.type);
+        sent.push(`${method} ${types.includes("merge_queue") ? "queue" : "no-queue"}`);
+        if (refuseQueue && types.includes("merge_queue")) return json({ message: "Validation Failed", errors: ["merge_queue is not available"] }, 422);
+        return json({ id: 7 });
+      }
+      if (method === "PATCH" && u.pathname === "/repos/o/r") return json({});
+      return json({ message: `unexpected ${method} ${u.pathname}` }, 500);
+    };
+    const note = await applyProtection({ owner: "o", name: "r", full: "o/r" }, { ciChecks: ["quality"], queue }, { token: "t" });
+    return { sent, note };
+  };
+  try {
+    const user = await run("User", false);
+    assert.deepEqual(user.sent, ["POST no-queue"], "a user's repository: one ruleset, no queue rule");
+    assert.match(user.note, /no merge queue \(GitHub offers no merge queue on a repository a user owns; Factory runs on strict required checks\)/);
+    const org = await run("Organization", false);
+    assert.deepEqual(org.sent, ["POST queue"]);
+    assert.match(org.note, /: merge queue, required checks quality/);
+    const refused = await run("Organization", true, true, { priv: true });
+    assert.deepEqual(refused.sent, ["POST queue", "POST no-queue"], "a private organization repository refused: tried with the queue, then made without it");
+    assert.match(refused.note, /no merge queue \(GitHub refused a merge queue on this private repository: .*Validation Failed/);
+    // GitHub offers a queue on every public organization repository: a 422 there is a real error, never a quiet fallback.
+    await assert.rejects(run("Organization", true, true, { priv: false }), /422|Validation Failed/);
+    // A queue stood before: a refusal now surfaces, and the working queue is not removed.
+    const before = run("Organization", true, true, { priv: true, existing: ["merge_queue", "required_status_checks"] });
+    await assert.rejects(before, /422|Validation Failed/);
+    const kept = await run("Organization", false, true, { existing: ["merge_queue"] });
+    assert.deepEqual(kept.sent, ["PUT queue"], "an existing ruleset is updated in place, queue kept");
+    const off = await run("Organization", false, false);
+    assert.deepEqual(off.sent, ["POST no-queue"]);
+    assert.match(off.note, /no merge queue \(--merge-queue false/);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});
+
+test("setup's project step skips the board on a repository a user owns: no GitHub App can move its cards (#199)", async () => {
+  const { applyProjectStep } = await import("../scripts/setup.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    calls.push(`${init.method || "GET"} ${u.pathname}`);
+    if (u.pathname === "/repos/me/app") return new Response(JSON.stringify({ default_branch: "main", owner: { type: "User" } }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ message: "unexpected" }), { status: 500, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const note = await applyProjectStep({ owner: "me", name: "app", full: "me/app" }, { token: "t" });
+    assert.match(note, /^skipped: a repository a user owns gets no board/);
+    assert.deepEqual(calls, ["GET /repos/me/app"], "no project query or mutation");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});

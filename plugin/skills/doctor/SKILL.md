@@ -1,6 +1,6 @@
 ---
 name: doctor
-description: /factory:doctor. Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Factory runs, and name the fix for each failure. Use when the user asks whether Factory is set up, why Objectives Block at the first step, or before enabling the workflow.
+description: /factory:doctor. Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Factory runs, and name the fix for each failure. Use when the user asks whether Clockgrove Factory is set up, why Objectives Block at the first step, or before enabling the workflow.
 ---
 
 # /factory:doctor

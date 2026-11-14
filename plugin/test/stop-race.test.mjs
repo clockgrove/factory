@@ -203,3 +203,108 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
   assert.equal(late.json.exited, 1, "past its time the stage exits");
   assert.ok(late.json.ended?.length === 1 && late.json.ended[0].usd > 0 && late.json.ended[0].low, "having written what it knew at once");
 });
+
+test("the merge pass fails closed: an issue it cannot read merges nothing ('pending'); the dispatcher's listed issue costs no read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-closed-"));
+  const script = `
+    import { mergeReadyOne } from ${JSON.stringify(LIB("session.mjs"))};
+    import { RETRY } from ${JSON.stringify(LIB("github.mjs"))};
+    RETRY.sleep = async () => {};
+    ${FETCH(["factory:objective"], "/issues/7")}
+    const repo = { owner: "acme", name: "app", full: "acme/app" };
+    const real = globalThis.fetch;
+    globalThis.fetch = (url, init) => (new URL(url).pathname === "/repos/acme/app/issues/7" ? Promise.resolve(new Response('{"message":"bad gateway"}', { status: 502, headers: { "content-type": "application/json" } })) : real(url, init));
+    const unread = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective" }, { token: "t" });
+    calls.length = 0;
+    const listed = await mergeReadyOne(repo, { issue: 7, prNumber: 70, queue: false, objectiveLabel: "factory:objective", issueData: { number: 7, state: "open", labels: [] } }, { token: "t" });
+    process.stdout.write(JSON.stringify({ unread, listed, calls }) + "\\n");
+    process.exit(0);
+  `;
+  const r = await stage(script, root, 30_000);
+  assert.ok(r.json, r.err);
+  assert.equal(r.json.unread, "pending");
+  assert.equal(r.json.listed, "stopped", "the listed issue decides");
+  assert.ok(!r.json.calls.some((c) => c.endsWith("/issues/7")), r.json.calls.join("\n"));
+});
+
+test("confirmRunning with `commit`: the exit begins at the read, so a later stop ends nothing; a stop before it parks the caller", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-confirm-"));
+  const script = `
+    import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
+    import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
+    ${FETCH(["factory:objective"])}
+    const repo = { owner: "acme", name: "app", full: "acme/app" };
+    const live = { number: 7, state: "open", labels: [{ name: "factory:objective" }] };
+    const first = await confirmRunning({ read: async () => live, label: "factory:objective", onStop: () => {}, commit: true });
+    const ends = [];
+    const took = await stopStage({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, records: [], finish: async (e) => ends.push(e), opts: { token: "t" } });
+    process.stdout.write(JSON.stringify({ first, took, ends }) + "\\n");
+    process.exit(0);
+  `;
+  const r = await stage(script, root, 30_000);
+  assert.ok(r.json, r.err);
+  assert.deepEqual(r.json, { first: true, took: false, ends: [] });
+  const racing = `
+    import { confirmRunning, requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
+    let settled = false;
+    // The stop lands while the issue is being read: the caller parks.
+    confirmRunning({ read: async () => (requestStageStop("unlabeled"), { number: 7, state: "open", labels: [{ name: "factory:objective" }] }), label: "factory:objective", onStop: () => {}, commit: true }).then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 200));
+    process.stdout.write(JSON.stringify({ settled }) + "\\n");
+    process.exit(0);
+  `;
+  const p = await stage(racing, root, 30_000);
+  assert.deepEqual(p.json, { settled: false });
+});
+
+test("stoppedEnd (a review stage whose merge pass found the Objective stopped): the stage ends `stopped`, its PR a draft", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-end-"));
+  const script = `
+    import { stoppedEnd } from ${JSON.stringify(LIB("session.mjs"))};
+    ${FETCH([])}
+    const repo = { owner: "acme", name: "app", full: "acme/app" };
+    const order = [];
+    await stoppedEnd({ cause: "unlabeled", label: "factory:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, finish: async (e, why) => order.push(e + ": " + why + " @" + calls.length), opts: { token: "t" } });
+    process.stdout.write(JSON.stringify({ order, calls }) + "\\n");
+    process.exit(0);
+  `;
+  const r = await stage(script, root, 30_000);
+  assert.ok(r.json, r.err);
+  assert.deepEqual(r.json.order, ["stopped: `factory:objective` was removed @0"]);
+  assert.ok(r.json.calls.some((c) => /convertPullRequestToDraft/.test(c)), r.json.calls.join("\n"));
+});
+
+test("the backstop's spend write: a final figure set but not landed is written at once; without one, the live reading", async () => {
+  const { createServer } = await import("node:http");
+  const bodies = [];
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET") return res.end("[]");
+      const text = JSON.parse(b || "{}").body || "";
+      bodies.push(`${req.method} ${text}`);
+      res.end(JSON.stringify({ id: 9, user: { login: "me", type: "User" }, body: text }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const root = mkdtempSync(join(tmpdir(), "stop-flush-"));
+  const script = `
+    import { progressReporter } from ${JSON.stringify(LIB("session.mjs"))};
+    import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
+    const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "1", soFar: null });
+    await progress("harness");
+    progress.spend(1.5);
+    progress.flushNow();
+    process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
+  let err = "";
+  child.stderr.on("data", (c) => (err += c));
+  assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);
+  server.close();
+  assert.ok(existsSync(root));
+  assert.match(bodies.at(-1), /^PATCH [^]*<!-- factory:spend \{"usd":1\.5\} -->/, bodies.join("\n---\n"));
+});

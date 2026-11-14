@@ -70,6 +70,8 @@ function fakeGitHub(g) {
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : null;
     let m;
+    // The Objective's issue, open and labelled: the merge pass reads it before any merge (session.mjs mergeReadyOne).
+    if (method === "GET" && /\/issues\/\d+$/.test(u.split("?")[0])) return json(200, { number: Number(/(\d+)$/.exec(u.split("?")[0])[1]), state: "open", labels: [{ name: "factory:objective" }] });
     if (/\/graphql$/.test(u)) {
       const q = body.query;
       if (q.includes("isInMergeQueue")) return json(200, { data: { repository: { pullRequest: { isInMergeQueue: queued.has(body.variables.n) } } } });

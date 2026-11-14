@@ -868,7 +868,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    * The stop signal's last write, made at once (rest-sync.mjs): a stopped stage whose end ran out of time (stopStage's
    * backstop) leaves its live spend in its line as a stop signal would.
    */
-  progress.flushNow = () => stopWrite();
+  progress.flushNow = () => {
+    if (spend === null) return stopWrite();
+    // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once.
+    if (commentId === null || !(spend > shown)) return;
+    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf({ spend, spendParts })}` }, token }, { ms: STOP_WRITE_MS });
+    if (r.ok) shown = spend;
+    else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+  };
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
@@ -1472,8 +1479,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
 }
 
 /**
- * The running stage's stop (stop.mjs): its Objective's label came off, its issue closed or a restart was asked for
- * (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
+ * The running stage's stop (stop.mjs): its Objective's label came off, or its issue closed (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
  * holdIfStopped). Nothing more when the stage had committed to its own exit (an exit being applied, a merge: false) or
  * was ending already (false). Otherwise its passes get up to `settleMs` to end and what they left is reaped (the
  * backend's sandbox.reap); its records are every pass this process ran, a pass ended before it reported dollars at its
@@ -1507,15 +1513,7 @@ export async function stopStage({ cause, label, repo, issue, pr = undefined, rec
     if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; it counts at its live reading`);
     await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
     records.splice(0, records.length, ...recordsNow());
-    await finish("stopped", reason);
-    ended = true;
-    let timer = null;
-    const late = new Promise((r) => {
-      timer = setTimeout(() => r("late"), tidyMs);
-    });
-    const tidy = await Promise.race([applyStop(repo, issue, { pr, closed: cause === "closed" }, opts).then(() => "done", () => "failed"), late]);
-    clearTimeout(timer);
-    if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
+    await stoppedEnd({ cause, label, repo, issue, pr, finish, opts, tidyMs, onEnded: () => (ended = true) });
     return true;
   } catch (e) {
     // The end could not be written the usual way: what is known is written now, as the backstop would.
@@ -1528,6 +1526,23 @@ export async function stopStage({ cause, label, repo, issue, pr = undefined, rec
     ended = true;
     clearTimeout(backstop);
   }
+}
+
+/**
+ * A stopped stage's end (stopStage, and a review stage whose merge pass found the Objective stopped): `finish("stopped",
+ * reason)` first (its usage, its spend line, its last progress line), then the Objective left stopped (stop.mjs applyStop)
+ * for at most `tidyMs`: the dispatcher's stopped pass finishes what the tidy did not.
+ */
+export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, finish, opts, tidyMs = STOP_TIDY_MS, onEnded = () => {} }) {
+  await finish("stopped", stopText(cause, label));
+  onEnded();
+  let timer = null;
+  const late = new Promise((r) => {
+    timer = setTimeout(() => r("late"), tidyMs);
+  });
+  const tidy = await Promise.race([applyStop(repo, issue, { pr, closed: cause === "closed" }, opts).then(() => "done", () => "failed"), late]);
+  clearTimeout(timer);
+  if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */
@@ -1837,8 +1852,8 @@ export function mergeBlockReason(how, report = {}) {
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
  * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
- * or "stopped" (its Objective is stopped or waits for its restart, read first: nothing merges; the stop's tidy or the
- * restart takes the PR out of the queue). In the
+ * or "stopped" (its Objective is stopped, read first, from `issueData` when the caller has it: nothing merges; the stop's
+ * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
  * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
@@ -1847,14 +1862,15 @@ export function mergeBlockReason(how, report = {}) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective" }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
-  // A stopped Objective (its label removed, its issue closed, a restart asked for: stop.mjs stopCause) never merges,
-  // whoever runs this pass: the dispatcher, a review stage that has not seen the stop yet, a local loop following it.
-  // A read that fails stops nothing here: the stage's own watch and the dispatcher's stopped pass still see the stop.
-  const issueNow = await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); merging on`), null));
-  if (issueNow && stopCause(issueNow, objectiveLabel)) return "stopped";
+  // A stopped Objective (its label removed, its issue closed: stop.mjs stopCause) never merges, whoever runs this pass:
+  // the dispatcher (with the issue it listed), a review stage that has not seen the stop yet, a local loop following it.
+  // An issue that cannot be read merges nothing now: the caller tries again.
+  const issueNow = issueData ?? (await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); next try`), null)));
+  if (!issueNow) return "pending";
+  if (stopCause(issueNow, objectiveLabel)) return "stopped";
   // A sibling merged first and this PR conflicts with the default branch: no merge or enqueue can take it (#2647).
   if (pr.mergeable_state === "dirty") return "conflict";
   let sha = await recordedMergeable(repo, prNumber, issue, opts);

@@ -96,10 +96,12 @@ export const holdIfStopped = () => (stopping() ? parked() : Promise.resolve());
  * Before the stage's last changes (its exit, its merge): its issue read once more, since the watch reads it only once
  * a minute. A stopped Objective asks for the stop (`onStop`) and parks the caller; a read that fails goes on.
  */
-export async function confirmRunning({ read, label, onStop }) {
+export async function confirmRunning({ read, label, onStop, commit = false }) {
   await holdIfStopped();
   const cause = stopCause(await read().catch(() => null), label);
-  if (!cause || STOP.committed) return true;
+  // `commit`: the caller's exit begins now (commitExit), with no await between the read and the commit, so a stop after
+  // the read ends nothing (the dispatcher's stopped pass tidies what the exit leaves) and one before it parks the caller.
+  if (!cause || STOP.committed) return commit && !commitExit() ? parked() : true;
   onStop(cause);
   return parked();
 }

@@ -70,6 +70,7 @@ import {
   mergeBlockReason,
   mergeReadyOne,
   stopStage,
+  stoppedEnd,
   unreadNow,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
@@ -380,7 +381,7 @@ async function main() {
     if (took) process.exit(0);
   };
   watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
-  beforeExit = () => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = (commit = false) => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
@@ -873,7 +874,9 @@ async function main() {
   // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no
   // merge, no ready mark, no label); the stop's end stands.
   await holdIfStopped();
-  await beforeExit?.();
+  // The exit begins here (stop.mjs confirmRunning `commit`): a stop after this read ends nothing, and the dispatcher's
+  // stopped pass tidies what this exit leaves; the merge pass reads the issue once more before any merge.
+  await beforeExit?.(true);
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
   if (decision.exit === "blocked") {
     decision.reason = relayReason(decision.reason);
@@ -918,6 +921,7 @@ async function main() {
       decision.reason = `the maintainers' comments could not be re-read before the merge: ${e.message.slice(0, 160)}`;
     }
   }
+  let stoppedAtMerge = null;
   if (decision.exit === "delivered" && !decision.rerun && !conflict) {
     // A harness may have converted the PR to a draft (the task card keeps PRs drafts until Factory's pass); delivered means ready.
     if (pr.draft) await setDraft(repo, pr.number, false, token).catch((e) => log(`ready: ${e.message.slice(0, 120)}`));
@@ -927,11 +931,10 @@ async function main() {
     if (closes && !closes.includes(issue)) {
       await rest(`repos/${repo.full}/pulls/${pr.number}`, { ...token, method: "PATCH", body: { body: `${pr.body || ""}\n\nCloses #${issue}\n` } }).catch((e) => log(`body: ${e.message.slice(0, 120)}`));
     }
+    // The stop mergeReadyOne found: its own end replaces this exit.
     if (inputs.autoMerge) {
       // The head Factory validated and pushed is the one it merges; nothing armed rides a later push.
-      // The stage commits to its exit here: a stop after this ends nothing (the merge closes the issue, which is no stop
-      // of a merged Objective), and mergeReadyOne reads the issue once more before it merges.
-      if (!commitExit()) await parked();
+      // The merge closes the issue, which is no stop of a merged Objective: the watch ends here.
       watch?.stop();
       let recorded = false;
       try {
@@ -943,6 +946,8 @@ async function main() {
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back once to
         // rebase (dispatch.mjs, logic.mjs staleDecision), and a conflict after that rebase Blocks there.
+        // Stopped since the stage's last read: nothing merged, and the stage ends as a stop does.
+        if (how === "stopped") stoppedAtMerge = stopCause(await getIssue(repo, issue, token).catch(() => null), inputs.objectiveLabel) || "unlabeled";
         if (how === "conflict") decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;
         if (why) {
           decision.exit = "blocked";
@@ -962,6 +967,11 @@ async function main() {
         }
       }
     } else log(`auto_merge is false: PR #${pr.number} is ready for a human merge`);
+  }
+  if (stoppedAtMerge) {
+    await dropLabel();
+    await stoppedEnd({ cause: stoppedAtMerge, label: inputs.objectiveLabel, repo, issue, pr, finish, opts: token });
+    return;
   }
   // Hosts the answer pass's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
   const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;

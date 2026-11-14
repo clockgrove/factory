@@ -516,7 +516,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         // green, with no unread maintainer decision. Nothing is armed between ticks.
         const report = {};
         if (queue) hungMs ??= await queueBoundMs(repo, opts);
-        const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel }, opts).catch((e) => {
+        const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue }, opts).catch((e) => {
           log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
           return null;
         });

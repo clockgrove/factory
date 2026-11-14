@@ -221,7 +221,7 @@ async function main() {
     if (took) process.exit(0);
   };
   watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
-  beforeExit = () => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = (commit = false) => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
   // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
   // landing between the two reads then count as after this stage's plan, never as before it.
@@ -673,7 +673,9 @@ async function main() {
   // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no ready
   // mark, no review label); the stop's end stands.
   await holdIfStopped();
-  await beforeExit?.();
+  // The exit begins here (stop.mjs confirmRunning `commit`): a stop after this read ends nothing, and the dispatcher's
+  // stopped pass tidies the ready mark and review label this exit may leave.
+  await beforeExit?.(true);
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {

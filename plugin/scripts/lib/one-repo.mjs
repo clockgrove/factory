@@ -1,12 +1,12 @@
 // One repository per Objective. An issue body that names another repository on a `Factory-Repository: OWNER/NAME`
 // line, or a plan that needs a change in another repository (its `Needs-Repository: OWNER/NAME` line, the
-// objective-plan skill), is a Question at plan time: the owner splits the Objective into one Objective per repository
+// factory-objective-plan skill), is a Question at plan time: the owner splits the Objective into one Objective per repository
 // and re-applies the label, or, for a plan's need, answers how to do the work in this repository alone. The body line
 // is checked before any harness runs; the plan's line when the harness writes its plan, which stops it there.
 
 /** The issue-body line that names a repository for the Objective to change. */
 export const DECLARE_KEY = "Factory-Repository";
-/** The plan line that names a repository the Objective needs a change in (the objective-plan skill), then why. */
+/** The plan line that names a repository the Objective needs a change in (the factory-objective-plan skill), then why. */
 export const NEED_KEY = "Needs-Repository";
 
 const NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;

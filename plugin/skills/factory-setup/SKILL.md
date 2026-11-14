@@ -1,9 +1,9 @@
 ---
-name: setup
-description: "/factory:setup. Install Clockgrove Factory in the current repository on the user's consent: add .github/workflows/factory.yml through a pull request, walk the GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Clockgrove Factory for a repository."
+name: factory-setup
+description: "/factory:factory-setup. Install Clockgrove Factory in the current repository on the user's consent: add .github/workflows/factory.yml through a pull request, walk the GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Clockgrove Factory for a repository."
 ---
 
-# /factory:setup
+# /factory:factory-setup
 
 Everything here changes the repository or its GitHub settings, so each step says what it will do and waits for a yes. The work is done by the plugin's `scripts/setup.mjs`: `node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes` (the plugin's root is two directories up), one consented step at a time, where `<step>` is `workflow`, `labels`, `project` or `protection`. Without `--yes` the script only prints what it would do; preview with that before asking.
 
@@ -37,4 +37,4 @@ For Factory on the user's own machine, walk `docs/LOCAL.md` instead of steps 1 t
 
 ## After
 
-On a yes, land the workflow file through a pull request ([reference.md](reference.md) beside this file). Then run the doctor skill and show its lines. End with what is left for the user: merge it, then say what to build (the file skill).
+On a yes, land the workflow file through a pull request ([reference.md](reference.md) beside this file). Then run the factory-doctor skill and show its lines. End with what is left for the user: merge it, then say what to build (the factory-file skill).

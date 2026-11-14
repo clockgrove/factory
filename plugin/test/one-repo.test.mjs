@@ -185,8 +185,8 @@ test("plan-time Question: the exit is a Question even with no commit and no PR, 
   assert.equal(decideExit({ harness, pr, commits: 1, protectedHits: [".github/x"], planNeeds: planNeedsReason }).exit, "blocked");
 });
 
-test("plan-time Question: the objective-plan skill names the plan line Factory reads and the one-repository rule", () => {
-  const skill = readFileSync(join(PLUGIN_ROOT, "skills", "objective-plan", "SKILL.md"), "utf8");
+test("plan-time Question: the factory-objective-plan skill names the plan line Factory reads and the one-repository rule", () => {
+  const skill = readFileSync(join(PLUGIN_ROOT, "skills", "factory-objective-plan", "SKILL.md"), "utf8");
   assert.ok(skill.includes(`\`${NEED_KEY}: OWNER/NAME\``), "the plan line, as plannedRepos reads it");
   assert.match(skill, /one repository per Objective/);
   assert.match(skill, /`question` exit record \(test `access`\)/);

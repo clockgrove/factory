@@ -43,7 +43,7 @@ test("Copilot on a runner: its own sandbox under Factory's policy, never --allow
   assert.deepEqual(launch, ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${COPILOT_RUNNER_HOME}`, `PATH=${COPILOT_RUNNER_HOME}/bin:/opt/tool/bin:/usr/bin`, "copilot", "-p"], "Factory's HOME and bwrap first, a TMPDIR of its own, nothing of the agent's home and no relative entry on its PATH");
   assert.ok(!COPILOT_TMP_LAUNCH.includes("${"));
   assert.equal(copilotRunner({ harness: "codex", agent: AGENT, clone: CLONE }), null);
-  assert.equal(copilotRunner({ harness: "copilot", agent: null, clone: CLONE }), null, "no agent uid (a developer's /factory:run): no runner sandbox");
+  assert.equal(copilotRunner({ harness: "copilot", agent: null, clone: CLONE }), null, "no agent uid (a developer's /factory:factory-run): no runner sandbox");
   assert.equal(copilotRunner({ harness: "copilot", agent: AGENT, clone: CLONE, env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
   assert.ok(harnessCommand({ harness: "copilot", prompt: "p" }).args.includes("--allow-all"), "a developer's own session is unchanged");
 });

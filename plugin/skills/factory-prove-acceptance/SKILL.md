@@ -1,6 +1,6 @@
 ---
-name: prove-acceptance
-description: Third step of working a Clockgrove Factory Objective, after implement-split and before deliver-pr. Use to prove every acceptance entry through the repository's real path per its testing guide, run the validation and test-budget commands, apply the base-failure rule and iterate locally before you hand off. Load when a task card says to use prove-acceptance.
+name: factory-prove-acceptance
+description: Third step of working a Clockgrove Factory Objective, after factory-implement-split and before factory-deliver-pr. Use to prove every acceptance entry through the repository's real path per its testing guide, run the validation and test-budget commands, apply the base-failure rule and iterate locally before you hand off. Load when a task card says to use factory-prove-acceptance.
 ---
 
 # Prove the acceptance
@@ -9,7 +9,7 @@ Every acceptance entry in the issue gets a proof that a reviewer can run. A clai
 
 ## The real path
 
-Prove each entry through the path the repository's testing guide calls real: the component that owns the behaviour, the real database, the real HTTP or CLI surface, the real browser where the guide places browser tests. One lasting test per claim, asserting exact values, placed where the guide says that kind of test lives. A proof that runs only against a fake, a mock or an in-memory stand-in is not a proof of the entry; if the real path cannot run in this sandbox, say so in pr.md (deliver-pr lists these) and keep the fake-only test marked as such in its name or a comment. Delete scaffolding tests the guide calls disposable before handoff.
+Prove each entry through the path the repository's testing guide calls real: the component that owns the behaviour, the real database, the real HTTP or CLI surface, the real browser where the guide places browser tests. One lasting test per claim, asserting exact values, placed where the guide says that kind of test lives. A proof that runs only against a fake, a mock or an in-memory stand-in is not a proof of the entry; if the real path cannot run in this sandbox, say so in pr.md (factory-deliver-pr lists these) and keep the fake-only test marked as such in its name or a comment. Delete scaffolding tests the guide calls disposable before handoff.
 
 ## Never weaken a test
 
@@ -37,4 +37,4 @@ Write a code comment only where the code does not explain itself: a non-obvious 
 
 ## Before leaving this step
 
-Every acceptance entry maps to a test that ran and passed through its real path or is listed as fake-only with a reason; every validation command and the budget command are green or carry a base failure named in your notes; the formatter has run. Then load deliver-pr.
+Every acceptance entry maps to a test that ran and passed through its real path or is listed as fake-only with a reason; every validation command and the budget command are green or carry a base failure named in your notes; the formatter has run. Then load factory-deliver-pr.

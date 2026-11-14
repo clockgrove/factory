@@ -1,9 +1,9 @@
 ---
-name: review
-description: "/factory:review <pr>. Run the Clockgrove Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Clockgrove Factory PR by number."
+name: factory-review
+description: "/factory:factory-review <pr>. Run the Clockgrove Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Clockgrove Factory PR by number."
 ---
 
-# /factory:review <pr>
+# /factory:factory-review <pr>
 
 Run one reviewer pass on a PR in this session, exactly as the Action's reviewer job does.
 
@@ -17,10 +17,10 @@ Run one reviewer pass on a PR in this session, exactly as the Action's reviewer 
 
 ## Review
 
-Load the `review-pr` skill and follow it. The reviewer is one model call on the top model: if this session's model is not the reviewer model pinned in this plugin's `agents/` for this harness, spawn the `reviewer` agent definition and give it the issue text, the diff and the PR body; otherwise do the pass yourself. Either way the result is the skill's JSON: `acceptance` (one judgment per entry) and `comments` (`path`, `line`, `entry`, `body`), each comment on an entry carrying its `entry`.
+Load the `factory-review-pr` skill and follow it. The reviewer is one model call on the top model: if this session's model is not the reviewer model pinned in this plugin's `agents/` for this harness, spawn the `reviewer` agent definition and give it the issue text, the diff and the PR body; otherwise do the pass yourself. Either way the result is the skill's JSON: `acceptance` (one judgment per entry) and `comments` (`path`, `line`, `entry`, `body`), each comment on an entry carrying its `entry`.
 
 Write that JSON (`{"acceptance": [...], "comments": [...]}`) to a file outside the clone, and have Factory post it: `factory post-review <pr> <file>` (else `node <plugin root>/scripts/local.mjs post-review <pr> <file>`). Factory fits each comment to the diff, adds one for each entry judged not met without one, neutralises mentions and markers in the text, and posts one comment-only review with the judgments in its body on the head with the `<!-- factory:<issue>:review -->` marker, so the Action's review job does not repeat the pass. It posts nothing from a file with no reviewer JSON or no judgment of the issue's entries; fix the file and run it again. Post nothing yourself; never approve, never request changes.
 
 ## After
 
-Tell the user how many comments were posted and list them one per line as `path:line: first sentence`. The worker (`/factory:run <issue>` on the branch, or the Action's worker pass) answers them; do not answer them yourself. The Action's answer pass answers this review like its own, since it carries the marker and comes from someone who can push.
+Tell the user how many comments were posted and list them one per line as `path:line: first sentence`. The worker (`/factory:factory-run <issue>` on the branch, or the Action's worker pass) answers them; do not answer them yourself. The Action's answer pass answers this review like its own, since it carries the marker and comes from someone who can push.

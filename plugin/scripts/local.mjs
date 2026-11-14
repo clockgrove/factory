@@ -1569,7 +1569,7 @@ async function sessionInputs({ dir, repoFull, repo, opts }) {
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
 
 /**
- * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:run --here, /factory:review), written
+ * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
  * to --out (default $FACTORY_IN/issue.md, else <git dir>/factory-in/issue.md) as the worker writes it: the title and
  * body read with their author and last editor, only when both can push or are pinned maintainers. Otherwise nothing is
  * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Writes
@@ -1588,7 +1588,7 @@ async function issueForSession(issue, flags) {
 }
 
 /**
- * `factory deliver <issue>`: Factory's half of an Objective worked in a session (/factory:run --here). The session
+ * `factory deliver <issue>`: Factory's half of an Objective worked in a session (/factory:factory-run --here). The session
  * committed on factory/<issue> in this clone and left its hand-off files in --out (default <git dir>/factory-out);
  * Factory checks the issue's author and last editor (objective-trust.mjs: a Block, nothing pushed, when either cannot
  * vouch for it), checks the protected paths, pushes, opens or updates the PR from pr.md, posts the plan comment, the
@@ -1600,7 +1600,7 @@ async function deliver(issue, flags) {
   const branch = `factory/${issue}`;
   const current = sh("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
   if (current !== branch) throw new Error(`the clone is on ${current}; deliver runs on ${branch}`);
-  // Run from a session (/factory:run --here), so the App's key is not read here: notices post with this token.
+  // Run from a session (/factory:factory-run --here), so the App's key is not read here: notices post with this token.
   if (process.env.FACTORY_LOCAL_APP_ID) log("notices post with your own token here, so their @mention notifies no one; the App posts them only for serve and run");
   const { defaultBranch, inputs } = await sessionInputs(clone);
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
@@ -1630,7 +1630,7 @@ async function deliver(issue, flags) {
     await planSync(repo, issue, opts)(files["plan.md"]);
     await postNote(repo, issue, files["note.md"], opts);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: planNeeds, notify: inputs.notify, stage: "work", askOnIssue: true }, opts);
-    // A `--here` run is unmetered (skills/score): its comment carries no spend line.
+    // A `--here` run is unmetered (skills/factory-score): its comment carries no spend line.
     if (needs.repos.length) await progressReporter(repo, issue, opts, { stage: "work", soFar: null }).planAsked(needs.repos);
     log(`#${issue}: question at plan time (${planNeeds}); nothing pushed`);
     return 1;
@@ -1683,7 +1683,7 @@ export function reviewPostFor({ issue, text, file, diff, entries }) {
 }
 
 /**
- * `factory post-review <pr> <findings.json>`: post a reviewer pass made in a session (/factory:review) as Factory's one
+ * `factory post-review <pr> <findings.json>`: post a reviewer pass made in a session (/factory:factory-review) as Factory's one
  * comment-only review (handoff.mjs reviewPost): the findings fitted to the diff and their text sanitised, a comment for
  * each entry judged not met without one, the judgments in the body, under the review marker.
  */

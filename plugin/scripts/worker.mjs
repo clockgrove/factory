@@ -468,7 +468,7 @@ async function main() {
   // 6. What the run left behind: the hand-off files, commits, protected paths, the PR. Factory pushes and opens the PR;
   // pushes carry no model secret.
   await io.collect();
-  // A plan that needs a change in another repository (its Needs-Repository line, objective-plan) is a Question at plan
+  // A plan that needs a change in another repository (its Needs-Repository line, factory-objective-plan) is a Question at plan
   // time (lib/one-repo.mjs): the harness stops after its plan, and Factory runs no validation, fix pass or exit-record
   // call for it. Whatever it committed anyway still goes up, as a draft. A rebase send-back changes no plan.
   const ignoredNeeds = plannedRepos(io.plan()).ignored;

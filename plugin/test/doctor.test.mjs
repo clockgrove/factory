@@ -96,7 +96,7 @@ test("setup files: a root setup file is protected at the root only, so a same-na
   assert.deepEqual(protectedTouched(["build.mjs", ".env.example", "configure"], list), ["build.mjs", ".env.example", "configure"]);
 });
 
-test("app permissions: one list; a missing read FAILs, actions read is no extra, and README and the setup skill carry the same text", async () => {
+test("app permissions: one list; a missing read FAILs, actions read is no extra, and README and the factory-setup skill carry the same text", async () => {
   const { APP_PERMISSIONS_TEXT, permissionGaps } = await import("../scripts/lib/app-token.mjs");
   const { appPermissionChecks } = await import("../scripts/doctor.mjs");
   const { readFileSync } = await import("node:fs");
@@ -125,7 +125,7 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   assert.deepEqual(wf.map((c) => c.status), ["PASS", "WARN"]);
   assert.match(wf[1].fix, /workflows permission off/);
   const root = join(import.meta.dirname, "..", "..");
-  for (const doc of ["README.md", "plugin/skills/setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
+  for (const doc of ["README.md", "plugin/skills/factory-setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
 });
 
 test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat or rg; no shell-credential WARN anywhere", async () => {

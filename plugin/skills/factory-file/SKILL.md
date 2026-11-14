@@ -1,9 +1,9 @@
 ---
-name: file
-description: "/factory:file. Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created with the factory:objective label on the user's yes. Use when the user asks to file, create or queue a Clockgrove Factory Objective, or asks Clockgrove Factory to build something."
+name: factory-file
+description: "/factory:factory-file. Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created with the factory:objective label on the user's yes. Use when the user asks to file, create or queue a Clockgrove Factory Objective, or asks Clockgrove Factory to build something."
 ---
 
-# /factory:file
+# /factory:factory-file
 
 An Objective is a GitHub issue that is the whole specification: the worker cannot ask anything while it runs. Write the issue, show it, and create it only on a yes.
 

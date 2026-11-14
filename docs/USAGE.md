@@ -4,7 +4,7 @@ How to write an Objective, what you see while it runs, and what to do when Facto
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the file skill), or write the issue yourself:
+An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the factory-file skill), or write the issue yourself:
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading such as `Acceptance` (`Done when`, `Definition of done`, `Must be true` and `Criteria` are read the same way). The reviewer judges each entry, met or not, with the line that shows it. Without such a section, the reviewer names the entries from the issue text itself.
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
@@ -60,13 +60,13 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 
 | Say | Command | What it does |
 | --- | --- | --- |
-| "Set up Clockgrove Factory for this repository." | `/factory:setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
-| "Is Clockgrove Factory set up correctly here?" | `/factory:doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
-| "File a Clockgrove Factory Objective: ..." | `/factory:file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
-| "Run Clockgrove Factory Objective 42 here." | `/factory:run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
-| "Review Clockgrove Factory PR 57." | `/factory:review <pr>` | Runs the reviewer on one Factory PR in your session |
-| "Start the Clockgrove Factory local loop." | `/factory:serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
-| "Start the Clockgrove Factory queue." | `/factory:queue` | Starts the unattended scheduler for the repository |
-| "Show the Clockgrove Factory scorecard." | `/factory:score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
+| "Set up Clockgrove Factory for this repository." | `/factory:factory-setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
+| "Is Clockgrove Factory set up correctly here?" | `/factory:factory-doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
+| "File a Clockgrove Factory Objective: ..." | `/factory:factory-file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
+| "Run Clockgrove Factory Objective 42 here." | `/factory:factory-run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
+| "Review Clockgrove Factory PR 57." | `/factory:factory-review <pr>` | Runs the reviewer on one Factory PR in your session |
+| "Start the Clockgrove Factory local loop." | `/factory:factory-serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
+| "Start the Clockgrove Factory queue." | `/factory:factory-queue` | Starts the unattended scheduler for the repository |
+| "Show the Clockgrove Factory scorecard." | `/factory:factory-score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
 On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).

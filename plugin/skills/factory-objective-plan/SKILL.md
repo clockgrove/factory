@@ -1,6 +1,6 @@
 ---
-name: objective-plan
-description: First step of working a Clockgrove Factory Objective (an issue labelled factory:objective). Use before any code is written to read the issue, write the plan, record every assumption and apply the Question rule. Load when a task card says to use objective-plan, or when asked to plan an Objective.
+name: factory-objective-plan
+description: First step of working a Clockgrove Factory Objective (an issue labelled factory:objective). Use before any code is written to read the issue, write the plan, record every assumption and apply the Question rule. Load when a task card says to use factory-objective-plan, or when asked to plan an Objective.
 ---
 
 # Plan the Objective
@@ -22,7 +22,7 @@ Where the issue admits more than one reading, take the simplest one that satisfi
 
 ## The Question rule
 
-An assumption that would change or remove an existing public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format), so that a use that works on the base commit breaks or behaves differently, that contradicts a recorded decision in the issue, or that grants new access (a permission, a credential, a service reachable from outside that was not), is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The deliver-pr skill then puts the question in pr.md's body and writes a `question` exit record naming, for each question, the test it meets; Factory keeps the PR a draft, so the queue moves on and a human answers in the PR. Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, never a Question, and so is a reversible choice the issue leaves open (a placeholder, a stand-in, a default, a label). Raise it only when one of these tests is met; the exit costs nothing, which is why it must be rare.
+An assumption that would change or remove an existing public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format), so that a use that works on the base commit breaks or behaves differently, that contradicts a recorded decision in the issue, or that grants new access (a permission, a credential, a service reachable from outside that was not), is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The factory-deliver-pr skill then puts the question in pr.md's body and writes a `question` exit record naming, for each question, the test it meets; Factory keeps the PR a draft, so the queue moves on and a human answers in the PR. Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, never a Question, and so is a reversible choice the issue leaves open (a placeholder, a stand-in, a default, a label). Raise it only when one of these tests is met; the exit costs nothing, which is why it must be rare.
 
 ## Another repository
 
@@ -34,4 +34,4 @@ If an acceptance entry needs a mechanism the base commit does not have (a table,
 
 ## Before leaving
 
-Confirm every acceptance entry maps to an item, every item names its files, every assumption is listed and plan.md is written. Then load implement-split.
+Confirm every acceptance entry maps to an item, every item names its files, every assumption is listed and plan.md is written. Then load factory-implement-split.

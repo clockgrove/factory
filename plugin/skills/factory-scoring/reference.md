@@ -1,6 +1,6 @@
 # scoring: reference
 
-Lookup detail for the scoring skill. SKILL.md says when to load each section; every rule here is as binding as one there.
+Lookup detail for the factory-scoring skill. SKILL.md says when to load each section; every rule here is as binding as one there.
 
 ## Dollars by harness
 

@@ -326,20 +326,95 @@ test("readers after a restart: a plan comment or a split record from before it i
   assert.match(EDITED_FIX, /factory:restart/);
 });
 
-test("a stage that missed the restart's label learns of it from the record newer than its start; an older record is no restart", async () => {
+test("a stage that missed the restart's label learns of it from a record newer than the ones it started with, whatever its clock", async () => {
   const { objectiveReader } = await import("../scripts/lib/stop.mjs");
   setSelf(BOT.login);
   try {
     let lists = 0;
     const comments = [recordComment()];
-    const read = (startedAt) => objectiveReader({ read: async () => ({ ...issue(["factory:objective"]), comments: comments.length }), list: async () => (lists++, comments), startedAt });
-    const before = read(Date.parse(AT) - 60_000);
-    assert.equal(stopCause(await before(), "factory:objective"), "restart");
-    const after = read(Date.parse(AT) + 60_000);
-    assert.equal(stopCause(await after(), "factory:objective"), null);
+    const reader = () => objectiveReader({ read: async () => ({ ...issue(["factory:objective"]), comments: comments.length }), list: async () => (lists++, comments) });
+    // The restarted run's own stage: the record is there when it starts. On a machine whose clock is behind GitHub's,
+    // the record's time is "after" the stage's start, and it still is no restart of this stage.
+    const own = reader();
+    await own.prime();
+    assert.equal(stopCause(await own(), "factory:objective"), null);
     const n = lists;
-    await after();
+    await own();
     assert.equal(lists, n, "the comments are read again only when their count changes");
+    // A later restart, recorded while the stage runs: it stops.
+    comments.push(recordComment(7, "2031-03-02T05:00:00Z"));
+    assert.equal(stopCause(await own(), "factory:objective"), "restart");
+    // A stage that began before any record learns of the first one.
+    const early = objectiveReader({ read: async () => ({ ...issue(["factory:objective"]), comments: 0 }), list: async () => [] });
+    await early.prime();
+    const later = Object.assign(early, {});
+    assert.equal(stopCause(await later(), "factory:objective"), null);
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("a refused restart (a branch a ruleset keeps) discards nothing: its record is retired, and the plan, the decisions and the edit gate still read as before it", async () => {
+  const { planOf } = await import("../scripts/lib/handoff.mjs");
+  const t = await tick({ labels: ["factory:in-review"], keepBranch: true });
+  setSelf(BOT.login);
+  try {
+    assert.equal(restartedAt(t.state.comments), null, "no reader takes the refused restart for one");
+    assert.ok(t.state.comments.some((c) => /^<!-- factory:7:restart-undone:/.test(c.body)));
+    const decision = { id: 5, user: { login: "maintainer", type: "User" }, created_at: "2031-03-02T00:30:00Z", body: "Keep the old API." };
+    assert.deepEqual(maintainerDecisions([decision, ...t.state.comments]).map((d) => d.body), ["Keep the old API."]);
+    assert.equal(planOf(t.state.comments, 7)?.id, 11, "the plan comment is still the plan");
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("a permission read that fails for now holds the restart for the next tick: no refusal, the label stays", async () => {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  await withEnv({}, async () => {
+    setSelf(BOT.login);
+    const all = ["factory:objective", RESTART_LABEL, "factory:in-review"];
+    const api = fakeApi({ labels: all, writers: [], open: (label) => (label === "factory:objective" ? [issue(all)] : []), timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, actor: { login: "newcomer", type: "User" }, created_at: new Date(Date.now() - 60_000).toISOString() }] });
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (/\/collaborators\/newcomer\/permission$/.test(new URL(url).pathname) ? new Response('{"message":"bad gateway"}', { status: 502, headers: { "content-type": "application/json" } }) : real(url, init));
+    try {
+      const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+      assert.deepEqual(r.restarted, []);
+      assert.ok(api.state.labels.has(RESTART_LABEL));
+      assert.ok(!api.writes.some((w) => w.includes("restart-refused")));
+      assert.ok(r.deadlines.some((d) => d.kind === "retry"));
+    } finally {
+      globalThis.fetch = real;
+      api.restore();
+      setSelf(null);
+    }
+  });
+});
+
+test("a retry after the branch went (GitHub closed the PR with it) still comments on and closes the PR the record names; a gone label does nothing at all", async () => {
+  setSelf(BOT.login);
+  try {
+    await withEnv({}, async () => {
+      const first = { id: 50, user: BOT, created_at: "2031-03-02T02:01:00Z", body: `${restartMarker(7, AT)}\n${restartRecord({ issue: 7, at: AT, by: "maintainer", pr: 70, head: HEAD7 })}` };
+      const api = fakeApi({ comments: [first] });
+      api.state.prOpen = false;
+      api.state.branch = null;
+      try {
+        await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
+        assert.ok(api.writes.includes("POST /issues/70/comments <!-- factory:7:restarted:20310302T020000Z -->"), api.writes.join("\n"));
+        assert.ok(api.writes.includes("PATCH /pulls/70 closed"));
+      } finally {
+        api.restore();
+      }
+      const gone = fakeApi({ labels: ["factory:objective", "factory:running"] });
+      try {
+        const r = await restartObjective(REPO, 7, { at: AT, project: null }, { token: "t" });
+        assert.equal(r.finished, false);
+        assert.deepEqual(gone.writes, [], "nothing written: no record, no PR change, no label");
+      } finally {
+        gone.restore();
+      }
+    });
   } finally {
     setSelf(null);
   }

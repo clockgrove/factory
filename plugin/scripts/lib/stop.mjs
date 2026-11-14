@@ -45,22 +45,28 @@ export function stopCause(issue, label) {
 
 /**
  * A stage's read of its issue for its watch and its last checks (stop.mjs watchObjective, confirmRunning): the issue
- * (`read`), marked `restarted` once a restart record newer than the stage's start (`startedAt`, ms) is among its
- * comments (`list`, read again only when the issue's comment count changed), so a stage that missed the restart's
- * label still learns of it.
+ * (`read`), marked `restarted` once its comments (`list`, read again only when the issue's comment count changed) hold a
+ * restart record other than, and newer than, the newest one at the stage's first read (`prime()`, called as the stage
+ * starts), so a stage that missed the restart's label still learns of it. Records are compared with each other only,
+ * never with this machine's clock, which may be behind GitHub's.
  */
-export function objectiveReader({ read, list, startedAt }) {
+export function objectiveReader({ read, list }) {
   let count = null;
+  let base;
   let restarted = false;
-  return async () => {
+  const reader = async () => {
     const issue = await read();
     if (!restarted && issue && issue.comments !== count) {
       const at = restartedAt(await list());
       count = issue.comments;
-      restarted = !!at && Date.parse(at) > startedAt;
+      if (base === undefined) base = at;
+      else restarted = !!at && at !== base && (!base || Date.parse(at) > Date.parse(base));
     }
     return restarted ? { ...issue, restarted: true } : issue;
   };
+  /** The stage's first read: the restart records already there are no restart of this stage. A failed read waits for the next. */
+  reader.prime = () => reader().catch(() => null);
+  return reader;
 }
 
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
@@ -264,6 +270,9 @@ export class RestartRefused extends Error {
  */
 export async function restartObjective(repo, issue, { at, by = null, project = undefined }, opts) {
   const key = restartMarker(issue, at);
+  // The label gone already: another loop finished this restart (or a person took the label off). Nothing to do.
+  const labelled = (i) => (i?.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === RESTART_LABEL);
+  if (!labelled(await getIssue(repo, issue, opts))) return { pr: null, head: null, finished: false };
   const comments = await listComments(repo, issue, opts);
   const prior = restartRecordOf(comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c)));
   const pr = await findPr(repo, `factory/${issue}`, opts);
@@ -287,12 +296,19 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
     await rest(ref, { ...opts, method: "DELETE" }).catch((e) => {
       if (![404, 422].includes(e.status)) throw e;
     });
-    if (await headNow()) throw new RestartRefused(`the restart could not delete \`factory/${issue}\`: GitHub kept the branch (a ruleset that protects it refuses its deletion)`, `let Factory delete \`factory/*\` branches (the ruleset's bypass list, or a rule that leaves them out), or delete \`factory/${issue}\` yourself, then apply \`${RESTART_LABEL}\` again`);
+    if (await headNow()) {
+      // Nothing was discarded: the record is retired (its marker renamed), so no reader takes it for a restart and drops
+      // the plan, the parts record or the decisions from before it.
+      const id = record?.id ?? comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c))?.id;
+      if (id) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "restart-undone", String(at).replace(/[^0-9TZ]/g, ""))}\nFactory could not restart this Objective: GitHub kept its branch \`factory/${issue}\`. Nothing was discarded.` } });
+      throw new RestartRefused(`the restart could not delete \`factory/${issue}\`: GitHub kept the branch (a ruleset that protects it refuses its deletion)`, `let Factory delete \`factory/*\` branches (the ruleset's bypass list, or a rule that leaves them out), or delete \`factory/${issue}\` yourself, then apply \`${RESTART_LABEL}\` again`);
+    }
   }
-  if (pr?.number) {
+  // The PR the record names: GitHub closed it when its branch went, so a retry finds it closed and still comments on it.
+  if (fields.pr) {
     const link = record?.html_url ? ` ([the restart](${record.html_url}))` : "";
-    await upsertComment(repo, pr.number, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Factory: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
-    await rest(`repos/${repo.full}/pulls/${pr.number}`, { ...opts, method: "PATCH", body: { state: "closed" } });
+    await upsertComment(repo, fields.pr, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Factory: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
+    await rest(`repos/${repo.full}/pulls/${fields.pr}`, { ...opts, method: "PATCH", body: { state: "closed" } });
   }
   // The earlier plan and split record, kept readable under markers no reader looks for (handoff.mjs planOf, partsRecord,
   // which also skip anything from before the restart).
@@ -306,8 +322,7 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
     await rest(`repos/${repo.full}/issues/comments/${c.id}`, { ...opts, method: "PATCH", body: { body: `${hit[1]}${c.body.slice(hit[0].length)}` } });
   }
   // Another loop that finished this restart first may have started the Objective since: its Running label stays.
-  const now = await getIssue(repo, issue, opts);
-  if (!(now?.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === RESTART_LABEL)) return { pr: fields.pr, head: fields.head, finished: false };
+  if (!labelled(await getIssue(repo, issue, opts))) return { pr: fields.pr, head: fields.head, finished: false };
   await setStateLabel(repo, issue, null, opts);
   if (project === undefined) project = await findProject(repo, opts).catch(() => null);
   await moveCard(project, repo, issue, "Queued", opts).catch((e) => log(`#${issue} restart: card: ${String(e?.message || e).slice(0, 120)}`));

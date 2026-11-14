@@ -228,8 +228,9 @@ async function main() {
     if (took) process.exit(0);
   };
   // The issue as the watch and the last checks read it: a restart recorded after this stage began stops it too, its
-  // label gone or not (stop.mjs objectiveReader).
-  const readObjective = objectiveReader({ read: () => getIssue(repo, issue, token), list: () => listComments(repo, issue, token), startedAt });
+  // label gone or not (stop.mjs objectiveReader); the records already there are read now, as the stage's own.
+  const readObjective = objectiveReader({ read: () => getIssue(repo, issue, token), list: () => listComments(repo, issue, token) });
+  await readObjective.prime();
   watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 

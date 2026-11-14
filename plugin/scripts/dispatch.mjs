@@ -169,10 +169,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       return hold?.state === "alive" || hold?.state === "unread";
     };
     // Who may restart: a writer the repository lists, a pinned maintainer, else one whose permission reads write or more.
+    // A permission read that fails for now is no answer ("unread": the restart waits for the next tick); only a person
+    // GitHub does not know (404) or one below write is refused.
     const mayRestart = async (actor) => {
       if (!actor?.login) return false;
       if (knownWriter(actor.login) === true || pinnedMaintainer(actor)) return true;
-      const perm = await collaboratorPermission(repo, actor.login, opts).catch(() => null);
+      let perm;
+      try {
+        perm = await collaboratorPermission(repo, actor.login, opts);
+      } catch {
+        return "unread";
+      }
       return ["admin", "maintain", "write"].includes(perm);
     };
     for (const issue of restarts) {
@@ -183,7 +190,13 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         retry(`#${n}'s restart time`);
         continue;
       }
-      if (!dryRun && !(await mayRestart(ev?.actor))) {
+      const allowed = dryRun || (await mayRestart(ev?.actor));
+      if (allowed === "unread") {
+        restarting[n] = "restarting: who applied the restart could not be checked; next tick";
+        retry(`#${n}'s restart permission`);
+        continue;
+      }
+      if (!allowed) {
         const who = ev?.actor?.login || "someone";
         log(`  #${n}: ${RESTART_LABEL} by ${who}, who cannot push and is no maintainer the workflow names: ignored, the label taken off`);
         await upsertComment(repo, n, marker(n, "restart-refused", String(ev?.at || "").replace(/[^0-9TZ]/g, "")), `Factory: \`${RESTART_LABEL}\` applied by ${who} was ignored: only someone who can push to this repository, or a maintainer the workflow names, can restart an Objective.`, opts).catch((e) => log(`  #${n}: restart refusal note: ${String(e?.message || e).slice(0, 120)}`));

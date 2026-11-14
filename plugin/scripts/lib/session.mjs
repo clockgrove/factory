@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, runHarness, seedSessionTotal, stageSpendSoFar } from "./harness.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, runHarness, seedSessionTotal, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -50,7 +50,8 @@ import {
 } from "./github.mjs";
 import { log, redactSecrets, secretForms } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
-import { agentUser, exec, git } from "./proc.mjs";
+import { agentUser, atStop, exec, git } from "./proc.mjs";
+import { restSync } from "./rest-sync.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -763,16 +764,23 @@ export const progressRunId = (env = process.env) =>
 /** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
+export const STOP_WRITE_MS = 5_000;
+
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
  * progress.spend records the final figure, so a stage that dies (killed, the machine restarted) still leaves the spend
  * Factory last knew: marked `usdLowerBound`, or `usdUpperBound` when part of it is priced at the table's dearest rates.
  * Null when the stage records no spend in its progress comment (backend.mjs spendInProgress), or for a `--here` run.
+ * `soFarNow`: the same read at once (harness.mjs stageSpendNow). A stage stopped by a signal (proc.mjs atStop: its
+ * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it is more than
+ * the comment's line shows, so a pass killed before the next status write is not left at the last line's figure.
  */
-export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null }) {
+export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null }) {
   const lines = [];
   const links = [];
   const started = Date.now();
+  const key = marker(issue, "progress", `${stage}:${runId}`);
   let status = "";
   let spend = null;
   let spendParts = null;
@@ -781,20 +789,50 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let asked = null;
   let lastWrite = 0;
   let writing = null;
+  // The comment as the last write that landed left it: its id and the spend its line shows.
+  let commentId = null;
+  let shown = 0;
+  let stopHook = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
-  const write = async () => {
+  // Not final: a lower bound, or, with a reading at the price table's dearest rates, an estimate marked as such.
+  const interimOf = (live) => ({ spend: live.usd, spendParts: live.estimated ? { usdUpperBound: true } : { usdLowerBound: true } });
+  const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const live = spend === null && soFar ? await soFar().catch(() => null) : null;
-    // Not final: a lower bound, or, with a reading at the price table's dearest rates, an estimate marked as such.
-    const counted = spend === null && Number.isFinite(live?.usd);
-    const interim = counted ? { spend: live.usd, spendParts: live.estimated ? { usdUpperBound: true } : { usdLowerBound: true } } : { spend, spendParts };
     const tail = progressTail({ harness, model, ...interim, read, triage, asked });
-    const body = `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
+    return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
+  };
+  /**
+   * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. Only
+   * a refusal GitHub answered leaves the session totals unrecorded; a write that may have landed (no answer in time)
+   * records them, so the next stage never counts again what this line may show (it may count less: a lower bound).
+   */
+  const stopWrite = () => {
+    if (spend !== null || commentId === null) return;
+    let live = null;
+    try {
+      live = soFarNow();
+    } catch {
+      return;
+    }
+    if (!Number.isFinite(live?.usd) || !(live.usd > shown)) return;
+    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(interimOf(live))}` }, token }, { ms: STOP_WRITE_MS });
+    if (!r.ok) log(`progress: the stopped stage's spend line ($${live.usd}) may not have landed: ${r.error}`);
+    if (r.ok || !(r.status >= 400 && r.status < 500)) live.commit?.();
+  };
+  const write = async () => {
+    const live = spend === null && soFar ? await soFar().catch(() => null) : null;
+    const counted = spend === null && Number.isFinite(live?.usd);
+    const interim = counted ? interimOf(live) : { spend, spendParts };
+    const body = bodyOf(interim);
     lastWrite = Date.now();
-    const wrote = await upsertComment(repo, issue, marker(issue, "progress", `${stage}:${runId}`), body, { token }).then(
-      () => true,
+    const wrote = await upsertComment(repo, issue, key, body, { token }).then(
+      (c) => {
+        if (Number.isInteger(c?.id)) commentId = c.id;
+        shown = Number(interim.spend) || 0;
+        return true;
+      },
       (e) => {
         log(`progress: ${e.message.slice(0, 120)}`);
         return false;
@@ -802,6 +840,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     );
     // Only a line that landed says what was counted: the session totals it counted are recorded after it, never before.
     if (wrote && counted) live.commit?.();
+    if (wrote && soFarNow && commentId !== null) stopHook ??= atStop(stopWrite);
   };
   const progress = async (phase) => {
     // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.

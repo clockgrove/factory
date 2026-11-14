@@ -69,8 +69,8 @@ const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 
 /**
  * A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it.
- * FAKE_SPLIT=1: the turn is reported half done, the process lingers, then its other half lands in the thread (a pass
- * that runs on after its stage was killed) and it writes `<FAKE_STATE>/done`.
+ * FAKE_SPLIT=1: the turn is reported half done, the process lingers (FAKE_LINGER ms, 1500 by default), then its other
+ * half lands in the thread (a pass that runs on after its stage was killed) and it writes `<FAKE_STATE>/done`.
  */
 function fakeCodex(bin) {
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -84,7 +84,7 @@ add(split ? 0.5 : 1);
 const id = resume || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724";
 console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: 0, output_tokens: t.output, reasoning_output_tokens: 0 } }));
-if (split) setTimeout(() => { add(0.5); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, 1500);
+if (split) setTimeout(() => { add(0.5); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, Number(process.env.FAKE_LINGER) || 1500);
 `, { mode: 0o755 });
 }
 
@@ -137,6 +137,8 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
  * - after: a phase line after the pass, then killed;
  * - window: killed as the pass ends, before any write shows it;
  * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session;
+ * - term: SIGTERM while the pass runs (as `factory serve` stops a stage), with no write since the pass began; the pass
+ *   runs in its own process group, as locally, and is killed with the stage;
  * - failed: a phase line that lands, a second pass, a phase line that fails to land, then killed.
  * Returns every stage's last spend line.
  */
@@ -165,11 +167,17 @@ async function stages(plan) {
     const resume = (await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id;
     delete process.env.FACTORY_LOCAL;
     await progress("harness");
-    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" ? "1" : "0" }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const local = how === "term" ? { FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }), FAKE_LINGER: "60000" } : {};
+    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how === "term" ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
     const run = pass();
-    if (how === "mid") {
+    if (how === "mid" || how === "term") {
       const until = Date.now() + 10_000;
       while (!((await stageSpendSoFar()).usd > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      if (how === "term") {
+        process.stdout.write("spent\\n");
+        await run;
+        process.exit(1);
+      }
       await progress("validation");
       process.exit(137);
     }
@@ -198,8 +206,14 @@ async function stages(plan) {
   try {
     for (const [i, how] of plan.entries()) {
       const s = stageProcess(script(`s${i}`, how), env);
-      await s.exited;
+      if (how === "term") {
+        const until = Date.now() + 15_000;
+        while (!/spent/.test(s.out()) && s.child.exitCode === null && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+        s.child.kill("SIGTERM");
+      }
+      const code = await s.exited;
       assert.ok(!s.err(), s.err());
+      if (how === "term") assert.equal(code, 143, "the stage exits as SIGTERM ends it");
       // A killed stage's pass runs on: the next stage starts once it has finished.
       const until = Date.now() + 15_000;
       if (how === "mid") while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
@@ -222,6 +236,7 @@ for (const [how, killed, own, passes] of [
   ["window", "as its pass ends, before a write shows it", 0, 3],
   ["mid", "in the middle of a pass that then runs on", PASS / 2, 3],
   ["failed", "after a second pass whose write failed to land", PASS, 4],
+  ["term", "by SIGTERM in the middle of a pass, before a write shows it", PASS / 2, 2.5],
 ]) {
   test(`a stage killed ${killed}, then resumed: the stages' lines sum to the spend, each pass counted once`, async () => {
     const lines = await stages(["end", how, "end"]);
@@ -232,6 +247,12 @@ for (const [how, killed, own, passes] of [
     assert.ok(near(lines[0].usd, PASS) && !lines[0].usdLowerBound && !lines[2].usdLowerBound, JSON.stringify(lines));
   });
 }
+
+test("a stage stopped by SIGTERM before any status write shows its first pass leaves that pass's reading, a lower bound", async () => {
+  // A fresh session that no later stage resumes: this line is all that records the pass.
+  const [line] = await stages(["term"]);
+  assert.ok(near(line.usd, PASS / 2) && line.usd > 0 && line.usdLowerBound === true, JSON.stringify(line));
+});
 
 test("a final write waits for a status write in flight, and its spend line replaces the interim one", async () => {
   const { progressReporter } = await import("../scripts/lib/session.mjs");

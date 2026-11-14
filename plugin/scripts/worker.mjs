@@ -22,7 +22,7 @@ import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/i
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, watchObjective } from "./lib/stop.mjs";
+import { RESTART_LABEL, claimExit, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -190,6 +190,13 @@ async function main() {
   if (issueData.state !== "open" || !labels.includes(inputs.objectiveLabel)) {
     log(`#${issue} is not an open ${inputs.objectiveLabel} issue; nothing to do`);
     await finish("skipped", `not an open ${inputs.objectiveLabel} issue`);
+    return;
+  }
+
+  // A restart is pending (factory:restart): the dispatcher restarts it from its current text first.
+  if (stopCause(issueData, inputs.objectiveLabel) === "restart") {
+    log(`#${issue} has ${RESTART_LABEL}: the dispatcher restarts it first; nothing to do here`);
+    await finish("skipped", `a restart is pending (${RESTART_LABEL})`);
     return;
   }
 

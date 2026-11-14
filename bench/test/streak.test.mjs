@@ -572,3 +572,17 @@ test("streaks: an External Objective between walk-aways neither extends nor rese
   const escaped = ext(6, { mergedAt: "2031-03-07T00:00:00Z", exit: "merged", quality: { escapes: [{ issue: "acme/widgets#99", priority: "P1" }] } });
   assert.equal(verdict(escaped).ok, false);
 });
+
+test("a restart (factory:restart) is a human action on every route; Factory's removal of the label after it is not", () => {
+  const actions = cleanMerge(42);
+  const by = { login: "maintainer", type: "User" };
+  actions.issueTimeline.push({ event: "labeled", label: { name: "factory:restart" }, actor: by, created_at: "2031-03-02T02:02:30Z" }, { event: "unlabeled", label: { name: "factory:restart" }, actor: { login: "factory-app[bot]", type: "Bot" }, created_at: "2031-03-02T02:02:40Z" });
+  const row = score(actions);
+  assert.equal(row.walkAway.value, false, "a restart is no walk-away");
+  assert.equal(row.walkAway.firstHumanAction.kind, "labeled factory:restart");
+  // Local mode: the loop removes the label under the person's own login once it has restarted the Objective.
+  const local = localMerge();
+  local.issueTimeline.push({ event: "labeled", label: { name: "factory:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" }, { event: "unlabeled", label: { name: "factory:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:20Z" });
+  const kinds = humanActions(local, "2031-03-02T01:00:00Z").map((a) => a.kind);
+  assert.deepEqual(kinds, ["labeled factory:restart"]);
+});

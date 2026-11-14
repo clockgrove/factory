@@ -21,7 +21,7 @@ import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { STOP_GRACE_MS, applyStop, stopCause } from "./lib/stop.mjs";
+import { RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -76,6 +76,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const repo = repoOf(inputs.repo);
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
+  // Actions reads (live jobs, usage artifacts) use the job token (actions: read), which the App has not.
+  const readToken0 = { token: inputs.githubToken || token };
   const watch = stopwatch();
   // Every moment at which only time changes what this dispatcher does (logic.mjs WAKE_KINDS): the wake job sleeps to
   // the earliest of its kinds; the rest are listed so the log shows each wait and whose it is.
@@ -139,6 +141,59 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   });
   if (project) statuses = await projectStatuses(project, repo, issues.map((i) => i.number), opts);
   watch.mark("board");
+
+  // Restart (`factory:restart`, lib/stop.mjs): an Objective a person asked to restart from its issue's current text, in
+  // any state. A stage of it that may still run stops itself first (its watch on the issue sees the label); until then the
+  // Objective is held, never picked. Then the earlier run's PR is closed, its branch deleted and its plan retired, and it
+  // is Queued again, picked like any other below. A stage that has not stopped STOP_GRACE_MS after the label is taken for
+  // gone. One on a stopped Objective (no factory:objective) waits for the label.
+  const restarted = [];
+  const restarting = {};
+  const restarts = wanted.filter((i) => stopCause(i, inputs.objectiveLabel) === "restart");
+  if (restarts.length) {
+    let jobs = null;
+    // Whether a stage of the Objective may still run: an Actions job, its sandbox's lease, a local loop's live claim. A
+    // read that fails is a maybe.
+    const mayRun = async (issue) => {
+      const n = issue.number;
+      const state = stateOf(issue, statuses[n] ?? null);
+      if (state !== "Running" && state !== "In review") return false;
+      if (!inputs.sandbox) {
+        jobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
+        if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
+      } else if (stageHolds(sandboxRecord(await listComments(repo, n, opts).catch(() => null), n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
+      const hold = await backend().trigger.localHold(repo, n, opts).catch(() => ({ state: "unread" }));
+      return hold?.state === "alive" || hold?.state === "unread";
+    };
+    for (const issue of restarts) {
+      const n = issue.number;
+      const at = await objectiveLabeledAt(repo, n, RESTART_LABEL, opts).catch(() => undefined);
+      if (at === undefined) {
+        restarting[n] = "restarting: its restart time is unread; next tick";
+        retry(`#${n}'s restart time`);
+        continue;
+      }
+      const since = at || new Date().toISOString();
+      if (Date.now() - Date.parse(since) < STOP_GRACE_MS && (await mayRun(issue))) {
+        restarting[n] = "restarting: its running stage stops first";
+        due(n, "retry", Date.now() + RETRY_WAKE_MS);
+        continue;
+      }
+      if (dryRun) continue;
+      try {
+        const r = await restartObjective(repo, n, { at: since, project }, opts);
+        restarted.push(n);
+        statuses[n] = "Queued";
+        issue.labels = (issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review|restart)$/.test(typeof l === "string" ? l : l.name));
+        log(`  #${n}: restarted from its current text${r.pr ? `; PR #${r.pr} closed and its branch deleted` : ""}`);
+      } catch (e) {
+        restarting[n] = "restarting: the restart did not finish; next tick";
+        log(`  #${n}: restart: ${String(e?.message || e).slice(0, 160)}; next tick tries again`);
+        retry(`#${n}'s restart`);
+      }
+    }
+  }
+  watch.mark("restart");
 
   // Recovery: a Blocked, Question or In-review issue (a PR closed unmerged by a human)
   // whose factory:objective label was re-applied after it stopped is Queued again (the
@@ -540,7 +595,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (usageError) retry("today's spend");
   watch.mark("spend");
 
-  const held = {};
+  const held = { ...restarting };
   // A local loop's own holds (local.mjs serve, #2667). localHeld: Objectives whose stage runs on its box, never picked
   // while a read still shows them Queued. localStopped: ones whose stage there ended with a Question or a Block, after
   // its exit labels were written. A listing can be older than that write, so a stop that reads Queued is held unless a
@@ -705,7 +760,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -901,6 +956,7 @@ async function main() {
     reset: result.reset,
     done: result.done,
     stopped: result.stopped,
+    restarted: result.restarted,
     vanished: result.vanished,
     paused: result.paused,
     sent_back_to_rebase: result.sentBack,

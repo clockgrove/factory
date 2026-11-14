@@ -1877,8 +1877,32 @@ export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
  * comment), oldest first. Who may decide is not read from author_association: an App's token sees an organization
  * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.
  */
+/**
+ * The newest restart's time (ISO) among an issue's comments (stop.mjs restartObjective's record, marker
+ * `<!-- factory:<n>:restart:<at> -->` then `<!-- factory:restart {"at"} -->`, `at` when the restart label was applied),
+ * from a record Factory or a writer posted; null for none.
+ */
+const RESTART_RECORD = /^<!-- factory:\d+:restart:[0-9TZ]+ -->\n<!-- factory:restart (\{[^\n]*\}) -->/;
+export function restartedAt(comments) {
+  let last = null;
+  for (const c of comments || []) {
+    const m = RESTART_RECORD.exec(c?.body || "");
+    if (!m || !trustedAuthor(c)) continue;
+    let at = null;
+    try {
+      at = JSON.parse(m[1])?.at;
+    } catch {
+      at = null;
+    }
+    if (Number.isFinite(Date.parse(at)) && (!last || Date.parse(at) > Date.parse(last))) last = new Date(Date.parse(at)).toISOString();
+  }
+  return last;
+}
+
 export function maintainerDecisions(comments) {
   const all = comments || [];
+  // A restart (stop.mjs restartObjective) starts from the issue's current text: what was said before it is no decision.
+  const since = Date.parse(restartedAt(all));
   // Factory's own review threads: inline comments of a review whose body carries the review marker, and replies in
   // those threads by the review's own author. In local mode the reviewer and the worker post as the developer's login,
   // with no bot type to tell them apart; a reply by anyone else in the thread is still a decision.
@@ -1891,7 +1915,7 @@ export function maintainerDecisions(comments) {
     return !!root && factoryReviews.has(root.pull_request_review_id) && factoryReviews.get(root.pull_request_review_id) === loginKey(c.user?.login);
   };
   return all
-    .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c))
+    .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
     .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, seen: latest(c.created_at, c.updated_at) }));
 }

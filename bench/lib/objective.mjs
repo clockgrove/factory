@@ -118,7 +118,8 @@ export function decisionsOf(actions) {
  * Local mode (the factory:local label): Factory acts under the developer's own login, so a person's actions and
  * Factory's share an actor. Factory's are told apart by structure, never by a time window alone:
  *   - labels: only the factory state labels the local loop sets (running, in-review, blocked, question, review) are
- *     Factory's. Any other label, and re-applying factory:objective, is a person's. Removing factory:blocked is
+ *     Factory's, and removing factory:restart once it restarted the Objective. Any other label, applying
+ *     factory:restart and re-applying factory:objective among them, is a person's. Removing factory:blocked is
  *     Factory's only after a re-applied Objective label (the recovery it answers); without one it is a person's
  *     manual un-block.
  *   - comments: Factory's comments all carry a `<!-- factory:... -->` marker. One without a marker is a person's, even
@@ -131,7 +132,8 @@ export function decisionsOf(actions) {
  * after the record while the issue is closed, is Factory's (#2668). No upper bound: a removal that failed waits for a
  * later tick, and the record's edit time need not move on a retry that writes the same body.
  */
-const LOCAL_STATE_KIND = /^(un)?labeled factory:(running|in-review|blocked|question|review)$/;
+// A restart's label is the person's (a human action); its removal is Factory's, once it has restarted the Objective.
+const LOCAL_STATE_KIND = /^(?:(un)?labeled factory:(running|in-review|blocked|question|review)|unlabeled factory:restart)$/;
 /** The state labels a Done pass removes from a closed Objective. */
 const DONE_LABELS = /^factory:(running|in-review|blocked|question)$/;
 export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {}) {

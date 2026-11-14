@@ -298,3 +298,63 @@ test("the usage record names the models the stage ran on and the labels that cho
   assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"] });
   assert.deepEqual(r.ran, stored.ran);
 });
+
+test("local mode, the real path: stageEnv sets the stage up for the harness it is given, the loop's own without one; a Copilot Objective on a Claude loop gets Copilot's home and token", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { pinGitDir, gitPinFile } = await import("../scripts/lib/local.mjs");
+  const dev = mkdtempSync(join(tmpdir(), "real-"));
+  const local = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repoFull: "o/r", wf: {}, stopping: false, firstSetup: new Map(), children: new Set() });
+  const clone = join(local.ws(8), "repo");
+  mkdirSync(join(clone, ".git"), { recursive: true });
+  pinGitDir(clone, gitPinFile(local.ws(8)));
+  const usage = join(local.ws(8), "usage-work-1");
+  mkdirSync(usage, { recursive: true });
+  const stageTmp = mkdtempSync(join(tmpdir(), "stage-"));
+  const token = process.env.COPILOT_GITHUB_TOKEN;
+  process.env.COPILOT_GITHUB_TOKEN = "copilot-test-token";
+  try {
+    const given = local.stageEnv(8, usage, clone, stageTmp, "worker.mjs", "claude");
+    assert.deepEqual([given.FACTORY_STAGE_HARNESS, given.FACTORY_HARNESS], ["claude", "claude"]);
+    assert.equal(local.stageEnv(8, usage, clone, stageTmp, "worker.mjs").FACTORY_STAGE_HARNESS, "claude", "no sixth argument: the loop's harness");
+    // Copilot's own part of the stage env, for a Copilot-labelled Objective on this Claude loop (stageEnv adds it, with Copilot's outer sandbox, which only some hosts start).
+    const extra = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot");
+    assert.equal(extra.COPILOT_HOME, join(local.ws(8), ".sandbox", "copilot-home"));
+    assert.equal(extra.COPILOT_GITHUB_TOKEN, "copilot-test-token", "the token the loop reads for Copilot, though its own harness is Claude");
+    assert.deepEqual(local.harnessEnv(8, [stageTmp], clone, usage, null), {}, "the loop's own Claude: nothing of Copilot's");
+  } finally {
+    if (token === undefined) delete process.env.COPILOT_GITHUB_TOKEN;
+    else process.env.COPILOT_GITHUB_TOKEN = token;
+    rmSync(dev, { recursive: true, force: true });
+    rmSync(stageTmp, { recursive: true, force: true });
+  }
+});
+
+test("local mode, the real path: harnessFor reads the issue's labels and their appliers from GitHub, and refuses a stranger's label", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const loop = Object.assign(Object.create(Local.prototype), { dev: "/nonexistent", harness: "claude", repoFull: "acme/app", repo, wf: {}, opts: { token: "t" } });
+  const labels = ["factory:objective", "factory:model:claude-sonnet-5-5"];
+  const real = globalThis.fetch;
+  const run = async (applier) => {
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+      if (/\/user$/.test(u)) return json({ login: "me", type: "User" });
+      if (/\/collaborators\?/.test(u)) return json([{ login: "dev" }]);
+      if (/\/collaborators\/[^/]+\/permission$/.test(u)) return json({ permission: /\/dev\//.test(u) ? "write" : "read" });
+      if (/\/issues\/8\/timeline/.test(u)) return json([{ event: "labeled", label: { name: labels[1] }, created_at: "2026-11-14T10:00:00Z", actor: { login: applier, id: 5, type: "User" } }]);
+      if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: labels.map((name) => ({ name })) });
+      throw new Error(`unexpected ${u}`);
+    };
+    try {
+      return await loop.harnessFor(8);
+    } finally {
+      globalThis.fetch = real;
+    }
+  };
+  assert.deepEqual(await run("dev"), { ok: true, harness: "claude" });
+  const refused = await run("reader");
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);
+});

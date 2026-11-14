@@ -612,7 +612,7 @@ export class Local {
    * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
    * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
    */
-  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = harness) {
+  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = this.harness) {
     const ws = this.ws(issue);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
@@ -682,9 +682,9 @@ export class Local {
     // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
     // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
     // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
-    const tools = localTools({ harness: harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    const tools = localTools({ harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
     const lead = tools.lead;
-    const extra = harnessEnv(issue, addDirs, clone, usageDir, tools);
+    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
     const outerFile = join(sandboxDir, `srt-harness-${basename(usageDir)}.json`);
@@ -712,7 +712,7 @@ export class Local {
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.

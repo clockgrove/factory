@@ -354,7 +354,7 @@ function bounded(text) {
 }
 function boundedYaml(text) {
   const { text: t, lines } = bounded(text);
-  return { doc: parseYaml(t), lines };
+  return { doc: parseYaml(t, { aliases: false }), lines };
 }
 // The lines outside the top-level `packages` entry (its key line at column 0 and every line up to the next line at
 // column 0 that is not blank, a comment or a list item), blank lines and column-0 comments dropped.

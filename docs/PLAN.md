@@ -21,7 +21,7 @@ Factory is a GitHub Action, a harness plugin and a bench, sharing one set of ski
 
 Factory uses an existing SDK or library before writing its own (AGENTS.md). The plugin runs with nothing installed, from a Claude Code plugin install and from the Action's checkout, so a runtime library ships inside it:
 
-- **Vendored, byte for byte:** `plugin/vendor/<name>/` holds the files the library itself published, as `tools/vendor/package-lock.json` pins them, never rebuilt. `node tools/vendor/sync.mjs` copies them after an `npm ci --ignore-scripts --prefix tools/vendor`, and CI checks the copy matches. Dependabot bumps the pin; the bump's PR stays red until `sync.mjs` is run on it and the copy committed. Today: `yaml` (workflows, `pnpm-workspace.yaml`, skill frontmatter) and `smol-toml` (Cargo and uv workspace members).
+- **Vendored, byte for byte:** `plugin/vendor/<name>/` holds the files the library itself published, as `tools/deps/package-lock.json` pins them, never rebuilt. `node tools/deps/sync.mjs` copies them after an `npm ci --ignore-scripts --prefix tools/deps`, and CI checks the copy matches. Dependabot bumps the pin; the bump's PR stays red until `sync.mjs` is run on it and the copy committed. Today: `yaml` (workflows, `pnpm-workspace.yaml`, agent frontmatter) and `smol-toml` (Cargo and uv workspace members).
 - **Installed for one job:** the cloud-sandbox jobs install `@vercel/sandbox` from `plugin/package-lock.json` (docs/ADAPTERS.md).
 
 What stays Factory's own code, and why:

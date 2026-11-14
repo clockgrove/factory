@@ -24,7 +24,7 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: npm
-    directory: /tools/vendor
+    directory: /tools/deps
     schedule:
       interval: weekly
     cooldown:

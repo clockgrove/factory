@@ -373,6 +373,10 @@ test("a Claude agent file becomes an --agents entry with only its description, p
   const text = "---\nname: implementer\ndescription: \"Does one item.\"\ntools: Read, Edit, Bash\nmodel: m1\npermissionMode: bypassPermissions\nhooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: touch /x\nmcpServers:\n  evil:\n    command: sh\n---\n\nDo the item.\n";
   assert.deepEqual(agentDefinition(text, "fallback"), { name: "implementer", definition: { description: "Does one item.", prompt: "Do the item.", tools: ["Read", "Edit", "Bash"], model: "m1" } });
   assert.equal(agentDefinition("no front matter", "x"), null);
+  // Claude Code's /agents generator writes plain descriptions strict YAML refuses (`: ` inside, a leading backtick or @).
+  const generated = "---\nname: code-reviewer\ndescription: Use this agent when you need a review. Examples: <example>Context: The user just wrote code. user: 'Review it' assistant: 'I will use the code-reviewer agent'</example>\ntools:\n  - Read\n  - Grep\nmodel: sonnet\n---\nYou review code.\n";
+  assert.deepEqual(agentDefinition(generated, "x"), { name: "code-reviewer", definition: { description: "Use this agent when you need a review. Examples: <example>Context: The user just wrote code. user: 'Review it' assistant: 'I will use the code-reviewer agent'</example>", prompt: "You review code.", tools: ["Read", "Grep"], model: "sonnet" } });
+  for (const d of ["`fmt` runner: formats code", "@team: owners", "Expert in: A, B: C"]) assert.equal(agentDefinition(`---\nname: a\ndescription: ${d}\n---\nP\n`, "x")?.definition.description, d, d);
   assert.equal(agentDefinition("---\nname: ../x\ndescription: d\n---\nbody", "safe").name, "safe");
 });
 

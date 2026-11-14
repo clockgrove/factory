@@ -1,9 +1,9 @@
 ---
-name: serve
-description: "/factory:serve. Start Clockgrove Factory's local loop for the current repository on this machine (`factory serve`): it takes the Objectives labelled factory:local (or all with --all), works and reviews them in sandboxes on this machine's harness login, and resumes its own paused work first. Use when the user asks to run Clockgrove Factory locally, serve, or work the queue on their machine."
+name: factory-serve
+description: "/factory:factory-serve. Start Clockgrove Factory's local loop for the current repository on this machine (`factory serve`): it takes the Objectives labelled factory:local (or all with --all), works and reviews them in sandboxes on this machine's harness login, and resumes its own paused work first. Use when the user asks to run Clockgrove Factory locally, serve, or work the queue on their machine."
 ---
 
-# /factory:serve
+# /factory:factory-serve
 
 Start local mode's loop for the repository whose clone is the current directory. It applies the dispatcher's rules every 30 seconds (order, caps, blocking, send-backs, Done) and runs the picks here, at most `FACTORY_LOCAL_MAX_CONCURRENT` at once, reviews before new work and this machine's paused Objectives before both (docs/LOCAL.md).
 

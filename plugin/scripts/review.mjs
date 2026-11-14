@@ -3,7 +3,7 @@
 // then the merge queue.
 //   node scripts/review.mjs --repo OWNER/NAME --pr N [--checkout DIR] [--usage-dir DIR]
 // With the App token: fetch the PR diff, body and the issue body; run the reviewer
-// harness once with the review-pr skill and the reviewer agent definition (model
+// harness once with the factory-review-pr skill and the reviewer agent definition (model
 // pinned there); parse its findings and post them as one PR review with line
 // comments (REST, event COMMENT); run one worker pass with the comments as the
 // prompt (a fresh session: the worker job's session does not survive the runner),
@@ -90,7 +90,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
   const entries = acceptanceEntries(issueBody);
   const brief = (t) => (t.length > 160 ? `${t.slice(0, 159)}…` : t);
   return [
-    `You are the Factory reviewer for the pull request on issue #${issue}: ${issueTitle}.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the review-pr skill (in .claude/skills/review-pr and .agents/skills/review-pr) exactly. Read the repository as you need to.`,
+    `You are the Factory reviewer for the pull request on issue #${issue}: ${issueTitle}.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the factory-review-pr skill (in .claude/skills/factory-review-pr and .agents/skills/factory-review-pr) exactly. Read the repository as you need to.`,
     "Do NOT post anything to GitHub yourself: the job posts your findings. Your final message must be only a JSON object of this shape, with no prose around it:",
     '```json\n{"acceptance": [{"entry": "2", "met": true, "path": "src/file.ts", "line": 40, "evidence": "..."}], "comments": [{"path": "src/file.ts", "line": 42, "entry": "2", "body": "acceptance 2: ..."}]}\n```',
     "`acceptance` has one judgment for every acceptance entry: `met` is true only when the diff and the repository show the entry holds, `path` and `line` point at the code that shows it, and `evidence` says how in a sentence. Where an entry says behaviour stays as it was, read what the diff removes or changes in that behaviour before you judge it. Every entry judged not met also gets a comment carrying its `entry`. `comments` may be empty. `line` is a line number on the new side of the diff.",
@@ -113,9 +113,9 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
   ].join("\n");
 }
 
-/** The reviewer's brief for a split part that is not the last (review-pr reference.md, "Split parts"). */
+/** The reviewer's brief for a split part that is not the last (factory-review-pr reference.md, "Split parts"). */
 export const splitPartBrief = (part) =>
-  `This PR is part ${part.number} of this Objective, which is split into sequential PRs, and it is not the last part: a later part delivers the acceptance entries its PR body assigns to one. Judge such an entry \`"met": false, "deferred": true\` with no comment, as the review-pr reference says under "Split parts". That changes only those judgments: review every line this part changes, every claim its body makes for this part, and the repository's rules and checklist answers exactly as for any PR. A defect in this part's own lines is a finding on those lines even when the entry it relates to is deferred: a schema, constraint, signature or error this part adds that a later part's entry cannot be built on as it stands (a column that cannot hold a record that entry needs, a call with no way to bound or stop it, a refusal whose reason is lost) is raised now, not left for that part.`;
+  `This PR is part ${part.number} of this Objective, which is split into sequential PRs, and it is not the last part: a later part delivers the acceptance entries its PR body assigns to one. Judge such an entry \`"met": false, "deferred": true\` with no comment, as the factory-review-pr reference says under "Split parts". That changes only those judgments: review every line this part changes, every claim its body makes for this part, and the repository's rules and checklist answers exactly as for any PR. A defect in this part's own lines is a finding on those lines even when the entry it relates to is deferred: a schema, constraint, signature or error this part adds that a later part's entry cannot be built on as it stands (a column that cannot hold a record that entry needs, a call with no way to bound or stop it, a refusal whose reason is lost) is raised now, not left for that part.`;
 
 /**
  * The decisions an answer pass is given to apply, as answerPrompt renders them: those that fit its task card (a fresh
@@ -136,7 +136,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
   // Unread decisions are what this pass is for: all of them, never cut for length (answerFed records them all).
   const recorded = decisionsSection(decisions, afterPush ? Infinity : undefined);
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$FACTORY_IN/review-comments.json\`). Load the deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$FACTORY_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}]; Factory posts them.${recorded ? " Apply the maintainers' decisions below as well." : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$FACTORY_IN/review-comments.json\`). Load the factory-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$FACTORY_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}]; Factory posts them.${recorded ? " Apply the maintainers' decisions below as well." : ""}`
     : afterPush
       ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.`
       : `A maintainer answered PR #${prNumber}'s question and marked it ready. Apply the decisions below to the branch: they are the specification where they differ from your assumptions. Update the Assumptions in \`$FACTORY_OUT/pr.md\` (start from \`$FACTORY_IN/pr.md\`) so no answered item starts with QUESTION: any more.`;

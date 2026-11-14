@@ -329,7 +329,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
       const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
       out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.slice(1).join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.slice(1).join(".")}`));
     }
-    if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
+    if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:factory-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
     out.push(ownedTickCheck(text, env, { job }));
     const waits = longWaitCheck(repoData);

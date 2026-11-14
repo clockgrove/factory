@@ -1,6 +1,6 @@
 ---
-name: implement-split
-description: Second step of working a Clockgrove Factory Objective, after objective-plan. Use to implement the plan's checklist with implementer sub-agents on the pinned model, run disjoint-file items concurrently, integrate once, and split an Objective too large for one session into sequential PRs. Load when a task card says to use implement-split.
+name: factory-implement-split
+description: Second step of working a Clockgrove Factory Objective, after factory-objective-plan. Use to implement the plan's checklist with implementer sub-agents on the pinned model, run disjoint-file items concurrently, integrate once, and split an Objective too large for one session into sequential PRs. Load when a task card says to use factory-implement-split.
 ---
 
 # Implement the checklist
@@ -29,8 +29,8 @@ Commit as you go on `factory/<issue>`. Each commit message names the checklist i
 
 ## Too large for one session
 
-If the checklist cannot finish within the hour and dollar budget on the task card, or the integrated diff would exceed what a reviewer can read in one pass, split it: finish the first self-contained group of items, deliver it as this part's PR through prove-acceptance and deliver-pr, mark in plan.md which items remain for a later part, and list them in your exit record as `"part": {"remaining": [...]}`. Factory links that PR to the issue without closing it; once it merges, Factory starts the next part from the default branch, with the plan in `$FACTORY_IN/plan.md` and the merged parts in `$FACTORY_IN/parts.md`. Each PR stands alone: validation green, acceptance entries it proves named in its body, nothing the next part needs left broken. The last part leaves `part` out, and its PR closes the issue. Factory caps an Objective at six parts. Decide this early, from the plan, not after the budget runs out.
+If the checklist cannot finish within the hour and dollar budget on the task card, or the integrated diff would exceed what a reviewer can read in one pass, split it: finish the first self-contained group of items, deliver it as this part's PR through factory-prove-acceptance and factory-deliver-pr, mark in plan.md which items remain for a later part, and list them in your exit record as `"part": {"remaining": [...]}`. Factory links that PR to the issue without closing it; once it merges, Factory starts the next part from the default branch, with the plan in `$FACTORY_IN/plan.md` and the merged parts in `$FACTORY_IN/parts.md`. Each PR stands alone: validation green, acceptance entries it proves named in its body, nothing the next part needs left broken. The last part leaves `part` out, and its PR closes the issue. Factory caps an Objective at six parts. Decide this early, from the plan, not after the budget runs out.
 
 ## Before leaving this step
 
-Every checklist item is marked done in plan.md or assigned to a later part, the tree is formatted, and the validation commands have run once over the integrated tree. Then load prove-acceptance.
+Every checklist item is marked done in plan.md or assigned to a later part, the tree is formatted, and the validation commands have run once over the integrated tree. Then load factory-prove-acceptance.

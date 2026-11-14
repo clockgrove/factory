@@ -1,6 +1,6 @@
-# deliver-pr: reference
+# factory-deliver-pr: reference
 
-Detail for the deliver-pr skill that applies only on some passes. SKILL.md says when to load each section; every rule here is as binding as one there.
+Detail for the factory-deliver-pr skill that applies only on some passes. SKILL.md says when to load each section; every rule here is as binding as one there.
 
 ## Reviewer comments
 

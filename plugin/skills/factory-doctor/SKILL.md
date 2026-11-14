@@ -1,11 +1,11 @@
 ---
-name: doctor
-description: /factory:doctor. Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Factory runs, and name the fix for each failure. Use when the user asks whether Clockgrove Factory is set up, why Objectives Block at the first step, or before enabling the workflow.
+name: factory-doctor
+description: /factory:factory-doctor. Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Factory runs, and name the fix for each failure. Use when the user asks whether Clockgrove Factory is set up, why Objectives Block at the first step, or before enabling the workflow.
 ---
 
-# /factory:doctor
+# /factory:factory-doctor
 
-Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:setup` applies fixes on consent. Run the plugin's `scripts/doctor.mjs` and render its output:
+Run every check, print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:factory-setup` applies fixes on consent. Run the plugin's `scripts/doctor.mjs` and render its output:
 
 ```sh
 node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup] [--local]
@@ -21,7 +21,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## GitHub
 
-- The App's installation token mints with its permission list on this repository (README; a missing read FAILs) and nothing more. Fix: create or reinstall the App (`/factory:setup`).
+- The App's installation token mints with its permission list on this repository (README; a missing read FAILs) and nothing more. Fix: create or reinstall the App (`/factory:factory-setup`).
 - The workflow checks read `.github/workflows/factory.yml` from the default branch on GitHub, which is what runs use; a local copy that differs is a warning. Fix: pull the default branch.
 - The job token is read-only on code (`permissions: contents: read`, plus `actions: read` for the usage artifacts). Fix: edit the workflow's `permissions:`.
 - The merge queue is on for the default branch with the CI workflow's checks required, and that workflow listens on `pull_request` and `merge_group`. Fix: setup's protection step; add `merge_group:` to the CI workflow's `on:`.
@@ -37,4 +37,4 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## After
 
-End with one line: `ready` when nothing failed, else the count of failures and `run /factory:setup to apply the GitHub fixes`. These same checks are the first step of every worker job, which Blocks with the failing line.
+End with one line: `ready` when nothing failed, else the count of failures and `run /factory:factory-setup to apply the GitHub fixes`. These same checks are the first step of every worker job, which Blocks with the failing line.

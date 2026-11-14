@@ -741,7 +741,7 @@ export function scoreObjective(collected, opts = {}) {
     stall,
     firstHumanAction: split[0] ?? null,
     humanActions: actions.length,
-    // The split (bench/README.md, the scoring skill): actions Factory asked for and the rest; requests are Factory's.
+    // The split (bench/README.md, the factory-scoring skill): actions Factory asked for and the rest; requests are Factory's.
     interventions: { asked: asked.length, unprompted: unprompted.length, requests: requests.map(({ at, kind }) => ({ at, kind })), firstUnprompted: unprompted[0] ?? null },
     blocked: blocked ? { at: blocked.at, reason: blocked.reason } : null,
     unseen,

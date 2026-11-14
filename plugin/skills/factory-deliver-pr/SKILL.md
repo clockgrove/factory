@@ -1,6 +1,6 @@
 ---
-name: deliver-pr
-description: Last step of working a Clockgrove Factory Objective, after prove-acceptance. Use to rebase on the default branch, write the one PR's title and body, answer each reviewer comment once, write the exit record and stop; Clockgrove Factory pushes, opens the PR and posts the replies. Load when a task card says to use deliver-pr, or when a Clockgrove Factory PR has reviewer comments to answer.
+name: factory-deliver-pr
+description: Last step of working a Clockgrove Factory Objective, after factory-prove-acceptance. Use to rebase on the default branch, write the one PR's title and body, answer each reviewer comment once, write the exit record and stop; Clockgrove Factory pushes, opens the PR and posts the replies. Load when a task card says to use factory-deliver-pr, or when a Clockgrove Factory PR has reviewer comments to answer.
 ---
 
 # Deliver the PR

@@ -1,13 +1,13 @@
 ---
-name: run
-description: "/factory:run <issue> [--here]. Run one Clockgrove Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Clockgrove Factory Objective by issue number on their machine."
+name: factory-run
+description: "/factory:factory-run <issue> [--here]. Run one Clockgrove Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Clockgrove Factory Objective by issue number on their machine."
 ---
 
-# /factory:run <issue> [--here]
+# /factory:factory-run <issue> [--here]
 
 ## Local mode (the default)
 
-Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox (docs/LOCAL.md). It needs local mode set up (the token file, `srt`); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:serve`, resumes it.
+Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox (docs/LOCAL.md). It needs local mode set up (the token file, `srt`); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:factory-serve`, resumes it.
 
 ## In this session (--here)
 
@@ -37,11 +37,11 @@ Then fetch and check out the default branch, create `factory/<issue>` from it, a
 
 ### Run
 
-The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Load and follow, in order: `objective-plan`, `implement-split`, `prove-acceptance`, `deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when deliver-pr says to. Write nothing to GitHub.
+The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Load and follow, in order: `factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when factory-deliver-pr says to. Write nothing to GitHub.
 
 ### Hand off to Factory
 
-Run `factory deliver <issue>` from the clone (else `node <plugin root>/scripts/local.mjs deliver <issue>`). Factory checks the issue's author and last editor again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, posts the plan, the PR, the replies and the note, and applies the exit record: a delivered PR is marked ready and labelled `factory:review`, which fires the Action's review job when `.github/workflows/factory.yml` exists. Without the workflow, say that the PR waits for `/factory:review <pr>` and a human merge.
+Run `factory deliver <issue>` from the clone (else `node <plugin root>/scripts/local.mjs deliver <issue>`). Factory checks the issue's author and last editor again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, posts the plan, the PR, the replies and the note, and applies the exit record: a delivered PR is marked ready and labelled `factory:review`, which fires the Action's review job when `.github/workflows/factory.yml` exists. Without the workflow, say that the PR waits for `/factory:factory-review <pr>` and a human merge.
 
 ### After
 

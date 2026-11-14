@@ -638,7 +638,7 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 
 /**
  * Reviewer findings with no answer. Line comments: the reviewer's root comments with no reply (the reviewer and the
- * worker both post as the App, so any reply counts: the review-pr skill forbids the reviewer replying). `reviewIds`
+ * worker both post as the App, so any reply counts: the factory-review-pr skill forbids the reviewer replying). `reviewIds`
  * (Factory's own reviews on the PR) decides which roots are the reviewer's by structure, which also holds in local mode,
  * where reviewer and developer are one login. Findings GitHub took in no line (postReview set them out in the body of
  * Factory's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one counts until Factory

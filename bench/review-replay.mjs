@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `node bench/review-replay.mjs`: replay the private review set with the 0.6 reviewer
- * (the review-pr skill as the pinned reviewer agent) and score its comments against the
+ * (the factory-review-pr skill as the pinned reviewer agent) and score its comments against the
  * set's labels. PLAN.md: no skill line changes without a replay-set run.
  *
  *   --set DIR               the replay set (records/, labels.json, seeded/, inputs/, plans/)

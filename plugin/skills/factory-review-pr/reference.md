@@ -1,6 +1,6 @@
-# review-pr: reference
+# factory-review-pr: reference
 
-Lookup detail for the review-pr skill. SKILL.md says when to load each section; every rule here is as binding as one there.
+Lookup detail for the factory-review-pr skill. SKILL.md says when to load each section; every rule here is as binding as one there.
 
 ## Placing a comment
 
@@ -32,4 +32,4 @@ The last part and an Objective in one PR are judged against every entry, never d
 
 ## SDK first
 
-The implement-split skill has the worker use the official SDK or a maintained library for a protocol, a file format, a codec or a provider's API, and write that code by hand only when none fits (no library, a licence that does not fit, an unwanted install script or native binary, byte-for-byte deterministic output), naming the choice or the reason under Assumptions. Hand-written code of that kind is a finding, citing that rule, when neither the PR body's Assumptions nor a repository decision names the SDK or library it uses or why none fits.
+The factory-implement-split skill has the worker use the official SDK or a maintained library for a protocol, a file format, a codec or a provider's API, and write that code by hand only when none fits (no library, a licence that does not fit, an unwanted install script or native binary, byte-for-byte deterministic output), naming the choice or the reason under Assumptions. Hand-written code of that kind is a finding, citing that rule, when neither the PR body's Assumptions nor a repository decision names the SDK or library it uses or why none fits.

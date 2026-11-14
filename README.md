@@ -47,7 +47,7 @@ Factory itself is free. Every cost goes to a provider you already pick and pay d
 
 Factory never handles a payment, and no bill comes from Clockgrove. To keep those costs in check:
 
-- **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change costs a dollar or a few; a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Factory's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/factory:run --here`) is neither capped nor counted.
+- **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change costs a dollar or a few; a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Factory's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/factory:factory-run --here`) is neither capped nor counted.
 - **Runs take from about ten minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run factory.yml -f issue=<number>`) runs it even when that limit is reached.
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Factory stops at a ready-for-review PR and you merge it yourself.
@@ -57,7 +57,7 @@ Factory never handles a payment, and no bill comes from Clockgrove. To keep thos
 ## What it can touch
 
 - **On every route Factory runs (GitHub Actions, local mode, the cloud sandbox), the worker and the reviewer cannot write to GitHub.** The worker only changes files in its own checkout, and Factory's scripts make every push, PR, comment and merge. On GitHub Actions they act as a GitHub App that you create for this one repository; in local mode, with a token you create for this one repository (and, if you add the App's key, as the App for Blocked and Question notices).
-- **The commands a worker runs are sandboxed** there and see none of your credentials unless you choose to share one. The exceptions are the commands that run inside your own agent session, `/factory:run --here` and `/factory:review` ([docs/USAGE.md](docs/USAGE.md)): they are not Factory's routes and work as you, unsandboxed, with your own GitHub login.
+- **The commands a worker runs are sandboxed** there and see none of your credentials unless you choose to share one. The exceptions are the commands that run inside your own agent session, `/factory:factory-run --here` and `/factory:factory-review` ([docs/USAGE.md](docs/USAGE.md)): they are not Factory's routes and work as you, unsandboxed, with your own GitHub login.
 - **Only people you trust can start a run.** Factory acts on an issue only when its author can push to the repository or is a maintainer you name during setup, so a stranger's issue cannot instruct the worker.
 - **One repository per Objective.** An Objective that needs a change in another repository stops before any code is written, with a Question on the issue.
 
@@ -127,7 +127,7 @@ The same setup runs as scripts from a clone of Factory, with no coding agent inv
 
 ### Run it on your own machine instead
 
-Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Factory in local mode" and the setup skill sets up both. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
+Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Factory in local mode" and the factory-setup skill sets up both. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
 
 ## What Factory adds to your repository
 

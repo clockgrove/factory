@@ -56,7 +56,7 @@ test("Codex on a runner: its own sandbox with local mode's profile fitted to the
   assert.equal(cmd, "/usr/bin/env");
   assert.deepEqual(launch, [`HOME=${CODEX_RUNNER_HOME}`, "TMPDIR=/tmp", "PATH=/opt/tool/bin:/usr/bin", "codex", "exec"], "Factory's HOME, a private /tmp, nothing of the agent's home on its PATH");
   assert.equal(codexRunner({ harness: "claude", agent: AGENT, clone: CLONE }), null);
-  assert.equal(codexRunner({ harness: "codex", agent: null, clone: CLONE }), null, "no agent uid (a developer's /factory:run): no runner sandbox");
+  assert.equal(codexRunner({ harness: "codex", agent: null, clone: CLONE }), null, "no agent uid (a developer's /factory:factory-run): no runner sandbox");
   assert.equal(codexRunner({ harness: "codex", agent: AGENT, clone: CLONE, env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
   assert.ok(harnessCommand({ harness: "codex", prompt: "p" }).args.includes("--dangerously-bypass-approvals-and-sandbox"), "a developer's own session keeps the CLI's own behaviour");
 });

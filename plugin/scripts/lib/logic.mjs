@@ -999,7 +999,7 @@ export function parseExitRecord(text) {
             const text = (q) => (typeof q === "string" ? q : q?.question ?? q?.item ?? JSON.stringify(q));
             const items = (Array.isArray(v.questions) ? v.questions : []).filter((q) => text(q));
             const questions = items.map(text);
-            // A split Objective's part: the items left for the next PR (implement-split). `part.remaining: []` says this
+            // A split Objective's part: the items left for the next PR (factory-implement-split). `part.remaining: []` says this
             // is the last part; no `part` at all says nothing, and the part Factory recorded stands.
             const part = Array.isArray(v.part?.remaining) ? { remaining: v.part.remaining.map(text).filter(Boolean) } : null;
             // A question exit's questions that name no test of the Question rule (questionFounded); none at all is one.
@@ -1019,7 +1019,7 @@ export function parseExitRecord(text) {
 }
 
 /**
- * The three tests of objective-plan's Question rule: the choice changes or removes an existing public contract (a use
+ * The three tests of factory-objective-plan's Question rule: the choice changes or removes an existing public contract (a use
  * that works on the base commit breaks or behaves differently), contradicts a decision recorded in the issue, or grants
  * new access (a permission, a credential, a newly exposed service). Any other addition that leaves every existing use
  * working, and a reversible choice the issue leaves open, meet none.

@@ -54,6 +54,7 @@ import { log, redactSecrets, secretForms } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
+import { outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -1344,7 +1345,7 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
@@ -1366,6 +1367,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     passes,
     exit,
     reason,
+    // A stage this machine's network ended (outageExit): the host it could not reach, the code and since when (ISO). A
+    // local serve reads it to resume the Objective once the host answers, or to Block it past OUTAGE.blockMs.
+    ...(outage ? { outage } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
@@ -1558,6 +1562,33 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
   const tidy = await Promise.race([applyStop(repo, issue, { pr, closed: cause === "closed" }, opts).then(() => "done", () => "failed"), late]);
   clearTimeout(timer);
   if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
+}
+
+/**
+ * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level
+ * failure), which is no crash. The process stops waiting first, so what it still writes fails at once rather than waiting
+ * again. Its records are every pass it ran (stagePasses, the ones still running at their live reading), so the usage
+ * counts a pass the outage cut off. On the local route (`local`) the stage ends `paused` with the outage in result.json
+ * and nothing written to GitHub: serve keeps the claim and resumes the Objective once the host answers (local.mjs). On
+ * any other route nothing resumes a stage, so it Blocks with the External cause `outage` through `block(reason)` (one try,
+ * which lands only if GitHub answers again by then).
+ */
+export async function outageExit(e, { local, records, finish, block }) {
+  stopWaiting();
+  const lost = outageOf(e);
+  const reason = outageReason(lost);
+  const outage = { host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}) };
+  const ran = stoppedRecords(stagePasses(), openPasses());
+  if (ran.length) records.splice(0, records.length, ...ran);
+  if (local) {
+    log(`paused: ${reason}; the claim stays, and serve resumes the stage once ${lost.host} answers`);
+    await finish("paused", reason, outage);
+    return;
+  }
+  const blocked = `${reason}; the stage waited for the network until its time ran out. Re-apply the label to run it again.`;
+  log(`blocked: ${blocked}`);
+  await block(blocked).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
+  await finish("blocked", blocked, outage);
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */

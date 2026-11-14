@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, remov
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, outageExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -31,6 +31,7 @@ import { ranWith } from "./lib/choice.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
+import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { exitFromOut, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -74,6 +75,11 @@ async function main() {
   mkdirSync(usageDir, { recursive: true });
   const eventsFile = join(usageDir, "events.jsonl");
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
+  // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
+  // in place for its host to answer, up to fifteen minutes on the local route (then the stage ends paused, for serve to
+  // resume) and up to the work's deadline elsewhere, where nothing resumes a stage.
+  const local = backend().name === "local";
+  waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
   let passes = 0;
@@ -107,12 +113,12 @@ async function main() {
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
-  const finish = async (exit, reason) => {
+  const finish = async (exit, reason, outage = null) => {
     watch?.stop();
     if (!claimExit()) return parked();
-    return finishNow(exit, reason);
+    return finishNow(exit, reason, outage);
   };
-  const finishNow = async (exit, reason) => {
+  const finishNow = async (exit, reason, outage = null) => {
     keeper.stop();
     // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
     const known = await stageSpendSoFar().catch(() => null);
@@ -127,7 +133,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -140,6 +146,8 @@ async function main() {
       progress.spend(line.usd, line.parts);
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
+    // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
+    stopWaiting();
     setOutput("exit", exit);
     setOutput("reason", reason || "");
     setOutput("pr", pr ? String(pr.number) : "");
@@ -161,6 +169,11 @@ async function main() {
       log(e.message.slice(0, 300));
       await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, cause: "setup", notify: inputs.notify, stage: "work" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
       await finish("blocked", refused.reason);
+      return;
+    }
+    // This machine's network, not the stage: paused locally, an `outage` Block elsewhere (session.mjs outageExit).
+    if (unreachable(e)) {
+      await outageExit(e, { local, records, finish, block: (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) });
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);

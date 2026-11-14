@@ -14,7 +14,8 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
+import { githubOrigin, networkBack, passCutOff, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -841,9 +842,96 @@ export const passesRunning = () => RUNNING;
  * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
  * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
  * stands and the stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
- * harnessShell).
+ * harnessShell). A pass this machine's network cut off runs again once the network is back (below), as one record.
  */
 export async function runHarness(opts) {
+  const startedAt = Date.now();
+  const lost = [];
+  let rec = await runResumable(opts);
+  // A pass this machine's network cut off (network.mjs passCutOff) is no death and no answer: once the network is back,
+  // the same pass runs again, resuming its session when it has one (a reviewer's runs from its own prompt), on what is
+  // left of its budget and wall clock. The wait throws NetworkDown past the stage's limit: the stage then ends on it.
+  for (;;) {
+    const cut = await outageCut(rec, opts);
+    if (!cut) break;
+    lost.push(rec);
+    if (cut.ongoing) await networkBack(cut.origin, cut.code);
+    const spent = lost.reduce((s, r) => s + (Number.isFinite(r.usd) ? Math.max(0, r.usd) : 0), 0);
+    const maxUsd = opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd;
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs;
+    if (opts.maxUsd > 0 && maxUsd <= 0) return joinLost(lost, { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" });
+    if (Number.isFinite(timeoutMs) && timeoutMs <= 0) return joinLost(lost, { ...rec, ok: false, timedOut: true, error: "wall clock reached" });
+    const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
+    log(`${opts.label || "run"}: the pass was cut off by this machine's network (${cut.code} reaching ${new URL(cut.origin).host}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
+    rec = await runResumable({ ...opts, maxUsd, timeoutMs, ...(session ? { resume: session, prompt: LOST_PASS_PROMPT } : {}) });
+  }
+  return lost.length ? joinLost(lost, rec) : rec;
+}
+
+/** What a pass cut off by the network is told when its session runs again. */
+export const LOST_PASS_PROMPT = "Your previous run lost its network connection before it finished. Continue the same task from where it stopped; do not redo finished steps.";
+
+/**
+ * The model provider's origin a harness calls, for the probe after a failed pass: the AI Gateway for Codex through it,
+ * else the provider's own API (a base URL the environment sets wins).
+ */
+export function providerOrigin(harness, env = {}) {
+  const base = harness === "claude" ? env.ANTHROPIC_BASE_URL : harness === "codex" ? env.OPENAI_BASE_URL : null;
+  if (base) {
+    try {
+      return new URL(base).origin;
+    } catch {
+      // not a URL: the default below
+    }
+  }
+  if (harness === "claude") return "https://api.anthropic.com";
+  if (harness === "codex") return codexGatewayOf(harness, env) ? new URL(GATEWAY_CODEX_URL).origin : env.CODEX_API_KEY || env.OPENAI_API_KEY ? "https://api.openai.com" : "https://chatgpt.com";
+  if (harness === "copilot") return "https://api.githubcopilot.com";
+  return null;
+}
+
+/**
+ * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
+ * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
+ * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
+ */
+async function outageCut(rec, { harness, env }) {
+  if (!waitingOutages() || rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
+  const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
+  return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);
+}
+
+/**
+ * The record of a pass that ran again after the network cut it off (`lost`, its earlier runs): the last run's outcome,
+ * every run's dollars, tokens, turns and credits (usage.mjs mergeUsage), its relayed key spend and sub-agent threads,
+ * from the first run's start. `lostToOutage` counts the runs cut off.
+ */
+export function joinLost(lost, rec) {
+  const all = [...lost, rec];
+  const m = mergeUsage(all);
+  const keyed = all.filter((r) => typeof r.workerKeyUsd === "number");
+  const subs = all.flatMap((r) => r.subAgents || []);
+  return {
+    ...rec,
+    usd: m.usd,
+    tokens: m.tokens,
+    turns: m.turns,
+    ...(m.models ? { models: m.models } : {}),
+    ...(typeof m.premiumRequests === "number" ? { premiumRequests: m.premiumRequests } : {}),
+    ...(typeof m.aiu === "number" ? { aiu: m.aiu } : {}),
+    ...(m.usdLowerBound ? { usdLowerBound: true } : {}),
+    ...(m.usdUpperBound ? { usdUpperBound: true } : {}),
+    ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
+    ...(subs.length ? { subAgents: subs } : {}),
+    started: lost[0].started ?? rec.started,
+    lostToOutage: lost.length,
+    basis: `${rec.basis}; with ${lost.length} earlier run${lost.length === 1 ? "" : "s"} of this pass cut off by this machine's network`,
+  };
+}
+
+/** runHarness's single pass: runOnce, and the fresh thread once after a refused resume. */
+async function runResumable(opts) {
   const rec = await runOnce(opts);
   if (!opts.resume || !rec.pinRotated || typeof opts.freshPrompt !== "string" || !opts.freshPrompt) return rec;
   log(`${opts.label || "run"}: the provider refused to resume ${opts.resume.slice(0, 8)} (${rec.refusal ? refusalFields(rec.refusal) : "rotated credential"}): its thread was written through another credential; running a fresh thread once`);

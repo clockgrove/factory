@@ -804,9 +804,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
   };
   /**
-   * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. Only
-   * a refusal GitHub answered leaves the session totals unrecorded; a write that may have landed (no answer in time)
-   * records them, so the next stage never counts again what this line may show (it may count less: a lower bound).
+   * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. The
+   * session totals it counted are recorded when the write landed or may have (rest-sync.mjs `sent`: a 5xx, no answer in
+   * time), so the next stage never counts again what this line may show (it may count less: a lower bound); not when it
+   * certainly did not land (never sent, or refused), so the next stage counts what this line could not.
    */
   const stopWrite = () => {
     if (spend !== null || commentId === null) return;
@@ -818,8 +819,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     }
     if (!Number.isFinite(live?.usd) || !(live.usd > shown)) return;
     const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(interimOf(live))}` }, token }, { ms: STOP_WRITE_MS });
-    if (!r.ok) log(`progress: the stopped stage's spend line ($${live.usd}) may not have landed: ${r.error}`);
-    if (r.ok || !(r.status >= 400 && r.status < 500)) live.commit?.();
+    if (!r.ok) log(`progress: the stopped stage's spend line ($${live.usd}) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+    if (r.ok || r.sent) live.commit?.();
   };
   const write = async () => {
     const live = spend === null && soFar ? await soFar().catch(() => null) : null;

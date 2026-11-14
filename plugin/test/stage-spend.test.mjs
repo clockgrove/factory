@@ -110,7 +110,7 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
     import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
     import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
     process.env.FACTORY_LOCAL = "1";
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", harness: "codex" });
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "codex" });
     delete process.env.FACTORY_LOCAL;
     const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: process.env.FAKE_STATE, env: { PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, label: "work-1" });
     await progress("validation");
@@ -139,6 +139,8 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
  * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session;
  * - term: SIGTERM while the pass runs (as `factory serve` stops a stage), with no write since the pass began; the pass
  *   runs in its own process group, as locally, and is killed with the stage;
+ * - term-unsent: as term, but GitHub is unreachable for the stop's write (nothing sent);
+ * - term-5xx: as term, but GitHub answers the stop's write with a 502 (it may have landed);
  * - failed: a phase line that lands, a second pass, a phase line that fails to land, then killed.
  * Returns every stage's last spend line.
  */
@@ -149,7 +151,12 @@ async function stages(plan) {
   mkdirSync(join(root, "bin"));
   mkdirSync(ws);
   fakeCodex(join(root, "bin"));
-  const env = { GITHUB_API_URL: gh.url, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
+  // An address nothing listens on: a request to it is refused before anything is sent.
+  const dead = createServer();
+  await new Promise((r) => dead.listen(0, "127.0.0.1", r));
+  const deadUrl = `http://127.0.0.1:${dead.address().port}`;
+  await new Promise((r) => dead.close(r));
+  const env = { GITHUB_API_URL: gh.url, FAKE_DEAD: deadUrl, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
   const script = (name, how) => `
     import { existsSync, mkdirSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
@@ -163,17 +170,21 @@ async function stages(plan) {
     const usageDir = join(root, "ws", "usage-work-" + ${JSON.stringify(name)});
     mkdirSync(usageDir, { recursive: true });
     process.env.FACTORY_LOCAL = "1";
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: ${JSON.stringify(name)}, harness: "codex" });
+    // The token as a stage holds it: TokenKeeper's getter (worker.mjs, review.mjs).
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: ${JSON.stringify(name)}, harness: "codex" });
     const resume = (await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id;
     delete process.env.FACTORY_LOCAL;
     await progress("harness");
-    const local = how === "term" ? { FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }), FAKE_LINGER: "60000" } : {};
-    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how === "term" ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const local = how.startsWith("term") ? { FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }), FAKE_LINGER: "60000" } : {};
+    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how.startsWith("term") ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
     const run = pass();
-    if (how === "mid" || how === "term") {
+    if (how === "mid" || how.startsWith("term")) {
       const until = Date.now() + 10_000;
       while (!((await stageSpendSoFar()).usd > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
-      if (how === "term") {
+      if (how.startsWith("term")) {
+        // The status line the stop's write carries (no write now: the last was moments ago), or where it goes.
+        if (how === "term-5xx") progress.live("FAIL-THIS", { everyMs: 3_600_000 });
+        if (how === "term-unsent") process.env.GITHUB_API_URL = process.env.FAKE_DEAD;
         process.stdout.write("spent\\n");
         await run;
         process.exit(1);
@@ -206,14 +217,14 @@ async function stages(plan) {
   try {
     for (const [i, how] of plan.entries()) {
       const s = stageProcess(script(`s${i}`, how), env);
-      if (how === "term") {
+      if (how.startsWith("term")) {
         const until = Date.now() + 15_000;
         while (!/spent/.test(s.out()) && s.child.exitCode === null && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
         s.child.kill("SIGTERM");
       }
       const code = await s.exited;
       assert.ok(!s.err(), s.err());
-      if (how === "term") assert.equal(code, 143, "the stage exits as SIGTERM ends it");
+      if (how.startsWith("term")) assert.equal(code, 143, "the stage exits as SIGTERM ends it");
       // A killed stage's pass runs on: the next stage starts once it has finished.
       const until = Date.now() + 15_000;
       if (how === "mid") while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
@@ -237,8 +248,13 @@ for (const [how, killed, own, passes] of [
   ["mid", "in the middle of a pass that then runs on", PASS / 2, 3],
   ["failed", "after a second pass whose write failed to land", PASS, 4],
   ["term", "by SIGTERM in the middle of a pass, before a write shows it", PASS / 2, 2.5],
+  // Its stop write never sent: no session totals recorded, so the resuming stage counts the killed half pass.
+  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, 2.5],
+  // Its stop write answered 502, so it may have landed: the totals are recorded, and the half pass is never counted twice
+  // (here it did not land, so it is not counted at all: a lower bound).
+  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, 2],
 ]) {
-  test(`a stage killed ${killed}, then resumed: the stages' lines sum to the spend, each pass counted once`, async () => {
+  test(`a stage killed ${killed}, then resumed: the stages' lines sum to ${passes} passes' spend, none counted twice`, async () => {
     const lines = await stages(["end", how, "end"]);
     const sum = lines.reduce((s, l) => s + l.usd, 0);
     assert.ok(near(sum, passes * PASS), `${JSON.stringify(lines)} sum to ${sum}, not ${passes * PASS}`);
@@ -252,6 +268,67 @@ test("a stage stopped by SIGTERM before any status write shows its first pass le
   // A fresh session that no later stage resumes: this line is all that records the pass.
   const [line] = await stages(["term"]);
   assert.ok(near(line.usd, PASS / 2) && line.usd > 0 && line.usdLowerBound === true, JSON.stringify(line));
+});
+
+test("restSync: a getter's token, the held secrets redacted here, and whether the request may have landed", async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      seen.push({ url: req.url, auth: req.headers.authorization, body: b });
+      if (req.url === "/hang") return;
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/422" || req.url === "/502") {
+        res.statusCode = Number(req.url.slice(1));
+        return res.end('{"message":"no"}');
+      }
+      res.end('{"id":5}');
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const dead = createServer();
+  await new Promise((r) => dead.listen(0, "127.0.0.1", r));
+  const deadUrl = `http://127.0.0.1:${dead.address().port}`;
+  await new Promise((r) => dead.close(r));
+  const script = `
+    import { restSync } from ${JSON.stringify(LIB("rest-sync.mjs"))};
+    import { holdSecrets } from ${JSON.stringify(LIB("inputs.mjs"))};
+    holdSecrets(["WORKERSECRETVALUE123"]);
+    const call = (url, token = () => "tok-1") => {
+      const r = restSync(url, { method: "PATCH", body: { body: "status: echo WORKERSECRETVALUE123" }, token }, { ms: 1500 });
+      return r.ok ? { ok: true, data: r.data } : { ok: false, sent: r.sent };
+    };
+    console.log(JSON.stringify({
+      landed: call(${JSON.stringify(base)} + "/ok"),
+      refused: call(${JSON.stringify(base)} + "/422"),
+      failed: call(${JSON.stringify(base)} + "/502"),
+      silent: call(${JSON.stringify(base)} + "/hang"),
+      unreachable: call(${JSON.stringify(deadUrl)} + "/x"),
+      noToken: call(${JSON.stringify(base)} + "/never", () => { throw new Error("no token"); }),
+    }));
+  `;
+  const s = stageProcess(script, {});
+  const code = await s.exited;
+  server.closeAllConnections();
+  server.close();
+  assert.equal(code, 0, s.err());
+  assert.deepEqual(JSON.parse(s.out().trim().split("\n").at(-1)), {
+    landed: { ok: true, data: { id: 5 } },
+    refused: { ok: false, sent: false },
+    failed: { ok: false, sent: true },
+    silent: { ok: false, sent: true },
+    unreachable: { ok: false, sent: false },
+    noToken: { ok: false, sent: false },
+  });
+  // One try each (no retry), none for the token that failed; the getter's token sent, the held secret never.
+  assert.deepEqual(seen.map((x) => x.url), ["/ok", "/422", "/502", "/hang"]);
+  assert.equal(seen[0].auth, "Bearer tok-1");
+  for (const x of seen) {
+    assert.doesNotMatch(x.body, /WORKERSECRETVALUE123/);
+    assert.match(x.body, /echo \*\*\*/);
+  }
 });
 
 test("a final write waits for a status write in flight, and its spend line replaces the interim one", async () => {

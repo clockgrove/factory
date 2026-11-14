@@ -4,7 +4,7 @@ How to write an Objective, what you see while it runs, and what to do when a run
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: the worker cannot ask you for more detail while it runs.
+An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: the worker cannot ask you for more detail while it runs. Ask a session to file one for you ("File a Factory Objective: ...", the file skill), or write the issue yourself:
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading such as `Acceptance` (`Done when`, `Definition of done`, `Must be true` and `Criteria` are read the same way). The reviewer judges each entry, met or not, with the line that shows it. Without such a section, the reviewer names the entries from the issue text itself.
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
@@ -56,16 +56,17 @@ Factory works in one repository per Objective. An Objective that needs a change 
 
 ## Commands
 
-In a Claude Code or Codex session with the plugin installed:
+With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words: each request below loads the Factory skill that does it. Where your agent offers skills as slash commands, the command works too.
 
-| Command | What it does |
-| --- | --- |
-| `/factory:setup` | Installs Factory in the current repository, one consented step at a time |
-| `/factory:doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
-| `/factory:run <issue>` | Runs the worker on one Objective in your own session, on your login |
-| `/factory:review <pr>` | Runs the reviewer on one Factory PR in your session |
-| `/factory:serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
-| `/factory:queue` | Starts the unattended scheduler for the repository |
-| `/factory:score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
+| Say | Command | What it does |
+| --- | --- | --- |
+| "Set up Factory for this repository." | `/factory:setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
+| "Is Factory set up correctly here?" | `/factory:doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
+| "File a Factory Objective: ..." | `/factory:file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
+| "Run Objective 42 here." | `/factory:run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
+| "Review Factory PR 57." | `/factory:review <pr>` | Runs the reviewer on one Factory PR in your session |
+| "Start Factory's local loop." | `/factory:serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
+| "Start the Factory queue." | `/factory:queue` | Starts the unattended scheduler for the repository |
+| "Show the Factory scorecard." | `/factory:score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
 On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).

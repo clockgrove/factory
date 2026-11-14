@@ -1,6 +1,6 @@
 ---
 name: review
-description: /factory:review <pr>. Run the Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Factory PR by number.
+description: "/factory:review <pr>. Run the Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Factory PR by number."
 ---
 
 # /factory:review <pr>

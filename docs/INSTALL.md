@@ -34,16 +34,19 @@ What each credential can do:
 - **The job token:** `contents: read`, `issues: write`, `actions: read` (usage artifacts and the CI workflow's triggers), and on the jobs that tick the dispatcher `actions: write` (work and review also use it to rerun flaky CI jobs); it never writes code. Set your repository's default workflow token to read-only: doctor requires it.
 - **The harness:** it holds no GitHub write access: on Actions it runs as its own uid with a read-only token (the runner needs passwordless sudo, as GitHub's hosted runners have); Factory makes every write.
 - **Secrets:** they are scrubbed from every non-harness child and masked in the uploaded event log.
-- **Cost:** it is capped by `max_usd` per job and `daily_usd` per day; Claude (`--max-budget-usd`) and Copilot (`--max-ai-credits`) enforce the per-job cap inside the run; Codex is checked after each run.
+- **Cost:** it is capped by `max_usd` per job ($25 by default) and `daily_usd` per day ($100 by default); `max_concurrent` is 3 and `timeout_minutes` 240 unless set; Claude (`--max-budget-usd`) and Copilot (`--max-ai-credits`) enforce the per-job cap inside the run; Codex is checked after each run.
 - **What persists:** the worker runs on an ephemeral runner; what persists is the branch, the PR, the plan comment and a usage artifact.
 
 ## Set it up
 
-With the plugin, `/factory:setup` in a session in your repository's clone walks every step below and waits for a yes before each change. Without it, the steps are:
+With the plugin, ask a session in your repository's clone to set up Factory (the setup skill, `/factory:setup`): it walks every step below, waits for a yes before each change, and opens the pull request that adds the workflow file. Without it, the steps are:
 
-1. **The workflow file and the GitHub settings.** In your repository's clone, with a clone of Factory beside it:
+1. **The workflow file and the GitHub settings.** Clone Factory at its latest release, then run setup in your repository's clone:
 
    ```sh
+   git clone --depth 1 --branch "$(gh release view --repo clockgrove/factory --json tagName --jq .tagName)" \
+     https://github.com/clockgrove/factory.git <factory clone>
+
    node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>"        # preview: prints each step, changes nothing
    node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>" --yes  # apply
    ```
@@ -51,11 +54,11 @@ With the plugin, `/factory:setup` in a session in your repository's clone walks 
    It writes `.github/workflows/factory.yml` pinned to the latest release, and creates the labels, the Project board and the `factory` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step. If your CI workflow lacks `merge_group:` under `on:`, add it.
 2. **The GitHub App.** Open `https://github.com/settings/apps/new` (or your organization's `/organizations/<org>/settings/apps/new`). Uncheck webhooks and grant exactly the repository permissions in the table above. Create it, generate a private key, note its App ID, and install it on this repository only.
 3. **The secrets.** `gh secret set FACTORY_APP_ID`, `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, and your model credential from the table above.
-4. **Commit the workflow file** on the default branch; its cron starts then.
+4. **Land the workflow file.** Commit `.github/workflows/factory.yml` on a branch and merge it to the default branch through a pull request; its cron and triggers start then.
 
 ## The plugin and the Action are one tree
 
-`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned for Claude Code and Codex; Copilot's only when `subagent_model` or `reviewer_model` is set), the task card, the scripts and the workflow template. The Action (`action.yml` at the repository root) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`). Commands: `/factory:run`, `/factory:serve`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`. The marketplaces install the plugin from `main`, so a session's commands follow `main`, not the tag your Action pins.
+`plugin/` holds the skills the worker and reviewer follow, the agent definitions (model pinned for Claude Code and Codex; Copilot's only when `subagent_model` or `reviewer_model` is set), the task card, the scripts and the workflow template. The Action (`action.yml` at the repository root) runs those scripts from beside it; `/factory:run <issue>` in your own Claude Code or Codex session runs the same worker on your login. Install the plugin with `claude plugin marketplace add https://github.com/clockgrove/factory.git` then `claude plugin install factory@clockgrove` (Codex: `codex plugin marketplace add clockgrove/factory`, `codex plugin add factory@clockgrove`; GitHub Copilot CLI: `copilot plugin marketplace add clockgrove/factory`, `copilot plugin install factory@clockgrove`). Commands: `/factory:file`, `/factory:run`, `/factory:serve`, `/factory:review`, `/factory:score`, `/factory:queue`, `/factory:doctor`, `/factory:setup`. The marketplaces install the plugin from `main`, so a session's commands follow `main`, not the tag your Action pins.
 
 ## Check and run
 

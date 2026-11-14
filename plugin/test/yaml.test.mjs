@@ -1,6 +1,9 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { parse } from "../vendor/yaml/browser/index.js";
 import { grantsWrite, parseYaml, workflowEvents } from "../scripts/lib/yaml.mjs";
 
 test("workflow YAML: events and permissions read from the parsed file; anything doctor cannot read for sure throws", () => {
@@ -66,4 +69,18 @@ test("workflow YAML: aliases copy their anchor against a budget, so many aliases
   assert.equal(Object.getPrototypeOf(proto), Object.prototype);
   assert.deepEqual(Object.keys(proto), ["__proto__"]);
   assert.equal({}.polluted, undefined);
+});
+
+test("every skill's frontmatter is strict YAML with its directory's name and a description: a harness that reads it strictly (Copilot CLI) drops a skill it cannot parse", () => {
+  const skills = join(import.meta.dirname, "..", "skills");
+  const names = readdirSync(skills);
+  assert.ok(names.length >= 14);
+  for (const name of names) {
+    const fm = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(join(skills, name, "SKILL.md"), "utf8"));
+    assert.ok(fm, `${name}: no frontmatter`);
+    let doc;
+    assert.doesNotThrow(() => (doc = parse(fm[1])), `${name}: frontmatter is not strict YAML (quote a description that holds ": ")`);
+    assert.equal(doc.name, name);
+    assert.ok(typeof doc.description === "string" && doc.description.length > 40, `${name}: description`);
+  }
 });

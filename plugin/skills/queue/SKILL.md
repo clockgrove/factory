@@ -1,6 +1,6 @@
 ---
 name: queue
-description: /factory:queue. Start the unattended Factory scheduler for the current repository: dispatch the Action's workflow when .github/workflows/factory.yml exists, otherwise explain the harness-cloud scheduled-task path for this harness. Use when the user asks to queue, start, kick or run the Factory queue unattended.
+description: "/factory:queue. Start the unattended Factory scheduler for the current repository: dispatch the Action's workflow when .github/workflows/factory.yml exists, otherwise explain the harness-cloud scheduled-task path for this harness. Use when the user asks to queue, start, kick or run the Factory queue unattended."
 ---
 
 # /factory:queue

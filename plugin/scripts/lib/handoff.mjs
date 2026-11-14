@@ -391,8 +391,9 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
 
 /**
  * The plan's record of the Objective text it was made from, on the plan comment's marker line after the marker:
- * `sha256` of that title and body (objective-trust.mjs objectiveSha), and `label`, the time GitHub shows on the latest
- * `factory:objective` label event when the work stage last started from that text (objective-trust.mjs planGate). Only
+ * `sha256` of that title and body (objective-trust.mjs objectiveSha), and `label`, the Objective's start time (the later
+ * of its last `factory:objective` label and its last `factory:draft` removal: objective-trust.mjs startedAt) when the
+ * work stage last started from that text (planGate). Only
  * Factory writes it: harness text never carries `<!--` (sanitize), and only Factory's own comment is read.
  */
 export const planTextMarker = (rec) => `<!-- factory:plan-text ${JSON.stringify({ sha256: rec.sha256, label: rec.label ?? null })} -->`;

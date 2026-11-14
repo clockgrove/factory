@@ -262,7 +262,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   for (const issue of wanted) {
     const state = stateOf(issue, statuses[issue.number] ?? null);
     if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
-    const again = inputs.issue === issue.number || (await relabeledAfter(repo, issue.number, inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], opts).catch(() => false));
+    const again = inputs.issue === issue.number || (await relabeledAfter(repo, issue.number, inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], opts, [DRAFT_LABEL]).catch(() => false));
     if (!again) continue;
     reset.push(issue.number);
     issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));

@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -9,7 +9,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { CALL_LOG, UNIX_SOCKET_PATH_MAX, EDITS_MAX_BYTES, FAST_ERROR_MS, FAST_ERROR_STATUS, HOLD_MAX_MS, IMAGE_UNKNOWN_FLOOR_USD, SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD, RELAY_RETRY_AFTER_S, UNKNOWN_STAGE_SHUT, UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UPSTREAM_KEEPALIVE_MS, upstreamRequest, RELAYED_NAME, RELAY_PING, addKeySpend, costOf, gatewayRefusalOf, keyCutter, modelOf, openRelay, relayShutText, routeOf, stageBlockReason, tokenMatches, withGatewayRefusal, withRelayShut } from "../scripts/lib/gateway-relay.mjs";
 import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/lib/relay-shim.mjs";
-import { RELAY_SOCKET_ROOT, closeWorkerRelay, localRelayDir, makeSocketDir, openWorkerRelay, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
+import { RELAY_SOCKET_DIR_ENV, RELAY_SOCKET_ROOT, SOCKET_DIR_RECORD, checkSocketRoot, closeWorkerRelay, dropSocketDir, handSocketDir, localRelayDir, makeSocketDir, openWorkerRelay, readSocketDirRecord, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
+import { STAGE_RECORD, reapSocketDirs, relaysGatewayKey } from "../scripts/local.mjs";
+import { processRecord } from "../scripts/lib/proc.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
 import { maxUsdReached, usdText } from "../scripts/lib/logic.mjs";
 import { harnessOuterSettings } from "../scripts/lib/local.mjs";
@@ -432,10 +434,12 @@ test("the relay's socket goes in a short directory of the stage's own: made 700 
     rmSync(dirname(dir), { force: true });
 
     // A socket path still over the limit: the stage Blocks before the run, naming the limit, with nothing left behind.
+    // A stand-in for /tmp: sticky, and its owner taken for root's (socketRootUid).
     const deep = join(root, "d".repeat(80));
-    mkdirSync(deep);
+    mkdirSync(deep, { mode: 0o1700 });
+    chmodSync(deep, 0o1700);
     const shell = { [RELAYED_NAME]: KEY };
-    const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, socketRoot: deep });
+    const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, socketRoot: deep, socketRootUid: uid });
     assert.equal(r.relay, null);
     assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket`));
     assert.ok(!(RELAYED_NAME in r.shell), "the key is out of the shell");
@@ -460,7 +464,8 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   const open = (o) => openRelay({ ...o, origin: gw.origin, lookupDelaysMs: [1] });
   let opened = null;
   try {
-    opened = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? fake : "/usr/bin/socat"), open, socketRoot: root });
+    chmodSync(root, 0o1700);
+    opened = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => (n === "bwrap" ? fake : "/usr/bin/socat"), open, socketRoot: root, socketRootUid: process.getuid() });
     assert.equal(opened.blocked, null, opened.blocked);
     const relay = opened.relay;
     assert.equal(dirname(relay.socketPath), relaySocketDir(usageDir, { root }));
@@ -2079,5 +2084,251 @@ test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run c
     await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A stand-in for /tmp under the real one: sticky (mode 1700), its owner taken for root's in the calls below. */
+function stickyRoot() {
+  const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
+  chmodSync(root, 0o1700);
+  return root;
+}
+
+test("the socket's root must be root's and sticky: a non-sticky stand-in is refused with a named reason, and the stage Blocks with nothing made (#185)", async () => {
+  const uid = process.getuid();
+  assert.equal(checkSocketRoot(RELAY_SOCKET_ROOT), realpathSync(RELAY_SOCKET_ROOT), "this machine's /tmp passes");
+  const root = mkdtempSync(join(realpathSync("/tmp"), "fxr-"));
+  try {
+    chmodSync(root, 0o777);
+    assert.throws(() => checkSocketRoot(root, { rootUid: uid }), new RegExp(`^Error: ${root} has no sticky bit \\(mode 777\\), so another user could swap the socket's directory there`));
+    chmodSync(root, 0o1777);
+    assert.throws(() => checkSocketRoot(root), new RegExp(`^Error: ${root} is not owned by root`), "sticky, but not root's");
+    assert.equal(checkSocketRoot(root, { rootUid: uid }), root);
+    chmodSync(root, 0o777);
+    const shell = { [RELAYED_NAME]: KEY };
+    for (const env of [{ FACTORY_LOCAL: "1", PATH: "/nope" }, { PATH: "/nope" }]) {
+      const r = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u"), env, which: (n) => `/usr/bin/${n}`, socketRoot: root, socketRootUid: uid });
+      assert.equal(r.relay, null);
+      assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: ${root} has no sticky bit`));
+      assert.ok(!(RELAYED_NAME in r.shell), "the key is out of the shell");
+      assert.deepEqual(readdirSync(root), [], "no directory made, no fallback either");
+    }
+    // The loop refuses it too, and hands nothing.
+    assert.throws(() => handSocketDir(join(root, "u"), { root, rootUid: uid }), /has no sticky bit/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a refused per-user directory: the stage's socket goes in a private mkdtemp directory, handed from the loop locally, checked, and removed with the stage; the path limit still holds there (#185)", { skip: process.platform === "win32" && "unix" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  const shell = { [RELAYED_NAME]: KEY };
+  const opts = { socketRoot: root, socketRootUid: uid };
+  try {
+    // Another user's stand-in at the per-user name: a file (a directory of theirs, or one open to others, is refused the same way).
+    writeFileSync(join(root, `factory-relay-${uid}`), "taken");
+    // A developer's own session: the stage falls back itself.
+    const own = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell, usageDir: join(root, "u1"), env: { PATH: "/nope" }, ...opts });
+    assert.equal(own.blocked, null, own.blocked);
+    const fallback = dirname(own.relay.socketPath);
+    assert.match(fallback, new RegExp(`^${root}/factory-relay-${uid}-[A-Za-z0-9]{6}$`));
+    assert.equal(statSync(fallback).mode & 0o7777, 0o700);
+    assert.equal(statSync(own.relay.socketPath).mode & 0o777, 0o600);
+    await closeWorkerRelay(own.relay);
+    assert.ok(!existsSync(fallback), "removed with the stage");
+
+    // Local mode with nothing handed: refused, never a directory the outer sandbox does not name.
+    const unhanded = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: join(root, "u2"), env: { FACTORY_LOCAL: "1", PATH: "/nope" }, which: (n) => `/usr/bin/${n}`, ...opts });
+    assert.match(unhanded.blocked, /its socket's directory: .*factory-relay-\d+ is not a directory/);
+
+    // Local mode: the loop makes the private directory, records it, names it in the outer sandbox and hands it over.
+    const usageDir = join(root, "u3");
+    mkdirSync(usageDir);
+    const m = handSocketDir(usageDir, { root, rootUid: uid });
+    assert.match(m.refused, /factory-relay-\d+ is not a directory/);
+    assert.match(m.dir, new RegExp(`^${root}/factory-relay-${uid}-[A-Za-z0-9]{6}$`));
+    assert.equal(readSocketDirRecord(usageDir).dir, m.dir);
+    const outer = harnessOuterSettings({ harness: "codex", writable: ["/w"], relaySocketDir: m.dir, env: {} });
+    assert.ok(!outer.filesystem.denyRead.some((p) => m.dir === p || m.dir.startsWith(`${p}/`)), "the outer sandbox keeps it reachable");
+    const handed = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: m.dir }, which: (n) => `/usr/bin/${n}`, ...opts });
+    assert.equal(handed.blocked, null, handed.blocked);
+    assert.equal(dirname(handed.relay.socketPath), m.dir);
+    await closeWorkerRelay(handed.relay);
+    assert.equal(dropSocketDir(usageDir, { root, rootUid: uid }), false, "already gone with the stage");
+    assert.equal(readSocketDirRecord(usageDir), null);
+
+    // A handed path that is not one of this user's socket directories there is refused, even where recorded.
+    writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: join(root, "elsewhere") }));
+    const odd = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: join(root, "elsewhere") }, which: (n) => `/usr/bin/${n}`, ...opts });
+    assert.match(odd.blocked, /is not a socket directory of this user's under/);
+
+    // The path limit, for the fallback too: a stand-in root deep enough that the private directory's socket passes it.
+    const deep = join(root, "d".repeat(80));
+    mkdirSync(deep, { mode: 0o1700 });
+    chmodSync(deep, 0o1700);
+    writeFileSync(join(deep, `factory-relay-${uid}`), "taken");
+    const long = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell, usageDir: join(root, "u4"), env: { PATH: "/nope" }, socketRoot: deep, socketRootUid: uid });
+    assert.match(long.blocked, new RegExp(`could not start: its socket's path would be \\d+ bytes, over this system's limit of ${UNIX_SOCKET_PATH_MAX} for a Unix socket \\(${deep}/factory-relay-${uid}-`));
+    assert.deepEqual(readdirSync(deep), [`factory-relay-${uid}`], "the private directory removed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("after the listen the socket must be in the very directory checked: a directory swapped before the listen, or swapped back after it, Blocks with nothing handed over (#185)", { skip: process.platform === "win32" && "unix" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  const shell = { [RELAYED_NAME]: KEY };
+  const opened = [];
+  try {
+    // What only a writable, non-sticky /tmp would allow: the checked directory renamed away, another put in its place.
+    const swap = (back) => async (o) => {
+      renameSync(o.socketDir, `${o.socketDir}.aside`);
+      mkdirSync(o.socketDir, { mode: 0o700 });
+      const relay = await openRelay(o);
+      if (back) {
+        renameSync(o.socketDir, `${o.socketDir}.other`);
+        renameSync(`${o.socketDir}.aside`, o.socketDir);
+      }
+      return relay;
+    };
+    // Any relay a failed check let start is closed below, so a failure here never hangs the run.
+    for (const [back, why] of [[false, /was replaced after it was checked/], [true, /no socket of this user's is at .* after the listen/]]) {
+      const usageDir = join(root, `u-${back}`);
+      const r = await openWorkerRelay({ inputs: { harness: "claude", maxUsd: 5 }, shell, usageDir, env: { PATH: "/nope" }, open: swap(back), socketRoot: root, socketRootUid: uid });
+      if (r.relay) opened.push(r.relay);
+      assert.equal(r.relay, null);
+      assert.match(r.blocked, new RegExp(`^the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: `));
+      assert.match(r.blocked, why);
+      assert.ok(!(RELAYED_NAME in r.shell), "the key is out of the shell");
+    }
+  } finally {
+    for (const r of opened) await closeWorkerRelay(r);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a loop's reap removes the socket directory of a dead stage, never a live one's or a path of another shape (#185)", { skip: process.platform !== "linux" && "process records read /proc" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  const ws = join(root, "ws");
+  // A process record of a process that has exited.
+  const gone = spawn("sleep", ["30"]);
+  const dead = processRecord(gone.pid);
+  gone.kill("SIGKILL");
+  await new Promise((r) => gone.on("exit", r));
+  const stages = {
+    "usage-work-dead": { stage: dead },
+    "usage-work-live": { stage: processRecord() },
+    "usage-work-unstarted-dead-loop": { owner: dead },
+    "usage-work-unstarted-live-loop": {},
+  };
+  try {
+    const dirs = {};
+    for (const [name, rec] of Object.entries(stages)) {
+      const usageDir = join(ws, name);
+      mkdirSync(usageDir, { recursive: true });
+      dirs[name] = handSocketDir(usageDir, { root, rootUid: uid }).dir;
+      if (rec.stage) writeFileSync(join(usageDir, STAGE_RECORD), JSON.stringify(rec.stage));
+      if (rec.owner) writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: dirs[name], owner: rec.owner }));
+    }
+    // A record naming some other directory of this user's: never removed.
+    const other = join(root, "keep-me");
+    mkdirSync(other);
+    mkdirSync(join(ws, "usage-odd"));
+    writeFileSync(join(ws, "usage-odd", SOCKET_DIR_RECORD), JSON.stringify({ dir: other, owner: dead }));
+
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 2);
+    assert.ok(!existsSync(dirs["usage-work-dead"]), "a dead stage's: removed");
+    assert.ok(!existsSync(dirs["usage-work-unstarted-dead-loop"]), "one whose loop died before the stage started: removed");
+    assert.ok(existsSync(dirs["usage-work-live"]), "a live stage's: kept");
+    assert.ok(existsSync(dirs["usage-work-unstarted-live-loop"]), "one a live loop is starting a stage with: kept");
+    assert.ok(existsSync(other), "a path of another shape: kept");
+    assert.ok(existsSync(join(root, `factory-relay-${uid}`)), "the per-user directory stays");
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 0, "done once");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local mode hands a socket directory only to a stage that relays the gateway key (#185)", () => {
+  const env = (v) => ({ FACTORY_WORKER_SECRETS: v });
+  assert.equal(relaysGatewayKey("worker.mjs", env("AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY")), true);
+  assert.equal(relaysGatewayKey("review.mjs", env("FAL_KEY, AI_GATEWAY_API_KEY=W")), true);
+  assert.equal(relaysGatewayKey("merge.mjs", env("AI_GATEWAY_API_KEY=W")), false);
+  assert.equal(relaysGatewayKey("worker.mjs", env("FAL_KEY")), false);
+  assert.equal(relaysGatewayKey("worker.mjs", {}), false);
+});
+
+test("removing a socket directory never goes through a link: a recorded path whose per-user parent is now a link to elsewhere stays, by reap and at the stage's end (#185)", { skip: process.platform !== "linux" && "process records read /proc" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  try {
+    // A dead stage's record; then /tmp cleared (a reboot) and another user's link planted at the per-user name.
+    const gone = spawn("sleep", ["30"]);
+    const dead = processRecord(gone.pid);
+    gone.kill("SIGKILL");
+    await new Promise((r) => gone.on("exit", r));
+    const hash = "0123456789ab";
+    const elsewhere = join(root, "clone", "x");
+    mkdirSync(join(elsewhere, hash), { recursive: true });
+    for (const d of [join(root, "clone"), elsewhere, join(elsewhere, hash)]) chmodSync(d, 0o700);
+    writeFileSync(join(elsewhere, hash, "precious.txt"), "keep");
+    symlinkSync(elsewhere, join(root, `factory-relay-${uid}`));
+    const dir = join(root, `factory-relay-${uid}`, hash);
+    const ws = join(root, "ws");
+    for (const name of ["usage-work-dead", "usage-work-ended"]) {
+      mkdirSync(join(ws, name), { recursive: true });
+      writeFileSync(join(ws, name, SOCKET_DIR_RECORD), JSON.stringify({ dir, owner: dead }));
+    }
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 0);
+    assert.equal(dropSocketDir(join(ws, "usage-work-ended"), { root, rootUid: uid }), false);
+    assert.ok(existsSync(join(elsewhere, hash, "precious.txt")), "nothing removed through the link");
+    for (const name of ["usage-work-dead", "usage-work-ended"]) assert.equal(readSocketDirRecord(join(ws, name)), null, "the records go");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("locally the stage takes only the socket directory made for it: another stage's live one, or one with no record, is refused; an unrecorded directory is never left behind (#185)", { skip: process.platform === "win32" && "unix" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  const shell = { [RELAYED_NAME]: KEY };
+  const opts = { socketRoot: root, socketRootUid: uid };
+  const env = (dir) => ({ FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: dir });
+  // Any relay a failed check let start is closed below, so a failure here never hangs the run.
+  const opened = [];
+  try {
+    const [a, b] = ["a", "b"].map((n) => {
+      const usageDir = join(root, `usage-${n}`);
+      mkdirSync(usageDir);
+      return { usageDir, dir: handSocketDir(usageDir, { root, rootUid: uid }).dir };
+    });
+    // Stage a handed stage b's directory: one of this user's, of the right shape, yet not its own.
+    const other = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: a.usageDir, env: env(b.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (other.relay) opened.push(other.relay);
+    assert.equal(other.relay, null);
+    assert.match(other.blocked, new RegExp(`its socket's directory: ${b.dir} is not the directory made for this stage`));
+    assert.ok(!(RELAYED_NAME in other.shell));
+    const unrecorded = join(root, "usage-c");
+    mkdirSync(unrecorded);
+    const none = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: unrecorded, env: env(a.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (none.relay) opened.push(none.relay);
+    assert.match(none.blocked, /is not the directory made for this stage/);
+    const own = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: a.usageDir, env: env(a.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (own.relay) opened.push(own.relay);
+    assert.equal(own.blocked, null, own.blocked);
+    assert.equal(dirname(own.relay.socketPath), a.dir);
+    await closeWorkerRelay(own.relay);
+    assert.ok(existsSync(b.dir), "the other stage's directory untouched");
+
+    // The record cannot be written (here: no usage directory): the directory just made goes too.
+    const missing = join(root, "usage-missing");
+    assert.throws(() => handSocketDir(missing, { root, rootUid: uid }), /ENOENT/);
+    assert.ok(!existsSync(relaySocketDir(missing, { root })), "no directory left without a record");
+  } finally {
+    for (const r of opened) await closeWorkerRelay(r);
+    rmSync(root, { recursive: true, force: true });
   }
 });

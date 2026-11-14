@@ -26,8 +26,9 @@ import { dispatch } from "./dispatch.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setDraft, setStateLabel, transientError } from "./lib/github.mjs";
 import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
-import { localSecretValues, parseSecretValues } from "./lib/worker-secrets.mjs";
-import { localRelayDir, relaySocketDir } from "./lib/worker-relay.mjs";
+import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
+import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
+import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
@@ -344,6 +345,38 @@ export function reapLeftRuns(ws) {
 /** The file in a stage's usage directory that names its process while it runs (proc.mjs processRecord). */
 export const STAGE_RECORD = "stage-process.json";
 
+/** Whether a stage running `script` with this env relays the gateway key: the work and review stages that opt it in. */
+export const relaysGatewayKey = (script, env) => (script === "worker.mjs" || script === "review.mjs") && parseWorkerSecrets(input("worker_secrets", { env })).entries.some((e) => e.name === RELAYED_NAME);
+
+/**
+ * Remove the gateway relay socket directories dead stages of this Objective left (lib/worker-relay.mjs handSocketDir's
+ * record in each usage directory): a stage whose process (STAGE_RECORD) is gone, or, where it never started, whose loop is.
+ * A live one, or one whose process cannot be told, is left. Returns how many were removed.
+ */
+export function reapSocketDirs(ws, opts = {}) {
+  let n = 0;
+  let dirs = [];
+  try {
+    dirs = readdirSync(ws).filter((d) => d.startsWith("usage-"));
+  } catch {
+    return 0;
+  }
+  for (const d of dirs) {
+    const usageDir = join(ws, d);
+    const rec = readSocketDirRecord(usageDir);
+    if (!rec) continue;
+    let stage = null;
+    try {
+      stage = JSON.parse(readFileSync(join(usageDir, STAGE_RECORD), "utf8"));
+    } catch {
+      // never started, or ended
+    }
+    if (sameProcess(stage ?? rec.owner) !== false) continue;
+    if (dropSocketDir(usageDir, opts)) n += 1;
+  }
+  return n;
+}
+
 /**
  * A stage of this Objective still running on this machine (this loop's own, or one whose loop died), as {pid, file,
  * sure}, or null. A stage counts as running when its record's process is still that process (`sure`), or cannot be told
@@ -521,9 +554,9 @@ export class Local {
 
   /**
    * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
-   * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path).
+   * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
    */
-  stageEnv(issue, usageDir, clone, stageTmp) {
+  stageEnv(issue, usageDir, clone, stageTmp, script = null) {
     const ws = this.ws(issue);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
@@ -573,6 +606,21 @@ export class Local {
       chmodSync(join(binDir, "git-lfs"), 0o755);
     }
     const base = this.baseEnv();
+    // A stage that relays the gateway key (lib/worker-relay.mjs): its socket's directory, made here so the outer sandbox
+    // written below names it, and handed to the stage, from this loop alone. A private one when the per-user directory is
+    // refused; none when /tmp itself is refused, and the stage then Blocks naming why. Removed when the stage ends
+    // (stage()), or by a later loop's reap when this one dies with it (reapSocketDirs).
+    delete base[RELAY_SOCKET_DIR_ENV];
+    let socketDir = null;
+    if (relaysGatewayKey(script, base)) {
+      try {
+        const m = handSocketDir(usageDir);
+        socketDir = base[RELAY_SOCKET_DIR_ENV] = m.dir;
+        if (m.refused) log(`#${issue}: the gateway relay's socket goes in a private directory: ${m.refused}`);
+      } catch (e) {
+        log(`#${issue}: no directory for the gateway relay's socket: ${String(e?.message || e).slice(0, 200)}`);
+      }
+    }
     const addDirs = [...caches, stageTmp];
     // Linux: the stage's node (#111) and the repository's package manager (#137) for Claude Code's and Copilot's commands,
     // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
@@ -608,7 +656,7 @@ export class Local {
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = this.harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: this.harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(this.harness)), projectDir, bwrapPath, relaySocketDir: relaySocketDir(usageDir), ripgrep }), null, 2));
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: this.harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(this.harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -730,9 +778,14 @@ export class Local {
     // a symlink into the home directory before the next sandbox opens it. Removed when the stage ends or fails to
     // start; one a killed loop left is cleared when the next stage on this machine makes its own (lib/local.mjs stageTemp).
     const stageTmp = stageTemp(`${issue}-`);
+    // The gateway relay's socket directory, when stageEnv made one (handSocketDir's record): removed with the stage.
+    const dropStage = () => {
+      dropOwned(stageTmp);
+      dropSocketDir(usageDir);
+    };
     let env;
     try {
-      env = this.stageEnv(issue, usageDir, clone, stageTmp);
+      env = this.stageEnv(issue, usageDir, clone, stageTmp, script);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
       const locks = staleGitLocks(clone);
@@ -740,7 +793,7 @@ export class Local {
       const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true, locks: locks.stale });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
-      dropOwned(stageTmp);
+      dropStage();
       const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason }[e.code];
       if (!reason) throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
@@ -748,7 +801,7 @@ export class Local {
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
     if (this.stopping) {
-      dropOwned(stageTmp);
+      dropStage();
       return { code: null, exit: null, usd: null, usageDir };
     }
     return new Promise((done) => {
@@ -789,7 +842,7 @@ export class Local {
         } catch {
           // no record: the child failed before writing one
         }
-        dropOwned(stageTmp);
+        dropStage();
         done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile });
       });
     });
@@ -860,6 +913,8 @@ export class Local {
   reapHere(issue) {
     const reaped = reapLeftRuns(this.ws(issue));
     if (reaped) log(`#${issue}: stopped ${reaped} harness run(s) an earlier stage left running on this machine`);
+    const dirs = reapSocketDirs(this.ws(issue));
+    if (dirs) log(`#${issue}: removed ${dirs} gateway relay socket director${dirs === 1 ? "y" : "ies"} a dead stage left`);
   }
 
   /**

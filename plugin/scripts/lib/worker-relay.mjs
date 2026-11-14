@@ -3,14 +3,14 @@
 // place and the relay's address in FACTORY_GATEWAY_URL (harness.mjs). Never falls back to handing the key over: where the
 // relay cannot reach the harness's commands, the stage Blocks before the run.
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { backend } from "./backend.mjs";
 import { prepareFactoryHome } from "./claude-runner.mjs";
 import { CALL_LOG, GATEWAY_KEY_SHAPE, RELAYED_NAME, openRelay, setActiveRelay } from "./gateway-relay.mjs";
 import { nameLabel } from "./worker-secrets.mjs";
 import { holdSecrets, log } from "./inputs.mjs";
-import { SAFE_PATH, agentUser, exec, whichSync } from "./proc.mjs";
+import { SAFE_PATH, agentUser, exec, processRecord, whichSync } from "./proc.mjs";
 import { copilotRelayExtra, copilotRelayShimIn, localCopilotRelayShim, writeRelayShim } from "./relay-shim.mjs";
 import { COPILOT_RUNNER_HOME, bakeCopilotRelay, copilotRunnerLayout } from "./copilot-runner.mjs";
 
@@ -36,9 +36,9 @@ export const localRelayDir = (usageDir) => join(usageDir, "relay");
  * Where the relay's socket goes when its directory is under the stage's usage directory (locally, and in a developer's
  * own session): a short directory of the stage's own, `/tmp/factory-relay-<uid>/<12 hex>`. A Unix socket's path is
  * limited (107 bytes on Linux, 103 on macOS) and the usage directory's grows with the checkout's path, the issue and the
- * stage's name. Its name is a hash of the usage directory, so local mode's outer sandbox, written before the relay opens,
- * names it as the one socket directory it keeps reachable (local.mjs harnessOuterSettings), as it named the relay
- * directory before. No sandbox writes /tmp: the outer one writes only its allowed paths, and the harnesses' own write
+ * stage's name. Its name is a hash of the usage directory. Locally the loop makes it (handSocketDir) before it writes
+ * local mode's outer sandbox, which names it as the one socket directory it keeps reachable (local.mjs
+ * harnessOuterSettings). No sandbox writes /tmp: the outer one writes only its allowed paths, and the harnesses' own write
  * the checkout and the stage's temp directory.
  */
 export const RELAY_SOCKET_ROOT = "/tmp";
@@ -53,6 +53,33 @@ export function relaySocketDir(usageDir, { uid = process.getuid?.() ?? 0, root =
   return join(base, `factory-relay-${uid}`, createHash("sha256").update(resolve(usageDir)).digest("hex").slice(0, 12));
 }
 
+/** The env name that carries the socket's directory the loop made for a local stage (handSocketDir) to the stage. */
+export const RELAY_SOCKET_DIR_ENV = "FACTORY_RELAY_SOCKET_DIR";
+/** The file in a stage's usage directory naming the socket's directory the loop made for it, and the loop (handSocketDir). */
+export const SOCKET_DIR_RECORD = "relay-socket.json";
+
+/**
+ * The directory the socket's directories go in (RELAY_SOCKET_ROOT), resolved: refused (throws, naming why) unless it is
+ * a directory owned by root (`rootUid`; a test's stand-in its own) with the sticky bit. Every user writes it, and only the
+ * sticky bit keeps another from renaming this user's directory there between Factory's checks and its `listen`, which
+ * would put the socket, and the commands' calls with their token, in a directory of theirs.
+ */
+export function checkSocketRoot(root = RELAY_SOCKET_ROOT, { rootUid = 0 } = {}) {
+  let real;
+  let st;
+  try {
+    real = realpathSync(root);
+    st = statSync(real);
+  } catch (e) {
+    throw new Error(`${root} could not be read (${e?.code || e?.message || e})`);
+  }
+  const owner = rootUid === 0 ? "root" : `uid ${rootUid}`;
+  if (!st.isDirectory()) throw new Error(`${real} is not a directory`);
+  if (st.uid !== rootUid) throw new Error(`${real} is not owned by ${owner}, so nothing keeps another user from swapping the socket's directory there`);
+  if (!(st.mode & 0o1000)) throw new Error(`${real} has no sticky bit (mode ${(st.mode & 0o7777).toString(8)}), so another user could swap the socket's directory there for one of theirs`);
+  return real;
+}
+
 /**
  * Make relaySocketDir's directory and its parent, each a real directory of this user's alone (mode 700): the parent is
  * in a directory every user writes, so one that is a link, a file, another user's or open to others is refused (throws,
@@ -65,12 +92,133 @@ export function makeSocketDir(dir, { uid = process.getuid?.() ?? 0 } = {}) {
     } catch (e) {
       if (e?.code !== "EEXIST") throw new Error(`${d} could not be made (${e?.code || e?.message || e})`);
     }
-    const st = lstatSync(d);
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${d} is not a directory (a link or a file stands there)`);
-    if (st.uid !== uid) throw new Error(`${d} belongs to another user`);
-    if (st.mode & 0o077) throw new Error(`${d} is open to other users (mode ${(st.mode & 0o777).toString(8)})`);
+    checkOwnDir(d, uid);
   }
   return dir;
+}
+
+function checkOwnDir(d, uid) {
+  const st = lstatSync(d);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${d} is not a directory (a link or a file stands there)`);
+  if (st.uid !== uid) throw new Error(`${d} belongs to another user`);
+  if (st.mode & 0o077) throw new Error(`${d} is open to other users (mode ${(st.mode & 0o777).toString(8)})`);
+  return st;
+}
+
+/**
+ * The levels of a socket's directory under the resolved root `real`: [`factory-relay-<uid>`, `<12 hex>`] for
+ * relaySocketDir's, [`factory-relay-<uid>-XXXXXX`] for the private fallback (stageSocketDir); null for any other path.
+ */
+function socketDirLevels(dir, real, uid) {
+  const own = `${real}/factory-relay-${uid}`;
+  if (dir.startsWith(`${own}/`) && /^[0-9a-f]{12}$/.test(dir.slice(own.length + 1))) return [own, dir];
+  if (dir.startsWith(`${own}-`) && /^[A-Za-z0-9]{6}$/.test(dir.slice(own.length + 1))) return [dir];
+  return null;
+}
+
+/**
+ * Check a socket's directory before the relay listens in it: the root is root's and sticky (checkSocketRoot), the path is
+ * one of the two this user's socket directories take there (socketDirLevels), and each level is a real directory of this
+ * user's alone. Returns {dir, dev, ino}, which confirmSocketDir holds the socket's directory to after the listen.
+ */
+export function checkSocketDir(dir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT, rootUid = 0 } = {}) {
+  const real = checkSocketRoot(root, { rootUid });
+  const levels = socketDirLevels(String(dir || ""), real, uid);
+  if (!levels) throw new Error(`${dir} is not a socket directory of this user's under ${real}`);
+  let st = null;
+  for (const d of levels) {
+    try {
+      st = checkOwnDir(d, uid);
+    } catch (e) {
+      if (e?.code) throw new Error(`${d} could not be read (${e.code})`);
+      throw e;
+    }
+  }
+  return { dir, dev: st.dev, ino: st.ino };
+}
+
+/**
+ * After the listen: the socket is in the very directory checkSocketDir checked (`checked`), which still passes its
+ * checks: the same directory (device and inode), the socket's real directory, and the socket itself this user's.
+ * Throws, naming what differs.
+ */
+export function confirmSocketDir(socketPath, checked, opts = {}) {
+  const uid = opts.uid ?? process.getuid?.() ?? 0;
+  const now = checkSocketDir(checked.dir, opts);
+  if (now.dev !== checked.dev || now.ino !== checked.ino) throw new Error(`${checked.dir} was replaced after it was checked`);
+  let real = null;
+  try {
+    real = realpathSync(dirname(socketPath));
+  } catch {
+    // named below
+  }
+  if (real !== checked.dir) throw new Error(`the socket's directory is ${real ?? "gone"}, not ${checked.dir}`);
+  const st = lstatSync(socketPath, { throwIfNoEntry: false });
+  if (!st?.isSocket() || st.uid !== uid) throw new Error(`no socket of this user's is at ${socketPath} after the listen (its directory was swapped while the socket was made)`);
+}
+
+/**
+ * The socket's directory for a stage: relaySocketDir's, made by makeSocketDir; when that is refused (another user made
+ * `factory-relay-<uid>` first, or it fails a check) and `fallback`, a private one of the stage's own made by mkdtemp in the
+ * root instead (`factory-relay-<uid>-XXXXXX`, mode 700, a name no one can take first). Returns {dir, refused}: `refused`
+ * the per-user directory's refusal when the fallback was taken. Throws when the root is refused (checkSocketRoot), which
+ * no fallback there escapes, or the per-user directory is refused without `fallback`.
+ */
+export function stageSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT, rootUid = 0, fallback = true } = {}) {
+  const real = checkSocketRoot(root, { rootUid });
+  try {
+    return { dir: makeSocketDir(relaySocketDir(usageDir, { uid, root: real }), { uid }), refused: null };
+  } catch (e) {
+    if (!fallback) throw e;
+    return { dir: mkdtempSync(join(real, `factory-relay-${uid}-`)), refused: String(e?.message || e) };
+  }
+}
+
+/**
+ * Local mode's loop, before a stage that relays the gateway key starts: its socket's directory (stageSocketDir), recorded
+ * in the stage's usage directory (SOCKET_DIR_RECORD, with this process as its owner) so a later loop removes it when the
+ * stage died (local.mjs reapSocketDirs). The loop names it in the outer sandbox and hands it to the stage (RELAY_SOCKET_DIR_ENV).
+ */
+export function handSocketDir(usageDir, opts = {}) {
+  const made = stageSocketDir(usageDir, opts);
+  try {
+    writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: made.dir, owner: processRecord() }), { mode: 0o600 });
+  } catch (e) {
+    // Unrecorded, no later loop could find it: it goes now.
+    rmSync(made.dir, { recursive: true, force: true });
+    throw e;
+  }
+  return made;
+}
+
+/** The record handSocketDir left in `usageDir`, or null. */
+export function readSocketDirRecord(usageDir) {
+  try {
+    const rec = JSON.parse(readFileSync(join(usageDir, SOCKET_DIR_RECORD), "utf8"));
+    return typeof rec?.dir === "string" ? rec : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove a stage's socket directory and its record (handSocketDir) from `usageDir`: only one that passes checkSocketDir
+ * (the root root's and sticky, a path of the two shapes this user's socket directories take there, and every level a
+ * real directory of this user's alone, so no link anywhere on the way), and only the stage's own level (the per-user
+ * parent stays). Returns whether a directory was removed.
+ */
+export function dropSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT, rootUid = 0 } = {}) {
+  const rec = readSocketDirRecord(usageDir);
+  rmSync(join(usageDir, SOCKET_DIR_RECORD), { force: true });
+  if (!rec) return false;
+  try {
+    checkSocketDir(rec.dir, { uid, root, rootUid });
+  } catch {
+    // Gone already, or no longer this user's own all the way down (a reboot cleared /tmp and someone planted a link).
+    return false;
+  }
+  rmSync(rec.dir, { recursive: true, force: true });
+  return true;
 }
 
 /**
@@ -85,9 +233,10 @@ export const unrelayedGatewayKeys = (shell = {}) => Object.entries(shell).filter
  * {shell, relay, blocked, masked}: `shell` with the token in the key's place and any other gateway-shaped key withheld
  * (unrelayedGatewayKeys); `blocked` a reason when the key cannot be relayed here (the key is then out of `shell`, and the
  * caller Blocks before any run); `masked` the values the stage masks in what it saves (the key, which `shell` no longer
- * holds). `socketRoot`: where relaySocketDir's directory goes (RELAY_SOCKET_ROOT; a test sets its own).
+ * holds). `socketRoot`: where the socket's directory goes (RELAY_SOCKET_ROOT), `socketRootUid` its owner (root; a test's
+ * stand-in its own).
  */
-export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR, copilotHome = COPILOT_RUNNER_HOME, socketRoot = RELAY_SOCKET_ROOT }) {
+export async function openWorkerRelay({ inputs, shell, usageDir, env = process.env, open = openRelay, which = whichSync, runnerDir = RELAY_RUNNER_DIR, copilotHome = COPILOT_RUNNER_HOME, socketRoot = RELAY_SOCKET_ROOT, socketRootUid = 0 }) {
   if (inputs.harness === "copilot" && agentUser() && backend(env).name !== "local") dropSharedCopilotRelay(runnerDir);
   const withheld = unrelayedGatewayKeys(shell || {});
   const masked = withheld.map((n) => shell[n]);
@@ -124,13 +273,30 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
       if (r.code !== 0) throw new Error(`the relay's socket could not be handed to ${g}'s group: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 160) || `exit ${r.code}`}`);
     };
   } else dir = local ? localRelayDir(usageDir) : join(usageDir, "relay");
-  // Under the usage directory the socket's path could pass its limit: it goes in a short directory of its own.
+  // Under the usage directory the socket's path could pass its limit: it goes in a short directory of its own. Locally
+  // the loop made it and named it in the outer sandbox (handSocketDir); elsewhere the stage makes it, falling back to a
+  // private one when the per-user directory is refused. Checked before the listen and confirmed after it.
   let socketDir = null;
+  let checked = null;
+  // The directory this process made, which it removes when the relay does not start (the loop removes the one it made).
+  let made = null;
+  const dirOpts = { root: socketRoot, rootUid: socketRootUid };
+  const dirBlocked = (e) => out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: ${String(e?.message || e).slice(0, 200)}` });
   if (!(agent && !local)) {
     try {
-      socketDir = makeSocketDir(relaySocketDir(usageDir, { root: socketRoot }));
+      const handed = local ? env[RELAY_SOCKET_DIR_ENV] || "" : "";
+      // Only the one serve made for this stage, as its record in the usage directory (which no sandbox writes) names.
+      if (handed && handed !== readSocketDirRecord(usageDir)?.dir) throw new Error(`${handed} is not the directory made for this stage`);
+      if (handed) socketDir = handed;
+      else {
+        const m = stageSocketDir(usageDir, { ...dirOpts, fallback: !local });
+        made = socketDir = m.dir;
+        if (m.refused) log(`gateway relay: ${m.refused}; the socket goes in a private directory of this stage's instead`);
+      }
+      checked = checkSocketDir(socketDir, dirOpts);
     } catch (e) {
-      return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: its socket's directory: ${String(e?.message || e).slice(0, 200)}` });
+      if (made) rmSync(made, { recursive: true, force: true });
+      return dirBlocked(e);
     }
   }
   let relay;
@@ -139,6 +305,17 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   } catch (e) {
     if (socketDir) rmSync(socketDir, { recursive: true, force: true });
     return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 240)}` });
+  }
+  if (checked) {
+    try {
+      confirmSocketDir(relay.socketPath, checked, dirOpts);
+    } catch (e) {
+      // Nothing was handed out yet: the relay goes before any command could reach it.
+      await relay.close().catch(() => {});
+      rmSync(dir, { recursive: true, force: true });
+      if (made) rmSync(made, { recursive: true, force: true });
+      return dirBlocked(e);
+    }
   }
   // Claude Code and Codex: the relay's shim first on their PATH. Copilot: its own shim (copilot-runner.mjs bwrapShim),
   // already first on its PATH, hands each call to the relay's, which adds Copilot's extra options (copilotRelayExtra).

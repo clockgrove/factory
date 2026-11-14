@@ -28,7 +28,7 @@ import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
-import { authorGate } from "./lib/objective-trust.mjs";
+import { authorGate, planGate } from "./lib/objective-trust.mjs";
 import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -343,6 +343,14 @@ async function main() {
     return;
   }
   const { issueData } = trusted;
+  // The text its plan was made from (objective-trust.mjs planGate): changed since, the review, the answer pass and the
+  // merge do not go on with code made for the earlier text. The stage Blocks before anything is set up for it.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
+  if (!planned.ok) {
+    log(planned.reason);
+    await finish("blocked", planned.reason);
+    return;
+  }
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 
@@ -446,7 +454,7 @@ async function main() {
   const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
-  const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch });
+  const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: off without an AI Gateway key; advice only.
   const drift = openDrift({ inputs, progress });
   io.set({ decisions, prNumber: pr.number });

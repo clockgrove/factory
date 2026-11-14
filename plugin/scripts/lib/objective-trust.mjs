@@ -4,12 +4,19 @@
 // The body acted on is the one read with those people, never a separate read a later edit could have changed. The
 // worker and the review job check it before any harness (Actions, local mode, a cloud-sandbox stage), and a session's
 // route reads the issue only through it (local.mjs `issue`, `deliver`, `post-review`).
-import { collaboratorPermission, graphql } from "./github.mjs";
-import { pinnedMaintainer, writersRepo } from "./logic.mjs";
+// What text the plan was made from (planGate): a stage never goes on with a plan and code made from one text and an
+// Objective that now says another.
+import { createHash } from "node:crypto";
+import { collaboratorPermission, graphql, objectiveLabeledAt, primeSelf } from "./github.mjs";
+import { planComment, stampPlan } from "./handoff.mjs";
+import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
 const ACTOR = "__typename login ... on User { databaseId }";
 const QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body lastEditedAt author { ${ACTOR} } editor { ${ACTOR} } title } } }`;
+
+/** The Objective's text as one value: the SHA-256 of its title and body exactly as GitHub returns them. */
+export const objectiveSha = (title, body) => createHash("sha256").update(JSON.stringify([title ?? "", body ?? ""])).digest("hex");
 
 /** An actor as a login a person can read: an App as `<slug>[bot]`. */
 const shown = (a) => (a?.__typename === "Bot" ? `${a.login}[bot]` : a.login);
@@ -41,7 +48,8 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
     if (!actor?.login) return { ok: false, role, reason: `the issue's ${role} could not be read, so ${what}`, body };
     if (!(await vouches(repo, actor, opts, gh))) return { ok: false, role, reason: `the issue's ${role} \`${shown(actor)}\` cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`, body };
   }
-  return { ok: true, reason: "", body, title: typeof node?.title === "string" ? node.title : null, people: roles.map(([role, a]) => [role, a.login]) };
+  const title = typeof node?.title === "string" ? node.title : null;
+  return { ok: true, reason: "", body, title, sha: objectiveSha(title, body), people: roles.map(([role, a]) => [role, a.login]) };
 }
 
 /**
@@ -55,13 +63,13 @@ export const AUTHOR_FIX = {
 
 /**
  * The issue as a stage acts on it: `issueData` (the REST read) with the title and body read with the people who vouch
- * for them, or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
+ * for them and `sha`, that text's objectiveSha, or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
  * the Blocked notice's remedy for who failed.
  */
 export async function trustedIssue(repo, issue, issueData, opts, gh) {
   const t = await objectiveTrusted(repo, issue, opts, { what: "Factory acts on none of its text", ...(gh ? { gh } : {}) });
   if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role] };
-  return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, people: t.people };
+  return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, sha: t.sha, people: t.people };
 }
 
 /**
@@ -75,4 +83,60 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", notify, stage: "author" }, opts);
   return t;
+}
+
+/** The Blocked reason and fix when the Objective's text changed after its plan was made (planGate). */
+export const EDITED_REASON = "the Objective's title or body changed after its plan was made, and its plan and code follow the earlier text, so Factory does not go on with the two mixed";
+export const EDITED_FIX = "Re-apply `factory:objective` to work from the new text: the worker makes its plan again from it, on the same branch and PR.";
+
+/**
+ * The Objective's text against the plan's record of the text it was made from (handoff.mjs planOf): "unplanned" (no
+ * record: the work stage plans from this text), "same", "replan" (the text changed, and a person applied the label
+ * after the work stage last started from the plan's text: only the work stage, which makes the plan again) or
+ * "changed" (the stage Blocks). Decided on the hash and GitHub's label event times, never the words.
+ */
+export function planTextState({ sha, record, labeledAt = null, work = false }) {
+  if (!record) return "unplanned";
+  if (record.sha256 === sha) return "same";
+  const relabeled = !!labeledAt && (!record.label || Date.parse(labeledAt) > Date.parse(record.label));
+  return work && relabeled ? "replan" : "changed";
+}
+
+/**
+ * Every stage's second check, after authorGate: the text it acts on (`sha`, trustedIssue's) against the text its plan
+ * was made from. "changed" Blocks (cause `work`: an edit is a person's action), through `apply` after `before`, with the
+ * PR as a draft. Returns {ok, state, record}: `record` the plan-text record this stage writes with the plan comment
+ * (handoff.mjs planSync). The work stage records this text with the latest label time, and writes it at once on a plan
+ * made from the same text, so a later edit with no new label is told from one the person re-applied the label after;
+ * the review stage keeps the plan's record. `read` (planComment, labeledAt) is a test's own.
+ */
+export async function planGate({ repo, issue, sha, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, read = {} }) {
+  const plan = read.planComment ?? planComment;
+  const labeled = read.labeledAt ?? objectiveLabeledAt;
+  // Factory's own plan comment is told by its login: unknown, no record could be read, and the check would pass blind.
+  if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Factory's own login could not be read, so its plan comment cannot be told from anyone else's");
+  const posted = await plan(repo, issue, opts);
+  const labeledAt = work ? await labeled(repo, issue, objectiveLabel, opts) : null;
+  const state = planTextState({ sha, record: posted?.record ?? null, labeledAt, work });
+  if (state === "changed") {
+    if (before) await before();
+    await apply(repo, { issue, pr, exit: "blocked", reason: EDITED_REASON, fix: EDITED_FIX, cause: "work", notify, stage }, opts);
+    return { ok: false, state, reason: EDITED_REASON, record: posted.record };
+  }
+  if (!work) return { ok: true, state, record: posted?.record ?? null };
+  const record = { sha256: sha, label: labeledAt };
+  if (state === "same" && posted.record.label !== labeledAt) await stampPlan(repo, issue, posted, record, opts);
+  return { ok: true, state, record };
+}
+
+/**
+ * Whether the Objective's text changed since its plan was made (the merge's check, session.mjs mergeReadyOne): its
+ * title and body now against the plan's record. False with no record. `gh` (graphql) and `read` are a test's own.
+ */
+export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, read = planComment } = {}) {
+  const posted = await read(repo, issue, opts);
+  if (!posted?.record) return false;
+  const node = (await gh.graphql(QUERY, { owner: repo.owner, name: repo.name, number: Number(issue) }, opts))?.repository?.issue;
+  if (!node) throw new Error(`#${issue} could not be read`);
+  return objectiveSha(typeof node.title === "string" ? node.title : null, typeof node.body === "string" ? node.body : "") !== posted.record.sha256;
 }

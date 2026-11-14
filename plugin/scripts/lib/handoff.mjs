@@ -388,26 +388,80 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
   return files;
 }
 
+/**
+ * The plan's record of the Objective text it was made from, on the plan comment's marker line after the marker:
+ * `sha256` of that title and body (objective-trust.mjs objectiveSha), and `label`, the time GitHub shows on the latest
+ * `factory:objective` label event when the work stage last started from that text (objective-trust.mjs planGate). Only
+ * Factory writes it: harness text never carries `<!--` (sanitize), and only Factory's own comment is read.
+ */
+export const planTextMarker = (rec) => `<!-- factory:plan-text ${JSON.stringify({ sha256: rec.sha256, label: rec.label ?? null })} -->`;
+const PLAN_TEXT = /^<!-- factory:plan-text (\{[^\n]*\}) -->$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** A plan-text record as written by planTextMarker, or null: none, or one that does not parse. */
+export function planTextOf(head) {
+  const m = PLAN_TEXT.exec(String(head || ""));
+  if (!m) return null;
+  try {
+    const r = JSON.parse(m[1]);
+    if (!SHA256.test(r?.sha256)) return null;
+    return { sha256: r.sha256, label: typeof r.label === "string" && Number.isFinite(Date.parse(r.label)) ? r.label : null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Factory's own plan comment among `comments`: {id, text (the harness's plan, the marker line dropped), record (the
+ * plan-text record, or null)}, or null when there is none. Factory's own by its login (logic.mjs isSelf).
+ */
+export function planOf(comments, issue) {
+  const mark = marker(issue, "plan");
+  const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
+  if (!c) return null;
+  const nl = c.body.indexOf("\n");
+  const first = nl < 0 ? c.body : c.body.slice(0, nl);
+  return { id: c.id, text: nl < 0 ? "" : c.body.slice(nl + 1), record: planTextOf(first.slice(mark.length)) };
+}
+
+/** The plan comment as planOf reads it; a failed read throws (a stage's gate must not take it for no plan). */
+export async function planComment(repo, issue, opts) {
+  return planOf(await listComments(repo, issue, opts), issue);
+}
+
+/**
+ * The plan comment's text a stage hands its harness as $FACTORY_IN/plan.md: none when the plan was recorded from other
+ * text than the stage's `record` (the plan is made again from the new text), else the plan as it stands.
+ */
+export const planHanded = (posted, record) => (posted && !(record && posted.record && posted.record.sha256 !== record.sha256) ? posted.text : null);
+
 /** The plan comment's text as the harness wrote it last (Factory's marker line dropped), or null when there is none. */
 export async function currentPlan(repo, issue, opts) {
-  const mark = marker(issue, "plan");
-  const c = (await listComments(repo, issue, opts).catch(() => [])).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
-  return c ? c.body.slice(mark.length).replace(/^\n/, "") : null;
+  return (await planComment(repo, issue, opts).catch(() => null))?.text ?? null;
 }
 
 // ------------------------------------------------------------- what Factory posts
 
-/** Post plan.md as the issue's plan comment when it changed since the last post. Returns a function to call per read. */
-export function planSync(repo, issue, opts) {
+/**
+ * Post plan.md as the issue's plan comment when it changed since the last post. `record` (planTextMarker) goes on the
+ * marker line: the text this stage works from, or null when the stage knows none. Returns a function to call per read.
+ */
+export function planSync(repo, issue, opts, record = null) {
   let last = null;
+  const head = record ? planTextMarker(record) : "";
   return async (text) => {
     if (typeof text !== "string" || !text.trim()) return false;
     const body = sanitize(text.trim());
     if (body === last) return false;
-    await upsertComment(repo, issue, marker(issue, "plan"), body, opts);
+    await upsertComment(repo, issue, marker(issue, "plan"), body, opts, { head });
     last = body;
     return true;
   };
+}
+
+/** Write `record` on the plan comment `plan` (planOf), its text unchanged. */
+export async function stampPlan(repo, issue, plan, record, opts) {
+  await rest(`repos/${repo.full}/issues/comments/${plan.id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "plan")}${planTextMarker(record)}\n${plan.text}` } });
 }
 
 /** Post note.md, the harness's account of what blocked it, as one comment on the issue. */
@@ -576,11 +630,12 @@ export const exitFromOut = (files) => (typeof files?.["exit.json"] === "string" 
  * `render()` hands the checkout the default branch and writes $FACTORY_IN from GitHub as it stands (call it
  * before every harness pass); `collect()` reads $FACTORY_OUT after one and keeps the plan comment current; `tick()` does
  * the plan part at most every two minutes while a harness runs, handing the plan.md it read to `onPlan`; `beforeFix()`
- * renders with a validation pass's failures.
+ * renders with a validation pass's failures. `record` (planTextMarker): the Objective text this stage works from, written
+ * with the plan comment; a plan comment recorded from other text is not handed to the harness (the plan is made again).
  */
-export async function openHandoff({ repo, issue, issueData, env, opts, outbox, branch }) {
+export async function openHandoff({ repo, issue, issueData, env, opts, outbox, branch, record = null }) {
   const dirs = await handoffDirs(env);
-  const syncPlan = planSync(repo, issue, opts);
+  const syncPlan = planSync(repo, issue, opts, record);
   const parts = await mergedParts(repo, issue, opts);
   let files = {};
   let decisions = [];
@@ -595,7 +650,7 @@ export async function openHandoff({ repo, issue, issueData, env, opts, outbox, b
     // The default branch as GitHub has it, handed to the checkout as a bundle (outbox.mjs feed): Factory runs no git there.
     const base = await outbox.feed();
     const pr = prNumber ? await getPr(repo, prNumber, opts).catch(() => null) : await findPr(repo, branch, opts).catch(() => null);
-    plan = await currentPlan(repo, issue, opts);
+    plan = planHanded(await planComment(repo, issue, opts).catch(() => null), record);
     await writeIn(dirs, inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body, decisions, plan, pr, reviewComments, checks, diff, parts, base }), env);
   };
   const collect = async () => {

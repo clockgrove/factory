@@ -9,6 +9,8 @@ import { REBASED_TWICE, applyExit, mergeBlockReason, mergeReadyOne, rebaseMarker
 import { marker, setSelf, staleDecision } from "../scripts/lib/logic.mjs";
 import { Local } from "../scripts/local.mjs";
 import { RETRY, transientError } from "../scripts/lib/github.mjs";
+import { planTextMarker } from "../scripts/lib/handoff.mjs";
+import { EDITED_REASON, objectiveSha } from "../scripts/lib/objective-trust.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
 RETRY.sleep = async () => {};
@@ -404,5 +406,25 @@ test("#2647: the dispatcher and a --wait loop Blocking the same second conflict 
     // A new head (or a human recovery) is a new condition: it notifies again.
     await applyExit(repo, rebasedTwiceBlock({ issue: 2, pr: { ...pr, head: { sha: "c".repeat(40) } }, since, notify: "kirk", stage: "merge" }), { token: "t" });
     assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "blocked").replace(/ -->$/, ""))).length, 2);
+  });
+});
+
+test("#205: an Objective edited since its plan does not merge; with its plan's text it does", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    // The plan comment Factory wrote, recording the text it was made from; the issue's text as GitHub returns it now.
+    const issue = { title: "Objective", body: "Save two." };
+    (gh.comments[2] ||= []).push({ id: 900, user: { login: SELF }, body: `${marker(2, "plan")}${planTextMarker({ sha256: objectiveSha("Objective", "Save two."), label: null })}\n## Plan`, created_at: new Date().toISOString() });
+    const real = gh.fetch;
+    globalThis.fetch = async (url, init = {}) => (/\/graphql$/.test(String(url)) && /issue\(number/.test(JSON.parse(init.body).query) ? new Response(JSON.stringify({ data: { repository: { issue } } }), { status: 200 }) : real(url, init));
+    issue.body = "Save two, and three.";
+    const report = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "edited");
+    assert.deepEqual([gh.enqueued, gh.attempts], [[], []], "nothing is enqueued");
+    assert.equal(mergeBlockReason("edited", report), EDITED_REASON);
+    issue.body = "Save two.";
+    assert.equal(await merge(2, 12), "queued", "the plan's own text merges as before");
   });
 });

@@ -426,9 +426,12 @@ export async function listComments(repo, number, opts) {
   return (await rest(`repos/${repo.full}/issues/${number}/comments?per_page=100`, { ...opts, paginate: true })) || [];
 }
 
-/** Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). */
-export async function upsertComment(repo, number, marker, body, opts) {
-  const text = `${marker}\n${body}`;
+/**
+ * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). `head`: Factory's own text
+ * after the marker on its first line (the plan comment's record, handoff.mjs planTextMarker).
+ */
+export async function upsertComment(repo, number, marker, body, opts, { head = "" } = {}) {
+  const text = `${marker}${head}\n${body}`;
   // Only Factory's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
   // Before Factory knows its login (a failed read), one by someone who can push is.
   const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(marker);

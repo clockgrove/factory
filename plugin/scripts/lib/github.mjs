@@ -1150,6 +1150,14 @@ export async function objectiveLabeledAt(repo, number, label, opts) {
   return last;
 }
 
+/** When `label` last came off the issue (its latest `unlabeled` event), or null when it never did. */
+export async function labelRemovedAt(repo, number, label, opts) {
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  let last = null;
+  for (const e of events) if (e.event === "unlabeled" && e.label?.name === label && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  return last;
+}
+
 /** When the issue last became Running (its `labeled factory:running` event), or null. */
 export async function runningSince(repo, number, opts) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];

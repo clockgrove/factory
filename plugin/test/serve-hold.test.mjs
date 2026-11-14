@@ -49,6 +49,8 @@ async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => fals
         send(200, issue([...labels]));
         return onIssue(reads, { labels, timeline });
       }
+      // The dispatcher's other listings (the stopped pass's state labels) see the current labels, and are no Objectives read.
+      if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("state") === "open" && url.searchParams.get("labels") !== "factory:objective") return send(200, labels.has(url.searchParams.get("labels")) ? [issue([...labels])] : []);
       if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("state") === "open") {
         reads += 1;
         send(200, [issue(view(reads, [...labels]))]);

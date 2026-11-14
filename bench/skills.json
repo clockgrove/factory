@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "2ca74a547e6c",
+  "digest": "6eaff1e3039e",
   "skills": {
     "factory-deliver-pr": {
       "sha256": "cfcc6a24ce0522d13e33263b520846bf877e4f90219c059632aa78c32d0dbb60",
@@ -99,7 +99,12 @@
           "words": 231
         }
       }
+    },
+    "factory-stop": {
+      "sha256": "2947968e65a2b9814e8da8a024c8c54418bcf5c2a511ef1521cbab5ace2ca3c7",
+      "lines": 30,
+      "words": 339
     }
   },
-  "recordedAt": "2026-11-14T08:01:46.938Z"
+  "recordedAt": "2026-11-14T08:15:05.450Z"
 }

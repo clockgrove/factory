@@ -192,7 +192,7 @@ test("ownedTickCheck: an installed workflow without the dispatcher's own ticks i
   const sandbox = { ...values, sandbox: "vercel", default_branch: "main" };
   for (const v of [values, sandbox]) assert.equal(ownedTickCheck(renderWorkflow(template, v), {}).status, "PASS");
   // A runner workflow rendered before: no closed issue tick, no wake job.
-  const old = renderWorkflow(template, values).replace("types: [opened, labeled, closed]", "types: [opened, labeled]").replace(/\n {2}wake:[\s\S]*?(?=\n {2}work:)/, "");
+  const old = renderWorkflow(template, values).replace("types: [opened, labeled, unlabeled, closed]", "types: [opened, labeled]").replace(/\n {2}wake:[\s\S]*?(?=\n {2}work:)/, "");
   const by = ownedTickCheck(old, {});
   assert.equal(by.status, "FAIL");
   assert.match(by.detail, /a dispatcher tick on a closed issue, the wake job/);

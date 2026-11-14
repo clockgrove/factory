@@ -1,5 +1,5 @@
 # Factory: unattended Objectives. Written by `/factory setup`; edit the env block, not the jobs.
-# Triggers: cron, manual (one issue), a new factory:objective label, the review job's own last step, and
+# Triggers: cron, manual (one issue), a new factory:objective label or its removal, the review job's own last step, and
 # pull_request when the Factory App labels a PR factory:review. Never from a fork: the Objective text (a writer) and the label (a
 # maintainer) are the only inputs. FACTORY_AUTO_MERGE is ON: Factory merges the reviewed head with
 # no human read. The gate is your CI workflow's checks on that exact head (and the merge queue's
@@ -24,12 +24,12 @@ on:
       image: { description: "true builds the sandbox image from the default branch now", required: false }
       sweep: { description: "true runs the sandbox sweep now", required: false }
       # {{/sandbox}}
-  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); closed: an Objective blocked by that issue is ready now
+  issues: # a new Objective dispatches at once (labelled at creation, or labelled later); factory:objective removed: the dispatcher leaves a stopped Objective's PR a draft; closed: an Objective blocked by that issue is ready now
     # {{^sandbox}}
-    types: [opened, labeled, closed]
+    types: [opened, labeled, unlabeled, closed]
     # {{/sandbox}}
     # {{#sandbox}}
-    types: [opened, labeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so do the factory:blocked and factory:question labels, which stop one left running
+    types: [opened, labeled, unlabeled, closed] # closed also runs the sandbox sweep, which destroys a closed Objective's sandbox; so do the factory:blocked and factory:question labels, which stop one left running
     # {{/sandbox}}
   pull_request: # fires because the App (not the job token) applies factory:review, a human marks a Question draft ready (the App's own ready mark starts no job), a Factory PR merged (siblings may be stale now), or the merge queue dropped one (the dispatcher re-enqueues it once, then Blocks)
     types: [labeled, ready_for_review, closed, dequeued]
@@ -83,7 +83,7 @@ permissions: # the job token reads code and Actions; every write goes through th
 jobs:
   dispatch:
     # Ticks: the */10 cron only (a backstop: GitHub fires schedules late or not at all; other schedules are other
-    # jobs'), a manual run, a new Objective's label, any issue closing (it may block an Objective), Factory's own jobs'
+    # jobs'), a manual run, a new Objective's label or its removal (a stop), any issue closing (it may block an Objective), Factory's own jobs'
     # last steps (a slot freed, a failed or requeued start), a merged Factory PR, the merge queue dropping one
     # (only GitHub and people with write access dequeue), the queue watch, and, without a sandbox, CI finishing on a
     # factory/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those

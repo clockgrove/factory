@@ -28,6 +28,25 @@ Ready Objectives start in priority order (`P0` to `P2`, then the lowest issue nu
 
 While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.
 
+## An Objective's lifecycle
+
+Each step is one action on GitHub. Where a skill is named, a plain-words request to your agent takes that action after asking you.
+
+<!-- Draft: filing an Objective without starting it. #204 adds this part. -->
+
+- **Start.** Applying `factory:objective` starts the Objective: the dispatcher picks it up on the label's own event, else on its ten-minute cron, and in local mode on `factory serve`'s next tick.
+
+- **Edit.** Edit the issue freely until the first work stage reads it. After its plan, an edit Blocks the Objective at its next stage, and re-applying `factory:objective` plans again from the new text (Edit an Objective, below).
+
+<!-- Restart: from the issue's current text, in any state. #206 adds this part. -->
+
+- **Stop.** Remove the `factory:objective` label, or close the issue ("Stop Clockgrove Factory Objective #12", the factory-stop skill, removes the label on your yes). No dispatcher tick, local loop or sandbox launch picks up a stopped Objective, and your other Objectives keep running. What happens depends on its state:
+  - **Running, or a review running:** the stage reads its issue once a minute. On the stop it ends its harness run, records the spend so far in its usage record (locally and in a cloud sandbox also in its progress comment's spend line, as every stage does) and exits, normally within two minutes; its progress comment's last line reads `exit: stopped`. Its PR, if it has one, becomes a draft without the `factory:review` label; its state label comes off and its card goes back to Queued. With the cloud sandbox the launcher then stops the sandbox. A Running Objective whose stage died before it saw the stop is tidied the same way by the dispatcher, ten minutes after the label came off.
+  - **In review with no stage running:** on its next tick the dispatcher takes the PR out of the merge queue, makes it a draft without the `factory:review` label, removes the state label and moves the card to Queued, so neither a review nor the merge queue takes it. On Actions the label's removal ticks it (a workflow file rendered before this release waits for the ten-minute cron until it is re-rendered: [INSTALL.md](INSTALL.md), Upgrade); locally `factory serve` ticks every 30 seconds.
+  - **Queued, Blocked or a Question:** it stays as it is.
+
+  Re-apply the label to start it again: it continues from its branch and PR, as after a Block. Closing the issue stops it the same way and then counts as done: the dispatcher's Done pass removes its state label, moves its card to Done and makes a PR it left open a draft, and with the cloud sandbox the sweep destroys its sandbox.
+
 ## Edit an Objective
 
 Edit the issue as much as you like until the worker reads it: the first work stage makes its plan from the title and body as they are when it starts. After that, the plan and the code follow that text, and an edit to the title or body does not reach the run halfway:
@@ -73,6 +92,7 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 | "Set up Clockgrove Factory for this repository." | `/factory:factory-setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
 | "Is Clockgrove Factory set up correctly here?" | `/factory:factory-doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
 | "File a Clockgrove Factory Objective: ..." | `/factory:factory-file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
+| "Stop Clockgrove Factory Objective 12." | `/factory:factory-stop <issue>` | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again (An Objective's lifecycle, above) |
 | "Run Clockgrove Factory Objective 42 here." | `/factory:factory-run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
 | "Review Clockgrove Factory PR 57." | `/factory:factory-review <pr>` | Runs the reviewer on one Factory PR in your session |
 | "Start the Clockgrove Factory local loop." | `/factory:factory-serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |

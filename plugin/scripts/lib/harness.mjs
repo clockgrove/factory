@@ -22,6 +22,7 @@ import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
+import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -514,8 +515,8 @@ function stageSpendOf(base, reads) {
  * A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are
  * none). `session`: the session it resumes, null for a fresh one.
  */
-export function meterPass(meter, { session = null } = {}) {
-  STAGE_SPEND.open.set(meter, { session });
+export function meterPass(meter, { session = null, label = "run", harness = null, model = null } = {}) {
+  STAGE_SPEND.open.set(meter, { session, label, harness, model });
   return {
     end: async (usd) => {
       if (!STAGE_SPEND.open.delete(meter)) return;
@@ -825,6 +826,16 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
 }
 
 /**
+ * Every harness pass this process ran, in order: what a stopped stage records as its usage (stop.mjs stoppedRecords),
+ * whichever caller was still holding a pass's record when the stop came.
+ */
+const PASSES = [];
+export const stagePasses = () => [...PASSES];
+let RUNNING = 0;
+/** How many harness passes of this process are running now, their records not yet in stagePasses. */
+export const passesRunning = () => RUNNING;
+
+/**
  * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
  * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
  * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
@@ -840,7 +851,48 @@ export async function runHarness(opts) {
   return { ...fresh, resumeRefused: { session: opts.resume, ...(rec.refusal ? { status: rec.refusal.status, type: rec.refusal.type, code: rec.refusal.code } : {}) } };
 }
 
-async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal = null, reviewer = false }) {
+async function runOnce(opts) {
+  RUNNING += 1;
+  let rec;
+  try {
+    rec = await runPass(opts);
+    PASSES.push(rec);
+  } finally {
+    RUNNING -= 1;
+  }
+  // A pass the stage's stop ended (or refused): its caller never goes on, since what it would do next (push, publish,
+  // run the validation commands again) is the stopped run's. The stop writes the stage's end (session.mjs stopStage).
+  if (rec.stopped && stopping()) await parked();
+  return rec;
+}
+
+/**
+ * The passes still running, each as a record at its live reading (a lower bound): what a stage that stops before
+ * they end counts for them (stop.mjs stoppedRecords). Read at once, with no await (live-spend.mjs `now`).
+ */
+export function openPasses() {
+  const out = [];
+  for (const [m, { label = "run", harness = null, model = null }] of STAGE_SPEND.open) {
+    let usd = 0;
+    try {
+      usd = Math.max(0, Number(m.now?.()?.usd) || 0);
+    } catch {
+      usd = 0;
+    }
+    out.push({ harness, model, label, usd, usdLowerBound: true, ok: false, stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
+  }
+  return out;
+}
+
+async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal: own = null, reviewer = false }) {
+  // A stopped stage (stop.mjs: its Objective's label removed, or its issue closed) starts no pass, and its stop ends the
+  // one running, as the caller's own `signal` does (the plan-time Question, worker.mjs).
+  if (stageStopped()) {
+    const now = new Date().toISOString();
+    log(`${label}: the Objective was stopped; not starting the run`);
+    return { ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, stopped: true, error: "stopped: the Objective was stopped", basis: "no run: the Objective was stopped", started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
+  }
+  const signal = own ? AbortSignal.any([own, stageStopSignal()]) : stageStopSignal();
   // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own, and out of a
   // reviewer call's altogether.
   const { shell, env } = harnessShell(given, { reviewer });
@@ -941,7 +993,7 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
   // The same reading is the stage's spend so far in its progress comment (stageSpendSoFar), with or without a relay.
   const live = liveSpend(harness, model || null, { prior, creditUsd, rollout: relay && harness === "codex" ? codexRolloutReader(runner, childEnv) : null });
-  const metered = meterPass(live, { session: resume || null });
+  const metered = meterPass(live, { session: resume || null, label, harness, model: model || null });
   if (eventsFile && !STAGE_SPEND.dir) Object.assign(STAGE_SPEND, { dir: dirname(eventsFile), harness });
   relay?.beginPass(maxUsd, live.usd);
   const lines = (l) => {
@@ -1000,6 +1052,9 @@ async function runOnce({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
   }
+  // A pass the stage's stop ended before its harness reported dollars: its stream's live reading, kept beside the record
+  // for the stopped stage's usage (stop.mjs stoppedRecords). metered.end books the same reading in the spend so far.
+  if (r.stopped && stageStopped() && !(typeof rec.usd === "number" && Number.isFinite(rec.usd))) rec.stoppedUsd = await live.usd().catch(() => null);
   // The pass's own dollars join the stage's spend so far; its key spend is the relay's total there.
   await metered.end(rec.usd);
   // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.

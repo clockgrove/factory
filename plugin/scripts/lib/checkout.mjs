@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { agentUser, exec } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
+import { holdIfStopped } from "./stop.mjs";
 import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
@@ -210,6 +211,8 @@ export async function stageChanges(checkout, start, env = process.env) {
  * clean default-branch tree Factory made, never on branch code.
  */
 export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {}, echo = true, asRunner = false, reap = true } = {}) {
+  // A stopped stage starts no command (stop.mjs holdIfStopped): one left running would outlive the stage on a local box.
+  await holdIfStopped();
   const childEnv = scrubbedEnv(env, extraEnv);
   const [cmd, args] = asRunner ? ["bash", ["-eo", "pipefail", "-c", command]] : backend(childEnv).sandbox.command(["bash", "-eo", "pipefail", "-c", command], childEnv);
   const r = await exec(cmd, args, { cwd: checkout, env: childEnv, timeoutMs, echo });

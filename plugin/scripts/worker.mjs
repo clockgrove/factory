@@ -12,7 +12,7 @@
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
@@ -21,7 +21,8 @@ import { addLabels, findPr, getIssue, getRepo, listComments, objectiveLabeledAt,
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -45,6 +46,17 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
   const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Factory has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
   return `${prompt.trimEnd()}\n\n---\n\n${here} Run the validation commands, commit, and stop: Factory pushes the branch. Do not ask questions.`;
 }
+
+/** Every exit this stage applies waits while a stop of its Objective is under way: the stop's own exit stands (stop.mjs). */
+// `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
+// already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
+let beforeExit = null;
+const applyExit = async (...args) => {
+  await holdIfStopped();
+  await beforeExit?.();
+  if (!commitExit()) await parked();
+  return applyExitNow(...args);
+};
 
 async function main() {
   const startedAt = Date.now();
@@ -89,7 +101,15 @@ async function main() {
   const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
   let reentry = null;
+  // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
+  let watch = null;
+  // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason) => {
+    watch?.stop();
+    if (!claimExit()) return parked();
+    return finishNow(exit, reason);
+  };
+  const finishNow = async (exit, reason) => {
     keeper.stop();
     // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
     const known = await stageSpendSoFar().catch(() => null);
@@ -179,6 +199,29 @@ async function main() {
     await finish("skipped", "held by a local loop");
     return;
   }
+
+  // From here the stage stops when a person stops its Objective (its label removed, its issue closed): every harness
+  // pass ends, its spend is recorded, its PR is left a draft, and the stage exits (session.mjs stopStage).
+  // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
+  // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
+  const endNow = (recs, why) => {
+    const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    maskFile(eventsFile, secrets);
+    maskFile(join(usageDir, CALL_LOG), secrets);
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
+    progress.flushNow();
+  };
+  const stopNow = async (cause) => {
+    let took = true;
+    try {
+      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, records, finish: finishNow, opts: token, endNow });
+    } catch (e) {
+      log(`the stop's end failed: ${String(e?.message || e).slice(0, 200)}`);
+    }
+    if (took) process.exit(0);
+  };
+  watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = (commit = false) => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
   // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
   // landing between the two reads then count as after this stage's plan, never as before it.
@@ -289,6 +332,7 @@ async function main() {
   }
   const written = await installPlugin(checkout, PLUGIN_ROOT, { harness: inputs.harness, models: { subagent: inputs.subagentModel, reviewer: inputs.reviewerModel }, env: childBase });
   log(`plugin written into the checkout: ${written.length} path(s), git-excluded`);
+  await holdIfStopped();
   await markRunning(repo, issue, token);
 
   // 4. setup and the lockfile's install (checkout.mjs installCommand): the model secrets never reach these.
@@ -479,7 +523,8 @@ async function main() {
   }
 
   // 6. What the run left behind: the hand-off files, commits, protected paths, the PR. Factory pushes and opens the PR;
-  // pushes carry no model secret.
+  // pushes carry no model secret. A stopped Objective's stage goes no further: its stop writes the end.
+  await holdIfStopped();
   await io.collect();
   // A plan that needs a change in another repository (its Needs-Repository line, factory-objective-plan) is a Question at plan
   // time (lib/one-repo.mjs): the harness stops after its plan, and Factory runs no validation, fix pass or exit-record
@@ -625,6 +670,12 @@ async function main() {
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
+  // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no ready
+  // mark, no review label); the stop's end stands.
+  await holdIfStopped();
+  // The exit begins here (stop.mjs confirmRunning `commit`): a stop after this read ends nothing, and the dispatcher's
+  // stopped pass tidies the ready mark and review label this exit may leave.
+  await beforeExit?.(true);
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {

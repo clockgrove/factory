@@ -52,6 +52,7 @@ Factory never handles a payment, and no bill comes from Clockgrove. To keep thos
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Factory stops at a ready-for-review PR and you merge it yourself.
 - **With auto-merge on, which is the default, nobody reads the code before it lands.** What stands between a change and your default branch is your required checks; the reviewer only comments, and the worker has to answer each comment.
+- **To stop one Objective,** remove its `factory:objective` label or close its issue, or ask "Stop Clockgrove Factory Objective 12". A running stage ends within about two minutes with its spend recorded, its PR becomes a draft, and nothing picks it up again until you re-apply the label; your other Objectives keep running ([docs/USAGE.md](docs/USAGE.md), An Objective's lifecycle).
 - **To stop everything,** disable the workflow (`gh workflow disable factory.yml`) and cancel any run in the Actions tab. With the cloud sandbox, also stop the Objective's sandboxes in your Vercel project: a stage already running there is not an Actions run. In local mode, stop `factory serve` with Ctrl-C. [docs/INSTALL.md](docs/INSTALL.md) has the full uninstall.
 
 ## What it can touch
@@ -138,6 +139,7 @@ Factory is a plugin of [Agent Skills](https://agentskills.io): one folder per sk
 | [`factory-setup`](plugin/skills/factory-setup/SKILL.md) | "Set up Clockgrove Factory for this repository." | Installs Factory one consented step at a time and opens the pull request that adds the workflow file |
 | [`factory-doctor`](plugin/skills/factory-doctor/SKILL.md) | "Is Clockgrove Factory set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
 | [`factory-file`](plugin/skills/factory-file/SKILL.md) | "File a Clockgrove Factory Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes |
+| [`factory-stop`](plugin/skills/factory-stop/SKILL.md) | "Stop Clockgrove Factory Objective 12." | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again |
 | [`factory-run`](plugin/skills/factory-run/SKILL.md) | "Run Clockgrove Factory Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |
 | [`factory-review`](plugin/skills/factory-review/SKILL.md) | "Review Clockgrove Factory PR 57." | Runs the reviewer on one Factory PR in your session |
 | [`factory-serve`](plugin/skills/factory-serve/SKILL.md) | "Start the Clockgrove Factory local loop." | Starts the local loop ([docs/LOCAL.md](docs/LOCAL.md)) |

@@ -91,8 +91,9 @@ test("workflow template: the sweep also runs when an Objective closes or its PR 
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
   const sandbox = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: "main" }));
   const runner = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3" }));
-  assert.deepEqual(sandbox.on.issues.types, ["opened", "labeled", "closed"]);
-  assert.deepEqual(runner.on.issues.types, ["opened", "labeled", "closed"]);
+  // `unlabeled`: a removed factory:objective label (a person's stop) ticks the dispatcher, which leaves its PR a draft.
+  assert.deepEqual(sandbox.on.issues.types, ["opened", "labeled", "unlabeled", "closed"]);
+  assert.deepEqual(runner.on.issues.types, ["opened", "labeled", "unlabeled", "closed"]);
   const cond = sandbox.jobs.sweep.if;
   assert.match(cond, /github\.event_name == 'issues' && github\.event\.action == 'closed' && contains\(join\(github\.event\.issue\.labels\.\*\.name, ','\), 'factory:objective'\)/);
   assert.match(cond, /github\.event\.pull_request\.merged == true && startsWith\(github\.head_ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);

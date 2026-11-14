@@ -17,6 +17,23 @@ Factory is a GitHub Action, a harness plugin and a bench, sharing one set of ski
 - **The App and the Project board are required.** The App is the only identity that both triggers the adopter's CI on Factory's PRs and gets a merge-queue run (below); the board is the dashboard.
 - **Adopters take releases by exact tag**, on their own cadence (README, Versioning).
 
+## Dependencies
+
+Factory uses an existing SDK or library before writing its own (AGENTS.md). The plugin runs with nothing installed, from a Claude Code plugin install and from the Action's checkout, so a runtime library ships inside it:
+
+- **Vendored, byte for byte:** `plugin/vendor/<name>/` holds the files the library itself published, as `tools/deps/package-lock.json` pins them, never rebuilt. `node tools/deps/sync.mjs` copies them after an `npm ci --ignore-scripts --prefix tools/deps`, and CI checks the copy matches. Dependabot bumps the pin; the bump's PR stays red until `sync.mjs` is run on it and the copy committed. Today: `yaml` (workflows, `pnpm-workspace.yaml`, agent frontmatter) and `smol-toml` (Cargo and uv workspace members).
+- **Installed for one job:** the cloud-sandbox jobs install `@vercel/sandbox` from `plugin/package-lock.json` (docs/ADAPTERS.md).
+
+What stays Factory's own code, and why:
+
+- **`lib/untar.mjs`:** runs as an inline script inside the agent's confinement, where no installed package is readable, and unpacks only Factory's own archives, skipping every link, device and FIFO. GNU tar fails there on Ubuntu 26.04 (#102).
+- **`lib/app-token.mjs`:** `node:crypto` signs the App's token; the rest is Factory's permission narrowing and doctor's gap checks.
+- **`lib/github.mjs`:** GitHub calls go through `gh api`, GitHub's own CLI.
+- **Diff reading in `lib/logic.mjs`:** `parse-diff` misreads the quoted names `git diff` prints, and the review needs the new-side line map GitHub's review API takes.
+- **Glob matching in `lib/logic.mjs` and `doctor.mjs`:** the patterns come from files a worker can edit, so the matcher runs in linear time. A brace or character-class pattern matches nothing there; at worst a fix pass's lockfile change is refused and the stage Blocks with the reason.
+- **The harness runners and usage parsing:** Factory drives each vendor's own CLI through its documented headless mode, and owns that launch (the outer sandbox, the agent uid, the process group it kills, the event file it meters). The Claude Agent, Codex and Copilot SDKs start the same CLIs and price nothing Factory does not.
+- **`lib/adapters/decider-ai-gateway.mjs`:** the AI SDK's decision model is experimental; the call is 47 lines behind the decider adapter contract.
+
 ## Job one and how it is measured
 
 Job one: file an Objective, walk away, and come back to correct, merged work at a reasonable cost. Factory is judged on four numbers per Objective, taken by the bench from the issue, the PR, the job log and the harness's usage output.

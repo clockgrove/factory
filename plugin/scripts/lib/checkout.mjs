@@ -133,7 +133,13 @@ export function agentDefinition(text, fallbackName) {
   try {
     fm = parseYaml(m[1]);
   } catch {
-    return null;
+    // Claude Code's own agent generator writes plain values strict YAML refuses (`description: Use when: ...`); like Claude
+    // Code, read each top-level `key: value` line whose value is plain text as a quoted string, then parse again.
+    try {
+      fm = parseYaml(quotedFrontmatter(m[1]));
+    } catch {
+      return null;
+    }
   }
   if (!fm || typeof fm !== "object" || typeof fm.description !== "string") return null;
   const name = typeof fm.name === "string" && /^[A-Za-z0-9_-]+$/.test(fm.name) ? fm.name : fallbackName;
@@ -143,6 +149,17 @@ export function agentDefinition(text, fallbackName) {
   if (list(fm.disallowedTools)) definition.disallowedTools = list(fm.disallowedTools);
   if (typeof fm.model === "string") definition.model = fm.model;
   return { name, definition };
+}
+
+/** Frontmatter with each top-level `key: value` line's plain value quoted, less a trailing ` #` comment (a quoted, flow, block, anchored or tagged value left as it is). */
+export function quotedFrontmatter(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .map((line) => {
+      const kv = /^([A-Za-z0-9_-]+):[ \t]+(\S.*)$/.exec(line);
+      return kv && !/^["'[{|>&*!#]/.test(kv[2]) ? `${kv[1]}: ${JSON.stringify(kv[2].replace(/[ \t]#.*$/, "").trim())}` : line;
+    })
+    .join("\n");
 }
 
 /** Rewrite the pinned model line of an agent definition in its harness's format. */

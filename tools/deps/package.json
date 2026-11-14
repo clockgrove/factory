@@ -1,0 +1,9 @@
+{
+  "name": "factory-deps",
+  "private": true,
+  "description": "The libraries Factory ships inside plugin/vendor, pinned here so Dependabot tracks them. sync.mjs copies each one's published files there; CI checks the copy matches.",
+  "dependencies": {
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.1"
+  }
+}

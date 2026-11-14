@@ -15,6 +15,12 @@ jobs:
           node-version: 24
       - name: The Action's manifest and the workflows parse as YAML
         run: python3 -c 'import glob, yaml; [yaml.safe_load(open(f)) for f in ["action.yml", *glob.glob(".github/workflows/*.yml")]]'
+      # plugin/vendor holds the libraries the plugin ships (it runs with nothing installed): byte for byte what
+      # tools/deps/package-lock.json installs, with no install scripts (docs/PLAN.md, "Dependencies").
+      - name: The vendored libraries match their lockfile
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix tools/deps
+          node tools/deps/sync.mjs --check
       # The tests run with an empty temp folder of their own, and must leave it empty: a developer's box runs them many
       # times a day, and what they left behind once filled /tmp's inodes (#2565).
       - name: An empty temp folder for the tests

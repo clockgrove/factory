@@ -1,6 +1,6 @@
 ---
 name: objective-plan
-description: First step of working a Factory Objective (an issue labelled factory:objective). Use before any code is written to read the issue, write the plan, record every assumption and apply the Question rule. Load when a task card says to use objective-plan, or when asked to plan an Objective.
+description: First step of working a Clockgrove Factory Objective (an issue labelled factory:objective). Use before any code is written to read the issue, write the plan, record every assumption and apply the Question rule. Load when a task card says to use objective-plan, or when asked to plan an Objective.
 ---
 
 # Plan the Objective

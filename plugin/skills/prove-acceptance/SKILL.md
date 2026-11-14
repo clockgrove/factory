@@ -1,6 +1,6 @@
 ---
 name: prove-acceptance
-description: Third step of working a Factory Objective, after implement-split and before deliver-pr. Use to prove every acceptance entry through the repository's real path per its testing guide, run the validation and test-budget commands, apply the base-failure rule and iterate locally before you hand off. Load when a task card says to use prove-acceptance.
+description: Third step of working a Clockgrove Factory Objective, after implement-split and before deliver-pr. Use to prove every acceptance entry through the repository's real path per its testing guide, run the validation and test-budget commands, apply the base-failure rule and iterate locally before you hand off. Load when a task card says to use prove-acceptance.
 ---
 
 # Prove the acceptance

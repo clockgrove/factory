@@ -1,5 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -107,6 +109,12 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   delete noReads.statuses;
   assert.deepEqual(permissionGaps(noReads).missing, ["checks:read", "statuses:read"]);
   assert.deepEqual(permissionGaps({ ...full, organization_projects: "read" }).missing, ["projects:write"]);
+  // A personal account's board is out of every App's reach (Projects is an organization permission, #199): not required.
+  const noProjects = { ...full };
+  delete noProjects.organization_projects;
+  assert.deepEqual(permissionGaps(noProjects).missing, ["projects:write"], "an organization's App still needs it");
+  assert.deepEqual(permissionGaps(noProjects, { userAccount: true }), { missing: [], extra: [] });
+  assert.deepEqual(appPermissionChecks({ appSlug: "f", ...permissionGaps(noProjects, { userAccount: true }) }).map((c) => c.status), ["PASS"]);
   const [fail] = appPermissionChecks({ appSlug: "f", ...permissionGaps(noReads) });
   assert.equal(fail.status, "FAIL");
   assert.match(fail.detail, /missing checks:read, statuses:read/);
@@ -183,4 +191,31 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     if (before === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = before;
   }
+});
+
+test("mintInstallationToken reads a personal account from the installation and stops requiring projects there; an organization's still needs it (#199)", () => {
+  const lib = join(import.meta.dirname, "..", "scripts", "lib", "app-token.mjs");
+  const script = `
+    import { generateKeyPairSync } from "node:crypto";
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs1", format: "pem" });
+    const perms = { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" };
+    const out = {};
+    for (const type of ["User", "Organization"]) {
+      globalThis.fetch = async (url) => {
+        const p = new URL(url).pathname;
+        const json = (b) => new Response(JSON.stringify(b), { status: p.endsWith("/access_tokens") ? 201 : 200, headers: { "content-type": "application/json" } });
+        if (p === "/app") return json({ slug: "f", name: "F" });
+        if (p === "/repos/o/r/installation") return json({ id: 9, account: { type }, permissions: perms });
+        if (p === "/app/installations/9/access_tokens") return json({ token: "t", expires_at: "2099-01-01T00:00:00Z", permissions: perms });
+        return new Response("{}", { status: 404 });
+      };
+      const { mintInstallationToken } = await import(${JSON.stringify(pathToFileURL(lib).href)} + "?" + type);
+      const r = await mintInstallationToken({ appId: "1", privateKey: pem, owner: "o", repo: "r" });
+      out[type] = { userAccount: r.userAccount, missing: r.missing };
+    }
+    process.stdout.write(JSON.stringify(out));`;
+  const got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, GITHUB_API_URL: "https://github.test" }, encoding: "utf8" }));
+  assert.deepEqual(got.User, { userAccount: true, missing: [] });
+  assert.deepEqual(got.Organization, { userAccount: false, missing: ["projects:write"] });
 });

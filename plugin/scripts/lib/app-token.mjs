@@ -84,8 +84,10 @@ export const APP_PERMISSIONS_TEXT = "contents, pull requests, issues, projects: 
 /**
  * What a granted permission set lacks of APP_PERMISSIONS (a write counts for a read), and what it has beyond the list
  * and APP_OPTIONAL_PERMISSIONS, or above its level (checks:write where Factory reads): ["name:level", ...] each.
+ * `userAccount`: the App is installed on a personal account, whose Projects board no GitHub App can reach (Projects is an
+ * organization permission), so projects is not required there: the board is skipped and labels carry the state (#199).
  */
-export function permissionGaps(perms = {}) {
+export function permissionGaps(perms = {}, { userAccount = false } = {}) {
   const rank = { none: 0, read: 1, write: 2, admin: 3 };
   const allowed = { ...APP_PERMISSIONS, ...APP_OPTIONAL_PERMISSIONS, ...Object.fromEntries(PROJECT_PERMISSION_KEYS.map((k) => [k, "write"])) };
   const extra = Object.entries(perms)
@@ -94,7 +96,7 @@ export function permissionGaps(perms = {}) {
   const missing = Object.entries(APP_PERMISSIONS)
     .filter(([k, v]) => (rank[perms[k]] ?? 0) < rank[v])
     .map(([k, v]) => `${k}:${v}`);
-  if (!PROJECT_PERMISSION_KEYS.some((k) => perms[k] === "write" || perms[k] === "admin")) missing.push("projects:write");
+  if (!userAccount && !PROJECT_PERMISSION_KEYS.some((k) => perms[k] === "write" || perms[k] === "admin")) missing.push("projects:write");
   return { missing, extra };
 }
 
@@ -123,8 +125,9 @@ export async function mintInstallationToken({ appId, privateKey, owner, repo, pe
   const tok = await api(`app/installations/${inst.id}/access_tokens`, { token: jwt, method: "POST", body: { repositories: [repo], ...(permissions ? { permissions } : {}) } });
   if (permissions) return { token: tok.token, expiresAt: tok.expires_at, permissions: tok.permissions || {}, repositories: (tok.repositories || []).map((r) => r.full_name), installationPermissions: granted, installationId: inst.id, appSlug: app.slug, appName: app.name, extra: [], missing: [] };
   const perms = tok.permissions || granted;
-  const { missing, extra } = permissionGaps(perms);
-  return { token: tok.token, expiresAt: tok.expires_at, permissions: perms, installationId: inst.id, appSlug: app.slug, appName: app.name, extra, missing };
+  const userAccount = inst.account?.type === "User";
+  const { missing, extra } = permissionGaps(perms, { userAccount });
+  return { token: tok.token, expiresAt: tok.expires_at, permissions: perms, installationId: inst.id, appSlug: app.slug, appName: app.name, extra, missing, userAccount };
 }
 
 /** All a notice needs: a comment on the issue, by the App, so GitHub notifies the person it mentions. */

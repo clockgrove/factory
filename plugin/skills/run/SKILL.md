@@ -1,13 +1,13 @@
 ---
 name: run
-description: "/factory:run <issue> [--here]. Run one Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Factory Objective by issue number on their machine."
+description: "/factory:run <issue> [--here]. Run one Clockgrove Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Clockgrove Factory Objective by issue number on their machine."
 ---
 
 # /factory:run <issue> [--here]
 
 ## Local mode (the default)
 
-Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, then its reviewer, then the merge, on this machine's harness login, every command in a sandbox (docs/LOCAL.md). It needs local mode set up (the token file, `srt`); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:serve`, resumes it.
+Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox (docs/LOCAL.md). It needs local mode set up (the token file, `srt`); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:serve`, resumes it.
 
 ## In this session (--here)
 

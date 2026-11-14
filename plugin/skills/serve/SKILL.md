@@ -1,6 +1,6 @@
 ---
 name: serve
-description: "/factory:serve. Start Factory's local loop for the current repository on this machine (`factory serve`): it takes the Objectives labelled factory:local (or all with --all), works and reviews them in sandboxes on this machine's harness login, and resumes its own paused work first. Use when the user asks to run Factory locally, serve, or work the queue on their machine."
+description: "/factory:serve. Start Clockgrove Factory's local loop for the current repository on this machine (`factory serve`): it takes the Objectives labelled factory:local (or all with --all), works and reviews them in sandboxes on this machine's harness login, and resumes its own paused work first. Use when the user asks to run Clockgrove Factory locally, serve, or work the queue on their machine."
 ---
 
 # /factory:serve

@@ -4,7 +4,7 @@ How to write an Objective, what you see while it runs, and what to do when Facto
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the factory-file skill), or write the issue yourself:
+An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the factory-file skill), which starts it or saves it as a draft to refine and start later (An Objective's lifecycle, below), or write the issue yourself:
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading such as `Acceptance` (`Done when`, `Definition of done`, `Must be true` and `Criteria` are read the same way). The reviewer judges each entry, met or not, with the line that shows it. Without such a section, the reviewer names the entries from the issue text itself.
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
@@ -32,9 +32,9 @@ While a job runs, one comment on the issue (edited in place, one per run) carrie
 
 Each step is one action on GitHub. Where a skill is named, a plain-words request to your agent takes that action after asking you.
 
-<!-- Draft: filing an Objective without starting it. #204 adds this part. -->
+- **Draft.** An issue with the `factory:draft` label is a draft: Factory never runs it, on any route, even with `factory:objective` on it too (the draft label wins: the dispatcher's log lists it as a draft, and a launch, `factory run` or a session's `factory issue` refuses it). Nothing is dispatched, claimed or spent for it. The factory-file skill offers it beside starting at once: it shows the issue and asks whether to start it now, save it as a draft, or keep discussing. "Let's keep working on Clockgrove Factory Objective #12" (the factory-draft skill) loads the draft from GitHub to refine it with you and saves the changes back to the issue only on your yes. Edit a draft freely: before its first plan, an edit is simply the text the run starts from.
 
-- **Start.** Applying `factory:objective` starts the Objective: the dispatcher picks it up on the label's own event, else on its ten-minute cron, and in local mode on `factory serve`'s next tick.
+- **Start.** Applying `factory:objective` starts the Objective: the dispatcher picks it up on the label's own event, else on its ten-minute cron, and in local mode on `factory serve`'s next tick. To start a draft, take `factory:draft` off and apply `factory:objective`, or ask "Start Clockgrove Factory Objective #12" (the factory-start skill): on your yes it does both, after the trust check a new Objective gets (its author and its last editor can push, or are maintainers the workflow names; otherwise it refuses and says who). A draft started, then edited, follows the edit rules below once its plan exists.
 
 - **Edit.** Edit the issue freely until the first work stage reads it. After its plan, an edit Blocks the Objective at its next stage, and re-applying `factory:objective` plans again from the new text (Edit an Objective, below).
 
@@ -44,6 +44,8 @@ Each step is one action on GitHub. Where a skill is named, a plain-words request
   - **Running, or a review running:** the stage reads its issue once a minute. On the stop it ends its harness run, records the spend so far in its usage record (locally and in a cloud sandbox also in its progress comment's spend line, as every stage does) and exits, normally within two minutes; its progress comment's last line reads `exit: stopped`. Its PR, if it has one, becomes a draft without the `factory:review` label; its state label comes off and its card goes back to Queued. With the cloud sandbox the launcher then stops the sandbox. A Running Objective whose stage died before it saw the stop is tidied the same way by the dispatcher, ten minutes after the label came off.
   - **In review with no stage running:** on its next tick the dispatcher takes the PR out of the merge queue, makes it a draft without the `factory:review` label, removes the state label and moves the card to Queued, so neither a review nor the merge queue takes it. On Actions the label's removal ticks it (a workflow file rendered before this release waits for the ten-minute cron until it is re-rendered: [INSTALL.md](INSTALL.md), Upgrade); locally `factory serve` ticks every 30 seconds.
   - **Queued, Blocked or a Question:** it stays as it is.
+
+  Applying `factory:draft` to an Objective stops it the same way, whatever its state, and keeps it a draft until it is started again.
 
   Re-apply the label to start it again: it continues from its branch and PR, as after a Block. Closing the issue stops it the same way and then counts as done: the dispatcher's Done pass removes its state label, moves its card to Done and makes a PR it left open a draft, and with the cloud sandbox the sweep destroys its sandbox.
 
@@ -91,7 +93,9 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 | --- | --- | --- |
 | "Set up Clockgrove Factory for this repository." | `/factory:factory-setup` | Installs Factory one consented step at a time, and opens the pull request that adds the workflow file |
 | "Is Clockgrove Factory set up correctly here?" | `/factory:factory-doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
-| "File a Clockgrove Factory Objective: ..." | `/factory:factory-file` | Writes what you describe as an Objective issue, shows it, and creates it with the label on your yes |
+| "File a Clockgrove Factory Objective: ..." | `/factory:factory-file` | Writes what you describe as an Objective issue, shows it, and on your yes creates it started (`factory:objective`) or as a draft (`factory:draft`) |
+| "Let's keep working on Clockgrove Factory Objective 12." | `/factory:factory-draft <issue>` | Loads the draft from GitHub to refine it with you, and saves the changes back on your yes |
+| "Start Clockgrove Factory Objective 12." | `/factory:factory-start <issue>` | Starts a draft on your yes, after the trust check: takes `factory:draft` off and applies `factory:objective` |
 | "Stop Clockgrove Factory Objective 12." | `/factory:factory-stop <issue>` | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again (An Objective's lifecycle, above) |
 | "Restart Clockgrove Factory Objective 12." | `/factory:factory-restart <issue>` | Applies `factory:restart` on your yes: the Objective starts over from the issue's current text (An Objective's lifecycle, above) |
 | "Run Clockgrove Factory Objective 42 here." | `/factory:factory-run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |

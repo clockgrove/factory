@@ -21,7 +21,7 @@ import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -99,13 +99,24 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
-  const issues = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
-  const openNumbers = new Set(issues.map((i) => i.number));
+  const listed = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
+  // An open Objective blocks the ones that name it, a draft among them: it is not done.
+  const openNumbers = new Set(listed.map((i) => i.number));
+  // A draft (factory:draft, lib/stop.mjs) is never run, its Objective label on or not: no pass below sees it. A Running
+  // or In-review one (a person made a running Objective a draft) is stopped: the stopped pass tidies it.
+  const drafts = listed.filter((i) => stopCause(i, inputs.objectiveLabel) === "draft").map((i) => i.number);
+  const issues = listed.filter((i) => !drafts.includes(i.number));
+  if (drafts.length) log(`drafts (${DRAFT_LABEL}), never run though labelled ${inputs.objectiveLabel}: ${drafts.map((n) => `#${n}`).join(", ")}`);
+  const draftSkips = listed.filter((i) => drafts.includes(i.number) && (!inputs.issue || i.number === inputs.issue) && backend().trigger.routes(i)).map(({ number: n }) => ({ number: n, reason: `a draft (${DRAFT_LABEL}): never run; starting it takes the label off` }));
   watch.mark("issues");
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
   // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs).
   const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i));
+  if (inputs.issue && drafts.includes(inputs.issue)) {
+    log(`issue #${inputs.issue} is a draft (${DRAFT_LABEL}); nothing to dispatch`);
+    return { ready: [], skipped: draftSkips, running: 0, spentToday: 0, reason: "a draft" };
+  }
   if (inputs.issue && !wanted.length) {
     log(`issue #${inputs.issue} is not an open ${inputs.objectiveLabel} issue; nothing to dispatch`);
     return { ready: [], skipped: [{ number: inputs.issue, reason: `not open with ${inputs.objectiveLabel}` }], running: 0, spentToday: 0, reason: "not an objective" };
@@ -738,11 +749,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   watch.mark("done");
-  // Stopped: an open issue still marked Running or In review whose Objective label a person removed (stop.mjs). Its PR
-  // goes back to a draft without the review label (no review starts, the merge queue drops it), its state label comes
-  // off and its card goes back to Queued, so re-applying the label starts it again. A running stage stops itself (its
-  // watch on the issue) and tidies the same way; a Running one is tidied here only STOP_GRACE_MS after its label came
-  // off, for a stage that died or never saw the stop. A local loop tidies only the Objectives it routes.
+  // Stopped: an open issue still marked Running or In review whose Objective label a person removed, or that a person made
+  // a draft (`factory:draft`, stop.mjs). Its PR goes back to a draft without the review label (no review starts, the
+  // merge queue drops it), its state label comes off and its card goes back to Queued, so re-applying the label (or
+  // starting the draft) starts it again. A running stage stops itself (its watch on the issue) and tidies the same way; a
+  // Running one is tidied here only STOP_GRACE_MS after its stop (the label's removal, the draft label's application),
+  // for a stage that died or never saw the stop. A local loop tidies only the Objectives it routes.
   const stopped = [];
   if (!dryRun) {
     const seen = new Set();
@@ -752,10 +764,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         return [];
       });
       for (const issue of list) {
-        if (seen.has(issue.number) || stopCause(issue, inputs.objectiveLabel) !== "unlabeled" || !backend().trigger.tends(issue)) continue;
+        const cause = stopCause(issue, inputs.objectiveLabel);
+        if (seen.has(issue.number) || (cause !== "unlabeled" && cause !== "draft") || !backend().trigger.tends(issue)) continue;
         seen.add(issue.number);
         if (label === "factory:running") {
-          const off = await labelRemovedAt(repo, issue.number, inputs.objectiveLabel, opts).catch(() => undefined);
+          const off = await (cause === "draft" ? labeledBy(repo, issue.number, DRAFT_LABEL, opts).then((e) => e?.at ?? null) : labelRemovedAt(repo, issue.number, inputs.objectiveLabel, opts)).catch(() => undefined);
           if (off === undefined) {
             retry(`#${issue.number}'s stop time`);
             continue;
@@ -766,7 +779,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         stopped.push(issue.number);
       }
     }
-    if (stopped.length) log(`stopped (the label removed), left a draft and Queued: ${stopped.map((n) => `#${n}`).join(", ")}`);
+    if (stopped.length) log(`stopped (the label removed, or made a draft), left a draft PR and Queued: ${stopped.map((n) => `#${n}`).join(", ")}`);
   }
 
   watch.mark("stopped");
@@ -807,7 +820,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /**

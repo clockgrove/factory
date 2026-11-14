@@ -9,7 +9,7 @@ Restarting an Objective is applying the `factory:restart` label to its issue, in
 
 ## Check the issue
 
-Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue is not restarted: say so and stop. Note its state from its labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`, or none: Queued). When it carries no `factory:objective` label it is stopped: the restart waits until that label is back, so offer to apply both.
+Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue is not restarted: say so and stop. Note its state from its labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`, or none: Queued). When it carries no `factory:objective` label it is stopped: the restart waits until that label is back, so offer to apply both. A draft (`factory:draft`) is not restarted until it is started (the factory-start skill): say so.
 
 When the user only wants it to go on after a fix or an answer, a restart is not needed: re-applying `factory:objective` continues from its branch and pull request. Say so if that is what they described.
 

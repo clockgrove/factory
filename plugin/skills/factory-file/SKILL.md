@@ -1,6 +1,6 @@
 ---
 name: factory-file
-description: "/factory:factory-file. Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created with the factory:objective label on the user's yes. Use when the user asks to file, create or queue a Clockgrove Factory Objective, or asks Clockgrove Factory to build something."
+description: "/factory:factory-file. Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created on the user's yes either started (the factory:objective label) or saved as a draft (factory:draft) to refine and start later. Use when the user asks to file, create or queue a Clockgrove Factory Objective, or asks Clockgrove Factory to build something."
 ---
 
 # /factory:factory-file
@@ -24,6 +24,10 @@ Ask the user only for what the issue cannot be written without. Where they left 
 
 ## Create it
 
-Show the title and the body. On a yes, write the body to a temporary file and run `gh issue create --repo OWNER/NAME --title "<title>" --body-file <file> --label factory:objective`. Add `--label factory:local` when the user wants their own machine's loop to take it, and a `P0`, `P1` or `P2` label when they give a priority.
+Show the title and the body, and offer three outcomes:
 
-Print the issue's URL and say what happens next: one comment on the issue shows the run's progress, and it ends merged, Blocked with the reason, or with a Question on a draft pull request.
+- **Start it now:** write the body to a temporary file and run `gh issue create --repo OWNER/NAME --title "<title>" --body-file <file> --label factory:objective`. Add `--label factory:local` when the user wants their own machine's loop to take it, and a `P0`, `P1` or `P2` label when they give a priority.
+- **Save it as a draft:** the same command with `--label factory:draft` in place of `factory:objective`. Factory never runs an issue while `factory:draft` is on it. When GitHub says the label does not exist, create it first: `gh label create factory:draft --repo OWNER/NAME --color D4C5F9 --description "A draft Objective: Factory never runs it while this label is on"`.
+- **Keep discussing:** nothing goes to GitHub; revise it and show it again.
+
+Print the issue's URL. For a started one, say what happens next: one comment on the issue shows the run's progress, and it ends merged, Blocked with the reason, or with a Question on a draft pull request. For a draft, say that "Let's keep working on Clockgrove Factory Objective <number>" refines it (the factory-draft skill) and "Start Clockgrove Factory Objective <number>" starts it (the factory-start skill).

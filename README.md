@@ -108,7 +108,7 @@ The session runs Factory's doctor, which changes nothing. Each line it prints is
 
 > File a Clockgrove Factory Objective: `mytool --version` should print the version from package.json.
 
-The session writes the issue in the shape Factory reads, shows it to you, and on your yes creates it with the `factory:objective` label. That label starts the run. The issue looks like this:
+The session writes the issue in the shape Factory reads, shows it to you, and asks whether to start it now, save it as a draft, or keep discussing. Started, it carries the `factory:objective` label, which starts the run. A draft carries `factory:draft` instead, which Factory never runs: say "Let's keep working on Clockgrove Factory Objective 12" to refine it in a later session (changes are saved to the issue on your yes), and "Start Clockgrove Factory Objective 12" when it is ready. The issue looks like this:
 
 ```markdown
 ## Goal
@@ -139,7 +139,9 @@ Factory is a plugin of [Agent Skills](https://agentskills.io): one folder per sk
 | --- | --- | --- |
 | [`factory-setup`](plugin/skills/factory-setup/SKILL.md) | "Set up Clockgrove Factory for this repository." | Installs Factory one consented step at a time and opens the pull request that adds the workflow file |
 | [`factory-doctor`](plugin/skills/factory-doctor/SKILL.md) | "Is Clockgrove Factory set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
-| [`factory-file`](plugin/skills/factory-file/SKILL.md) | "File a Clockgrove Factory Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes |
+| [`factory-file`](plugin/skills/factory-file/SKILL.md) | "File a Clockgrove Factory Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes, started or as a draft |
+| [`factory-draft`](plugin/skills/factory-draft/SKILL.md) | "Let's keep working on Clockgrove Factory Objective 12." | Loads the draft from GitHub to refine it with you, and saves the changes back on your yes |
+| [`factory-start`](plugin/skills/factory-start/SKILL.md) | "Start Clockgrove Factory Objective 12." | Starts a draft on your yes, after the trust check: takes `factory:draft` off and applies `factory:objective` |
 | [`factory-stop`](plugin/skills/factory-stop/SKILL.md) | "Stop Clockgrove Factory Objective 12." | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again |
 | [`factory-restart`](plugin/skills/factory-restart/SKILL.md) | "Restart Clockgrove Factory Objective 12." | Applies `factory:restart` on your yes: the Objective starts over from the issue's current text |
 | [`factory-run`](plugin/skills/factory-run/SKILL.md) | "Run Clockgrove Factory Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |

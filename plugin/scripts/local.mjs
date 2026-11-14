@@ -45,7 +45,7 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, planStateNow, settled, trustedIssue } from "./lib/objective-trust.mjs";
-import { stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -1268,6 +1268,8 @@ export class Local {
     if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);
     const data = await retried(`reading issue #${issue}`, () => gh.getIssue(this.repo, issue, this.opts), { waitMs });
     if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
+    // Before any claim: a draft is never run (lib/stop.mjs).
+    if (isDraft(data)) throw draftRefusal(issue, "nothing to run");
     const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });
     const next = stageFor({ pr, issue: data }) ?? "work";
     if (next === "review") log(`#${issue}: PR #${pr.number} waits for its review; starting there`);
@@ -1588,6 +1590,8 @@ const sessionIssueFile = (dir) => join(process.env.FACTORY_IN || resolve(dir, sh
 
 /** A session's refusal of an issue whose author or last editor cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
+/** A draft (factory:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
+const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Factory never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Factory Objective ${issue}")`);
 
 /**
  * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
@@ -1600,7 +1604,9 @@ const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`
 async function issueForSession(issue, flags) {
   const clone = sessionClone(flags);
   await sessionInputs(clone);
-  const t = await trustedIssue(clone.repo, issue, await getIssue(clone.repo, issue, clone.opts), clone.opts);
+  const data = await getIssue(clone.repo, issue, clone.opts);
+  if (isDraft(data)) throw draftRefusal(issue, `#${issue} is not given to this session`);
+  const t = await trustedIssue(clone.repo, issue, data, clone.opts);
   if (!t.ok) throw untrustedRefusal(t, `#${issue} is not given to this session`);
   const file = resolve(flags.out || sessionIssueFile(clone.dir));
   // In the session's hand-off directory, the plan beside the issue, only when it was made from this text
@@ -1637,8 +1643,10 @@ async function deliver(issue, flags) {
   const { defaultBranch, inputs } = await sessionInputs(clone);
   // When the label was last applied, read before the text, as the worker does (objective-trust.mjs planGate).
   const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, opts);
+  const issueNow = await getIssue(repo, issue, opts);
+  if (isDraft(issueNow)) throw draftRefusal(issue, "nothing was delivered");
   // The worker's check, made again here: the body the session read may have been edited since by someone who cannot push.
-  const trusted = await authorGate({ repo, issue, issueData: await getIssue(repo, issue, opts), notify: inputs.notify, opts, apply: applyExit });
+  const trusted = await authorGate({ repo, issue, issueData: issueNow, notify: inputs.notify, opts, apply: applyExit });
   if (!trusted.ok) {
     log(`#${issue}: blocked, nothing pushed: ${trusted.reason}`);
     return 1;

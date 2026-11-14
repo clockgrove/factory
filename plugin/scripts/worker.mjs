@@ -22,7 +22,7 @@ import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/i
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -187,6 +187,12 @@ async function main() {
   // 2. The issue.
   let issueData = await getIssue(repo, issue, token);
   const labels = (issueData.labels || []).map((l) => l.name);
+  // A draft (factory:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
+  if (stopCause(issueData, inputs.objectiveLabel) === "draft") {
+    log(`#${issue} is a draft (${DRAFT_LABEL}); Factory never runs a draft; nothing to do`);
+    await finish("skipped", `a draft (${DRAFT_LABEL})`);
+    return;
+  }
   if (issueData.state !== "open" || !labels.includes(inputs.objectiveLabel)) {
     log(`#${issue} is not an open ${inputs.objectiveLabel} issue; nothing to do`);
     await finish("skipped", `not an open ${inputs.objectiveLabel} issue`);

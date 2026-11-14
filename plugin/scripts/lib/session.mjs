@@ -1866,7 +1866,7 @@ export function mergeBlockReason(how, report = {}) {
 export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
-  // A stopped Objective (its label removed, its issue closed, a restart asked for: stop.mjs stopCause) never merges, whoever runs this pass:
+  // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
   // the dispatcher (with the issue it listed), a review stage that has not seen the stop yet, a local loop following it.
   // An issue that cannot be read merges nothing now: the caller tries again.
   const issueNow = issueData ?? (await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); next try`), null)));

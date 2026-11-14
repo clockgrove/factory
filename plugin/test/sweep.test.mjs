@@ -214,7 +214,7 @@ test("sweep: a Question whose card sits in In review is stopped and booked like 
 });
 
 test("sweep review fixes: its claim holds against a launcher, a lost claim stops nothing, a stop error clears, an interrupted sweep's stage is never restored as the stage's", async () => {
-  const { launchDecision, stageHolds } = await import("../scripts/lib/logic.mjs");
+  const { stageHolds } = await import("../scripts/lib/logic.mjs");
   const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
   const blocked = { state: "open", labels: [{ name: "factory:objective" }, { name: "factory:blocked" }] };
   const started = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "factory-aaa", state: "running", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(60) }] };

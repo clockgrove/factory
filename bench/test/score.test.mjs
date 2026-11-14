@@ -296,7 +296,6 @@ test("waitingMinutes and decisionsOf: queue and human-turn time apart from worki
 });
 
 test("humanActions: board bookkeeping and Factory-marker comments are not human actions", async () => {
-  const { humanActions } = await import("../lib/objective.mjs");
   const collected = {
     issue: { number: 9 },
     issueTimeline: [

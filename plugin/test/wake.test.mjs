@@ -397,7 +397,7 @@ test("repeated lost launches reach three strikes, each stored as the next marker
 });
 
 test("recordFailedStart writes under the record lock: a sweep's destroy in between is kept, never the stale sandbox id", async () => {
-  const { recordFailedStart, recordBody, writeSandboxRecord } = await import("../scripts/launch.mjs");
+  const { recordFailedStart } = await import("../scripts/launch.mjs");
   setSelf(BOT.login);
   const N = 7;
   const HEAD = marker(N, "sandbox");

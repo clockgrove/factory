@@ -1013,7 +1013,7 @@ test("a clone's .git/info/attributes: made empty and read-only everywhere; pin, 
 });
 
 test("a stage's start clears what an earlier stage or run left untracked in the reused clone; ignored files and Factory's paths stay", async () => {
-  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { execFileSync } = await import("node:child_process");

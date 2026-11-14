@@ -1054,7 +1054,7 @@ test("stageChanges: a stage answers for what it changed since it started, never 
 test("exec group: a run's processes are killed when it ends, one that left the group (setsid) included", async (t) => {
   if (process.platform !== "linux") return t.skip("reads /proc");
   const { exec } = await import("../scripts/lib/proc.mjs");
-  const { mkdtempSync, readFileSync, existsSync } = await import("node:fs");
+  const { mkdtempSync, existsSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "factory-group-"));
   const r = await exec("sh", ["-c", `sleep 300 & echo $! > ${dir}/a; setsid sh -c 'sleep 300 & echo $! > ${dir}/b; wait' & sleep 0.5; echo done`], { group: true });

@@ -1440,11 +1440,11 @@ export function harnessHomeGuards(harness, env = {}, home = homedir(), { dirsOnl
   const fixed = [...g.dirs.map((f) => join(d, f)), ...(dirsOnly ? [] : [...g.files.map((f) => join(d, f)), ...(harness === "claude" ? [join(home, ".claude.json")] : [])])];
   if (dirsOnly || staticOnly) return fixed;
   const named = new Set([...g.dirs, ...g.files]);
-  const rest = entries(d).filter((n) => !named.has(n) && !writableName(harness, n)).map((n) => join(d, n));
-  if (harness === "claude" && clone && linkableProject(clone)) return [...fixed, ...rest, join(d, "projects")];
+  const others = entries(d).filter((n) => !named.has(n) && !writableName(harness, n)).map((n) => join(d, n));
+  if (harness === "claude" && clone && linkableProject(clone)) return [...fixed, ...others, join(d, "projects")];
   const mine = clone ? claudeProject(clone) : null;
   const own = harness === "claude" ? entries(join(d, "projects")).filter((n) => n !== mine && !(mine?.length > 200 && n.startsWith(mine.slice(0, 200)))).map((n) => join(d, "projects", n)) : harness === "codex" ? codexSessionGuards(join(d, "sessions"), now) : [];
-  return [...fixed, ...rest, ...own];
+  return [...fixed, ...others, ...own];
 }
 
 /**

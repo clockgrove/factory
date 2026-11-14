@@ -335,7 +335,7 @@ export function workflowAction({ explicit, before, latest }) {
  * gate keeps the existing file's maintainer ids beside the pinned ones unless --maintainers names others (a new --notify
  * drops the old notify id). Env keys the existing file has and the template does not are kept at the env block's end.
  */
-export function workflowText({ template, inputs, args, explicit = args, before = null, latest, notify, runsOn = null, ciWorkflow, defaultBranch = "", protectedPaths = inputs.protectedAdditions }) {
+export function workflowText({ template, inputs, args, explicit = args, before = null, latest, notify, runsOn = null, ciWorkflow, defaultBranch = "", protectedPaths: protectedList = inputs.protectedAdditions }) {
   const sandbox = String(args.sandbox || "").trim().toLowerCase();
   const oldNotifyId = parseMaintainer(before?.env.FACTORY_NOTIFY || "")?.id ?? null;
   const keptIds = before && explicit.maintainers === undefined ? before.ids.filter((id) => explicit.notify === undefined || id !== oldNotifyId) : [];
@@ -360,7 +360,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     // `parallel: ` marks would make a plain YAML value a mapping: renderWorkflow's yamlScalar quotes it, once.
     validation: inputs.validation.join(", "),
     budget_command: inputs.budgetCommand,
-    protected_paths: protectedPaths.join(", "),
+    protected_paths: protectedList.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",
     action: workflowAction({ explicit, before, latest }),

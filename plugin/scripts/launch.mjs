@@ -584,7 +584,8 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
     if (!usage) {
       const dir = join(process.env.RUNNER_TEMP || tmpdir(), `factory-usage-${n}-${record.claim}`);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
+      // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
+      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
 `);
       usage = { dir, name: record.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
     }
@@ -719,7 +720,9 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
     return out({ exit: decision.skip ? "skipped" : "start", start: !decision.skip, reason: decision.skip ? `#${n} (${ev.kind}): ${decision.skip}` : `#${n} (${ev.kind})` });
   }
   if (decision.skip) return out({ exit: "skipped", reason: `#${n} (${ev.kind}): ${decision.skip}` });
-  const run = { inputs, eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
+  // The repository's own harness and models (`defaults`), taken once before any start applies an Objective's labels to
+  // `inputs`: for the stage's env (stageEnvironment) and the CLI version pin, however many starts this run makes.
+  const run = { inputs, defaults: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]])), eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
   if (decision.block) return out(await block(run, `launcher: ${decision.block}`));
   if (decision.requeue) return out(await requeue(run, ctx.project, decision.requeue));
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
@@ -980,17 +983,17 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // call: a label no writer applied, two of one kind or a model its harness cannot run Blocks here, before any spend. The
   // stage then gets that harness's credential, its CLI checked in the sandbox, and FACTORY_STAGE_HARNESS (stageEnvironment).
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
-  // The repository's own, kept for the stage's env (stageEnvironment) and the CLI version pin, before the choice is applied.
-  run.defaults = Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]]));
   // The gateway key from this launcher's inputs: main() has taken the secrets out of its environment by now.
+  // Over the repository's defaults, never an earlier start's choice in `inputs`.
   const chosen = await objectiveInputs({ repo, issue: n, env: process.env, opts, gateway: !!inputs.codexGatewayKey });
   if (!chosen.ok) return out(await block(run, `launcher: ${chosen.reason}`, "setup", chosen.fix));
-  Object.assign(inputs, chosen.inputs);
+  Object.assign(inputs, run.defaults, chosen.inputs);
   const noKey = missingCredential(inputs);
   if (noKey) return out(await block(run, `launcher: ${noKey.reason}`, "setup", noKey.fix));
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;
-  const base = { vendor: inputs.sandbox, stage, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };
+  // `harness`: the one this stage runs on (the Objective's), for a usage record the launcher or the sweep writes for it.
+  const base = { vendor: inputs.sandbox, stage, harness: inputs.harness, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };
   const write = (next) => writeSandboxRecord(repo, n, opts, next, { base: run.base });
   const launches = (entry, list = prior?.launches) => [...(list || []), { ...entry, cue }].slice(-KEEP_LAUNCHES);
 

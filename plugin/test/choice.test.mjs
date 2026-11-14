@@ -407,3 +407,18 @@ test("the review job checks the chosen harness's credential and Blocks with its 
   const fails = (await credentialChecks({ inputs: { ...resolveInputs({ env: { GITHUB_REPOSITORY: "acme/app" } }), ...chosenInputs({ env: ENV, choice: { harness: "codex" } }).inputs, codexApiKey: "", codexGatewayKey: "" }, env: { GITHUB_ACTIONS: "true" } })).filter((c) => c.status === "FAIL");
   assert.match(fails[0]?.fix ?? "", /gh secret set FACTORY_CODEX_GATEWAY_KEY/, "the fix names the secret");
 });
+
+test("chosenInputs: a label naming the workflow's own harness on a manual run that overrode it keeps the workflow's models, not the run's", () => {
+  const env = { ...ENV, FACTORY_MODEL: "claude-sonnet-5-5", FACTORY_INPUT_HARNESS: "codex", FACTORY_INPUT_REVIEWER_MODEL: "gpt-6.1-terra" };
+  const r = chosenInputs({ env, choice: { harness: "claude" } });
+  assert.deepEqual([r.ok, r.inputs.harness, r.inputs.model, r.inputs.reviewerModel], [true, "claude", "claude-sonnet-5-5", "claude-fable-5-2"], "the env block's Claude models; the run's Codex reviewer model gone");
+  assert.equal(chosenInputs({ env, choice: { harness: "copilot" } }).inputs.model, "", "another harness again: its own defaults");
+});
+
+test("the launcher takes the repository's defaults once, before any start applies an Objective's labels, and records the stage's harness", () => {
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "launch.mjs"), "utf8");
+  assert.match(src, /const run = \{ inputs, defaults: Object\.fromEntries\(CHOSEN_FIELDS\.map\(\(k\) => \[k, inputs\[k\]\]\)\),/, "taken with the run");
+  assert.doesNotMatch(src, /run\.defaults =/, "never again from `inputs`, which a start has changed");
+  assert.match(src, /Object\.assign\(inputs, run\.defaults, chosen\.inputs\)/);
+  assert.match(src, /const base = \{ vendor: inputs\.sandbox, stage, harness: inputs\.harness,/, "the stage's harness on its record");
+});

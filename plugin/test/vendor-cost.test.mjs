@@ -188,6 +188,10 @@ test("book: the vendor's cost goes into the usage record beside the model's, or 
   assert.equal(own.spendInProgress, true, "the stage's progress comment carries its spend: daily_usd counts it there, once");
   assert.equal(own.vendor.upperBound, true);
   close(own.vendor.usd, 0.3, "the session's ceiling");
+  assert.equal(own.harness, "claude", "a record with no harness: the caller's");
+  // A stage on an Objective's label harness (#224): its record names it, whatever the repository's default.
+  const labelled = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { ...record, claim: "c2", harness: "codex" }, after: null, settled: true, state: "stopped", usage: null, harness: "claude", error: "unavailable" });
+  assert.equal(JSON.parse(readFileSync(join(labelled.usage.dir, "result.json"), "utf8")).harness, "codex");
 
   assert.deepEqual(await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { id: "factory-abc", stage: "work" }, after, settled: true, state: "stopped" }), { usage: null, vendor: null }, "a stage started before vendor costs were recorded books nothing");
 });

@@ -3,7 +3,7 @@
 // Objective only, and an issue with none runs on the defaults. Labels, not the body: who applied each one is on the
 // issue's timeline (objective-trust.mjs choiceTrusted), and the plan's record covers them (objective-trust.mjs
 // objectiveSha), so one added, removed or changed after the plan stops the Objective like an edit.
-import { MODEL_DEFAULTS, resolveInputs } from "./inputs.mjs";
+import { DEFAULTS, MODEL_DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
@@ -88,17 +88,20 @@ const FIELD = { model: "model", subagent_model: "subagentModel", reviewer_model:
 
 /**
  * The harness and models this Objective runs on: the repository's defaults (`env`, the workflow's env block; `args`, a
- * stage's flags) with the labels' `choice` as the strongest input. A harness label naming another harness than the
- * default takes that harness's own defaults for the models and efforts no label names, whatever the env block or a flag
- * set for the default one. Returns {ok, inputs} (the CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label,
+ * stage's flags) with the labels' `choice` as the strongest input. A harness label naming another harness than the run's
+ * takes that harness's own defaults for the models and efforts no label names, whatever a flag, `with:` or the env block
+ * set for the run's; one naming the workflow's own harness (FACTORY_HARNESS) keeps the env block's. Returns {ok, inputs} (the CHOSEN_FIELDS only), or {ok: false, reason, fix} naming the label,
  * or the harness label whose defaults these are, when the harness cannot run a model (modelProblem). `gateway`: whether
  * Codex has the AI Gateway key, when `env` no longer holds it (the launcher).
  */
 export function chosenInputs({ args = {}, env = process.env, choice = {}, gateway } = {}) {
   const base = resolveInputs({ args, env });
   const switched = !!choice.harness && choice.harness !== base.harness;
-  // The default harness's models and efforts, in whichever source set them, are not the chosen harness's.
-  const bound = (name) => switched && HARNESS_BOUND.some((n) => name === n || name === `FACTORY_${n.toUpperCase()}` || name === `FACTORY_INPUT_${n.toUpperCase()}`);
+  // The run's harness's models and efforts are not the chosen harness's: a run's own (a flag, `with:`) always go; the
+  // workflow's env block's go unless the label names the workflow's own harness (a manual run that overrode it).
+  const workflowHarness = String(env.FACTORY_HARNESS || DEFAULTS.harness).trim().toLowerCase();
+  const keepWorkflow = choice.harness === workflowHarness;
+  const bound = (name) => switched && HARNESS_BOUND.some((n) => name === n || name === `FACTORY_INPUT_${n.toUpperCase()}` || (!keepWorkflow && name === `FACTORY_${n.toUpperCase()}`));
   const keep = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !bound(k)));
   const r = resolveInputs({ args: { ...keep(args), ...choice }, env: keep(env) });
   const viaGateway = gateway ?? !!r.codexGatewayKey;

@@ -451,6 +451,56 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return { ops: [...new Set(String(r.stdout).split("\n").map((l) => ops[l.trim()]).filter(Boolean))] };
   };
 
+  /**
+   * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
+   * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
+   * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
+   * a head that does not contain `onto` (the conflict pass gave up); or one of the branch's own commits missing from it.
+   * A rebase keeps each commit's author, author time and subject while its patch changes to resolve the conflict, so a
+   * commit is found by those; one missing (a `rebase --skip`) is lost unless `onto` already has its change, file for
+   * file, as git rebase drops a commit that became empty. Read on git's exit codes and fields, never its messages.
+   */
+  box.rebaseLeft = async ({ from, onto }) => {
+    const busy = await box.inProgress();
+    if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
+    if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
+    let head;
+    try {
+      head = await take();
+    } catch (e) {
+      return `the checkout's head could not be read: ${e.message}`;
+    }
+    if ((await git(["merge-base", "--is-ancestor", onto, head])).code !== 0) return "the branch it left is not rebased onto it";
+    const old = (await git(["merge-base", from, onto])).stdout.trim();
+    const commits = async (range) => {
+      const r = await git(["log", "--no-merges", "-z", "--format=%H%x01%ae%x01%at%x01%s", range]);
+      if (r.code !== 0) throw new Error(`git log exited ${r.code}`);
+      return r.stdout.split("\0").filter(Boolean).map((l) => {
+        const [id, ...key] = l.replace(/^\n/, "").split("\x01");
+        return { id, key: key.join("\x01") };
+      });
+    };
+    try {
+      if (!SHA.test(old)) throw new Error("no merge base");
+      const kept = new Map();
+      for (const c of await commits(`${onto}..${head}`)) kept.set(c.key, (kept.get(c.key) || 0) + 1);
+      const lost = [];
+      for (const c of (await commits(`${old}..${from}`)).reverse()) {
+        if (kept.get(c.key)) {
+          kept.set(c.key, kept.get(c.key) - 1);
+          continue;
+        }
+        const files = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", c.id])).stdout.split("\0").filter(Boolean);
+        if (files.length && (await git(["diff", "--quiet", c.id, onto, "--", ...files])).code === 0) continue;
+        lost.push(c.id);
+      }
+      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")})`;
+    } catch {
+      return "Factory could not compare the rebased branch with the branch before it";
+    }
+    return "";
+  };
+
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */
   box.block = (reason) => refuse(reason);
 

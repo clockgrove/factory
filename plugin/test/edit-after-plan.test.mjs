@@ -295,3 +295,30 @@ test("edit after plan: with Factory's own login unknown, the merge and a session
     globalThis.fetch = real;
   }
 });
+
+test("edit after plan: another App's marker never hides Factory's plan comment or its record, github-actions[bot] included", async () => {
+  setSelf("factory-app[bot]");
+  const mine = own(`<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: L0 })}\n## Plan`);
+  const later = "2026-11-13T13:00:00Z";
+  const app = (id, login, body) => ({ id, user: { login, type: "Bot" }, body, created_at: later, updated_at: later });
+  const cases = [
+    ["another App", app(8, "other-app[bot]", "<!-- factory:7:plan -->\n## Something")],
+    ["github-actions[bot]", app(9, "github-actions[bot]", "<!-- factory:7:plan -->\n## From a workflow")],
+    ["another App's forged record of the new text", app(10, "other-app[bot]", `<!-- factory:7:plan -->${planTextMarker({ sha256: B, label: later })}\n## Forged`)],
+  ];
+  const issueNow = { gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the other thing.", lastEditedAt: L1 } } }) }, renamed: async () => null };
+  for (const [name, c] of cases) {
+    const list = [mine, c];
+    const read = async () => planOf(list, 7);
+    assert.deepEqual([planOf(list, 7).id, planOf(list, 7).record], [2, { sha256: A, label: L0 }], name);
+    // The text edited (B) after the plan, before the App's comment: every check still sees the change.
+    assert.equal((await gate(list, { sha: B, work: false, editedAt: L1 })).r.ok, false, `${name}: the review`);
+    assert.equal((await gate(list, { sha: B, work: true, labeledAt: L0, editedAt: L1 })).r.ok, false, `${name}: the next work stage`);
+    assert.equal(await editedSincePlan(repo, 7, { token: "t" }, { ...issueNow, read }), true, `${name}: the merge and the queue`);
+    assert.equal((await planStateNow(repo, 7, { sha: B, editedAt: L1 }, { token: "t" }, { planComment: read, renamedAt: async () => null })).state, "changed", `${name}: post-review`);
+  }
+  // With no plan comment of Factory's, an App's marker only makes the check stricter: its time, never its record.
+  const alone = planOf([cases[2][1]], 7);
+  assert.deepEqual([alone.foreign, alone.record, alone.text], [true, null, null]);
+  assert.equal(planTextState({ sha: B, plan: alone, editedAt: "2026-11-13T14:00:00Z" }), "changed");
+});

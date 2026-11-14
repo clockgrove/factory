@@ -108,7 +108,7 @@ test("objective trust: the Blocked notice never tells anyone to edit an issue wh
 // The session's route (local.mjs issue, deliver, post-review) against a GitHub that answers like the real one.
 const LOCAL = join(import.meta.dirname, "..", "scripts", "local.mjs");
 const run = (args, env, cwd) => new Promise((ok) => execFile(process.execPath, [LOCAL, ...args, "--repo", "acme/app"], { cwd, env, encoding: "utf8", timeout: 60_000 }, (e, stdout, stderr) => ok({ code: e ? e.code : 0, stdout, stderr })));
-async function fakeGitHub({ author, editor = null, perms: p = perms, issueComments = [] }) {
+async function fakeGitHub({ author, editor = null, perms: p = perms, issueComments = [], commentsStatus = 200 }) {
   const calls = [];
   const send = (res, status, body) => {
     res.writeHead(status, { "content-type": "application/json" });
@@ -130,7 +130,7 @@ async function fakeGitHub({ author, editor = null, perms: p = perms, issueCommen
       if (path === "/repos/acme/app") return send(res, 200, { full_name: "acme/app", default_branch: "main" });
       if (path === "/user") return send(res, 200, { login: "dev", type: "User" });
       if (path === "/repos/acme/app/issues/7") return send(res, 200, { number: 7, title: "REST title", body: "REST body.", state: "open", labels: [{ name: "factory:objective" }] });
-      if (path === "/repos/acme/app/issues/7/comments") return send(res, 200, issueComments);
+      if (path === "/repos/acme/app/issues/7/comments") return send(res, commentsStatus, commentsStatus === 200 ? issueComments : { message: "Not Found" });
       if (path === "/repos/acme/app/pulls/9") return send(res, 200, { number: 9, head: { ref: "factory/7", sha: "a".repeat(40) }, base: { ref: "main" } });
       const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(path);
       if (perm) return p[perm[1]] ? send(res, 200, { permission: p[perm[1]] }) : send(res, 404, { message: "Not Found" });
@@ -321,5 +321,20 @@ test("session route: `factory issue` hands the session the plan only when it was
     assert.deepEqual(writes(edited.calls), [], "nothing written to GitHub");
   } finally {
     await edited.close();
+  }
+});
+
+test("session route: `factory issue` leaves no earlier plan.md when the plan comment cannot be read", async () => {
+  const c = clone();
+  const dir = join(c.work, ".git", "factory-in");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "plan.md"), "## A plan from an earlier run\n");
+  const fake = await fakeGitHub({ author: user("kirk"), commentsStatus: 404 });
+  try {
+    const r = await run(["issue", "7"], envFor(fake.url, c.root), c.work);
+    assert.notEqual(r.code, 0);
+    assert.equal(existsSync(join(dir, "plan.md")), false, "the stale plan is gone before anything can fail");
+  } finally {
+    await fake.close();
   }
 });

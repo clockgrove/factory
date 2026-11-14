@@ -413,24 +413,28 @@ export function planTextOf(head) {
 
 /**
  * The Objective's plan comment among `comments`: the newest written (its last update) of those that carry the marker on
- * their first line and come from Factory's own login or a person who can push (local mode writes as its developer), or
- * from another App (Factory's App when this process is a local one): {id, at (when it was posted), text (the plan, the
- * marker line dropped; null for another App's, whose text no harness is handed), record (the plan-text record, or null)}.
- * Null when there is none. A record no stage can read (none, one that does not parse, another App's) leaves the stage to
- * decide on GitHub's edit times (objective-trust.mjs planTextState).
+ * their first line and come from Factory's own login or a person who can push (local mode writes as its developer):
+ * {id, at (when it was posted), own, text (the plan, the marker line dropped), record (the plan-text record, or null)}.
+ * No other App counts (logic.mjs trustedAuthor), github-actions[bot] included: its comment never stands in for a plan
+ * comment that exists. Only when none does, the oldest such App comment's time is kept ({foreign: true}, no text, no
+ * record), so a stage decides on GitHub's edit times rather than on no plan at all: never laxer than without it. A record
+ * no stage can read leaves the stage to decide on those times too (objective-trust.mjs planTextState). Null when none.
  */
 export function planOf(comments, issue) {
   const mark = marker(issue, "plan");
+  const marked = (comments || []).filter((x) => (x.body || "").startsWith(mark));
   const seen = (x) => Date.parse(x.updated_at ?? x.created_at) || 0;
-  const c = (comments || [])
-    .filter((x) => (x.body || "").startsWith(mark) && (trustedAuthor(x) || x.user?.type === "Bot"))
-    .sort((a, b) => seen(b) - seen(a))[0];
-  if (!c) return null;
+  const c = marked.filter((x) => trustedAuthor(x)).sort((a, b) => seen(b) - seen(a))[0];
+  if (!c) {
+    // Factory's App seen from a local process looks like any other App: its time only, the earliest such comment's.
+    const posted = (x) => Date.parse(x.created_at) || 0;
+    const app = marked.filter((x) => x.user?.type === "Bot").sort((a, b) => posted(a) - posted(b))[0];
+    return app ? { id: app.id, at: app.created_at ?? null, own: false, foreign: true, text: null, record: null } : null;
+  }
   const nl = c.body.indexOf("\n");
   // GitHub's web editor saves a comment with CRLF line ends: the marker line's `\r` is no part of the record.
   const first = (nl < 0 ? c.body : c.body.slice(0, nl)).replace(/\r$/, "");
-  const foreign = !trustedAuthor(c);
-  return { id: c.id, at: c.created_at ?? null, own: isSelf(c), text: foreign ? null : nl < 0 ? "" : c.body.slice(nl + 1), record: foreign ? null : planTextOf(first.slice(mark.length)) };
+  return { id: c.id, at: c.created_at ?? null, own: isSelf(c), text: nl < 0 ? "" : c.body.slice(nl + 1), record: planTextOf(first.slice(mark.length)) };
 }
 
 /** The plan comment as planOf reads it; a failed read throws (a stage's gate must not take it for no plan). */

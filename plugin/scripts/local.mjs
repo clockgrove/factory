@@ -1585,18 +1585,18 @@ async function issueForSession(issue, flags) {
   const t = await trustedIssue(clone.repo, issue, await getIssue(clone.repo, issue, clone.opts), clone.opts);
   if (!t.ok) throw untrustedRefusal(t, `#${issue} is not given to this session`);
   const file = resolve(flags.out || sessionIssueFile(clone.dir));
+  // In the session's hand-off directory, the plan beside the issue, only when it was made from this text
+  // (objective-trust.mjs planTextState, as a work stage hands its harness): after an edit the session plans again from
+  // the new text. No plan.md from an earlier run stays, even when the plan cannot be read: it goes before anything else.
+  const planFile = flags.out ? null : join(dirname(file), "plan.md");
+  if (planFile) rmSync(planFile, { force: true });
+  const { posted, state } = planFile ? await planStateNow(clone.repo, issue, t, clone.opts) : {};
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
-  if (flags.out) return 0;
-  // In the session's hand-off directory, the plan beside it, only when it was made from this text (objective-trust.mjs
-  // planTextState, as a work stage hands its harness): after an edit the session plans again from the new text, and no
-  // plan.md from an earlier run stays.
-  const { posted, state } = await planStateNow(clone.repo, issue, t, clone.opts);
-  const planFile = join(dirname(file), "plan.md");
+  if (!planFile) return 0;
   const plan = state === "same" ? (posted.text ?? null) : null;
   if (plan !== null) writeFileSync(planFile, plan);
-  else rmSync(planFile, { force: true });
   log(plan !== null ? `#${issue}: its plan in ${planFile}` : state === "unplanned" ? `#${issue}: no plan yet` : `#${issue}: the plan comment was not made from this text, so no plan.md: plan from the issue`);
   return 0;
 }

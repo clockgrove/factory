@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CHOICE_PREFIXES, LABEL_MAX, choiceLabel, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
+import { CHOICE_PREFIXES, LABEL_MAX, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
 import { MODEL_DEFAULTS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
@@ -40,17 +40,11 @@ test("choice labels: two of one kind, an unknown harness or an empty id is refus
   assert.equal(choiceOf(["factory:harness:claude", "factory:harness:codex"]).ok, false);
 });
 
-test("label names: every model in Factory's defaults and price tables fits GitHub's 50 characters for every kind; a longer one is refused clearly", () => {
+test("label names: every model in Factory's defaults and price tables fits GitHub's 50 characters for every kind", () => {
   const claude = Object.keys(JSON.parse(readFileSync(join(ROOT, "plugin", "scripts", "lib", "claude-prices.json"), "utf8")).perMillion);
   const ids = new Set([...Object.values(MODEL_DEFAULTS).flatMap((d) => [d.model, d.subagent_model, d.reviewer_model]).filter(Boolean), ...claude, ...Object.keys(CODEX_PRICES.perMillion)]);
-  for (const id of ids) for (const kind of ["model", "subagent_model", "reviewer_model"]) assert.ok(choiceLabel(kind, id).name, `${kind} ${id}`);
-  for (const h of ["claude", "codex", "copilot"]) assert.equal(choiceLabel("harness", h).name, `factory:harness:${h}`);
-  assert.equal(LABEL_MAX - CHOICE_PREFIXES.model.length, 36);
-  assert.equal(LABEL_MAX - CHOICE_PREFIXES.reviewer_model.length, 27);
-  const long = choiceLabel("reviewer_model", "gpt-5.1-codex-mini-2026-08-07");
-  assert.equal(long.name, undefined);
-  assert.match(long.error, /52 characters and GitHub refuses a label over 50: a reviewer model id fits in 27/);
-  assert.ok(choiceLabel("model", "gpt-5.1-codex-mini-2026-08-07").name, "the same id fits the worker's shorter prefix");
+  for (const id of ids) for (const kind of ["model", "subagent_model", "reviewer_model"]) assert.ok(`${CHOICE_PREFIXES[kind]}${id}`.length <= LABEL_MAX, `${kind} ${id}`);
+  assert.deepEqual(Object.fromEntries(Object.entries(CHOICE_PREFIXES).map(([k, p]) => [k, LABEL_MAX - p.length])), { harness: 34, model: 36, subagent_model: 27, reviewer_model: 27 }, "the room USAGE.md states");
 });
 
 test("modelProblem: each harness runs only what it can within Factory's caps, decided before any spend", () => {
@@ -399,4 +393,17 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
   const refused = await run("reader");
   assert.equal(refused.ok, false);
   assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);
+});
+
+test("the review job checks the chosen harness's credential and Blocks with its fix before anything is set up, never a crash", async () => {
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "review.mjs"), "utf8");
+  const run = src.indexOf("async function run()");
+  const at = (x) => src.indexOf(x, run);
+  const check = at("await credentialChecks({ inputs })");
+  assert.ok(check > at("Object.assign(inputs, chosen.inputs)"), "for the chosen harness");
+  for (const later of ["openOutbox(", "installPlugin(", "credentialEnv("]) assert.ok(at(later) > check, later);
+  assert.match(src.slice(check, check + 700), /status === "FAIL"[\s\S]*exit: "blocked", reason, cause: "setup"[\s\S]*await finish\("blocked", reason\);\n\s+return;/);
+  const { credentialChecks } = await import("../scripts/doctor.mjs");
+  const fails = (await credentialChecks({ inputs: { ...resolveInputs({ env: { GITHUB_REPOSITORY: "acme/app" } }), ...chosenInputs({ env: ENV, choice: { harness: "codex" } }).inputs, codexApiKey: "", codexGatewayKey: "" }, env: { GITHUB_ACTIONS: "true" } })).filter((c) => c.status === "FAIL");
+  assert.match(fails[0]?.fix ?? "", /gh secret set FACTORY_CODEX_GATEWAY_KEY/, "the fix names the secret");
 });

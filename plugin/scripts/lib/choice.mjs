@@ -9,7 +9,10 @@ import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
 export const HARNESSES = ["claude", "codex", "copilot"];
 /** Each choice's label prefix, keyed by the input it overrides; the rest of the name is the harness or the model id. */
 export const CHOICE_PREFIXES = Object.freeze({ harness: "factory:harness:", model: "factory:model:", subagent_model: "factory:subagent-model:", reviewer_model: "factory:reviewer-model:" });
-/** GitHub's limit on a label name's length. */
+/**
+ * GitHub's limit on a label name's length, which it enforces itself when the label is made: an id fits in 50 less its
+ * prefix (34 for a harness, 36 for a worker model, 27 for a sub-agent or reviewer model). USAGE.md says so.
+ */
 export const LABEL_MAX = 50;
 /** The words a reason uses for each choice. */
 const WHAT = { harness: "harness", model: "worker model", subagent_model: "sub-agent model", reviewer_model: "reviewer model" };
@@ -20,19 +23,6 @@ const kindOf = (name) => Object.entries(CHOICE_PREFIXES).find(([, p]) => String(
 export const isChoiceLabel = (name) => kindOf(name) !== null;
 /** The choice labels among `names` (names, or GitHub's label objects), sorted: the set the plan's record covers. */
 export const choiceLabels = (names = []) => [...new Set((names || []).map((n) => (typeof n === "string" ? n : n?.name)).filter((n) => typeof n === "string" && isChoiceLabel(n)))].sort();
-
-/**
- * The label that makes a choice: {name}, or {error} when the name would pass GitHub's 50 characters, which GitHub refuses
- * to create. The room for an id is 50 less the prefix: 34 for a harness, 36 for a worker model, 27 for a sub-agent or
- * reviewer model.
- */
-export function choiceLabel(kind, value) {
-  const prefix = CHOICE_PREFIXES[kind];
-  if (!prefix) throw new Error(`no choice ${kind}: one of ${Object.keys(CHOICE_PREFIXES).join(", ")}`);
-  const name = `${prefix}${String(value ?? "").trim()}`;
-  if (name.length <= LABEL_MAX) return { name };
-  return { error: `${name} is ${name.length} characters and GitHub refuses a label over ${LABEL_MAX}: a ${WHAT[kind]} id fits in ${LABEL_MAX - prefix.length}, so name the model by its shorter id (without a date suffix or a provider prefix) or make it the repository's default` };
-}
 
 /**
  * The choice the issue's labels make: {ok: true, choice, labels}, `choice` holding `harness`, `model`, `subagent_model` and

@@ -30,6 +30,7 @@ import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
+import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -420,6 +421,17 @@ async function main() {
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
   progress.ran(ranWith(inputs, chosenLabels));
+  // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
+  // with its fix before anything is set up, never a crash at the first harness pass.
+  const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");
+  if (credFails.length) {
+    const reason = `doctor: ${credFails.map((c) => `${c.name} (${c.fix || c.detail})`).join("; ")}`;
+    log(reason);
+    await dropLabel();
+    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
+    await finish("blocked", reason);
+    return;
+  }
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 

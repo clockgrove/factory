@@ -89,7 +89,7 @@ Seven optional inputs on the Action; each row gives its default. Every Claude ca
 
 1. Read the release notes between your tag and the new one.
 2. Re-render the workflow with that release's setup: in your repository's clone, `node <factory clone at vX.Y.Z>/plugin/scripts/setup.mjs --repo OWNER/NAME --apply workflow --action clockgrove/factory@vX.Y.Z --yes`. It keeps your settings, moves the pin and brings the template's jobs to that release. Re-render on every upgrade: the template belongs to its release, and an older file misses jobs the new Action expects (doctor names some, such as `merge ticks`).
-3. Commit the file on the default branch, then run doctor. Until then the file lacks the newer jobs' events: a file from before the lifecycle labels, for one, ticks the dispatcher on a removed `factory:objective` or an applied `factory:restart` only on its ten-minute cron.
+3. Commit the file on the default branch, then run doctor. Until then the file lacks the newer jobs' events: a file from before the lifecycle labels, for one, ticks the dispatcher on a removed `factory:objective`, an applied `factory:restart` or a changed `factory:draft` only on its ten-minute cron.
 4. If you accepted setup's offer to commit Factory's skills into the repository, copy them again from the new release: committed copies never update, and they override the plugin's.
 
 ## Uninstall

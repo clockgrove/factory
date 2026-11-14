@@ -7,7 +7,8 @@
 // What text the plan was made from (planGate): a stage never goes on with a plan and code made from one text and an
 // Objective that now says another.
 import { createHash } from "node:crypto";
-import { collaboratorPermission, graphql, issueRenamedAt, objectiveLabeledAt, primeSelf } from "./github.mjs";
+import { collaboratorPermission, graphql, issueRenamedAt, primeSelf, rest } from "./github.mjs";
+import { DRAFT_LABEL } from "./stop.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
@@ -96,6 +97,24 @@ export async function knowSelf(opts) {
   if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Factory's own login could not be read, so its plan comment cannot be told from anyone else's");
 }
 
+/**
+ * When the Objective was last started, from its timeline events: the later of its label's last application and the
+ * draft label's last removal (a draft is started by taking that label off, its Objective label on or not), or null.
+ */
+export function startTime(events, label) {
+  let last = null;
+  for (const e of events || []) {
+    const start = (e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
+    if (start && Number.isFinite(Date.parse(e.created_at)) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  }
+  return last;
+}
+
+/** When the issue's Objective was last started (startTime), read from its timeline: the label time a work stage plans by. */
+export async function startedAt(repo, issue, label, opts) {
+  return startTime((await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label);
+}
+
 /** When the title or body was last changed: the body's `lastEditedAt` (GitHub's) and the title's latest rename. */
 async function textEditedAt(repo, issue, lastEditedAt, opts, renamed = issueRenamedAt) {
   const times = [lastEditedAt, await renamed(repo, issue, opts)].filter((t) => Number.isFinite(Date.parse(t)));
@@ -133,7 +152,7 @@ export function planTextState({ sha, plan, labeledAt = null, editedAt = null, wo
 export async function planGate({ repo, issue, sha, editedAt = null, labeledAt, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, read = {} }) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
-  const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? objectiveLabeledAt)(repo, issue, objectiveLabel, opts)) : null;
+  const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? startedAt)(repo, issue, objectiveLabel, opts)) : null;
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.renamedAt) : null;
   const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work });
   if (state === "changed") {

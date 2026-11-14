@@ -37,7 +37,7 @@ import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
-import { RESTART_LABEL } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
 export const CLAIM_LEASE_MS = 10 * 60_000;
@@ -210,7 +210,7 @@ async function reviewRequest(repo, pr, opts, { labelledOnly = false } = {}) {
  * kind decides which: a sweep or a stage's end reads when the Objective became Running and its PR's review request; a
  * review cue, its PR's review request; a finished check, the branch's head; a comment, who may push.
  */
-async function readContext({ repo, n, ev, inputs, opts, readEventTime, runId = "", eventAt = null }) {
+export async function readContext({ repo, n, ev, inputs, opts, readEventTime, runId = "", eventAt = null }) {
   const due = ev.kind === "swept" || ev.kind === "stage";
   // Every read the decision may need goes out at once, the issue's own beside the rest: an Objective that turns out
   // closed or held by a local loop costs a few reads it did not need, never a write.
@@ -239,9 +239,11 @@ async function readContext({ repo, n, ev, inputs, opts, readEventTime, runId = "
   const labels = (issueData.labels || []).map((l) => (typeof l === "string" ? l : l.name));
   // A stage's own events are answered whatever became of the issue: an Objective closed while its stage ran still gets
   // its sandbox stopped and its usage collected.
-  // A restart pending (factory:restart) starts nothing either: the dispatcher restarts the Objective first (lib/stop.mjs).
-  const closed = issueData.state !== "open" || !labels.includes(inputs.objectiveLabel) || labels.includes(RESTART_LABEL) || !!issueData.pull_request;
-  if (closed && ev.kind !== "stage") return { skip: labels.includes(RESTART_LABEL) && issueData.state === "open" ? `#${n} waits for its restart (${RESTART_LABEL})` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
+  // Whether it may run is lib/stop.mjs stopCause's answer, as on every route: a draft (factory:draft) or a restart
+  // pending (factory:restart) starts nothing either; the dispatcher restarts the latter first.
+  const cause = issueData.pull_request ? "pull request" : stopCause(issueData, inputs.objectiveLabel);
+  const closed = !!cause;
+  if (closed && ev.kind !== "stage") return { skip: cause === "restart" ? `#${n} waits for its restart (${RESTART_LABEL})` : cause === "draft" ? `#${n} is a draft (${DRAFT_LABEL}): never run` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
   if (ev.kind !== "stage" && (await backend().trigger.stepsAside(repo, n, opts, issueData))) return { skip: `#${n} is held by a local loop` };
   const [{ project, card }, comments, since, review, headSha, at] = await reads;
   const state = stateOf(issueData, card);

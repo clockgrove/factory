@@ -9,7 +9,7 @@ Stopping an Objective is removing its `factory:objective` label. Nothing else ne
 
 ## Check the issue
 
-Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. When it is closed, or carries no `factory:objective` label, it is stopped already: say so and stop. Otherwise note its state from its labels: `factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`, or none (Queued).
+Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. When it is closed, carries no `factory:objective` label, or is a draft (`factory:draft`, which Factory never runs), it is stopped already: say so and stop. Otherwise note its state from its labels: `factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`, or none (Queued).
 
 ## Ask
 

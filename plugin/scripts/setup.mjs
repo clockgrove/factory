@@ -42,6 +42,7 @@ export const LABELS = [
   ["factory:question", "D93F0B", "Factory opened a draft PR with a question"],
   ["factory:review", "C5DEF5", "Applied by the Factory App to trigger the review job"],
   ["factory:restart", "5319E7", "Restart this Objective from the issue's current text (any state)"],
+  ["factory:draft", "D4C5F9", "A draft Objective: Factory never runs it while this label is on"],
   ["P0", "B60205", "Priority 0"],
   ["P1", "D93F0B", "Priority 1"],
   ["P2", "FBCA04", "Priority 2"],

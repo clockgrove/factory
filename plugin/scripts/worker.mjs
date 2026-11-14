@@ -17,16 +17,16 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, objectiveLabeledAt, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
-import { authorGate, planGate } from "./lib/objective-trust.mjs";
+import { authorGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -187,6 +187,12 @@ async function main() {
   // 2. The issue.
   let issueData = await getIssue(repo, issue, token);
   const labels = (issueData.labels || []).map((l) => l.name);
+  // A draft (factory:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
+  if (stopCause(issueData, inputs.objectiveLabel) === "draft") {
+    log(`#${issue} is a draft (${DRAFT_LABEL}); Factory never runs a draft; nothing to do`);
+    await finish("skipped", `a draft (${DRAFT_LABEL})`);
+    return;
+  }
   if (issueData.state !== "open" || !labels.includes(inputs.objectiveLabel)) {
     log(`#${issue} is not an open ${inputs.objectiveLabel} issue; nothing to do`);
     await finish("skipped", `not an open ${inputs.objectiveLabel} issue`);
@@ -234,9 +240,10 @@ async function main() {
   watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
-  // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
-  // landing between the two reads then count as after this stage's plan, never as before it.
-  const labeledAt = await objectiveLabeledAt(repo, issue, inputs.objectiveLabel, token);
+  // When the Objective was last started (its label applied, or its draft label taken off: objective-trust.mjs startedAt),
+  // read before the text (planGate): an edit and a start landing between the two reads then count as after this stage's
+  // plan, never as before it.
+  const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, token);
   // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the body read with its author
   // and last editor, and Blocks before any harness when either cannot push and is not a pinned maintainer.
   const trusted = await authorGate({ repo, issue, issueData, notify: inputs.notify, opts: token, apply: applyExit });

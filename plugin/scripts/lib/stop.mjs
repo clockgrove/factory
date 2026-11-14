@@ -1,5 +1,5 @@
 // A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): its `factory:objective` label removed,
-// or its issue closed; and its restart from the issue's current text (`factory:restart`), which stops a running stage
+// its issue closed, or `factory:draft` applied (a draft never runs, its Objective label on or not); and its restart from the issue's current text (`factory:restart`), which stops a running stage
 // the same way before the dispatcher discards what the earlier run left (restartObjective). No tick, loop or relaunch picks a stopped Objective (they list only labelled, open issues); this
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
@@ -27,16 +27,27 @@ export const STOP_GRACE_MS = 10 * 60_000;
 
 /** The label a person applies to restart an Objective from its issue's current text, in any state. */
 export const RESTART_LABEL = "factory:restart";
+/**
+ * The label of a draft Objective: an issue Factory never runs (no dispatch, claim or spend, on any route) while it is
+ * on, even beside the Objective label. Starting a draft takes it off and applies the Objective label.
+ */
+export const DRAFT_LABEL = "factory:draft";
 
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
 
+/** Whether the issue is a draft (DRAFT_LABEL on it). */
+export const isDraft = (issue) => names(issue).includes(DRAFT_LABEL);
+
 /**
- * Why the issue's Objective is stopped: "closed", "unlabeled" (its Objective label is off), "restart" (a restart is
- * asked for: its running stage stops first, and nothing starts until the dispatcher has restarted it), or null.
+ * Whether the issue's Objective may run, and if not why: the one answer the dispatcher, the launcher, the worker, the
+ * review job, the merge pass and the local loop each read. "closed", "draft" (DRAFT_LABEL on it, whatever else is),
+ * "unlabeled" (its Objective label is off), "restart" (a restart is asked for: its running stage stops first, and
+ * nothing starts until the dispatcher has restarted it), or null: it may run.
  */
 export function stopCause(issue, label) {
   if (!issue) return null;
   if (issue.state && issue.state !== "open") return "closed";
+  if (isDraft(issue)) return "draft";
   if (!names(issue).includes(label)) return "unlabeled";
   // `restarted`: a restart recorded after the reader's stage began (objectiveReader), its label already gone.
   if (names(issue).includes(RESTART_LABEL) || issue.restarted === true) return "restart";
@@ -70,7 +81,8 @@ export function objectiveReader({ read, list }) {
 }
 
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
-export const stopText = (cause, label = "factory:objective") => (cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : `\`${label}\` was removed`);
+export const stopText = (cause, label = "factory:objective") =>
+  cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : cause === "draft" ? `\`${DRAFT_LABEL}\` was applied` : `\`${label}\` was removed`;
 
 // This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, who ends it
 // (`exit`), and whether its own exit is under way (`committed`: an exit being applied, or a merge), which a later stop

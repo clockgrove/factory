@@ -27,6 +27,7 @@ export const ROW_VERSION = 1;
 const BRANCH = (issue) => `factory/${issue}`;
 export const RUNNING_LABEL = "factory:running";
 export const OBJECTIVE_LABEL = "factory:objective";
+const DRAFT_LABEL = "factory:draft";
 const BLOCKED_LABEL = "factory:blocked";
 /**
  * The stall threshold's default, in minutes: a merged Objective idle longer than this after Factory's last action
@@ -60,9 +61,10 @@ function commitActor(commit) {
 }
 
 /**
- * The first `labeled factory:objective` event (the clock), or null. With
- * `clockAfter`, the first such event at or after that date: an issue that an
- * earlier Factory already ran under the same label starts its 0.6 clock there.
+ * The first `labeled factory:objective` event (the clock), or null; a draft's start
+ * for a draft (below). With `clockAfter`, the first such event at or after that date:
+ * an issue that an earlier Factory already ran under the same label starts its 0.6
+ * clock there.
  */
 export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter = null) {
   const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
@@ -72,7 +74,14 @@ export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter =
   const events = (timeline || [])
     .filter((e) => e.event === "labeled" && (e.label?.name === label || e.label?.name === RUNNING_LABEL) && ms(e.created_at) >= floor)
     .sort((a, b) => ms(a.created_at) - ms(b.created_at));
-  return events[0]?.created_at ?? null;
+  const first = events[0]?.created_at ?? null;
+  // A draft (factory:draft) is not started until it may run: its clock is the last of its Objective label's
+  // applications and its draft label's removals before Factory first picked it up, so neither its time as a draft nor
+  // the start itself (one label off, the other on, in either order) counts against the run.
+  if (!first || !(timeline || []).some((e) => e.event === "labeled" && e.label?.name === DRAFT_LABEL)) return first;
+  const running = events.find((e) => e.label?.name === RUNNING_LABEL)?.created_at ?? null;
+  const starts = (timeline || []).filter((e) => ((e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && ms(e.created_at) >= ms(first) && (!running || ms(e.created_at) <= ms(running)));
+  return starts.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1) ?? first;
 }
 
 /**
@@ -296,6 +305,7 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
     // milestone, pin, project card) are not input to the Objective's work.
     if (PASSIVE_EVENTS.has(e.event)) continue;
     if (e.event === "labeled" && e.label?.name === label && e.created_at === since) continue; // the clock itself
+    if (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL && e.created_at === since) continue; // a draft's start: the clock
     // Labels the issue's author applies while filing it (a priority, the type's labels) are part of filing, not input.
     if (e.event === "labeled" && (e.actor?.login ?? null) === (collected.issue.user?.login ?? undefined) && ms(e.created_at) - ms(collected.issue.created_at) <= 60_000) continue;
     if (e.event === "commented") {

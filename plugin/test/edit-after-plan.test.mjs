@@ -9,7 +9,7 @@ import { EDITED_FIX, EDITED_REASON, editedSincePlan, objectiveSha, planGate, pla
 import { blockedLine, mergeBlockCause, mergeBlockReason } from "../scripts/lib/session.mjs";
 import { BLOCK_CAUSES } from "../scripts/lib/logic.mjs";
 
-// #205: an edit to an Objective's title or body after its plan was made is never acted on halfway. The plan comment
+// #205: an edit to an Objective's title, body or harness and model labels after its plan was made is never acted on halfway. The plan comment
 // records the text it was made from; the next stage compares, and Blocks or (after a person re-applied the label) plans again.
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
@@ -92,8 +92,8 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(review.applied[0].pr.number, 9, "the PR goes back to a draft");
     assert.equal(BLOCK_CAUSES[review.applied[0].cause].external, false, "an edit is a person's action, never External");
     const notice = blockedLine({ issue: 7, pr: { number: 9 }, stage: "review", reason: EDITED_REASON, fix: EDITED_FIX });
-    assert.match(notice, /title or body changed after its plan was made/);
-    assert.match(notice, /Re-apply `factory:objective` to work from the new text: the worker makes its plan again from it/);
+    assert.match(notice, /title, body or harness and model labels \(`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`\) changed after its plan was made/);
+    assert.match(notice, /Re-apply `factory:objective` to work from the issue as it is now, its text and its harness and model labels: the worker makes its plan again from it/);
   });
 
   test(`edit after plan (${route}): an edit while Blocked, then the label re-applied, plans again from the new text`, async () => {

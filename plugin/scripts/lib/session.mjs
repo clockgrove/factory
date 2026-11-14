@@ -1859,7 +1859,7 @@ export function mergeBlockReason(how, report = {}) {
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
- * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title or body
+ * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
  * of; the caller Blocks), "conflict" (the PR conflicts with the
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for the

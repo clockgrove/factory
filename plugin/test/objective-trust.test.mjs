@@ -284,7 +284,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   try {
     const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /nothing posted: the Objective's title or body changed after its plan was made/);
+    assert.match(r.stderr, /nothing posted: the Objective's title, body or harness and model labels .* changed after its plan was made/);
     assert.deepEqual(writes(fake.calls), [], "no review posted");
   } finally {
     await fake.close();
@@ -293,7 +293,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
   try {
     const r = await run(["post-review", "9", file], envFor(same.url, c.root), c.work);
-    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title or body changed/);
+    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title, body or harness and model labels/);
   } finally {
     await same.close();
   }

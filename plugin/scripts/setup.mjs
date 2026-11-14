@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Factory setup: apply the GitHub fixes doctor names, on consent.
-//   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]
+//   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
 //                          [--action clockgrove/factory@vX.Y.Z]   (default: the latest Factory release)   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 //                          [--sandbox vercel [--ci-workflow NAME]]   stages run in a cloud sandbox, started by launch jobs (docs/ADAPTERS.md)
@@ -534,10 +534,31 @@ async function latestRelease() {
   return /^v\d+\.\d+\.\d+$/.test(tag || "") ? tag : `v${FACTORY_VERSION}`;
 }
 
+/** setup's steps, in the order it runs them. */
+export const SETUP_STEPS = ["labels", "project", "protection", "workflow"];
+
+/**
+ * The steps `argv` asks for: every `--apply` given (`--apply a --apply b`, `--apply=a`, `--apply a,b`), in setup's own
+ * order, `all` (or no `--apply`) for every step. parseArgs keeps one value per flag, so the flags are read here. Throws
+ * on a step setup does not have.
+ */
+export function setupSteps(argv) {
+  const asked = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--apply" && i + 1 < argv.length && !argv[i + 1].startsWith("--")) asked.push(argv[(i += 1)]);
+    else if (argv[i].startsWith("--apply=")) asked.push(argv[i].slice("--apply=".length));
+  }
+  const names = asked.flatMap((a) => a.split(",")).map((n) => n.trim()).filter(Boolean);
+  if (!names.length || names.includes("all")) return [...SETUP_STEPS];
+  const unknown = names.filter((n) => !SETUP_STEPS.includes(n));
+  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${SETUP_STEPS.join(", ")} or all`);
+  return SETUP_STEPS.filter((n) => names.includes(n));
+}
+
 async function main() {
   const explicit = parseArgs(process.argv.slice(2));
   const checkout = resolve(explicit.checkout || process.cwd());
-  const steps = (explicit.apply || "all") === "all" ? ["labels", "project", "protection", "workflow"] : String(explicit.apply).split(",").map((s) => s.trim());
+  const steps = setupSteps(process.argv.slice(2));
   // A re-render keeps what the existing file states (its env block, the gate's ids, the runner, the CI workflow and a
   // pinned Action); a flag still wins. The protection step's required checks come from the same settings.
   const template = readFileSync(join(PLUGIN_ROOT, "workflow-template.yml"), "utf8");

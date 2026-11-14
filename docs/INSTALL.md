@@ -51,7 +51,7 @@ With the plugin, ask a session in your repository's clone to set up Factory (the
    node <factory clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>" --yes  # apply
    ```
 
-   It writes `.github/workflows/factory.yml` pinned to the latest release, and creates the labels, the Project board (on a repository an organization owns) and the `factory` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step. If your CI workflow lacks `merge_group:` under `on:`, add it.
+   It writes `.github/workflows/factory.yml` pinned to the latest release, and creates the labels, the Project board (on a repository an organization owns) and the `factory` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step; repeat it (or give `a,b`) for several. If your CI workflow lacks `merge_group:` under `on:`, add it.
 2. **The GitHub App.** Open `https://github.com/settings/apps/new` (or your organization's `/organizations/<org>/settings/apps/new`). Uncheck webhooks and grant exactly the permissions in the table above: projects is under Organization permissions, the rest under Repository permissions. On a repository a user owns, skip projects: no GitHub App can reach a personal account's board, so setup makes none and the labels carry each Objective's state. Create it, generate a private key, note its App ID, and install it on this repository only.
 3. **The secrets.** `gh secret set FACTORY_APP_ID`, `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, and your model credential from the table above.
 4. **Land the workflow file.** Commit `.github/workflows/factory.yml` on a branch and merge it to the default branch through a pull request; its cron and triggers start then.

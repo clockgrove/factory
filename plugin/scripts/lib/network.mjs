@@ -4,7 +4,10 @@
 // (waitOutages: the stages and `factory serve`) sends no such request again until a cheap probe of the same host gets
 // an answer. One probe loop per host, however many calls wait on it, and one log line when the host is lost and one
 // when it answers again. Any HTTP answer, a 5xx or a 429 included, is GitHub (or the provider) answering: the client's
-// own retries handle those (github.mjs RETRY).
+// own retries handle those (github.mjs RETRY), with one exception: GitHub's primary rate limit spent (#250). That answer
+// says no request will pass until its reset, a known moment, so it is an outage of the API host of known length: a
+// process that waits outages out sends nothing more to that host until the reset (plus a little jitter), one sleep and
+// two log lines for all its callers, no probe.
 import { log } from "./inputs.mjs";
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, or its connect timed out. */
@@ -15,6 +18,13 @@ export const causeCode = (e) => {
   for (let c = e, i = 0; c && i < 4; c = c.cause, i += 1) if (typeof c.code === "string" && /^[A-Z0-9_]+$/.test(c.code)) return c.code;
   return "";
 };
+
+/**
+ * The code on an error GitHub's primary rate limit refused (github.mjs: a 403 or 429, or a GraphQL RATE_LIMITED, with
+ * x-ratelimit-remaining 0 and a reset; no secondary limit's sign), with `resetAt` (ms), in every process; and on the
+ * NetworkDown a waiting process throws when the reset is past its limit or the caller's deadline.
+ */
+export const RATE_LIMIT_SPENT = "RATE_LIMIT_SPENT";
 
 /** Whether an error is this machine failing to reach a host: a connect-level code on it or its causes, or a NetworkDown. */
 export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(causeCode(e)));
@@ -31,7 +41,11 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
  * harnesses retry their own calls for minutes before a pass fails); one before the pass began never counts, and one on
  * another host than the pass's provider counts only when it lasted `passOutageMs`. `passReruns`: how many times one pass
  * runs again after an outage before its failure stands. `flapMs`: a host lost again this soon after answering is the same
- * outage (its first loss and its limit carried over). `now` and `sleep` are replaced in tests.
+ * outage (its first loss and its limit carried over). `quotaJitterMs`: the most a wait for a rate limit's reset runs past
+ * it (a tenth of it at least), so the callers of several processes on one quota do not all go again at once.
+ * `exitWaitMs`: how long a stage off the local route that ended on a rate limit waits for its reset to write its Block
+ * (inside the fifteen minutes the job keeps after its deadline, session.mjs deadline). `now`, `sleep` and `random` are
+ * replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
@@ -42,7 +56,10 @@ export const OUTAGE = {
   passOutageMs: 2 * 60_000,
   passReruns: 2,
   flapMs: 60_000,
+  quotaJitterMs: 10_000,
+  exitWaitMs: 10 * 60_000,
   now: () => Date.now(),
+  random: Math.random,
   sleep: (ms, signal) =>
     new Promise((resolve) => {
       const done = () => {
@@ -87,13 +104,15 @@ export const originOf = (url) => {
 /**
  * A wait that ended without the host answering: the process's limit (waitOutages `until`) or the caller's deadline came
  * first, or the process stopped waiting. Shaped as the transport error it stands for (status 0, `transport`, `unsent`), so
- * a caller that tells transient failures apart still does, plus `offline`, `origin`, `code` and `since` (ms).
+ * a caller that tells transient failures apart still does, plus `offline`, `origin`, `code` and `since` (ms). With
+ * `resetAt` (ms) it is GitHub's primary rate limit spent until then (code RATE_LIMIT_SPENT): nothing was done.
  */
 export class NetworkDown extends Error {
-  constructor({ origin, code, since }) {
-    super(`${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
+  constructor({ origin, code, since, resetAt = null }) {
+    const spent = Number.isFinite(resetAt);
+    super(spent ? `GitHub's API rate limit on ${hostOf(origin)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
     this.name = "NetworkDown";
-    Object.assign(this, { offline: true, transport: true, unsent: true, status: 0, origin, code: code || "", since });
+    Object.assign(this, { offline: true, transport: true, unsent: true, status: 0, origin, code: spent ? RATE_LIMIT_SPENT : code || "", since, ...(spent ? { resetAt } : {}) });
   }
 }
 
@@ -108,6 +127,8 @@ const PAST = [];
 const GIVEN_UP = new Map();
 // The last outage each host came back from, for a host lost again soon after (OUTAGE.flapMs): the same outage.
 const RECENT = new Map();
+// The reset (ms) of each host's spent primary rate limit as this process last met it, whether it waits or not (spentUntil).
+const SPENT = new Map();
 // Bumped by resetNetwork: an episode from before it records nothing after it.
 let GEN = 0;
 
@@ -142,6 +163,7 @@ export function resetNetwork() {
   PAST.length = 0;
   GIVEN_UP.clear();
   RECENT.clear();
+  SPENT.clear();
 }
 
 /**
@@ -151,6 +173,26 @@ export function resetNetwork() {
 export const downFor = (origin) => {
   const g = origin && GIVEN_UP.get(origin);
   return g ? new NetworkDown(g) : null;
+};
+
+/** Record that `origin` answered with its primary rate limit spent until `resetAt` (ms); any process (spentUntil). */
+export function noteSpent(origin, resetAt) {
+  if (origin && Number.isFinite(resetAt) && resetAt > (SPENT.get(origin) ?? 0)) SPENT.set(origin, resetAt);
+}
+
+/** The reset (ms) of `origin`'s primary rate limit when this process met it spent and the reset is still ahead, else null. */
+export const spentUntil = (origin) => {
+  const at = origin ? SPENT.get(origin) : undefined;
+  return at !== undefined && at > OUTAGE.now() ? at : null;
+};
+
+/**
+ * Once this process has stopped waiting: the NetworkDown for `origin`'s spent rate limit while its reset is still ahead
+ * (a request to it is not sent: it would be refused), else null.
+ */
+export const spentOn = (origin) => {
+  const g = origin && GIVEN_UP.get(origin);
+  return g && Number.isFinite(g.resetAt) && g.resetAt > OUTAGE.now() ? new NetworkDown(g) : null;
 };
 
 /** One probe: null when `origin` gives any HTTP answer, else why not (a connect-level code, or "no answer"). */
@@ -172,15 +214,19 @@ export async function unreachableNow(origins) {
   return i < 0 ? null : { origin: list[i], code: codes[i] };
 }
 
-/** The outage on `origin` under way, or a new one: its probe loop runs until the host answers or the limit passes. */
-function episode(origin, code) {
+/**
+ * The outage on `origin` under way, or a new one: its probe loop runs until the host answers or the limit passes. With
+ * `resetAt` (ms), a spent rate limit: one sleep to the reset instead (spentEpisode).
+ */
+function episode(origin, code, resetAt = null) {
   const known = EPISODES.get(origin);
   if (known) return known;
+  if (Number.isFinite(resetAt)) return spentEpisode(origin, resetAt);
   // A host lost again within OUTAGE.flapMs of answering (a network that comes and goes): the same outage, its first loss
   // and its limit carried over, and no new log line, so a flapping network neither floods the log nor waits afresh. One
   // that then stays down past OUTAGE.flapMs is a loss of its own in the log: one line when it has, one when it answers.
   const last = RECENT.get(origin);
-  const flap = !!last && OUTAGE.now() - last.back < OUTAGE.flapMs;
+  const flap = !!last && !Number.isFinite(last.resetAt) && OUTAGE.now() - last.back < OUTAGE.flapMs;
   const since = flap ? last.since : OUTAGE.now();
   const end = flap ? last.end : MODE.until(since);
   const stop = new AbortController();
@@ -226,19 +272,73 @@ function episode(origin, code) {
 }
 
 /**
+ * A spent primary rate limit on `origin`, reset at `resetAt` (ms): the wait is known, so it is one sleep to the reset plus
+ * OUTAGE's jitter, no probe. A reset past the process's limit is not waited for at all: the process stops waiting (as at
+ * an outage's limit), so the stage ends on it now. One log line when met (or given up), one when the reset has passed.
+ * A host refused again within OUTAGE.flapMs of a reset (GitHub's clock a little behind) is the same wait, not logged again.
+ */
+function spentEpisode(origin, resetAt) {
+  const now = OUTAGE.now();
+  const last = RECENT.get(origin);
+  const again = !!last && Number.isFinite(last.resetAt) && now - last.back < OUTAGE.flapMs;
+  const since = again ? last.since : now;
+  const end = Math.max(resetAt, now) + Math.round(OUTAGE.quotaJitterMs * (0.1 + 0.9 * OUTAGE.random()));
+  const limit = MODE.until(since);
+  const stop = new AbortController();
+  const gen = GEN;
+  const ep = { origin, code: RATE_LIMIT_SPENT, since, end, resetAt, stop, back: null };
+  EPISODES.set(origin, ep);
+  const host = hostOf(origin);
+  ep.done = (async () => {
+    if (end > limit) {
+      log(`network: GitHub's API rate limit on ${host} is spent until ${iso(resetAt)}, past this process's wait (until ${iso(limit)}); no longer waiting`);
+      if (gen === GEN) GIVEN_UP.set(origin, { origin, code: RATE_LIMIT_SPENT, since, resetAt });
+      stopWaiting();
+      return false;
+    }
+    if (!again) log(`network: GitHub's API rate limit on ${host} is spent until ${iso(resetAt)}; no request goes to it until then (${minutesText(end - now)})`);
+    await OUTAGE.sleep(end - OUTAGE.now(), stop.signal);
+    if (stop.signal.aborted) {
+      if (gen === GEN) GIVEN_UP.set(origin, { origin, code: RATE_LIMIT_SPENT, since, resetAt });
+      return false;
+    }
+    ep.back = OUTAGE.now();
+    if (!again) log(`network: GitHub's API rate limit on ${host} has reset; requests go again after ${minutesText(ep.back - since)}`);
+    if (gen === GEN) RECENT.set(origin, { since, end, code: RATE_LIMIT_SPENT, back: ep.back, resetAt });
+    return true;
+  })().finally(() => {
+    if (gen !== GEN) return;
+    EPISODES.delete(origin);
+    PAST.push({ origin, code: RATE_LIMIT_SPENT, since, back: ep.back ?? OUTAGE.now(), resetAt });
+    if (PAST.length > 20) PAST.shift();
+  });
+  return ep;
+}
+
+/**
  * Wait for `origin` to answer again after a request to it failed with `code` (unreachable): resolves once a probe gets
  * an answer; throws NetworkDown when the process's limit or `deadlineAt` comes first, or the process stops waiting.
+ * With `resetAt` (ms), GitHub's primary rate limit is spent until then: resolves once the reset has passed; a reset
+ * past `deadlineAt` throws at once, since that wait cannot end in time.
  */
-export async function networkBack(origin, code, { deadlineAt = Infinity } = {}) {
-  if (!waitingOutages()) throw new NetworkDown({ origin, code, since: OUTAGE.now() });
-  const ep = episode(origin, code);
+export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt = null } = {}) {
+  if (!waitingOutages()) {
+    const since = OUTAGE.now();
+    // Stopped waiting: the rate limit is recorded as the one this process gave up on, for the stage's end (outageOf).
+    if (Number.isFinite(resetAt) && MODE !== null) GIVEN_UP.set(origin, { origin, code: RATE_LIMIT_SPENT, since, resetAt });
+    throw new NetworkDown({ origin, code, since, resetAt });
+  }
+  const ep = episode(origin, code, resetAt);
   let back;
   if (Number.isFinite(deadlineAt) && deadlineAt < ep.end) {
-    const cut = new AbortController();
-    back = await Promise.race([ep.done, OUTAGE.sleep(deadlineAt - OUTAGE.now(), cut.signal).then(() => false)]);
-    cut.abort();
+    if (Number.isFinite(ep.resetAt)) back = false;
+    else {
+      const cut = new AbortController();
+      back = await Promise.race([ep.done, OUTAGE.sleep(deadlineAt - OUTAGE.now(), cut.signal).then(() => false)]);
+      cut.abort();
+    }
   } else back = await ep.done;
-  if (!back) throw new NetworkDown({ origin, code: ep.code, since: ep.since });
+  if (!back) throw new NetworkDown({ origin, code: ep.code, since: ep.since, resetAt: ep.resetAt });
 }
 
 /** The outage under way on `origin`, if any: a request to it waits (networkBack) instead of being sent. */
@@ -255,7 +355,8 @@ export async function passCutOff(startedMs, endedMs, origins) {
   const [provider] = origins;
   // Only an outage that could have cut the pass off: on its provider's host, or one on any host that lasted at least
   // OUTAGE.passOutageMs (a heartbeat's GitHub blip of a few seconds is no reason for a pass to fail).
-  const counts = (o) => o.origin === provider || (o.back ?? OUTAGE.now()) - o.since >= OUTAGE.passOutageMs;
+  // A spent rate limit is GitHub refusing, not the network: it cuts no pass off.
+  const counts = (o) => !Number.isFinite(o.resetAt) && (o.origin === provider || (o.back ?? OUTAGE.now()) - o.since >= OUTAGE.passOutageMs);
   const now = [...EPISODES.values()].find(counts);
   if (now) return { origin: now.origin, code: now.code, since: now.since, ongoing: true };
   const past = PAST.findLast((p) => p.back >= from && p.since <= endedMs && counts(p));
@@ -264,13 +365,17 @@ export async function passCutOff(startedMs, endedMs, origins) {
   return down ? { ...down, since: OUTAGE.now(), ongoing: true } : null;
 }
 
-/** The outage a NetworkDown (or a bare connect-level error) names, for an exit: {origin, host, code, since} (ms). */
+/**
+ * The outage a NetworkDown (or a bare connect-level error) names, for an exit: {origin, host, code, since} (ms), plus
+ * `resetAt` (ms) for GitHub's spent rate limit.
+ */
 export function outageOf(e, now = OUTAGE.now()) {
   // An error that names no outage (a bare connect failure): the one this process last gave up on, if any.
   const known = e?.origin && Number.isFinite(e?.since) ? e : (e?.origin && GIVEN_UP.get(e.origin)) || [...GIVEN_UP.values()].at(-1) || e;
   const origin = known?.origin ?? null;
-  return { origin, host: origin ? hostOf(origin) : "the network", code: known?.code || causeCode(e) || "no answer", since: Number.isFinite(known?.since) ? known.since : now };
+  return { origin, host: origin ? hostOf(origin) : "the network", code: known?.code || causeCode(e) || "no answer", since: Number.isFinite(known?.since) ? known.since : now, ...(Number.isFinite(known?.resetAt) ? { resetAt: known.resetAt } : {}) };
 }
 
-/** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` in ms). */
-export const outageReason = ({ host, code, since }, now = OUTAGE.now()) => `this machine could not reach ${host} (${code}) from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;
+/** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` and `resetAt` in ms). */
+export const outageReason = ({ host, code, since, resetAt }, now = OUTAGE.now()) =>
+  Number.isFinite(resetAt) ? `GitHub's API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `this machine could not reach ${host} (${code}) from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;

@@ -1115,10 +1115,11 @@ export class Local {
 
   /**
    * A stage that ended `paused` on this machine's network (session.mjs outageExit): the outage it names (`result.outage`:
-   * host, origin, code, since) is kept in this loop's memory. A pause that comes within OUTAGE.stageWaitMs of this loop
-   * resuming the Objective from an earlier one is the same outage (a network that comes and goes): its `since` stays the
-   * earlier one, so OUTAGE.blockMs counts from when the Objective first lost the network. No lapse is counted; the claim
-   * stays. The memory is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
+   * host, origin, code, since, and `reset` for GitHub's spent rate limit) is kept in this loop's memory. A pause that
+   * comes within OUTAGE.stageWaitMs of this loop resuming the Objective from an earlier one is the same outage (a network
+   * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
+   * the network. No lapse is counted; the claim stays. The memory is this loop's: another serve on the machine resumes
+   * the Objective with the bound counted afresh.
    */
   outagePaused(issue, result) {
     const o = result?.outage || {};
@@ -1127,9 +1128,11 @@ export class Local {
     const earlier = this.offline?.get(issue);
     const same = earlier && Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs;
     const since = same ? Math.min(own, earlier.since) : own;
-    (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer" });
+    const reset = Date.parse(o.reset);
+    (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(Number.isFinite(reset) ? { reset } : {}) });
     this.lapsed?.delete(issue);
-    log(`#${issue}: the ${result?.stage || "work"} stage paused: this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`);
+    const what = Number.isFinite(reset) ? `GitHub's API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
 
   /**
@@ -1155,10 +1158,12 @@ export class Local {
       if (!c || !sameMachineHolder(c.holder)) continue;
       // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
       // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
-      // answers would otherwise leave it Running with no notice).
+      // answers would otherwise leave it Running with no notice). Paused on GitHub's spent rate limit: resumed once its
+      // reset has passed, with no probe (GitHub answers while the limit is spent).
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
-        if (!off.origin || (this.clock ?? Date.now)() - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
+        const now = (this.clock ?? Date.now)();
+        if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
@@ -1597,7 +1602,9 @@ export class Local {
     const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
     log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
-    // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause.
+    // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
+    // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
+    // then, said once.
     waitOutages();
     this.stopOnSignals(() => Promise.allSettled(running.values()));
     let cleaned = 0;

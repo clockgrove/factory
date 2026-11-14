@@ -715,3 +715,32 @@ test("pausedHere: an Objective paused on a provider that never answers again is 
     gh.restore();
   }
 });
+
+test("withClaim: a stage that paused on GitHub's spent rate limit is resumed after the reset, with no probe and no lapse (#250)", async () => {
+  const gh = claimGitHub();
+  const inner = globalThis.fetch;
+  // GitHub answers any probe while its limit is spent: a probe would resume the Objective at once.
+  const probes = [];
+  globalThis.fetch = async (url, init = {}) => (init.method === "HEAD" ? (probes.push(String(url)), new Response(null, { status: 200 })) : inner(url, init));
+  try {
+    const loop = await claimLoop();
+    const since = Date.parse("2026-11-14T08:47:00Z");
+    const reset = since + 20 * 60_000;
+    let t = since + 60_000;
+    loop.clock = () => t;
+    const outage = { host: "github.test", origin: "https://github.test", code: "RATE_LIMIT_SPENT", since: new Date(since).toISOString(), reset: new Date(reset).toISOString() };
+    assert.equal((await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage }))).exit, "paused");
+    assert.equal(gh.comments.length, 1, "the claim stays");
+    assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "not before the reset");
+    t = reset - 1;
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "not a moment before it");
+    assert.deepEqual(probes, [], "no probe: GitHub answers while the limit is spent");
+    t = reset;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed once the reset has passed");
+    assert.deepEqual(probes, []);
+  } finally {
+    globalThis.fetch = inner;
+    gh.restore();
+  }
+});

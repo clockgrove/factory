@@ -78,7 +78,8 @@ async function main() {
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
   // in place for its host to answer, up to fifteen minutes on the local route (then the stage ends paused, for serve to
-  // resume) and up to the work's deadline elsewhere, where nothing resumes a stage.
+  // resume) and up to the work's deadline elsewhere, where nothing resumes a stage. GitHub's primary rate limit spent is
+  // the same wait, to its reset: one past that bound ends the stage at once (paused locally, Blocked elsewhere).
   const local = backend().name === "local";
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
@@ -180,9 +181,10 @@ async function main() {
       await finish("blocked", refused.reason);
       return;
     }
-    // This machine's network, not the stage: paused locally, an `outage` Block elsewhere (session.mjs outageExit).
+    // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
+    // (`outage`, or `provider-quota` for the rate limit: session.mjs outageExit).
     if (unreachable(e)) {
-      await outageExit(e, { local, records, finish, block: (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) });
+      await outageExit(e, { local, records, finish, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) });
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);

@@ -296,7 +296,7 @@ test("the work and review stages wait outages out and end on one through outageE
     const caught = src.indexOf("if (unreachable(e)) {");
     assert.ok(caught > 0 && caught < src.indexOf("crashed: ${e.message.slice(0, 300)}"), `${file}: the outage before the crash Block`);
     assert.match(src.slice(caught, caught + 600), /await outageExit\(e, \{\s+local,\s+records,\s+finish,/, `${file}: through outageExit`);
-    assert.match(src.slice(caught, caught + 600), /cause: "outage"/, `${file}: an outage Block off the local route`);
+    assert.match(src.slice(caught, caught + 600), /block: (async )?\(reason, cause\) =>[\s\S]*?\bcause,/, `${file}: an External Block off the local route, its cause outageExit's`);
   }
   const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
   assert.match(local.slice(local.indexOf("async serve(")), /^[\s\S]*?\n {4}waitOutages\(\);/, "serve: no bound");

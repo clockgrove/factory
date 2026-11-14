@@ -193,6 +193,54 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
   }
 });
 
+test("doctor without --checkout takes the settings from the default branch's workflow on GitHub: copilot there gets copilot's checks (#236)", async () => {
+  const { defaultsCheck, doctorSettings } = await import("../scripts/doctor.mjs");
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const asked = [];
+  let status = 200;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    asked.push([`${u.pathname}${u.search}`, init.headers?.Authorization]);
+    if (status !== 200) return new Response(JSON.stringify({ message: "x" }), { status, headers: { "content-type": "application/json" } });
+    return new Response("on: issues\nenv:\n  FACTORY_HARNESS: copilot\n  FACTORY_MODEL: gpt-x\n  FACTORY_RUNNER_NAME: no-setting\njobs: {}\n", { status: 200 });
+  };
+  const copy = clone("env:\n  FACTORY_HARNESS: codex\n");
+  try {
+    const r = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: {} });
+    assert.deepEqual(asked, [["/repos/o/r/contents/.github/workflows/factory.yml", "Bearer t"]], "the default branch's file, with doctor's token");
+    assert.equal(r.inputs.harness, "copilot");
+    assert.match(defaultsCheck(r.inputs).detail, /^harness copilot, worker gpt-x,/);
+    assert.deepEqual((await credentialChecks({ inputs: r.inputs, env: {}, local: false })).map((c) => c.name), ["copilot credential"]);
+    assert.deepEqual(r.checks, []);
+    assert.equal(r.env.FACTORY_RUNNER_NAME, undefined, "only the settings Factory takes");
+    // GitHub's copy wins over a clone's here; this shell wins over both.
+    assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "copilot");
+    assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: { FACTORY_HARNESS: "claude" } })).inputs.harness, "claude");
+    // With --checkout, that checkout's copy, and GitHub is not read.
+    asked.length = 0;
+    assert.equal((await doctorSettings({ args: { checkout: copy }, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "codex");
+    assert.deepEqual(asked, []);
+    // Unreadable: one WARN naming the harness assumed, from the local copy when there is one.
+    for (status of [404, 403]) {
+      const none = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: {} });
+      assert.equal(none.inputs.harness, "claude");
+      assert.equal(none.checks.length, 1);
+      assert.equal(none.checks[0].status, "WARN");
+      assert.equal(none.checks[0].name, "workflow settings");
+      assert.match(none.checks[0].detail, new RegExp(`\\(HTTP ${status}\\), so the checks take no workflow's settings and assume harness claude$`));
+      const here = await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: {} });
+      assert.equal(here.inputs.harness, "codex");
+      assert.match(here.checks[0].detail, /'s copy and assume harness codex$/);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+});
+
 test("mintInstallationToken reads a personal account from the installation and stops requiring projects there; an organization's still needs it (#199)", () => {
   const lib = join(import.meta.dirname, "..", "scripts", "lib", "app-token.mjs");
   const script = `

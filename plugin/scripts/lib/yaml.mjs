@@ -2,13 +2,13 @@
 // pinned in tools/deps). The library parses; turning the tree into values is Factory's own, so each refusal sits in one
 // place. Plain scalars come back as their source text (`true`, `1.0` and `on` stay strings), null for an empty value,
 // `~` or `null`. Anchors and aliases are read as GitHub Actions reads them, unless the caller turns them off; an alias
-// copies its anchor's value, against an expansion budget. What GitHub does not take, or a reader could not be sure of,
+// copies its anchor's value, against an expansion budget, and an anchor name may be used once. What GitHub does not take, or a reader could not be sure of,
 // throws: several documents, a `%YAML` directive other than 1.2, any explicit tag, a `<<` key, a repeated key (compared
 // as the text it reads as), a key that is not a scalar, any parse error or warning. Doctor then FAILs rather than guess.
 import { isAlias, isMap, isScalar, isSeq, parseDocument } from "../../vendor/yaml/browser/index.js";
 
 /** The most value nodes all aliases of one document may copy, in total. */
-export const ALIAS_BUDGET = 20_000;
+export const ALIAS_BUDGET = 100_000;
 
 const unsupported = (what, line) => {
   throw new Error(`unsupported YAML (${what})${line ? ` at line ${line}` : ""}`);
@@ -24,6 +24,7 @@ export function parseYaml(text, { aliases = true } = {}) {
   if (problem) unsupported(problem.code === "MULTIPLE_DOCS" ? "several documents" : problem.code.toLowerCase().replace(/_/g, " "), problem.linePos?.[0]?.line ?? null);
   if (doc.directives?.yaml?.explicit && doc.directives.yaml.version !== "1.2") unsupported(`a %YAML ${doc.directives.yaml.version} directive`, 1);
   const anchors = new Map();
+  const named = new Set();
   let budget = ALIAS_BUDGET;
   const copy = (v) => {
     budget -= 1;
@@ -40,6 +41,11 @@ export function parseYaml(text, { aliases = true } = {}) {
       return copy(anchors.get(node.source));
     }
     if (node.tag) fail("a tag", node);
+    // An anchor name used twice (or again inside its own node) is read differently by different YAML readers: refused.
+    if (node.anchor) {
+      if (named.has(node.anchor)) fail(`an anchor name used twice (&${node.anchor})`, node);
+      named.add(node.anchor);
+    }
     let v;
     if (isScalar(node)) v = node.value === null || node.value === undefined ? null : typeof node.value === "string" ? node.value : node.type === "PLAIN" ? String(node.source) : fail("a scalar", node);
     else if (isSeq(node)) v = node.items.map(value);

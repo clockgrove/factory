@@ -151,13 +151,13 @@ export function agentDefinition(text, fallbackName) {
   return { name, definition };
 }
 
-/** Frontmatter with each top-level `key: value` line's plain value quoted (a quoted, flow, block, anchored or tagged value left as it is). */
+/** Frontmatter with each top-level `key: value` line's plain value quoted, less a trailing ` #` comment (a quoted, flow, block, anchored or tagged value left as it is). */
 export function quotedFrontmatter(text) {
   return String(text)
     .split(/\r?\n/)
     .map((line) => {
       const kv = /^([A-Za-z0-9_-]+):[ \t]+(\S.*)$/.exec(line);
-      return kv && !/^["'[{|>&*!#]/.test(kv[2]) ? `${kv[1]}: ${JSON.stringify(kv[2].trim())}` : line;
+      return kv && !/^["'[{|>&*!#]/.test(kv[2]) ? `${kv[1]}: ${JSON.stringify(kv[2].replace(/[ \t]#.*$/, "").trim())}` : line;
     })
     .join("\n");
 }

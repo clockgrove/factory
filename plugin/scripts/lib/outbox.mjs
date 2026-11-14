@@ -861,8 +861,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * box.error set, and the outbox refuses every later push.
    */
   box.push = async ({ sha = null } = {}) => {
-    // A stopped stage pushes nothing more (stop.mjs holdIfStopped).
+    // A stopped stage pushes nothing more (stop.mjs holdIfStopped), nor one whose Objective was stopped or restarted
+    // since its watch last read it (`box.beforePush`, the stage's last read of its issue).
     await holdIfStopped();
+    await box.beforePush?.();
     if (box.failed) return false;
     // What this push did, never an earlier one's: Factory's merge, a conflict, GitHub's text, whether the checkout took it.
     box.merged = null;

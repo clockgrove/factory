@@ -1,11 +1,12 @@
 // A person's stop of one Objective (docs/USAGE.md, "An Objective's lifecycle"): its `factory:objective` label removed,
-// or its issue closed. No tick, loop or relaunch picks a stopped Objective (they list only labelled, open issues); this
+// or its issue closed; and its restart from the issue's current text (`factory:restart`), which stops a running stage
+// the same way before the dispatcher discards what the earlier run left (restartObjective). No tick, loop or relaunch picks a stopped Objective (they list only labelled, open issues); this
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
 // stopped (its PR a draft without the review label, its state label off, its card back in Queued).
-import { dequeuePr, findPr, findProject, getPr, mergeQueueEntry, moveCard, removeLabel, setDraft, setStateLabel } from "./github.mjs";
+import { dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL } from "./logic.mjs";
+import { REVIEW_LABEL, marker, restartedAt, trustedAuthor } from "./logic.mjs";
 
 /** How often a running stage reads its issue for a stop. */
 export const STOP_POLL_MS = 60_000;
@@ -24,18 +25,52 @@ export const STOP_TIDY_MS = 45_000;
  */
 export const STOP_GRACE_MS = 10 * 60_000;
 
+/** The label a person applies to restart an Objective from its issue's current text, in any state. */
+export const RESTART_LABEL = "factory:restart";
+
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
 
-/** Why the issue's Objective is stopped: "closed", "unlabeled" (its Objective label is off), or null when it is not. */
+/**
+ * Why the issue's Objective is stopped: "closed", "unlabeled" (its Objective label is off), "restart" (a restart is
+ * asked for: its running stage stops first, and nothing starts until the dispatcher has restarted it), or null.
+ */
 export function stopCause(issue, label) {
   if (!issue) return null;
   if (issue.state && issue.state !== "open") return "closed";
   if (!names(issue).includes(label)) return "unlabeled";
+  // `restarted`: a restart recorded after the reader's stage began (objectiveReader), its label already gone.
+  if (names(issue).includes(RESTART_LABEL) || issue.restarted === true) return "restart";
   return null;
 }
 
+/**
+ * A stage's read of its issue for its watch and its last checks (stop.mjs watchObjective, confirmRunning): the issue
+ * (`read`), marked `restarted` once its comments (`list`, read again only when the issue's comment count changed) hold a
+ * restart record other than, and newer than, the newest one at the stage's first read (`prime()`, called as the stage
+ * starts), so a stage that missed the restart's label still learns of it. Records are compared with each other only,
+ * never with this machine's clock, which may be behind GitHub's.
+ */
+export function objectiveReader({ read, list }) {
+  let count = null;
+  let base;
+  let restarted = false;
+  const reader = async () => {
+    const issue = await read();
+    if (!restarted && issue && issue.comments !== count) {
+      const at = restartedAt(await list());
+      count = issue.comments;
+      if (base === undefined) base = at;
+      else restarted = !!at && at !== base && (!base || Date.parse(at) > Date.parse(base));
+    }
+    return restarted ? { ...issue, restarted: true } : issue;
+  };
+  /** The stage's first read: the restart records already there are no restart of this stage. A failed read waits for the next. */
+  reader.prime = () => reader().catch(() => null);
+  return reader;
+}
+
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
-export const stopText = (cause, label = "factory:objective") => (cause === "closed" ? "the issue was closed" : `\`${label}\` was removed`);
+export const stopText = (cause, label = "factory:objective") => (cause === "closed" ? "the issue was closed" : cause === "restart" ? `\`${RESTART_LABEL}\` was applied` : `\`${label}\` was removed`);
 
 // This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, who ends it
 // (`exit`), and whether its own exit is under way (`committed`: an exit being applied, or a merge), which a later stop
@@ -189,4 +224,109 @@ export async function applyStop(repo, issue, { pr = undefined, closed = false, p
  */
 export function stoppedRecords(passes, open = []) {
   return [...(passes || []), ...open].map((r) => (r && r.stopped && !r.noRun && !Number.isFinite(r.usd) && Number.isFinite(r.stoppedUsd) ? { ...r, usd: r.stoppedUsd, usdLowerBound: true, basis: "lower bound: the stage was stopped before the harness reported its cost; the live reading of its stream" } : r));
+}
+
+/** The restart's record on the issue (logic.mjs restartedAt reads it): one per restart, keyed by its time. */
+export const restartMarker = (issue, at) => marker(issue, "restart", String(at).replace(/[^0-9TZ]/g, ""));
+
+/** The fields of a restart record's comment (its JSON line), or null. */
+export function restartRecordOf(comment) {
+  const m = /^<!-- factory:\d+:restart:[0-9TZ]+ -->\n<!-- factory:restart (\{[^\n]*\}) -->/.exec(comment?.body || "");
+  if (!m) return null;
+  try {
+    const v = JSON.parse(m[1]);
+    return v && typeof v === "object" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The record's body: the restart's time (when the label was applied), who applied it, the earlier PR and the deleted
+ * branch's last commit, which restores the branch.
+ */
+export const restartRecord = ({ issue, at, by = null, pr = null, head = null }) =>
+  `<!-- factory:restart ${JSON.stringify({ at, ...(by ? { by } : {}), ...(pr ? { pr } : {}), ...(head ? { head } : {}) })} -->\nFactory restarted this Objective from the issue's current text (\`${RESTART_LABEL}\`, applied ${at}${by ? ` by ${by}` : ""}).${pr ? ` Its earlier pull request #${pr} is closed; its commits and review stay there.` : ""}${head ? ` Its branch \`factory/${issue}\` is deleted; its last commit was ${head}, and \`git push origin ${head}:refs/heads/factory/${issue}\` restores it.` : ""} The earlier plan and the comments from before the restart do not feed the restarted run; it starts from the default branch.`;
+
+/** A restart Factory could not finish as asked (a ruleset keeps the branch): the dispatcher Blocks with `fix`. */
+export class RestartRefused extends Error {
+  constructor(message, fix) {
+    super(message);
+    this.code = "restart-refused";
+    this.fix = fix;
+  }
+}
+
+/**
+ * Restart the issue's Objective from its current text (`at`: when the restart label was applied, `by`: who applied it),
+ * once no stage of it runs: the restart's record first (the PR and the branch's head an earlier try of this restart
+ * recorded are kept, once they are gone); the earlier PR out of the merge queue and its review label off; the
+ * factory/<issue> branch deleted, read back after a refusal (only a 404 is gone: a ruleset answers 422 and keeps it,
+ * which throws RestartRefused, the PR untouched beyond that); the PR then commented with a link to the record and
+ * closed (its history stays on it); the plan comment and a split's parts record retired (their markers renamed, their
+ * text kept); and, unless another loop finished this restart meanwhile (its label already off), every state label off,
+ * the card in Queued, and the restart label off last. Each step is idempotent, so a restart cut off halfway is finished
+ * by the next tick. Throws when a step fails: the label stays and the next tick tries again.
+ */
+export async function restartObjective(repo, issue, { at, by = null, project = undefined }, opts) {
+  const key = restartMarker(issue, at);
+  // The label gone already: another loop finished this restart (or a person took the label off). Nothing to do.
+  const labelled = (i) => (i?.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === RESTART_LABEL);
+  if (!labelled(await getIssue(repo, issue, opts))) return { pr: null, head: null, finished: false };
+  const comments = await listComments(repo, issue, opts);
+  const prior = restartRecordOf(comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c)));
+  const pr = await findPr(repo, `factory/${issue}`, opts);
+  const ref = `repos/${repo.full}/git/refs/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`;
+  const headNow = () =>
+    rest(`repos/${repo.full}/git/ref/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`, opts).then(
+      (r) => r?.object?.sha ?? null,
+      (e) => {
+        if (e.status === 404) return null;
+        throw e;
+      },
+    );
+  const head = await headNow();
+  const fields = { issue, at, by: by ?? prior?.by ?? null, pr: pr?.number ?? prior?.pr ?? null, head: head ?? prior?.head ?? null };
+  const record = await upsertComment(repo, issue, key, restartRecord(fields), opts);
+  if (pr?.number) {
+    if (await mergeQueueEntry(repo, pr.number, opts).catch(() => null)) await dequeuePr(repo, pr.node_id ?? (await getPr(repo, pr.number, opts)).node_id, opts);
+    await removeLabel(repo, pr.number, REVIEW_LABEL, opts);
+  }
+  if (head) {
+    await rest(ref, { ...opts, method: "DELETE" }).catch((e) => {
+      if (![404, 422].includes(e.status)) throw e;
+    });
+    if (await headNow()) {
+      // Nothing was discarded: the record is retired (its marker renamed), so no reader takes it for a restart and drops
+      // the plan, the parts record or the decisions from before it.
+      const id = record?.id ?? comments.find((c) => (c.body || "").startsWith(key) && trustedAuthor(c))?.id;
+      if (id) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body: `${marker(issue, "restart-undone", String(at).replace(/[^0-9TZ]/g, ""))}\nFactory could not restart this Objective: GitHub kept its branch \`factory/${issue}\`. Nothing was discarded.` } });
+      throw new RestartRefused(`the restart could not delete \`factory/${issue}\`: GitHub kept the branch (a ruleset that protects it refuses its deletion)`, `let Factory delete \`factory/*\` branches (the ruleset's bypass list, or a rule that leaves them out), or delete \`factory/${issue}\` yourself, then apply \`${RESTART_LABEL}\` again`);
+    }
+  }
+  // The PR the record names: GitHub closed it when its branch went, so a retry finds it closed and still comments on it.
+  if (fields.pr) {
+    const link = record?.html_url ? ` ([the restart](${record.html_url}))` : "";
+    await upsertComment(repo, fields.pr, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Factory: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
+    // Only an open PR is closed: one the merge queue merged before this retry stays as it is (closing it fails every tick).
+    if ((await getPr(repo, fields.pr, opts))?.state === "open") await rest(`repos/${repo.full}/pulls/${fields.pr}`, { ...opts, method: "PATCH", body: { state: "closed" } });
+  }
+  // The earlier plan and split record, kept readable under markers no reader looks for (handoff.mjs planOf, partsRecord,
+  // which also skip anything from before the restart).
+  const retire = [
+    [`${marker(issue, "plan")}`, `${marker(issue, "restarted-plan")}`],
+    [`<!-- factory:${issue}:parts `, `<!-- factory:${issue}:restarted-parts `],
+  ];
+  for (const c of comments) {
+    const hit = retire.find(([from]) => (c.body || "").startsWith(from));
+    if (!hit || !trustedAuthor(c)) continue;
+    await rest(`repos/${repo.full}/issues/comments/${c.id}`, { ...opts, method: "PATCH", body: { body: `${hit[1]}${c.body.slice(hit[0].length)}` } });
+  }
+  // Another loop that finished this restart first may have started the Objective since: its Running label stays.
+  if (!labelled(await getIssue(repo, issue, opts))) return { pr: fields.pr, head: fields.head, finished: false };
+  await setStateLabel(repo, issue, null, opts);
+  if (project === undefined) project = await findProject(repo, opts).catch(() => null);
+  await moveCard(project, repo, issue, "Queued", opts).catch((e) => log(`#${issue} restart: card: ${String(e?.message || e).slice(0, 120)}`));
+  await removeLabel(repo, issue, RESTART_LABEL, opts);
+  return { pr: fields.pr, head: fields.head, finished: true };
 }

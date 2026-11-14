@@ -22,7 +22,7 @@ Factory turns an issue into a merged pull request with no one watching. You writ
 
 A run that goes well needs nothing from you. When one needs you, Factory does all the work it can first and then hands the Objective back to you in one of two states. Your other Objectives keep running meanwhile.
 
-- **Blocked:** Factory could not finish, for example because a check still fails or a spending cap was reached. One comment on the issue gives the reason, and the PR, if it opened one, becomes a draft. Fix the cause, then label the issue `factory:objective` again to restart it.
+- **Blocked:** Factory could not finish, for example because a check still fails or a spending cap was reached. One comment on the issue gives the reason, and the PR, if it opened one, becomes a draft. Fix the cause, then label the issue `factory:objective` again: it continues from its branch and PR.
 - **Question:** the work depends on a decision that should be yours, such as changing a public interface. The worker finishes everything else and asks what it needs decided in the draft PR's body. You answer in a comment and mark the PR ready, and Factory continues from there. A Question about working in another repository comes earlier, on the issue itself, before any code (below).
 
 ## Will it work for you?
@@ -53,6 +53,7 @@ Factory never handles a payment, and no bill comes from Clockgrove. To keep thos
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Factory stops at a ready-for-review PR and you merge it yourself.
 - **With auto-merge on, which is the default, nobody reads the code before it lands.** What stands between a change and your default branch is your required checks; the reviewer only comments, and the worker has to answer each comment.
 - **To stop one Objective,** remove its `factory:objective` label or close its issue, or ask "Stop Clockgrove Factory Objective 12". A running stage ends within about two minutes with its spend recorded, its PR becomes a draft, and nothing picks it up again until you re-apply the label; your other Objectives keep running ([docs/USAGE.md](docs/USAGE.md), An Objective's lifecycle).
+- **To restart one from its current text,** in any state, label its issue `factory:restart`, or ask "Restart Clockgrove Factory Objective 12". A running stage stops first; the earlier PR is closed with a comment, its branch deleted, and the run starts over from the default branch.
 - **To stop everything,** disable the workflow (`gh workflow disable factory.yml`) and cancel any run in the Actions tab. With the cloud sandbox, also stop the Objective's sandboxes in your Vercel project: a stage already running there is not an Actions run. In local mode, stop `factory serve` with Ctrl-C. [docs/INSTALL.md](docs/INSTALL.md) has the full uninstall.
 
 ## What it can touch
@@ -140,6 +141,7 @@ Factory is a plugin of [Agent Skills](https://agentskills.io): one folder per sk
 | [`factory-doctor`](plugin/skills/factory-doctor/SKILL.md) | "Is Clockgrove Factory set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
 | [`factory-file`](plugin/skills/factory-file/SKILL.md) | "File a Clockgrove Factory Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes |
 | [`factory-stop`](plugin/skills/factory-stop/SKILL.md) | "Stop Clockgrove Factory Objective 12." | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again |
+| [`factory-restart`](plugin/skills/factory-restart/SKILL.md) | "Restart Clockgrove Factory Objective 12." | Applies `factory:restart` on your yes: the Objective starts over from the issue's current text |
 | [`factory-run`](plugin/skills/factory-run/SKILL.md) | "Run Clockgrove Factory Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |
 | [`factory-review`](plugin/skills/factory-review/SKILL.md) | "Review Clockgrove Factory PR 57." | Runs the reviewer on one Factory PR in your session |
 | [`factory-serve`](plugin/skills/factory-serve/SKILL.md) | "Start the Clockgrove Factory local loop." | Starts the local loop ([docs/LOCAL.md](docs/LOCAL.md)) |

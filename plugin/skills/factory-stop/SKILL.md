@@ -17,7 +17,7 @@ Show the issue's number, title and state, and say what the stop does:
 
 - A running stage reads its issue once a minute: it ends its harness run, records the spend so far and exits, normally within two minutes.
 - Its pull request, if it has one, leaves the merge queue and becomes a draft without the `factory:review` label, so nothing merges it and no review starts. A Running or In-review Objective goes back to Queued on the board; a Blocked one or a Question stays as it is.
-- Nothing picks it up again until the label is re-applied, which continues from its branch and pull request.
+- Nothing picks it up again until the label is re-applied, which continues from its branch and pull request. To start over from the issue's current text instead, the factory-restart skill applies `factory:restart`.
 - Closing the issue stops it too, and is the way to drop it for good.
 
 Ask for a yes. Removing a label needs triage or write access to the repository; when `gh` reports no access, say a maintainer has to do it.

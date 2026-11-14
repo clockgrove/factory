@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "6eaff1e3039e",
+  "digest": "cd0a9576f0ce",
   "skills": {
     "factory-deliver-pr": {
       "sha256": "cfcc6a24ce0522d13e33263b520846bf877e4f90219c059632aa78c32d0dbb60",
@@ -43,6 +43,11 @@
       "sha256": "51d1ca5413de0db40b9cb0b77f77c7b655b2ba653b9786d2c51987de2edadb7c",
       "lines": 34,
       "words": 501
+    },
+    "factory-restart": {
+      "sha256": "34f49c76b14521decec68d2b72fe02d22906c8bc14cd4277a59a5ca558e2185f",
+      "lines": 31,
+      "words": 474
     },
     "factory-review": {
       "sha256": "7e6c9b63e581489222eabae34959f79b6caf9d43b02f9cb02bad840bfbf66aa1",
@@ -101,10 +106,10 @@
       }
     },
     "factory-stop": {
-      "sha256": "2947968e65a2b9814e8da8a024c8c54418bcf5c2a511ef1521cbab5ace2ca3c7",
+      "sha256": "9d39f18d45386ef9e6887b78bd16e978f7aec8edb84c410f932bd063c930c629",
       "lines": 30,
-      "words": 339
+      "words": 353
     }
   },
-  "recordedAt": "2026-11-14T08:15:05.450Z"
+  "recordedAt": "2026-11-14T08:28:39.583Z"
 }

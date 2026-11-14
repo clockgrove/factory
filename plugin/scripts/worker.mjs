@@ -22,7 +22,7 @@ import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/i
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, watchObjective } from "./lib/stop.mjs";
+import { RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -193,6 +193,13 @@ async function main() {
     return;
   }
 
+  // A restart is pending (factory:restart): the dispatcher restarts it from its current text first.
+  if (stopCause(issueData, inputs.objectiveLabel) === "restart") {
+    log(`#${issue} has ${RESTART_LABEL}: the dispatcher restarts it first; nothing to do here`);
+    await finish("skipped", `a restart is pending (${RESTART_LABEL})`);
+    return;
+  }
+
   // A local loop holds this Objective (factory run / serve on a developer box): the Actions job steps aside.
   if (await backend().trigger.stepsAside(repo, issue, token, issueData)) {
     log(`#${issue} is held by a local loop; nothing to do here`);
@@ -220,8 +227,12 @@ async function main() {
     }
     if (took) process.exit(0);
   };
-  watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
-  beforeExit = (commit = false) => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
+  // The issue as the watch and the last checks read it: a restart recorded after this stage began stops it too, its
+  // label gone or not (stop.mjs objectiveReader); the records already there are read now, as the stage's own.
+  const readObjective = objectiveReader({ read: () => getIssue(repo, issue, token), list: () => listComments(repo, issue, token) });
+  await readObjective.prime();
+  watch = watchObjective({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = (commit = false) => confirmRunning({ read: readObjective, label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause), commit });
 
   // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
   // landing between the two reads then count as after this stage's plan, never as before it.
@@ -270,6 +281,8 @@ async function main() {
   let outbox;
   try {
     outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
+    // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
+    outbox.beforePush = () => beforeExit?.();
   } catch (e) {
     if (e.code !== "ref-collision") throw e;
     log(e.message);

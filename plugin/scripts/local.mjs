@@ -1527,6 +1527,11 @@ export class Local {
         continue;
       }
       for (const n of result.released || []) if (stopped.get(n) === given.get(n)) stopped.delete(n);
+      // A restarted Objective starts over here too: no failed start or lapse of its earlier run counts against it.
+      for (const n of result.restarted || []) {
+        this.startFailures?.delete(n);
+        this.lapsed?.delete(n);
+      }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
       if (pending.length > reviews.length) log(`${pending.length - reviews.length} review(s) wait for a free slot on this box`);

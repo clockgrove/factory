@@ -37,6 +37,7 @@ import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
+import { RESTART_LABEL } from "./lib/stop.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
 export const CLAIM_LEASE_MS = 10 * 60_000;
@@ -238,8 +239,9 @@ async function readContext({ repo, n, ev, inputs, opts, readEventTime, runId = "
   const labels = (issueData.labels || []).map((l) => (typeof l === "string" ? l : l.name));
   // A stage's own events are answered whatever became of the issue: an Objective closed while its stage ran still gets
   // its sandbox stopped and its usage collected.
-  const closed = issueData.state !== "open" || !labels.includes(inputs.objectiveLabel) || !!issueData.pull_request;
-  if (closed && ev.kind !== "stage") return { skip: `#${n} is not an open ${inputs.objectiveLabel} issue` };
+  // A restart pending (factory:restart) starts nothing either: the dispatcher restarts the Objective first (lib/stop.mjs).
+  const closed = issueData.state !== "open" || !labels.includes(inputs.objectiveLabel) || labels.includes(RESTART_LABEL) || !!issueData.pull_request;
+  if (closed && ev.kind !== "stage") return { skip: labels.includes(RESTART_LABEL) && issueData.state === "open" ? `#${n} waits for its restart (${RESTART_LABEL})` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
   if (ev.kind !== "stage" && (await backend().trigger.stepsAside(repo, n, opts, issueData))) return { skip: `#${n} is held by a local loop` };
   const [{ project, card }, comments, since, review, headSha, at] = await reads;
   const state = stateOf(issueData, card);

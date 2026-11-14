@@ -14,7 +14,7 @@
 // red validation after the pass is the blocked exit.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
@@ -72,7 +72,7 @@ import {
   stopStage,
   unreadNow,
 } from "./lib/session.mjs";
-import { STOP_EXIT_MS, claimExit, holdIfStopped, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -156,8 +156,13 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
 }
 
 /** Every exit this stage applies waits while a stop of its Objective is under way: the stop's own exit stands (stop.mjs). */
+// `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
+// already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
+let beforeExit = null;
 const applyExit = async (...args) => {
   await holdIfStopped();
+  await beforeExit?.();
+  if (!commitExit()) await parked();
   return applyExitNow(...args);
 };
 
@@ -356,18 +361,26 @@ async function main() {
     await finish("skipped", `the Objective is stopped (${stopText(stopped, inputs.objectiveLabel)})`);
     return;
   }
+  // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
+  // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
+  const endNow = (recs, why) => {
+    const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    maskFile(eventsFile, secrets);
+    maskFile(join(usageDir, CALL_LOG), secrets);
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
+    progress.flushNow();
+  };
   const stopNow = async (cause) => {
-    const backstop = setTimeout(() => process.exit(1), STOP_EXIT_MS);
     let took = true;
     try {
-      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, pr, records, finish: finishNow, opts: token });
+      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, pr, records, finish: finishNow, opts: token, endNow });
     } catch (e) {
       log(`the stop's end failed: ${String(e?.message || e).slice(0, 200)}`);
     }
-    if (!took) return clearTimeout(backstop);
-    process.exit(0);
+    if (took) process.exit(0);
   };
   watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = () => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
@@ -857,8 +870,10 @@ async function main() {
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });
-  // Stopped meanwhile: nothing of this exit is applied (no merge, no ready mark, no label); the stop's end stands.
+  // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no
+  // merge, no ready mark, no label); the stop's end stands.
   await holdIfStopped();
+  await beforeExit?.();
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
   if (decision.exit === "blocked") {
     decision.reason = relayReason(decision.reason);
@@ -914,13 +929,17 @@ async function main() {
     }
     if (inputs.autoMerge) {
       // The head Factory validated and pushed is the one it merges; nothing armed rides a later push.
+      // The stage commits to its exit here: a stop after this ends nothing (the merge closes the issue, which is no stop
+      // of a merged Objective), and mergeReadyOne reads the issue once more before it merges.
+      if (!commitExit()) await parked();
+      watch?.stop();
       let recorded = false;
       try {
         await recordMergeable(repo, pr.number, issue, outbox.expected() || pr.head.sha, token);
         recorded = true;
         const report = {};
         const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back once for a rebase` }[how] || how}`);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back once for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back once to
         // rebase (dispatch.mjs, logic.mjs staleDecision), and a conflict after that rebase Blocks there.

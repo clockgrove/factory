@@ -12,7 +12,7 @@
 // and usage/result.json for the artifact. The harness writes nothing to GitHub.
 import { agentServicePorts, noteSetupStart, pinRunnerGit } from "./lib/claude-runner.mjs";
 import { pathToFileURL } from "node:url";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
@@ -22,7 +22,7 @@ import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/i
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { STOP_EXIT_MS, claimExit, holdIfStopped, parked, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, parked, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
@@ -48,8 +48,13 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
 }
 
 /** Every exit this stage applies waits while a stop of its Objective is under way: the stop's own exit stands (stop.mjs). */
+// `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
+// already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
+let beforeExit = null;
 const applyExit = async (...args) => {
   await holdIfStopped();
+  await beforeExit?.();
+  if (!commitExit()) await parked();
   return applyExitNow(...args);
 };
 
@@ -197,18 +202,26 @@ async function main() {
 
   // From here the stage stops when a person stops its Objective (its label removed, its issue closed): every harness
   // pass ends, its spend is recorded, its PR is left a draft, and the stage exits (session.mjs stopStage).
+  // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
+  // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
+  const endNow = (recs, why) => {
+    const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    maskFile(eventsFile, secrets);
+    maskFile(join(usageDir, CALL_LOG), secrets);
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
+    progress.flushNow();
+  };
   const stopNow = async (cause) => {
-    const backstop = setTimeout(() => process.exit(1), STOP_EXIT_MS);
     let took = true;
     try {
-      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, records, finish: finishNow, opts: token });
+      took = await stopStage({ cause, label: inputs.objectiveLabel, repo, issue, records, finish: finishNow, opts: token, endNow });
     } catch (e) {
       log(`the stop's end failed: ${String(e?.message || e).slice(0, 200)}`);
     }
-    if (!took) return clearTimeout(backstop);
-    process.exit(0);
+    if (took) process.exit(0);
   };
   watch = watchObjective({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
+  beforeExit = () => confirmRunning({ read: () => getIssue(repo, issue, token), label: inputs.objectiveLabel, onStop: (cause) => void stopNow(cause) });
 
   // When the label was last applied, read before the text (objective-trust.mjs planGate): an edit and a re-applied label
   // landing between the two reads then count as after this stage's plan, never as before it.
@@ -657,8 +670,10 @@ async function main() {
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
-  // Stopped meanwhile: nothing of this exit is applied (no ready mark, no review label); the stop's end stands.
+  // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no ready
+  // mark, no review label); the stop's end stands.
   await holdIfStopped();
+  await beforeExit?.();
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {

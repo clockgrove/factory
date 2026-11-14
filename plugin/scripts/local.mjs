@@ -1411,6 +1411,10 @@ export class Local {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
           return false;
         }
+        if (how === "stopped") {
+          log(`#${issue}: the Objective was stopped; PR #${prNumber} is not merged`);
+          return false;
+        }
         if (how === "held") {
           log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Factory leaves it to them`);
           return false;

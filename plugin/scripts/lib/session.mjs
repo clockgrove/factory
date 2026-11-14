@@ -7,8 +7,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
-import { STOP_SETTLE_MS, applyStop, claimExit, requestStageStop, stopText, stoppedRecords } from "./stop.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
+import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
   awaitChecks,
@@ -31,6 +31,7 @@ import {
   requiredChecks,
   findPr,
   findProject,
+  getIssue,
   getPr,
   getRepo,
   getPrSettled,
@@ -863,6 +864,11 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     });
   };
   /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
+  /**
+   * The stop signal's last write, made at once (rest-sync.mjs): a stopped stage whose end ran out of time (stopStage's
+   * backstop) leaves its live spend in its line as a stop signal would.
+   */
+  progress.flushNow = () => stopWrite();
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
@@ -1466,27 +1472,62 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
 }
 
 /**
- * The running stage's stop (stop.mjs): its Objective's label came off, or its issue closed (`cause`). Every harness pass
- * is ended and none starts after; the stage's exit is claimed (false, and nothing more, when the stage was ending
- * already); its passes get up to `settleMs` to end, and what they left is reaped (the backend's sandbox.reap); every pass
- * this process ran becomes the stage's records (stop.mjs stoppedRecords: a pass ended before it reported dollars counts
- * its live reading); the Objective is left stopped (stop.mjs applyStop: `pr`, else the branch's open PR, a draft); and
- * `finish("stopped", reason)` writes the stage's end (its usage, its spend line, its last progress line). The caller
- * then exits the process: the stage's own flow is parked (stop.mjs holdIfStopped) or ended.
+ * The running stage's stop (stop.mjs): its Objective's label came off, its issue closed or a restart was asked for
+ * (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
+ * holdIfStopped). Nothing more when the stage had committed to its own exit (an exit being applied, a merge: false) or
+ * was ending already (false). Otherwise its passes get up to `settleMs` to end and what they left is reaped (the
+ * backend's sandbox.reap); its records are every pass this process ran, a pass ended before it reported dollars at its
+ * live reading and one still running at its live reading too, lower bounds (stop.mjs stoppedRecords); and
+ * `finish("stopped", reason)` writes the stage's end (its usage, its spend line, its last progress line) before
+ * anything else. Only then is the Objective left stopped (stop.mjs applyStop: `pr`, else the branch's open PR, a draft),
+ * for at most `tidyMs`: the dispatcher's stopped pass finishes what it did not. Past `exitMs` from the stop, with the
+ * end not written, `endNow(records)` writes it synchronously and `exit(1)` ends the process; the caller exits after a
+ * true answer.
  */
-export async function stopStage({ cause, label, repo, issue, pr = undefined, records, finish, opts, settleMs = STOP_SETTLE_MS }) {
+export async function stopStage({ cause, label, repo, issue, pr = undefined, records, finish, opts, settleMs = STOP_SETTLE_MS, tidyMs = STOP_TIDY_MS, exitMs = STOP_EXIT_MS, endNow = null, exit = (code) => process.exit(code) }) {
   requestStageStop(cause);
-  if (!claimExit()) return false;
+  if (exitCommitted() || !claimExit()) return false;
   const reason = stopText(cause, label);
   log(`#${issue}: ${reason}; stopping the stage`);
-  const until = Date.now() + settleMs;
-  while (passesRunning() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
-  if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; the stage ends anyway`);
-  await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
-  records.splice(0, records.length, ...stoppedRecords(stagePasses()));
-  await applyStop(repo, issue, { pr, closed: cause === "closed" }, opts);
-  await finish("stopped", reason);
-  return true;
+  let ended = false;
+  const recordsNow = () => stoppedRecords(stagePasses(), openPasses());
+  const backstop = setTimeout(() => {
+    if (!ended) {
+      try {
+        endNow?.(recordsNow(), reason);
+      } catch (e) {
+        log(`the stopped stage's end could not be written in time: ${String(e?.message || e).slice(0, 120)}`);
+      }
+    }
+    exit(1);
+  }, exitMs);
+  try {
+    const until = Date.now() + settleMs;
+    while (passesRunning() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+    if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; it counts at its live reading`);
+    await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
+    records.splice(0, records.length, ...recordsNow());
+    await finish("stopped", reason);
+    ended = true;
+    let timer = null;
+    const late = new Promise((r) => {
+      timer = setTimeout(() => r("late"), tidyMs);
+    });
+    const tidy = await Promise.race([applyStop(repo, issue, { pr, closed: cause === "closed" }, opts).then(() => "done", () => "failed"), late]);
+    clearTimeout(timer);
+    if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
+    return true;
+  } catch (e) {
+    // The end could not be written the usual way: what is known is written now, as the backstop would.
+    if (!ended) {
+      ended = true;
+      endNow?.(recordsNow(), reason);
+    }
+    throw e;
+  } finally {
+    ended = true;
+    clearTimeout(backstop);
+  }
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */
@@ -1795,7 +1836,9 @@ export function mergeBlockReason(how, report = {}) {
  * one rebase, rebaseMarkers, and a conflict after that rebase Blocks with REBASED_TWICE), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
  * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
- * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters). In the
+ * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
+ * or "stopped" (its Objective is stopped or waits for its restart, read first: nothing merges; the stop's tidy or the
+ * restart takes the PR out of the queue). In the
  * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
@@ -1807,6 +1850,11 @@ export function mergeBlockReason(how, report = {}) {
 export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective" }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
+  // A stopped Objective (its label removed, its issue closed, a restart asked for: stop.mjs stopCause) never merges,
+  // whoever runs this pass: the dispatcher, a review stage that has not seen the stop yet, a local loop following it.
+  // A read that fails stops nothing here: the stage's own watch and the dispatcher's stopped pass still see the stop.
+  const issueNow = await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); merging on`), null));
+  if (issueNow && stopCause(issueNow, objectiveLabel)) return "stopped";
   // A sibling merged first and this PR conflicts with the default branch: no merge or enqueue can take it (#2647).
   if (pr.mergeable_state === "dirty") return "conflict";
   let sha = await recordedMergeable(repo, prNumber, issue, opts);

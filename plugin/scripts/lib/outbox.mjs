@@ -10,6 +10,7 @@ import { closeSync, constants as C, createReadStream, existsSync, fstatSync, mkd
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
+import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
 import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
@@ -860,6 +861,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * box.error set, and the outbox refuses every later push.
    */
   box.push = async ({ sha = null } = {}) => {
+    // A stopped stage pushes nothing more (stop.mjs holdIfStopped).
+    await holdIfStopped();
     if (box.failed) return false;
     // What this push did, never an earlier one's: Factory's merge, a conflict, GitHub's text, whether the checkout took it.
     box.merged = null;

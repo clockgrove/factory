@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend } from "./backend.mjs";
+import { holdIfStopped } from "./stop.mjs";
 import { closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, rest, updatePr, upsertComment } from "./github.mjs";
 import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
@@ -491,6 +492,8 @@ export async function postNote(repo, issue, text, opts) {
  * a new one gets the issue's title and `fallbackBody`, sanitised. Returns the PR, or null when there is nothing to open.
  */
 export async function publishPr(repo, { branch, base, issue, issueTitle, prText, fallbackBody = "", splitPart = false, pr = null }, opts) {
+  // A stopped stage opens no PR and rewrites none from a half-written pr.md (stop.mjs holdIfStopped).
+  await holdIfStopped();
   const parsed = prText ? parsePrText(prText, issue) : null;
   const existing = pr || (await findPr(repo, branch, opts));
   const footer = prFooter(issue, splitPart);
@@ -552,6 +555,7 @@ const withFooter = (body, footer) => `${String(body || "").trimEnd()}\n\n${foote
  * comment, each under Factory's reply marker. Returns how many were posted.
  */
 export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
+  await holdIfStopped();
   const replies = parseReplies(text, allowed);
   let posted = 0;
   for (const r of replies) {

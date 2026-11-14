@@ -11,8 +11,13 @@ import { REVIEW_LABEL } from "./logic.mjs";
 export const STOP_POLL_MS = 60_000;
 /** How long a stopping stage waits for its harness passes to end (proc.mjs exec kills a stopped one within 15 s). */
 export const STOP_SETTLE_MS = 30_000;
-/** The longest a stopping stage takes to write its end before it exits anyway. */
+/**
+ * The longest a stopping stage takes before it exits anyway: past it, what is left of its end is written at once,
+ * synchronously (the usage, a lower bound; the spend line as the stop signal writes it), and the process exits.
+ */
 export const STOP_EXIT_MS = 120_000;
+/** How long a stopped stage gives its GitHub tidy (applyStop), its usage already written: the dispatcher finishes the rest. */
+export const STOP_TIDY_MS = 45_000;
 /**
  * How long after its stop a stopped Objective may still carry the Running label before the dispatcher tidies it (its
  * stage died, or never saw the stop): past what a live stage's own stop takes (a poll, the settle, the exit).
@@ -32,13 +37,31 @@ export function stopCause(issue, label) {
 /** The stop's cause in words, for logs, the progress comment and the stage's exit reason (its exit is `stopped`). */
 export const stopText = (cause, label = "factory:objective") => (cause === "closed" ? "the issue was closed" : `\`${label}\` was removed`);
 
-// This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, and who ends it.
-const STOP = { cause: null, ctl: new AbortController(), exit: false };
+// This process's stage: whether a stop was asked for (its cause), the abort its harness passes listen to, who ends it
+// (`exit`), and whether its own exit is under way (`committed`: an exit being applied, or a merge), which a later stop
+// never overrides.
+const STOP = { cause: null, ctl: new AbortController(), exit: false, committed: false };
 
 /** The signal every harness pass of this stage is stopped by (harness.mjs runOnce). */
 export const stageStopSignal = () => STOP.ctl.signal;
 /** The cause of this stage's stop, or null while it runs on. */
 export const stageStopped = () => STOP.cause;
+/** Whether the stage is stopping: a stop was asked for and no exit of its own was under way before it. */
+export const stopping = () => !!STOP.cause && !STOP.committed;
+
+/**
+ * The stage commits to its own exit (applying it, or merging): true from then on, and a stop that comes later ends
+ * nothing (session.mjs stopStage; a state label it put back is the dispatcher's to tidy). False when a stop came first:
+ * the caller parks, and the stop writes the end.
+ */
+export function commitExit() {
+  if (STOP.committed) return true;
+  if (STOP.cause) return false;
+  STOP.committed = true;
+  return true;
+}
+/** Whether the stage committed to its own exit. */
+export const exitCommitted = () => STOP.committed;
 
 /** Ask this stage to stop: every running harness pass is ended and none starts after. False when it was asked already. */
 export function requestStageStop(cause) {
@@ -61,14 +84,32 @@ export function claimExit() {
 /** Never settles: what a stage's main flow waits on once its stop (or its own end) owns the exit. */
 export const parked = () => new Promise(() => {});
 
-/** Resolves at once while the stage runs on; parks it once a stop was asked for, so it makes no change after the stop. */
-export const holdIfStopped = () => (STOP.cause ? parked() : Promise.resolve());
+/**
+ * Resolves at once while the stage runs on; parks it once it is stopping, so it makes no change after the stop. Every
+ * step that writes to GitHub or starts a command on the stage's behalf waits on it: a harness pass (harness.mjs
+ * runOnce), a repository command (checkout.mjs sh), a push (outbox.mjs), the PR's text (handoff.mjs publishPr), the
+ * replies (handoff.mjs postReplies) and every exit.
+ */
+export const holdIfStopped = () => (stopping() ? parked() : Promise.resolve());
+
+/**
+ * Before the stage's last changes (its exit, its merge): its issue read once more, since the watch reads it only once
+ * a minute. A stopped Objective asks for the stop (`onStop`) and parks the caller; a read that fails goes on.
+ */
+export async function confirmRunning({ read, label, onStop }) {
+  await holdIfStopped();
+  const cause = stopCause(await read().catch(() => null), label);
+  if (!cause || STOP.committed) return true;
+  onStop(cause);
+  return parked();
+}
 
 /** Tests only: a fresh stage state. */
 export function resetStageStop() {
   STOP.cause = null;
   STOP.ctl = new AbortController();
   STOP.exit = false;
+  STOP.committed = false;
 }
 
 /**
@@ -142,7 +183,8 @@ export async function applyStop(repo, issue, { pr = undefined, closed = false, p
  * The stopped stage's records for its usage: each harness pass this stage ran (harness.mjs stagePasses). A pass the
  * stop ended before its harness reported dollars (a Claude run prints them only in its last line) counts its stream's
  * live reading (`stoppedUsd`, harness.mjs runOnce), a lower bound, so the stop's spend is recorded once and not lost.
+ * `open`: the passes still running (harness.mjs openPasses), each at its live reading, a lower bound too.
  */
-export function stoppedRecords(passes) {
-  return (passes || []).map((r) => (r && r.stopped && !r.noRun && !Number.isFinite(r.usd) && Number.isFinite(r.stoppedUsd) ? { ...r, usd: r.stoppedUsd, usdLowerBound: true, basis: "lower bound: the stage was stopped before the harness reported its cost; the live reading of its stream" } : r));
+export function stoppedRecords(passes, open = []) {
+  return [...(passes || []), ...open].map((r) => (r && r.stopped && !r.noRun && !Number.isFinite(r.usd) && Number.isFinite(r.stoppedUsd) ? { ...r, usd: r.stoppedUsd, usdLowerBound: true, basis: "lower bound: the stage was stopped before the harness reported its cost; the live reading of its stream" } : r));
 }

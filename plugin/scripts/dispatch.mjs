@@ -522,7 +522,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         });
         if (how === "merged" || how === "queued") merged.push(issue.number);
         if (report.watch) queueWatch.push(open.number);
-        if (how && !["not-recorded", "pending", "in-queue", "not-open", "held"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
+        if (how && !["not-recorded", "pending", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
         if (why) {
           statuses[issue.number] = "Blocked";

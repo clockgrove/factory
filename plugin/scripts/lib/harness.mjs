@@ -22,7 +22,7 @@ import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
-import { stageStopSignal, stageStopped } from "./stop.mjs";
+import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -515,8 +515,8 @@ function stageSpendOf(base, reads) {
  * A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are
  * none). `session`: the session it resumes, null for a fresh one.
  */
-export function meterPass(meter, { session = null } = {}) {
-  STAGE_SPEND.open.set(meter, { session });
+export function meterPass(meter, { session = null, label = "run", harness = null, model = null } = {}) {
+  STAGE_SPEND.open.set(meter, { session, label, harness, model });
   return {
     end: async (usd) => {
       if (!STAGE_SPEND.open.delete(meter)) return;
@@ -853,13 +853,35 @@ export async function runHarness(opts) {
 
 async function runOnce(opts) {
   RUNNING += 1;
+  let rec;
   try {
-    const rec = await runPass(opts);
+    rec = await runPass(opts);
     PASSES.push(rec);
-    return rec;
   } finally {
     RUNNING -= 1;
   }
+  // A pass the stage's stop ended (or refused): its caller never goes on, since what it would do next (push, publish,
+  // run the validation commands again) is the stopped run's. The stop writes the stage's end (session.mjs stopStage).
+  if (rec.stopped && stopping()) await parked();
+  return rec;
+}
+
+/**
+ * The passes still running, each as a record at its live reading (a lower bound): what a stage that stops before
+ * they end counts for them (stop.mjs stoppedRecords). Read at once, with no await (live-spend.mjs `now`).
+ */
+export function openPasses() {
+  const out = [];
+  for (const [m, { label = "run", harness = null, model = null }] of STAGE_SPEND.open) {
+    let usd = 0;
+    try {
+      usd = Math.max(0, Number(m.now?.()?.usd) || 0);
+    } catch {
+      usd = 0;
+    }
+    out.push({ harness, model, label, usd, usdLowerBound: true, ok: false, stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
+  }
+  return out;
 }
 
 async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env: given, timeoutMs, eventsFile, label = "run", effort, onLine = null, onResume = null, idleMs = HARNESS_IDLE_MS, signal: own = null, reviewer = false }) {
@@ -971,7 +993,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
   // The same reading is the stage's spend so far in its progress comment (stageSpendSoFar), with or without a relay.
   const live = liveSpend(harness, model || null, { prior, creditUsd, rollout: relay && harness === "codex" ? codexRolloutReader(runner, childEnv) : null });
-  const metered = meterPass(live, { session: resume || null });
+  const metered = meterPass(live, { session: resume || null, label, harness, model: model || null });
   if (eventsFile && !STAGE_SPEND.dir) Object.assign(STAGE_SPEND, { dir: dirname(eventsFile), harness });
   relay?.beginPass(maxUsd, live.usd);
   const lines = (l) => {

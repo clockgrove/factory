@@ -1074,6 +1074,36 @@ export const isPlaceholder = (body) => String(body || "").includes(PLACEHOLDER_M
 
 // -------------------------------------------------------------- review diff
 
+const GIT_ESCAPES = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+/**
+ * A path as `git diff` prints it on a `+++` line, unquoted: git puts a name holding a non-ASCII byte, a control
+ * character, `"` or `\\` in double quotes with C escapes and each non-ASCII byte in octal (`"b/caf\\303\\251.md"`), and ends
+ * a name holding a space with a tab. A malformed quoted name comes back as printed.
+ */
+export function gitDiffPath(raw) {
+  const t = String(raw).replace(/\t$/, "").trim();
+  if (!(t.length >= 2 && t.startsWith('"') && t.endsWith('"'))) return t;
+  const bytes = [];
+  const body = Array.from(t.slice(1, -1));
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i];
+    if (c !== "\\") {
+      bytes.push(...Buffer.from(c, "utf8"));
+      continue;
+    }
+    const n = body[i + 1];
+    const octal = body.slice(i + 1, i + 4).join("");
+    if (Object.hasOwn(GIT_ESCAPES, n)) {
+      bytes.push(GIT_ESCAPES[n]);
+      i += 1;
+    } else if (/^[0-3][0-7]{2}$/.test(octal)) {
+      bytes.push(parseInt(octal, 8));
+      i += 3;
+    } else return t;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
 /** The right-side line numbers a unified diff touches, per file: {path: Set(lines)} and first changed line. */
 export function diffLines(diff) {
   const files = {};
@@ -1086,7 +1116,7 @@ export function diffLines(diff) {
       continue;
     }
     if (inHeader && raw.startsWith("+++ ")) {
-      const p = raw.slice(4).replace(/^b\//, "").trim();
+      const p = gitDiffPath(raw.slice(4)).replace(/^b\//, "");
       path = p === "/dev/null" ? null : p;
       if (path) files[path] ??= { lines: new Set(), first: null };
       continue;

@@ -223,12 +223,16 @@ export function neededSecrets(inputs) {
 }
 const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
-async function secretChecks({ inputs, repo }) {
+export async function secretChecks({ inputs, repo }) {
   const names = new Set();
   try {
-    for (const path of [`repos/${repo.full}/actions/secrets`, `repos/${repo.full}/actions/organization-secrets`]) {
-      for (const s of (await rest(`${path}?per_page=100`, {}))?.secrets || []) names.add(s.name);
-    }
+    for (const s of (await rest(`repos/${repo.full}/actions/secrets?per_page=100`, {}))?.secrets || []) names.add(s.name);
+    // A repository a user owns has no organization: GitHub answers this list with 422, which means none, not unreadable.
+    const org = await rest(`repos/${repo.full}/actions/organization-secrets?per_page=100`, {}).catch((e) => {
+      if (e?.status === 422) return { secrets: [] };
+      throw e;
+    });
+    for (const s of org?.secrets || []) names.add(s.name);
   } catch (e) {
     return [WARN("secrets", `could not list secret names (${String(e.message).slice(0, 100)})`, "run doctor with a gh login that administers the repository")];
   }

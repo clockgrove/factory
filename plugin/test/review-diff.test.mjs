@@ -442,3 +442,24 @@ test("review diff: findings a 422 put in the review body count as unaddressed, r
     globalThis.fetch = realFetch;
   }
 });
+
+test("a file name git quotes in its diff (non-ASCII, a quote, an emoji) or ends with a tab (a space) maps to its real path, and a comment on it stays on its line", () => {
+  const dir = mkdtempSync(join(tmpdir(), "quoted-"));
+  try {
+    const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "a");
+    const names = ["café.md", "a b.md", 'say "hi".md', "back\\slash.md", "🦝.md", "plain.md"];
+    for (const n of names) writeFileSync(join(dir, n), "one\ntwo\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "b");
+    const diff = git("-c", "core.quotePath=true", "diff", "HEAD~1", "HEAD");
+    assert.match(diff, /\+\+\+ "b\/caf\\303\\251\.md"/);
+    assert.deepEqual(Object.keys(lineMap(diff)).sort(), [...names].sort());
+    for (const n of names) assert.deepEqual(lineMap(diff)[n], { first: 1, lines: [1, 2] });
+    const [c] = snapComments([{ path: "café.md", line: 2, body: "Finding." }], diff);
+    assert.deepEqual(c, { path: "café.md", line: 2, side: "RIGHT", body: "Finding." });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

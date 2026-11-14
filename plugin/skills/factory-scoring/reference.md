@@ -9,6 +9,10 @@ Lookup detail for the factory-scoring skill. SKILL.md says when to load each sec
 - **Copilot.** Token counts, premium requests and AI credits (`totalNanoAiu`, billionths of a credit) from `copilot --usage-output-file`, which the worker writes beside `events.jsonl`. Dollars are the credits at `copilot_credit_usd`, GitHub's published $0.01 per credit by default. A resumed session reports its running total, so each pass counts only its own share. An artifact with no credits is `unmetered`. Unit: USD. Basis: harness-reported AI credits.
 - **Sandbox cost (any harness).** A cloud sandbox stage's own cost is booked once, at its end: `vendor` in its usage artifact beside the harness's dollars, and its vendor comment's spend line (`vendorUsd`) beside its progress comment's model dollars. Report it apart from the model's dollars, with its basis (list rates, or the session's ceiling as an upper bound).
 
+## Harness and models
+
+Each stage's usage record carries `ran`: the worker, sub-agent and reviewer models it ran on (null for a harness's own default) and `labels`, the `factory:harness:`, `factory:model:`, `factory:subagent-model:` and `factory:reviewer-model:` labels that chose them; none means the repository's defaults. It is in `result.json`, and for a local stage in the `models` and `labels` of the `<!-- factory:harness -->` line of its progress comment. Report the worker's model as the harness reported it (the work stage's `model`), else its `ran.worker`; the sub-agent model from the last work stage's `ran`; the reviewer's from the last review stage's `ran`; and the labels.
+
 ## Reading the artifacts
 
 The issue gives the label time, the plan comment, the Blocked comment and any question. The PR gives the title, body, review comments, replies and merge time. The job log gives the runner minutes, the validation reruns and the exit (delivered, question, blocked). The usage artifact gives the tokens and dollars.

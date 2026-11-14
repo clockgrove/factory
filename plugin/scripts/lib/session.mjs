@@ -765,8 +765,8 @@ export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
   /^[A-Za-z0-9-]{1,60}$/.test(env.FACTORY_PROGRESS_RUN || "") ? env.FACTORY_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
 /** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 
@@ -790,6 +790,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let read = null;
   let triage = null;
   let asked = null;
+  // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
+  let ran = null;
   let lastWrite = 0;
   let writing = null;
   // The comment as the last write that landed left it: its id and the spend its line shows.
@@ -803,7 +805,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ...interim, read, triage, asked });
+    const tail = progressTail({ harness, model, ran, ...interim, read, triage, asked });
     return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
   };
   /**
@@ -853,6 +855,15 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     // A status write still in flight lands first, so it never overwrites this one (the final spend line with it).
     await writing;
     await write();
+  };
+  /**
+   * The harness and models the stage runs on (choice.mjs ranWith), as the Objective's labels chose them: the harness line
+   * names them from the next write. `model` stays the stage's own: the reviewer's on a review stage.
+   */
+  progress.ran = (r) => {
+    ran = r;
+    harness = r.harness;
+    model = (stage === "review" ? r.reviewer : r.worker) || "";
   };
   /** The live status line (what the harness is doing now); written at most every `everyMs`, never twice at once. */
   progress.live = (text, { everyMs = 120_000, force = false } = {}) => {
@@ -1333,7 +1344,7 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false, workerKey = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress = false, workerKey = null, ran = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
@@ -1341,6 +1352,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     harness,
     harnessVersion,
     model: merged.model ?? model ?? null,
+    // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default) and the harness
+    // and model labels that chose them (none: the repository's defaults).
+    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [] } } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,

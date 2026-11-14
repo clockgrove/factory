@@ -25,7 +25,7 @@ async function fakeGitHub() {
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
       if (req.method === "GET" && /per_page=/.test(req.url)) return res.end("[]");
-      if (req.method === "GET" && /\/issues\/7$/.test(req.url)) return res.end(JSON.stringify({ number: 7, state: "open", labels: [], body: "" }));
+      if (req.method === "GET" && /\/issues\/7$/.test(req.url)) return res.end(JSON.stringify({ number: 7, state: "open", labels: [{ name: "factory:objective" }], body: "" }));
       if (req.method === "GET" && /\/user$/.test(req.url)) return res.end(JSON.stringify({ login: "me", type: "User" }));
       if ((req.method === "POST" || req.method === "PATCH") && /\/comments/.test(req.url)) {
         const text = JSON.parse(body || "{}").body || "";
@@ -48,7 +48,7 @@ const lineOf = (body) => JSON.parse(SPEND.exec(body)?.[1] ?? "null");
 test("a local work stage that ran no harness pass ends with a $0 spend line, not none", async () => {
   const gh = await fakeGitHub();
   const home = mkdtempSync(join(tmpdir(), "spend-"));
-  // The fake repository fails doctor's job checks: the stage Blocks before any harness pass.
+  // The fake GitHub names no author for the Objective: the stage Blocks before any harness pass.
   const child = spawn(process.execPath, [join(SCRIPTS, "worker.mjs"), "--repo", "owner/repo", "--issue", "7", "--checkout", home, "--usage-dir", join(home, "usage"), "--token-fd", "3"], {
     env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_LOCAL: "1" },
     stdio: ["ignore", "pipe", "pipe", "pipe"],
@@ -62,6 +62,7 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   const last = gh.progress.at(-1);
   assert.ok(last, `the stage wrote no progress comment:\n${out}`);
   assert.match(last, /exit: blocked/, out);
+  assert.doesNotMatch(last, /crashed/, "a Block by its own check, not a crash");
   assert.deepEqual(lineOf(last), { usd: 0 }, last);
 });
 

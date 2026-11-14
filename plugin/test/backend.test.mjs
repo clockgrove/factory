@@ -744,6 +744,8 @@ test("local Copilot runs only inside the outer sandbox: serve refuses a host whe
   pinGitDir(join(local.ws(8), "repo"), gitPinFile(local.ws(8)));
   const blocked = [];
   local.block = async (...a) => blocked.push(a);
+  // The Objective's labels choose nothing: the loop's own harness.
+  local.harnessFor = async () => ({ ok: true, harness: "copilot" });
   local.stageEnv = () => {
     throw Object.assign(new Error("local mode runs Copilot only inside the outer sandbox, which does not start on this host: slirp4netns did not configure its interface: x"), { code: "outer-sandbox" });
   };

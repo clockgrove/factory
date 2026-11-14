@@ -26,7 +26,8 @@ import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, con
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
-import { authorGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { ranWith } from "./lib/choice.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
@@ -101,6 +102,8 @@ async function main() {
   const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
   let reentry = null;
+  // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
+  let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
@@ -124,7 +127,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -173,18 +176,7 @@ async function main() {
     await finish("blocked", agentError);
     return;
   }
-  // 1. Doctor's job checks: a misconfigured repository Blocks with one line, not a run.
-  const checks = await jobChecks({ inputs, repo, token: keeper.token, app, checkout: factoryTree, notice: !!access.notice });
-  const failed = checks.filter((c) => c.status === "FAIL");
-  for (const c of checks) log(`${c.status} ${c.name}${c.detail ? `: ${c.detail}` : ""}${c.fix && c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
-  if (failed.length) {
-    const reason = `doctor: ${failed.map((c) => `${c.name} (${c.fix || c.detail})`).join("; ")}`;
-    await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
-    await finish("blocked", reason);
-    return;
-  }
-
-  // 2. The issue.
+  // 1. The issue.
   let issueData = await getIssue(repo, issue, token);
   const labels = (issueData.labels || []).map((l) => l.name);
   // A draft (factory:draft) never runs, its Objective label on or not (lib/stop.mjs stopCause): nothing is claimed or spent.
@@ -221,7 +213,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -255,13 +247,39 @@ async function main() {
   issueData = trusted.issueData;
   // The text its plan was made from (objective-trust.mjs planGate): changed since, with no label applied after the last
   // work stage started from it, the stage Blocks; with one, the plan is made again from this text.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, labeledAt, work: true, pr: await findPr(repo, `factory/${issue}`, token).catch(() => null), objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
+  const prNow = await findPr(repo, `factory/${issue}`, token).catch(() => null);
+  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
   if (!planned.ok) {
     log(planned.reason);
     await finish("blocked", planned.reason);
     return;
   }
   if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
+
+  // The harness and models this Objective runs on (objective-trust.mjs choiceGate): its harness and model labels, read
+  // with the text, over the repository's defaults; a label no writer applied, two of one kind, a model the harness cannot
+  // run, or a harness other than the one this stage was prepared for Blocks before any harness.
+  const chosen = await choiceGate({ repo, issue, labels: trusted.labels, args, pr: prNow, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
+  if (!chosen.ok) {
+    log(chosen.reason);
+    await finish("blocked", chosen.reason);
+    return;
+  }
+  Object.assign(inputs, chosen.inputs);
+  chosenLabels = chosen.labels;
+  progress.ran(ranWith(inputs, chosenLabels));
+  if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
+
+  // 2. Doctor's job checks, for the harness this Objective runs on: a misconfigured repository Blocks with one line, not a run.
+  const checks = await jobChecks({ inputs, repo, token: keeper.token, app, checkout: factoryTree, notice: !!access.notice });
+  const failed = checks.filter((c) => c.status === "FAIL");
+  for (const c of checks) log(`${c.status} ${c.name}${c.detail ? `: ${c.detail}` : ""}${c.fix && c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
+  if (failed.length) {
+    const reason = `doctor: ${failed.map((c) => `${c.name} (${c.fix || c.detail})`).join("; ")}`;
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
+    await finish("blocked", reason);
+    return;
+  }
 
   // One repository per Objective (lib/one-repo.mjs): a body that names another repository (declaredQuestion) is a
   // Question before any branch work or harness spend. An open PR the Objective already has goes back to a draft with

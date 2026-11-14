@@ -7,19 +7,28 @@
 // What text the plan was made from (planGate): a stage never goes on with a plan and code made from one text and an
 // Objective that now says another.
 import { createHash } from "node:crypto";
-import { collaboratorPermission, graphql, issueRenamedAt, primeSelf, rest } from "./github.mjs";
+import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
+import { choiceLabels, choiceOf, chosenInputs, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
 const ACTOR = "__typename login ... on User { databaseId }";
-const QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body lastEditedAt author { ${ACTOR} } editor { ${ACTOR} } title } } }`;
+const QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body lastEditedAt author { ${ACTOR} } editor { ${ACTOR} } title labels(first: 100) { nodes { name } } } } }`;
+/** The label names a GraphQL issue node carries. */
+const labelNames = (node) => (node?.labels?.nodes || []).map((l) => l?.name).filter((n) => typeof n === "string");
 
 /** Text as an edit changes it: line ends as LF and no trailing whitespace (a save that changed nothing else is no edit). */
 export const settled = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").trimEnd();
-/** The Objective's text as one value: the SHA-256 of its title and body as GitHub returns them, settled. */
-export const objectiveSha = (title, body) => createHash("sha256").update(JSON.stringify([settled(title), settled(body)])).digest("hex");
+/**
+ * The Objective's text as one value: the SHA-256 of its title and body as GitHub returns them, settled, and of its
+ * harness and model labels (choice.mjs choiceLabels) when it has any: one added, removed or changed is an edit too.
+ */
+export const objectiveSha = (title, body, labels = []) => {
+  const chosen = choiceLabels(labels);
+  return createHash("sha256").update(JSON.stringify(chosen.length ? [settled(title), settled(body), chosen] : [settled(title), settled(body)])).digest("hex");
+};
 
 /** An actor as a login a person can read: an App as `<slug>[bot]`. */
 const shown = (a) => (a?.__typename === "Bot" ? `${a.login}[bot]` : a.login);
@@ -52,7 +61,8 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
     if (!(await vouches(repo, actor, opts, gh))) return { ok: false, role, reason: `the issue's ${role} \`${shown(actor)}\` cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`, body };
   }
   const title = typeof node?.title === "string" ? node.title : null;
-  return { ok: true, reason: "", body, title, sha: objectiveSha(title, body), editedAt: node?.lastEditedAt ?? null, people: roles.map(([role, a]) => [role, a.login]) };
+  const labels = labelNames(node);
+  return { ok: true, reason: "", body, title, labels, sha: objectiveSha(title, body, labels), editedAt: node?.lastEditedAt ?? null, people: roles.map(([role, a]) => [role, a.login]) };
 }
 
 /**
@@ -66,13 +76,13 @@ export const AUTHOR_FIX = {
 
 /**
  * The issue as a stage acts on it: `issueData` (the REST read) with the title and body read with the people who vouch
- * for them, `sha` (that text's objectiveSha) and `editedAt` (the body's last edit, GitHub's), or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
+ * for them, `labels` (the label names from that same read), `sha` (that text's objectiveSha) and `editedAt` (the body's last edit, GitHub's), or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
  * the Blocked notice's remedy for who failed.
  */
 export async function trustedIssue(repo, issue, issueData, opts, gh) {
   const t = await objectiveTrusted(repo, issue, opts, { what: "Factory acts on none of its text", ...(gh ? { gh } : {}) });
   if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role] };
-  return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, sha: t.sha, editedAt: t.editedAt, people: t.people };
+  return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, labels: t.labels, sha: t.sha, editedAt: t.editedAt, people: t.people };
 }
 
 /**
@@ -115,9 +125,12 @@ export async function startedAt(repo, issue, label, opts) {
   return startTime((await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label);
 }
 
-/** When the title or body was last changed: the body's `lastEditedAt` (GitHub's) and the title's latest rename. */
-async function textEditedAt(repo, issue, lastEditedAt, opts, renamed = issueRenamedAt) {
-  const times = [lastEditedAt, await renamed(repo, issue, opts)].filter((t) => Number.isFinite(Date.parse(t)));
+/**
+ * When the title, body or harness and model labels last changed: the body's `lastEditedAt` (GitHub's), and the title's
+ * latest rename and the latest choice label added or removed (the timeline's).
+ */
+async function textEditedAt(repo, issue, lastEditedAt, opts, changed = issueTextChangedAt) {
+  const times = [lastEditedAt, await changed(repo, issue, opts, isChoiceLabel)].filter((t) => Number.isFinite(Date.parse(t)));
   return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 
@@ -147,13 +160,13 @@ export function planTextState({ sha, plan, labeledAt = null, editedAt = null, wo
  * plan comment (handoff.mjs planSync). The work stage records this text with the latest label time, `labeledAt` read
  * before the text (an edit and a re-applied label between the two reads then count as after the plan), and writes it at
  * once on a plan made from the same text, so a later edit with no new label is told from one the person re-applied the
- * label after; the review stage keeps the plan's record. `read` (planComment, labeledAt, renamedAt) is a test's own.
+ * label after; the review stage keeps the plan's record. `read` (planComment, labeledAt, changedAt) is a test's own.
  */
 export async function planGate({ repo, issue, sha, editedAt = null, labeledAt, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, read = {} }) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? startedAt)(repo, issue, objectiveLabel, opts)) : null;
-  const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.renamedAt) : null;
+  const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
   const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work });
   if (state === "changed") {
     if (before) await before();
@@ -169,27 +182,82 @@ export async function planGate({ repo, issue, sha, editedAt = null, labeledAt, w
 
 /**
  * The plan comment and planTextState's answer for a stage that never plans again (a session's `factory issue` and
- * `post-review`): {posted, state}. `sha` and `editedAt` from trustedIssue; `read` (planComment, renamedAt) a test's own.
+ * `post-review`): {posted, state}. `sha` and `editedAt` from trustedIssue; `read` (planComment, changedAt) a test's own.
  */
 export async function planStateNow(repo, issue, { sha, editedAt = null }, opts, read = {}) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
-  const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.renamedAt) : null;
+  const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
   return { posted, state: planTextState({ sha, plan: posted, editedAt: edited }) };
 }
 
 /**
  * Whether the Objective's text changed since its plan was made (the merge's check, session.mjs mergeReadyOne): its
- * title and body now against the plan comment, as planTextState decides for a review. False with no plan comment.
- * `gh` (graphql), `read` and `renamed` are a test's own.
+ * title, body and harness and model labels now against the plan comment, as planTextState decides for a review. False
+ * with no plan comment. `gh` (graphql), `read` and `changed` are a test's own.
  */
-export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, read = planComment, renamed = issueRenamedAt } = {}) {
+export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, read = planComment, changed = issueTextChangedAt } = {}) {
   await knowSelf(opts);
   const posted = await read(repo, issue, opts);
   if (!posted) return false;
   const node = (await gh.graphql(QUERY, { owner: repo.owner, name: repo.name, number: Number(issue) }, opts))?.repository?.issue;
   if (!node) throw new Error(`#${issue} could not be read`);
-  const sha = objectiveSha(typeof node.title === "string" ? node.title : null, typeof node.body === "string" ? node.body : "");
-  const editedAt = posted.record ? null : await textEditedAt(repo, issue, node.lastEditedAt ?? null, opts, renamed);
+  const sha = objectiveSha(typeof node.title === "string" ? node.title : null, typeof node.body === "string" ? node.body : "", labelNames(node));
+  const editedAt = posted.record ? null : await textEditedAt(repo, issue, node.lastEditedAt ?? null, opts, changed);
   return planTextState({ sha, plan: posted, editedAt }) === "changed";
+}
+
+/** What a Blocked notice tells a person to do about a harness or model label Factory did not act on. */
+export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective on the repository's defaults, then re-applies `factory:objective`.";
+
+/**
+ * The harness and model labels among `names` (the issue's, read with its text) as Factory may act on them: choice.mjs
+ * choiceOf, and each label's latest `labeled` event on the timeline by a person who can push or a pinned maintainer.
+ * Returns {ok, choice, labels} or {ok: false, reason, fix}, the reason naming the label. `gh` (labelers, permission) is a
+ * test's own.
+ */
+export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
+  const parsed = choiceOf(names);
+  if (!parsed.ok || !parsed.labels.length) return parsed;
+  const read = { labelers: labelersOf, permission: collaboratorPermission, ...gh };
+  const by = await read.labelers(repo, issue, parsed.labels, opts);
+  for (const label of parsed.labels) {
+    const a = by?.[label]?.actor;
+    // The REST timeline's actor, in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches.
+    const actor = a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null;
+    if (!actor) return { ok: false, labels: parsed.labels, reason: `who applied \`${label}\` could not be read from the issue's timeline, so Factory does not run on its choice`, fix: CHOICE_FIX };
+    if (!(await vouches(repo, actor, opts, read))) return { ok: false, labels: parsed.labels, reason: `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so Factory does not run on its choice`, fix: CHOICE_FIX };
+  }
+  return parsed;
+}
+
+/**
+ * The inputs an Objective runs on before any stage starts (the launcher, the local loop): its labels read now,
+ * choiceTrusted, then choice.mjs chosenInputs over `args` and `env`. {ok, inputs, labels} or {ok: false, reason, fix}.
+ * `gh` (issue, labelers, permission) is a test's own.
+ */
+export async function objectiveInputs({ repo, issue, args = {}, env = process.env, opts, gh = {} }) {
+  const names = ((await (gh.issue ?? getIssue)(repo, issue, opts))?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
+  const t = await choiceTrusted(repo, issue, names, opts, gh);
+  if (!t.ok) return t;
+  const c = chosenInputs({ args, env, choice: t.choice });
+  return c.ok ? { ...c, labels: t.labels } : c;
+}
+
+/**
+ * Every stage's harness and models (the worker, the review job), after authorGate: `labels` (trustedIssue's, read with
+ * the text) through choiceTrusted and chosenInputs, then against the harness this stage's route prepared
+ * (FACTORY_STAGE_HARNESS: the Action's install, the launcher's sandbox credential, the local loop's sandbox; none on a
+ * route that prepares every harness alike). A refusal Blocks (cause setup) through `apply` after `before`, before any
+ * harness, and returns {ok: false, reason}; else {ok, inputs, labels}, the stage running on `inputs` (choice.mjs
+ * CHOSEN_FIELDS). `gh` (labelers, permission) is a test's own.
+ */
+export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {
+  const t = await choiceTrusted(repo, issue, labels, opts, gh);
+  const c = t.ok ? chosenInputs({ args, env, choice: t.choice }) : t;
+  const refusal = c.ok ? routeProblem(env.FACTORY_STAGE_HARNESS, c.inputs.harness) : c;
+  if (!refusal) return { ...c, labels: t.labels };
+  if (before) await before();
+  await apply(repo, { issue, pr, exit: "blocked", reason: refusal.reason, fix: refusal.fix, cause: "setup", notify, stage }, opts);
+  return { ok: false, reason: refusal.reason };
 }

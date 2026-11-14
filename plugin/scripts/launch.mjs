@@ -35,6 +35,7 @@ import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TR
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
+import { objectiveInputs } from "./lib/objective-trust.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
@@ -75,6 +76,17 @@ const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "repo", "sandbox", "app_id
 /** The harness's credentials, by harness: only the one the stage's harness needs goes into the sandbox. */
 const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexGatewayKey", "codexApiKey"], copilot: ["copilotGithubToken"] };
 const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
+/** The secrets that carry each harness's credential to the launch job (workflow-template.yml), for a refusal's fix. */
+const HARNESS_SECRET_NAMES = { claude: "ANTHROPIC_API_KEY (CLAUDE_CODE_OAUTH_TOKEN with credential: plan)", codex: "FACTORY_CODEX_GATEWAY_KEY or CODEX_API_KEY", copilot: "COPILOT_GITHUB_TOKEN" };
+/**
+ * {reason, fix} when the launcher holds no credential for the stage's harness (HARNESS_SECRETS), else null: the stage
+ * would Block on it inside its sandbox, after the sandbox's cost, so the launcher Blocks first.
+ */
+export function missingCredential(inputs) {
+  if ((HARNESS_SECRETS[inputs.harness] || []).some((k) => inputs[k])) return null;
+  return { reason: `no ${inputs.harness} credential reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness"} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
+}
+
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
 const GITHUB_CONTEXT = ["GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REPOSITORY_OWNER", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SERVER_URL", "GITHUB_API_URL", "GITHUB_GRAPHQL_URL", "GITHUB_WORKFLOW_REF"];
 
@@ -315,8 +327,11 @@ export function stageEnvironment({ inputs, env = process.env, stage, issue, pr, 
     const v = input(name, { env });
     if (v !== "") out[`FACTORY_${name.toUpperCase()}`] = v;
   }
-  // The harness and its models as this run resolved them (a harness override takes its own defaults), not as written.
-  Object.assign(out, { FACTORY_HARNESS: inputs.harness, FACTORY_MODEL: inputs.model, FACTORY_SUBAGENT_MODEL: inputs.subagentModel, FACTORY_REVIEWER_MODEL: inputs.reviewerModel, FACTORY_REVIEWER_EFFORT: inputs.reviewerEffort, FACTORY_EFFORT: inputs.effort });
+  // The harness and its models as this run resolved them (a harness override or the Objective's labels take that harness's
+  // own defaults), not as written.
+  // FACTORY_STAGE_HARNESS: the harness this start prepared the stage for (its credential below, its CLI in the sandbox); a
+  // stage whose labels name another by the time it runs Blocks (objective-trust.mjs choiceGate).
+  Object.assign(out, { FACTORY_HARNESS: inputs.harness, FACTORY_STAGE_HARNESS: inputs.harness, FACTORY_MODEL: inputs.model, FACTORY_SUBAGENT_MODEL: inputs.subagentModel, FACTORY_REVIEWER_MODEL: inputs.reviewerModel, FACTORY_REVIEWER_EFFORT: inputs.reviewerEffort, FACTORY_EFFORT: inputs.effort });
   for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) if (!out[k]) delete out[k];
   for (const k of GITHUB_CONTEXT) if (env[k]) out[k] = env[k];
   // Codex with both keys gets the gateway's only: the one it runs on (harness.mjs credentialEnv).
@@ -792,8 +807,8 @@ export function startFailure({ code }) {
 export const failedStartCause = (kind) => (kind === "quota" ? "provider-quota" : "factory");
 
 /** The Objective Blocked with Factory's own reason (codes and times) and its cause (logic.mjs BLOCK_CAUSES). */
-async function block({ repo, n, inputs, opts }, reason, cause = "factory") {
-  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch" }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
+async function block({ repo, n, inputs, opts }, reason, cause = "factory", fix = null) {
+  await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch", ...(fix ? { fix } : {}) }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
   return { exit: "blocked", reason, failed: true };
 }
 
@@ -959,6 +974,15 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // A review starts on its PR: the event's, else the Objective's open PR on its factory branch; without one nothing starts.
   const pr = stage === "review" ? (wanted ?? (await findPr(repo, `factory/${n}`, opts))?.number ?? null) : null;
   if (stage === "review" && !Number.isInteger(pr)) return out({ exit: "skipped", reason: `#${n}: a review is due but the Objective has no open PR` });
+  // The harness and models this Objective runs on (objective-trust.mjs objectiveInputs), before the claim and any sandbox
+  // call: a label no writer applied, two of one kind or a model its harness cannot run Blocks here, before any spend. The
+  // stage then gets that harness's credential, its CLI checked in the sandbox, and FACTORY_STAGE_HARNESS (stageEnvironment).
+  await primeWriters(repo, opts, { maintainers: inputs.maintainers });
+  const chosen = await objectiveInputs({ repo, issue: n, env: process.env, opts });
+  if (!chosen.ok) return out(await block(run, `launcher: ${chosen.reason}`, "setup", chosen.fix));
+  Object.assign(inputs, chosen.inputs);
+  const noKey = missingCredential(inputs);
+  if (noKey) return out(await block(run, `launcher: ${noKey.reason}`, "setup", noKey.fix));
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;
   const base = { vendor: inputs.sandbox, stage, event: eventName, eventAt: ctx.eventAt, run: runId, budgetUsd: inputs.maxUsd, home: prior?.home ?? null };

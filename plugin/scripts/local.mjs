@@ -44,7 +44,7 @@ import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -204,14 +204,7 @@ export function repoFromRemote(url) {
  */
 export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform() } = {}) {
   const problems = [];
-  if (!["claude", "codex", "copilot"].includes(harness)) problems.push(`unknown harness ${harness}`);
-  for (const bin of ["git", "gh", harness]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
-  if (harness === "copilot") {
-    // Copilot's sandbox reads its policy from its own home, so the developer's `copilot login` is not used there.
-    if (!copilotToken) problems.push(`no Copilot token: create a fine-grained token with the Copilot Requests permission and save it to ${copilotTokenFile()} (chmod 600) or export COPILOT_GITHUB_TOKEN`);
-    // Without these Copilot's sandbox cannot start, and every command fails while the run still exits 0.
-    if (platform() === "linux") for (const bin of ["slirp4netns", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; Copilot's sandbox needs it (sudo apt-get install -y slirp4netns iptables)`);
-  }
+  for (const bin of ["git", "gh"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
   if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
   if (!onPath("rg")) problems.push("rg (ripgrep) is not on PATH; the sandbox needs it");
   if (platform() === "linux") for (const bin of ["bwrap", "socat"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; the sandbox needs it (sudo apt-get install -y bubblewrap socat)`);
@@ -221,14 +214,33 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
   if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
-  // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
-  if (harness === "copilot" && (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && !startProblems.length))) {
-    // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
-    const { COPILOT_HOME: _own, ...env } = process.env;
-    const o = outer("copilot", { env });
-    if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
-  }
+  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length }));
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
+  return problems;
+}
+
+/**
+ * Why one harness cannot run here, one line each: the loop's own at its start (preflight), and another an Objective's
+ * harness label names before its first stage on this machine (Local.harnessFor). `sandboxStarts`: whether srt's sandbox
+ * starts here (preflight's own check), without which Copilot's outer sandbox is not probed.
+ */
+export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true } = {}) {
+  const problems = [];
+  if (!["claude", "codex", "copilot"].includes(harness)) return [`unknown harness ${harness}`];
+  if (!onPath(harness)) problems.push(`${harness} is not on PATH`);
+  if (harness === "copilot") {
+    // Copilot's sandbox reads its policy from its own home, so the developer's `copilot login` is not used there.
+    if (!copilotToken) problems.push(`no Copilot token: create a fine-grained token with the Copilot Requests permission and save it to ${copilotTokenFile()} (chmod 600) or export COPILOT_GITHUB_TOKEN`);
+    // Without these Copilot's sandbox cannot start, and every command fails while the run still exits 0.
+    if (platform() === "linux") for (const bin of ["slirp4netns", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH; Copilot's sandbox needs it (sudo apt-get install -y slirp4netns iptables)`);
+    // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
+    if (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && sandboxStarts)) {
+      // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
+      const { COPILOT_HOME: _own, ...env } = process.env;
+      const o = outer("copilot", { env });
+      if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
+    }
+  }
   return problems;
 }
 
@@ -486,8 +498,8 @@ export class Local {
    * Codex reports success even when its sandbox cannot start (the command just never runs), so a local Codex loop
    * first runs one command under the same profile, which must run and must fail to write the home directory.
    */
-  codexSelfTest() {
-    if (this.harness !== "codex") return;
+  codexSelfTest(harness = this.harness) {
+    if (harness !== "codex") return;
     const probe = 'f="$HOME/.factory-sandbox-check"; if touch "$f" 2>/dev/null; then rm -f "$f"; exit 9; fi';
     try {
       execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains(), clone: this.dev }), "--", "sh", "-c", probe], { cwd: this.dev, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
@@ -495,6 +507,44 @@ export class Local {
       const why = e.status === 9 ? "a command in it could write the home directory" : `it does not run here (${String(e.stderr || e.message).trim().slice(0, 200)})`;
       throw new Error(`local mode cannot start: Codex's sandbox is not confining: ${why}`);
     }
+  }
+
+  /**
+   * The harness an Objective's stage runs on here (objective-trust.mjs objectiveInputs): its harness and model labels
+   * over this loop's settings, read before the stage's sandbox is set up for it. Another harness than the loop's is
+   * checked on this machine as the loop's own was at its start (harnessReady). {ok, harness} or {ok: false, reason, fix}.
+   */
+  async harnessFor(issue) {
+    const env = this.baseEnv();
+    const args = { repo: this.repoFull };
+    await primeWriters(this.repo, this.opts, { maintainers: resolveInputs({ args, env }).maintainers });
+    const chosen = await objectiveInputs({ repo: this.repo, issue, args, env, opts: this.opts });
+    if (!chosen.ok) return chosen;
+    const harness = chosen.inputs.harness;
+    const problems = this.harnessReady(harness);
+    if (!problems.length) return { ok: true, harness };
+    // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
+    log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
+    return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
+  }
+
+  /** Why `harness` cannot run on this machine (local.mjs harnessProblems, the App key, the gateway key, Codex's sandbox); a yes is kept. */
+  harnessReady(harness) {
+    this.ready ??= new Set([this.harness]);
+    if (this.ready.has(harness)) return [];
+    const problems = harnessProblems(harness, harness === "copilot" ? copilotToken() : "");
+    const app = localApp(process.env, homedir(), harness).problem;
+    const gateway = gatewayKeyProblem(process.env, homedir(), harness);
+    for (const p of [app, gateway]) if (p) problems.push(p);
+    if (!problems.length && harness === "codex") {
+      try {
+        this.codexSelfTest(harness);
+      } catch (e) {
+        problems.push(e.message.replace(/^local mode cannot start: /, ""));
+      }
+    }
+    if (!problems.length) this.ready.add(harness);
+    return problems;
   }
 
   /** <clone>/.factory/ never shows up in the developer's git status. */
@@ -562,7 +612,7 @@ export class Local {
    * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
    * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
    */
-  stageEnv(issue, usageDir, clone, stageTmp, script = null) {
+  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = harness) {
     const ws = this.ws(issue);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
@@ -632,37 +682,37 @@ export class Local {
     // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
     // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
     // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
-    const tools = localTools({ harness: this.harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    const tools = localTools({ harness: harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
     const lead = tools.lead;
-    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools);
+    const extra = harnessEnv(issue, addDirs, clone, usageDir, tools);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
     const outerFile = join(sandboxDir, `srt-harness-${basename(usageDir)}.json`);
     // Whether the harness runs in it on this host: Claude Code on Linux, Codex where its own sandbox starts inside it (probed
     // once per host and version, lib/local.mjs outerProbe), Copilot where its sandbox's network starts inside it (probed the
     // same way). Said once when it does not.
-    const outer = outerProbe(this.harness, { domains: this.domains(), env: { ...process.env, ...extra } });
+    const outer = outerProbe(harness, { domains: this.domains(), env: { ...process.env, ...extra } });
     const outerOn = outer.on;
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
-    const dropped = ["codex", "copilot"].includes(this.harness) ? sandboxDroppedHosts(this.domains()) : [];
-    if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${this.harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
+    const dropped = ["codex", "copilot"].includes(harness) ? sandboxDroppedHosts(this.domains()) : [];
+    if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
     // Copilot never runs without it (preflight refuses such a host): here it stopped starting after serve began, for
     // example a new Copilot, bubblewrap or slirp4netns version probed again. The stage refuses; stage() Blocks.
-    if (!outerOn && this.harness === "copilot") throw Object.assign(new Error(`${COPILOT_OUTER_OFF}: ${outer.why}${outer.cacheFile ? ` (probe cache: ${outer.cacheFile})` : ""}`), { code: "outer-sandbox" });
-    if (!outerOn && !OUTER_SAID.has(this.harness)) {
-      OUTER_SAID.add(this.harness);
-      log(`local: ${this.harness} runs without the outer sandbox on this host: ${outer.why}. What it runs on the host itself relies on the file-level guards and Factory's git guard.`);
+    if (!outerOn && harness === "copilot") throw Object.assign(new Error(`${COPILOT_OUTER_OFF}: ${outer.why}${outer.cacheFile ? ` (probe cache: ${outer.cacheFile})` : ""}`), { code: "outer-sandbox" });
+    if (!outerOn && !OUTER_SAID.has(harness)) {
+      OUTER_SAID.add(harness);
+      log(`local: ${harness} runs without the outer sandbox on this host: ${outer.why}. What it runs on the host itself relies on the file-level guards and Factory's git guard.`);
     }
     if (outerOn) {
       mkdirSync(join(usageDir, "harness"), { recursive: true });
-      ensureHarnessHomes(this.harness, { ...process.env, ...extra });
+      ensureHarnessHomes(harness, { ...process.env, ...extra });
       // Claude Code's projects are read-only in it; the clone's own project links to a directory of the Objective's.
-      const projectDir = this.harness === "claude" ? claudeProjectLink(clone, join(ws, "claude-project"), { ...process.env, ...extra }) : null;
+      const projectDir = harness === "claude" ? claudeProjectLink(clone, join(ws, "claude-project"), { ...process.env, ...extra }) : null;
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
-      const bwrapPath = this.harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: this.harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(this.harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
+      const bwrapPath = harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness: harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -677,7 +727,7 @@ export class Local {
     // sandbox may write; harness.mjs copilotLocalCheck proves it before every start.
     // It also gives each command the stage's temp directory as its TMPDIR: Copilot itself runs with its own
     // (lib/local.mjs copilotPrivateTmp), where it writes each command's network rules.
-    const bwrapBin = outerOn && this.harness === "copilot" ? join(usageDir, "bwrapbin") : null;
+    const bwrapBin = outerOn && harness === "copilot" ? join(usageDir, "bwrapbin") : null;
     if (bwrapBin) {
       mkdirSync(bwrapBin, { recursive: true });
       // Each command's PATH led by the stage's node where it is bound (after Factory's git): a version manager's shim
@@ -686,7 +736,7 @@ export class Local {
     }
     // Claude Code sources this before each command, inside its sandbox (CLAUDE_ENV_FILE): the same PATH lead. In the
     // usage directory, which no sandbox may write.
-    const claudeEnv = this.harness === "claude" && lead.length ? join(usageDir, "claude-env.sh") : null;
+    const claudeEnv = harness === "claude" && lead.length ? join(usageDir, "claude-env.sh") : null;
     if (claudeEnv) writeFileSync(claudeEnv, claudeEnvText([gitBin, ...lead]), { mode: 0o644 });
     return {
       ...base,
@@ -733,13 +783,15 @@ export class Local {
       ...lfsPinEnv(`https://github.com/${this.repoFull}.git`),
       GIT_NO_REPLACE_OBJECTS: "1",
       FACTORY_LFS_PIN: "1",
+      // The harness this sandbox is set up for: a stage whose labels name another by the time it runs Blocks (choiceGate).
+      FACTORY_STAGE_HARNESS: harness,
       ...extra,
     };
   }
 
   /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
-  harnessEnv(issue, addDirs, clone, usageDir, tools = null) {
-    if (this.harness !== "copilot") return {};
+  harnessEnv(issue, addDirs, clone, usageDir, tools = null, harness = this.harness) {
+    if (harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
     const home = join(this.ws(issue), ".sandbox", "copilot-home");
@@ -756,7 +808,7 @@ export class Local {
     }
     // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
     // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
-    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken, GIT_CONFIG_GLOBAL: "/dev/null" };
+    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken || copilotToken(), GIT_CONFIG_GLOBAL: "/dev/null" };
   }
 
   /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */
@@ -779,6 +831,14 @@ export class Local {
       await this.blockForClone(issue, name);
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // The harness this Objective runs on here (harnessFor): a label no writer applied, a model its harness cannot run or a
+    // harness this machine cannot run Blocks before anything is set up for it.
+    const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue) : { ok: true, harness: this.harness };
+    if (!runs.ok) {
+      log(`#${issue}: refusing to run: ${runs.reason}`);
+      await this.block(issue, name, runs.reason, { fix: runs.fix });
+      return { code: null, exit: "blocked", usd: null, usageDir };
+    }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. Removed when the stage ends or fails to
@@ -791,7 +851,7 @@ export class Local {
     };
     let env;
     try {
-      env = this.stageEnv(issue, usageDir, clone, stageTmp, script);
+      env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
       const locks = staleGitLocks(clone);
@@ -867,11 +927,11 @@ export class Local {
    * which drops it on every exit, never starts here), so serve does not pick it again. `key`: the Blocked comment a
    * repeat of the same condition updates.
    */
-  async block(issue, name, reason, { key = null, cause = "setup", gh = { findPr, removeLabel, applyExit } } = {}) {
+  async block(issue, name, reason, { key = null, cause = "setup", fix = null, gh = { findPr, removeLabel, applyExit } } = {}) {
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const pr = await gh.findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
     if (pr) await gh.removeLabel(this.repo, pr.number, REVIEW_LABEL, this.opts).catch((e) => log(`#${issue} review label: ${e.message.slice(0, 120)}`));
-    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause, notify: inputs.notify, stage: name }, this.opts);
+    await gh.applyExit(this.repo, { issue, pr, exit: "blocked", reason, key, cause, ...(fix ? { fix } : {}), notify: inputs.notify, stage: name }, this.opts);
   }
 
   /**

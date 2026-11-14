@@ -1136,11 +1136,17 @@ export async function activeFactoryJobs(repo, opts, { strict = false } = {}) {
   return out;
 }
 
-/** When the issue's title was last changed (its latest `renamed` event), or null. */
-export async function issueRenamedAt(repo, number, opts) {
+/**
+ * When the issue's text last changed on its timeline: its latest rename, or the latest `labeled` or `unlabeled` event of a
+ * label `labelled(name)` holds for (an Objective's harness and model labels, choice.mjs isChoiceLabel); null when none.
+ */
+export async function issueTextChangedAt(repo, number, opts, labelled = () => false) {
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   let last = null;
-  for (const e of events) if (e.event === "renamed" && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  for (const e of events) {
+    const counts = e.event === "renamed" || ((e.event === "labeled" || e.event === "unlabeled") && labelled(e.label?.name));
+    if (counts && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
+  }
   return last;
 }
 
@@ -1151,6 +1157,22 @@ export async function objectiveLabeledAt(repo, number, label, opts) {
   let last = null;
   for (const e of events) if (e.event === "labeled" && names.includes(e.label?.name) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
   return last;
+}
+
+/**
+ * Who last applied each of `names`, from the issue's timeline: {name: {at, actor}} (the actor as GitHub gives it), a name
+ * with no `labeled` event left out.
+ */
+export async function labelersOf(repo, number, names, opts) {
+  const want = new Set(names);
+  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  const out = {};
+  for (const e of events) {
+    const n = e.label?.name;
+    if (e.event !== "labeled" || !want.has(n)) continue;
+    if (!out[n] || Date.parse(e.created_at) > Date.parse(out[n].at)) out[n] = { at: e.created_at, actor: e.actor ?? null };
+  }
+  return out;
 }
 
 /** The issue's latest `labeled` event of `label`: {at, actor} (the actor as GitHub gives it), or null when it has none. */

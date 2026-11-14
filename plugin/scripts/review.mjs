@@ -28,7 +28,8 @@ import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
-import { authorGate, planGate } from "./lib/objective-trust.mjs";
+import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
+import { ranWith } from "./lib/choice.mjs";
 import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -268,6 +269,8 @@ async function main() {
   // finish saves it and every other session this stage ran (the reviewer's own), so the review's spend can be checked.
   const session = { id: null, canResume: true };
   let reentry = null;
+  // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
+  let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
@@ -290,7 +293,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -368,7 +371,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -406,6 +409,17 @@ async function main() {
     await finish("blocked", planned.reason);
     return;
   }
+  // The harness and models this Objective runs on (objective-trust.mjs choiceGate): the reviewer, and the fix and answer
+  // passes, on what its labels choose over the repository's defaults, or a Block before anything is set up for it.
+  const chosen = await choiceGate({ repo, issue, labels: trusted.labels, args, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
+  if (!chosen.ok) {
+    log(chosen.reason);
+    await finish("blocked", chosen.reason);
+    return;
+  }
+  Object.assign(inputs, chosen.inputs);
+  chosenLabels = chosen.labels;
+  progress.ran(ranWith(inputs, chosenLabels));
   const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
   if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
 

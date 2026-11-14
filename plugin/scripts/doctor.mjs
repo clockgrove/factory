@@ -29,6 +29,7 @@ import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, 
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
+import { CHOICE_PREFIXES } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { dropOwned } from "./lib/fsafe.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
@@ -97,6 +98,15 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
   }
   if (probe) out.push(await probeHarness({ inputs, env }));
   return out;
+}
+
+/**
+ * The repository's harness and models (the workflow's env block, or this shell's in local mode): its defaults, which an
+ * Objective's harness and model labels override for that Objective alone (lib/choice.mjs).
+ */
+export function defaultsCheck(inputs) {
+  const m = (v) => v || `${inputs.harness}'s own default`;
+  return PASS("defaults", `harness ${inputs.harness}, worker ${m(inputs.model)}, sub-agents ${m(inputs.subagentModel)}, reviewer ${m(inputs.reviewerModel)}: the repository's defaults; an Objective overrides any of them for itself with a ${Object.values(CHOICE_PREFIXES).map((p) => `${p}<${p === CHOICE_PREFIXES.harness ? "name" : "id"}>`).join(", ")} label (docs/USAGE.md); one on another harness needs that harness's credential too, and Blocks naming it when it is missing`);
 }
 
 /**
@@ -1315,7 +1325,7 @@ async function main() {
       app = { error: e.message };
     }
   }
-  const results = [];
+  const results = [defaultsCheck(inputs)];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

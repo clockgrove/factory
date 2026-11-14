@@ -69,11 +69,13 @@ node <factory clone>/plugin/scripts/setup.mjs  --repo OWNER/NAME --yes --ci-chec
 gh workflow run factory.yml -f issue=811                              # one Objective now; the cron and the ticks do the rest
 ```
 
-Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
+Each job uploads `factory-usage-<issue>` (and `factory-usage-<issue>-review`) with `events.jsonl` and `result.json` (`{harness, harnessVersion, model, ran: {worker, subagent, reviewer, labels}, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, …}`, `ran` being the three models the stage ran on and the harness and model labels that chose them); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
 
 ## Inputs that tune cost
 
-Seven optional inputs on the Action; each row gives its default. Every Claude call also shares one cached system-prompt prefix across runs.
+`harness`, `model`, `subagent_model` and `reviewer_model` (`FACTORY_HARNESS` and the three `FACTORY_*_MODEL` settings in the workflow's env block) are the repository's defaults. An Objective overrides any of them for itself with a label (`factory:harness:<name>`, `factory:model:<id>`, `factory:subagent-model:<id>`, `factory:reviewer-model:<id>`), so a small change can run on a cheaper model and a hard one on the strongest without editing the workflow: [USAGE.md](USAGE.md), Choose the harness and models.
+
+Seven more optional inputs on the Action; each row gives its default. Every Claude call also shares one cached system-prompt prefix across runs.
 
 | Input | What it does |
 | --- | --- |

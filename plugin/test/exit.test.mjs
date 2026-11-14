@@ -1196,7 +1196,6 @@ test("fix-pass scope: a workspace member's manifest brings its workspace's root 
   for (const files of [
     { "package.json": "{ workspaces: [packages/*] }" },
     { "package.json": '{"workspaces":"packages/*"}' },
-    { "pnpm-workspace.yaml": "base: &b\n  - packages/*\npackages: *b\n" },
     { "Cargo.toml": "[workspace]\nmembers = [1]\n" },
     { "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\nmembers = ["**"]\n' },
     { "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n\n[workspace]\nexclude = []\n' },
@@ -1205,8 +1204,12 @@ test("fix-pass scope: a workspace member's manifest brings its workspace's root 
     { "pyproject.toml": '[tool.uv.workspace]\nmembers = ["libs/*"\n' },
     { "pyproject.toml": '[tool.poetry]\npackages = [{ include = "libs" }]\n' },
     { "Cargo.toml": '[__proto__.workspace]\nmembers = ["**"]\n' },
-    { "pyproject.toml": '[tool.uv.workspace]\nconstructor = 1\nmembers = ["libs/*"]\n' },
   ]) assert.deepEqual(workspaceDeclarations("", files), [], JSON.stringify(files));
+  // A key named after an object's own machinery is only a key (the TOML reader builds objects with no prototype).
+  assert.deepEqual(workspaceDeclarations("", { "pyproject.toml": '[tool.uv.workspace]\nconstructor = 1\nmembers = ["libs/*"]\n' }).map((w) => w.members), [["libs/*"]]);
+  assert.equal(Object.prototype.workspace, undefined);
+  // An anchor and alias read as pnpm reads them (and as GitHub Actions reads a workflow's).
+  assert.deepEqual(workspaceDeclarations("", { "pnpm-workspace.yaml": "base: &b\n  - packages/*\npackages: *b\n" }).map((w) => w.members), [["packages/*"]]);
   // A member pattern that leaves the root matches nothing.
   assert.deepEqual(fixScopeRefused(["libs/x/Cargo.toml", "mono/Cargo.lock"], { workspaces: workspaceDeclarations("mono/", { "Cargo.toml": '[workspace]\nmembers = ["../libs/*", "/libs/*"]\n' }) }), ["mono/Cargo.lock"]);
 });

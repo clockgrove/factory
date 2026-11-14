@@ -87,7 +87,7 @@ The plugin follows Factory's `main` branch. The workflow it writes for your repo
 
 Use the full name in requests like this one: it is what Factory's skills answer to, and it keeps your agent from picking up another product called Factory.
 
-The session follows Factory's setup skill. It asks a few questions first; the ones that matter on day one are the cost caps and auto-merge, and the defaults are fine for the rest. Then it shows each change and waits for your yes. It:
+The session follows Factory's `factory-setup` skill. It asks a few questions first; the ones that matter on day one are the cost caps and auto-merge, and the defaults are fine for the rest. Then it shows each change and waits for your yes. It:
 
 - writes Factory's workflow file, `.github/workflows/factory.yml`, which holds the jobs that run your Objectives, and opens a pull request that adds it;
 - walks you through creating a GitHub App for this one repository, a few minutes in GitHub's settings: on GitHub Actions, Factory writes to your repository as that App rather than as you;
@@ -128,6 +128,25 @@ The same setup runs as scripts from a clone of Factory, with no coding agent inv
 ### Run it on your own machine instead
 
 Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Factory in local mode" and the factory-setup skill sets up both. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
+
+## Skills
+
+Factory is a plugin of [Agent Skills](https://agentskills.io): one folder per skill under [`plugin/skills/`](plugin/skills/), each a `SKILL.md` that Claude Code, Codex and GitHub Copilot CLI load the same way. Ask in plain words with the full name, Clockgrove Factory. In Claude Code each skill is also a slash command, `/factory:<skill>`; Codex and Copilot list them among their own skills.
+
+| Skill | Say | What it does |
+| --- | --- | --- |
+| [`factory-setup`](plugin/skills/factory-setup/SKILL.md) | "Set up Clockgrove Factory for this repository." | Installs Factory one consented step at a time and opens the pull request that adds the workflow file |
+| [`factory-doctor`](plugin/skills/factory-doctor/SKILL.md) | "Is Clockgrove Factory set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
+| [`factory-file`](plugin/skills/factory-file/SKILL.md) | "File a Clockgrove Factory Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes |
+| [`factory-run`](plugin/skills/factory-run/SKILL.md) | "Run Clockgrove Factory Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |
+| [`factory-review`](plugin/skills/factory-review/SKILL.md) | "Review Clockgrove Factory PR 57." | Runs the reviewer on one Factory PR in your session |
+| [`factory-serve`](plugin/skills/factory-serve/SKILL.md) | "Start the Clockgrove Factory local loop." | Starts the local loop ([docs/LOCAL.md](docs/LOCAL.md)) |
+| [`factory-queue`](plugin/skills/factory-queue/SKILL.md) | "Start the Clockgrove Factory queue." | Starts the unattended scheduler for the repository |
+| [`factory-score`](plugin/skills/factory-score/SKILL.md) | "Show the Clockgrove Factory scorecard." | Prints the scorecard: walk-away, quality, operator minutes, cost |
+
+Six more are loaded for you. The worker follows [`factory-objective-plan`](plugin/skills/factory-objective-plan/SKILL.md), [`factory-implement-split`](plugin/skills/factory-implement-split/SKILL.md), [`factory-prove-acceptance`](plugin/skills/factory-prove-acceptance/SKILL.md) and [`factory-deliver-pr`](plugin/skills/factory-deliver-pr/SKILL.md), in that order; the reviewer follows [`factory-review-pr`](plugin/skills/factory-review-pr/SKILL.md); and `factory-score` loads [`factory-scoring`](plugin/skills/factory-scoring/SKILL.md).
+
+Install Factory as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, queue, review and score skills run, so those skills do not work installed that way.
 
 ## What Factory adds to your repository
 

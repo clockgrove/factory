@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "factory",
-  "version": "0.9.26",
+  "version": "0.9.27",
   "description": "Clockgrove Factory: file a GitHub Objective, walk away, come back to merged work. The worker, reviewer and scorecard as skills.",
   "author": { "name": "Clockgrove", "url": "https://github.com/clockgrove" },
   "homepage": "https://github.com/clockgrove/factory#readme",

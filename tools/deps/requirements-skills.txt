@@ -1,4 +1,4 @@
-# The Agent Skills standard's reference validator (https://agentskills.io, anthropics/agentskills), run in CI over
+# The Agent Skills standard's reference validator (https://agentskills.io, anthropics/agentskills; its command is `agentskills`), run in CI over
 # every skill in plugin/skills/ (.github/workflows/quality.yml). Installed with --require-hashes from wheels only.
 skills-ref==0.1.1 \
     --hash=sha256:d35db5bb8de71ae301daf5ca9cb71f8a555e8c6f83a6d40e46a5bc09f8f461b5

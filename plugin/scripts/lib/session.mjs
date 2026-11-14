@@ -1479,7 +1479,8 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
 }
 
 /**
- * The running stage's stop (stop.mjs): its Objective's label came off, or its issue closed (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
+ * The running stage's stop (stop.mjs): its Objective's label came off, its issue closed or a restart was asked for
+ * (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
  * holdIfStopped). Nothing more when the stage had committed to its own exit (an exit being applied, a merge: false) or
  * was ending already (false). Otherwise its passes get up to `settleMs` to end and what they left is reaped (the
  * backend's sandbox.reap); its records are every pass this process ran, a pass ended before it reported dollars at its
@@ -1852,7 +1853,7 @@ export function mergeBlockReason(how, report = {}) {
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
  * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
- * or "stopped" (its Objective is stopped, read first, from `issueData` when the caller has it: nothing merges; the stop's
+ * or "stopped" (its Objective is stopped or waits for its restart, read first, from `issueData` when the caller has it: nothing merges; the stop's
  * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
  * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
@@ -1865,7 +1866,7 @@ export function mergeBlockReason(how, report = {}) {
 export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
-  // A stopped Objective (its label removed, its issue closed: stop.mjs stopCause) never merges, whoever runs this pass:
+  // A stopped Objective (its label removed, its issue closed, a restart asked for: stop.mjs stopCause) never merges, whoever runs this pass:
   // the dispatcher (with the issue it listed), a review stage that has not seen the stop yet, a local loop following it.
   // An issue that cannot be read merges nothing now: the caller tries again.
   const issueNow = issueData ?? (await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read before the merge (${errCode(e)}); next try`), null)));

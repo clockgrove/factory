@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { addLabels, closedPrsFor, closingIssues, createPr, findPr, getPr, listComments, postReply, removeLabel, rest, updatePr, upsertComment } from "./github.mjs";
-import { HANDOVER_FILE, HANDOVER_LABEL, handoverNotice, handoverOf, handoverRefusedReason, handoverSection, withoutHandover } from "./handover.mjs";
+import { HANDOVER_FILE, HANDOVER_LABEL, closedHarnessText, handoverLine, handoverMarker, handoverOf, handoverRefusedReason, handoverText, patchFiles, withoutHandoverLine } from "./handover.mjs";
 import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
@@ -371,11 +371,11 @@ export const checkFile = (i, name) => `checks/${i + 1}-${String(name).replace(/[
 
 /**
  * The files of $FACTORY_IN: the issue, the maintainers' decisions (all of them, uncut), the plan comment and the PR as
- * they stand (its workflow hand-over apart, as workflow.patch), the review comments to answer, the failed checks' whole
+ * they stand (Factory's hand-over line left out), the workflow hand-over Factory published (workflow.patch), the review comments to answer, the failed checks' whole
  * logs, the diff since the last green head, the merged parts of a split Objective, and the default branch's commit
  * Factory fetched.
  */
-export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = null, pr = null, reviewComments = [], checks = [], diff = null, parts = [], base = "" }) {
+export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = null, pr = null, handover = null, reviewComments = [], checks = [], diff = null, parts = [], base = "" }) {
   const files = {
     "issue.md": `# #${issue}: ${issueTitle || ""}\n\n${issueBody || "(no body)"}\n`,
     "decisions.md": decisions.length ? `${decisionsSection(decisions, Infinity)}\n` : "No maintainer decisions recorded.\n",
@@ -383,8 +383,7 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
     "base.txt": `${base}\n`,
   };
   if (plan !== null) files["plan.md"] = plan;
-  if (pr) files["pr.md"] = `${pr.title || ""}\n\n${withoutHandover(pr.body || "", issue)}\n`;
-  const handover = pr ? handoverOf(pr.body, issue) : null;
+  if (pr) files["pr.md"] = `${pr.title || ""}\n\n${withoutHandoverLine(pr.body || "", issue)}\n`;
   if (handover) files[HANDOVER_FILE] = handover;
   if (parts.length) files["parts.md"] = `Merged parts of this Objective, oldest first:\n\n${parts.map((p) => `- PR #${p.number}: ${p.title} (${p.html_url})`).join("\n")}\n`;
   checks.forEach((c, i) => {
@@ -503,45 +502,89 @@ export async function postNote(repo, issue, text, opts) {
  * Open or update the branch's one PR from pr.md. A new PR opens as a draft (Factory marks it ready once its own
  * validation is green); its body ends with Factory's closing line. Without pr.md an existing PR is left as it is, and
  * a new one gets the issue's title and `fallbackBody`, sanitised. Returns the PR, or null when there is nothing to open.
- * `handover`: the workflow hand-over's patch, already checked (outbox.mjs handover), as Factory's section before the
- * closing line; "" for none; undefined keeps the one the PR carries. When that changes, so do the issue's
- * factory:handover label and its hand-over notice (handoverChanged).
+ * `handover`: the workflow hand-over as Factory publishes it (git's own patch, outbox.mjs checkHandover); "" for none;
+ * undefined keeps the one Factory's comment on the issue carries (handoverPosted). With one, that comment holds it
+ * (handoverText), the issue carries the factory:handover label, and the PR body's first line is Factory's, pointing to
+ * the comment (handoverLine); with none, the label comes off and a notice there says the PR carries none. The label and
+ * the comment are put right on every publish, so a write GitHub refused is made again on the next. The harness's text
+ * is held to closedHarnessText, so nothing it leaves open runs into Factory's text after it.
  */
 export async function publishPr(repo, { branch, base, issue, issueTitle, prText, fallbackBody = "", splitPart = false, pr = null, handover = undefined }, opts) {
   // A stopped stage opens no PR and rewrites none from a half-written pr.md (stop.mjs holdIfStopped).
   await holdIfStopped();
   const parsed = prText ? parsePrText(prText, issue) : null;
   const existing = pr || (await findPr(repo, branch, opts));
-  const had = existing ? handoverOf(existing.body, issue) : null;
+  const posted = await handoverPosted(repo, issue, opts);
   const given = handover && !handover.endsWith("\n") ? `${handover}\n` : handover;
-  const patch = given === undefined ? had : given || null;
-  const section = patch ? handoverSection({ issue, patch, defaultBranch: base }) : "";
-  // Factory's section rides with its closing line, through every fallback of closingChecked; the harness's text gives
-  // way so the body fits GitHub's limit.
-  const footer = section ? `${section}\n\n${prFooter(issue, splitPart)}` : prFooter(issue, splitPart);
-  const room = (text) => (section && text.length > BODY_MAX - footer.length ? `${text.slice(0, BODY_MAX - footer.length - 60)}\n\n(cut to fit the workflow hand-over)` : text);
+  const patch = given === undefined ? (posted?.patch ?? null) : given || null;
+  // The hand-over's comment first, so the PR's line can point to it.
+  let comment = posted;
+  let line = "";
+  if (patch) {
+    comment = await syncHandover(repo, { issue, posted, text: handoverText({ issue, pr: existing?.number ?? true, patch, defaultBranch: base }), label: true }, opts);
+    line = handoverLine({ issue, url: comment?.html_url || `https://github.com/${repo.full}/issues/${issue}`, files: patchFiles(patch) });
+  }
+  const head = line ? `${line}\n\n` : "";
+  const footer = prFooter(issue, splitPart);
   let out;
   let harnessBody;
   if (existing) {
-    harnessBody = room(withoutHandover(parsed ? parsed.body : stripFooter(existing.body || "", issue), issue));
-    const body = withFooter(harnessBody, footer);
+    harnessBody = closedHarnessText(withoutHandoverLine(parsed ? parsed.body : stripFooter(existing.body || "", issue), issue));
+    const body = withFooter(`${head}${harnessBody}`, footer);
     const title = parsed?.title || existing.title;
     out = title === existing.title && body === existing.body ? existing : await updatePr(repo, existing.number, { title, body }, opts);
   } else {
     const title = parsed?.title || `#${issue}: ${sanitize(String(issueTitle || ""), { max: 100 }).replace(/\s+/g, " ")}`;
-    harnessBody = room(withoutHandover(parsed?.body || sanitize(fallbackBody || "Opened by Factory; the harness left no pr.md."), issue));
-    out = await createPr(repo, { head: branch, base, title, body: withFooter(harnessBody, footer), draft: true }, opts);
+    harnessBody = closedHarnessText(withoutHandoverLine(parsed?.body || sanitize(fallbackBody || "Opened by Factory; the harness left no pr.md."), issue));
+    out = await createPr(repo, { head: branch, base, title, body: withFooter(`${head}${harnessBody}`, footer), draft: true }, opts);
   }
-  out = await closingChecked(repo, out, { issue, splitPart, harnessBody, footer }, opts);
-  // The PR stands either way: a label or notice GitHub refused is logged.
-  if (patch !== had) await handoverChanged(repo, { issue, pr: out.number, patch }, opts).catch((e) => log(`hand-over label or notice on #${issue}: ${String(e?.message || e).slice(0, 120)}`));
+  out = await closingChecked(repo, out, { issue, splitPart, harnessBody, footer, head }, opts);
+  // Now the PR's number is known: a new PR's comment names it; with no hand-over, an earlier notice or hand-over there
+  // is put right (the PR carries none).
+  if (patch && !existing) await syncHandover(repo, { issue, posted: comment, text: handoverText({ issue, pr: out.number, patch, defaultBranch: base }), label: true }, opts);
+  else if (!patch && posted) await syncHandover(repo, { issue, posted, text: handoverText({ issue, pr: out.number }), label: false }, opts);
   return out;
+}
+
+/**
+ * Factory's hand-over comment on the issue (handoverMarker on its first line, Factory's own login only): {id,
+ * html_url, text (after the marker line), patch (handoverOf)}, or null.
+ */
+export async function handoverPosted(repo, issue, opts) {
+  return postedOf((await listComments(repo, issue, opts)).find((x) => isSelf(x) && (x.body || "").startsWith(`${handoverMarker(issue)}\n`)), issue);
+}
+
+/** A hand-over comment as handoverPosted gives it, from GitHub's comment object; null for none. */
+const postedOf = (c, issue) => {
+  if (!c?.body) return null;
+  const text = c.body.slice(handoverMarker(issue).length + 1);
+  return { id: c.id, html_url: c.html_url ?? null, text, patch: handoverOf(text) };
+};
+
+/**
+ * The issue's hand-over comment and label as `text` and `label` say: the label added or removed (both safe to repeat),
+ * the comment written when it differs. A refused write is logged, never thrown: the PR stands, and the next publish
+ * puts it right. Returns the comment (GitHub's answer, or the one there), or null.
+ */
+async function syncHandover(repo, { issue, posted, text, label }, opts) {
+  try {
+    if (label) await addLabels(repo, issue, [HANDOVER_LABEL], opts);
+    else await removeLabel(repo, issue, HANDOVER_LABEL, opts);
+  } catch (e) {
+    log(`hand-over label on #${issue}: ${String(e?.message || e).slice(0, 120)}`);
+  }
+  if (posted?.text === text) return posted;
+  return upsertComment(repo, issue, handoverMarker(issue), text, opts).then((c) => postedOf(c, issue) ?? posted, (e) => {
+    log(`hand-over comment on #${issue}: ${String(e?.message || e).slice(0, 120)}`);
+    return posted;
+  });
 }
 
 /**
  * The stage's workflow hand-over (handover.mjs), from `files()` (the hand-off files as last collected), checked in
  * Factory's mirror against the branch as GitHub has it (outbox.mjs handover), once per text. `now()`: undefined when no
- * pass left workflow.patch (the PR keeps the one it carries), "" for an empty one (none), else the patch; undefined too
+ * pass left workflow.patch (the one Factory published stands), "" for an empty one (none), else git's own regenerated
+ * patch (never the worker's text); undefined too
  * for one that cannot go out, which `refused()` then names (handoverRefusedReason): its stage Blocks.
  */
 export function handoverChecker(files, outbox) {
@@ -556,7 +599,7 @@ export function handoverChecker(files, outbox) {
       if (!text.trim()) return "";
       if (!seen.has(text)) seen.set(text, await outbox.handover(text).catch((e) => ({ ok: false, problem: `could not be checked: ${String(e?.message || e).slice(0, 120)}` })));
       const checked = seen.get(text);
-      if (checked.ok) return text.endsWith("\n") ? text : `${text}\n`;
+      if (checked.ok) return checked.patch;
       refused = handoverRefusedReason(checked.problem);
       log(refused);
       return undefined;
@@ -564,18 +607,6 @@ export function handoverChecker(files, outbox) {
   };
 }
 
-/** The longest PR body Factory writes: GitHub's limit is 65,536 characters. */
-const BODY_MAX = 65_000;
-
-/**
- * The issue follows its PR's workflow hand-over: with one, the factory:handover label and the notice naming the PR
- * (handoverNotice); without one, the label off and the notice saying so, when there was one before.
- */
-export async function handoverChanged(repo, { issue, pr, patch }, opts) {
-  if (patch) await addLabels(repo, issue, [HANDOVER_LABEL], opts);
-  else await removeLabel(repo, issue, HANDOVER_LABEL, opts);
-  await upsertComment(repo, issue, marker(issue, "handover"), handoverNotice({ pr, patch }), opts);
-}
 
 /**
  * Before any work, the issue's hand-over notice when its text or plan names workflow files (handover.mjs
@@ -584,19 +615,17 @@ export async function handoverChanged(repo, { issue, pr, patch }, opts) {
  */
 export async function handoverUpFront(repo, issue, { named, from = "issue" }, opts) {
   if (!named.length) return false;
-  const mark = marker(issue, "handover");
-  if ((await listComments(repo, issue, opts)).some((c) => isSelf(c) && (c.body || "").startsWith(mark))) return false;
-  await upsertComment(repo, issue, mark, handoverNotice({ named, from }), opts);
+  if (await handoverPosted(repo, issue, opts)) return false;
+  await upsertComment(repo, issue, handoverMarker(issue), sanitize(handoverText({ issue, named, from })), opts);
   return true;
 }
 
 /**
- * The whole change is a hand-over (nothing to push, so no PR): Factory's section goes on the issue in the notice, with
- * the factory:handover label.
+ * The whole change is a hand-over (nothing to push, so no PR): Factory's comment on the issue carries it, with the
+ * factory:handover label.
  */
 export async function handoverOnIssue(repo, { issue, patch, defaultBranch }, opts) {
-  await addLabels(repo, issue, [HANDOVER_LABEL], opts);
-  await upsertComment(repo, issue, marker(issue, "handover"), handoverNotice({ patch, section: handoverSection({ issue, patch, defaultBranch, pr: false }) }), opts);
+  await syncHandover(repo, { issue, posted: await handoverPosted(repo, issue, opts), text: handoverText({ issue, patch, defaultBranch }), label: true }, opts);
 }
 
 /** Every issue reference made inert: `#12`, `o/r#12` and issue links keep their text and link nothing. */
@@ -607,7 +636,7 @@ export const inertRefs = (text) => String(text).replace(/#(?=\d)/g, "#\u200b").r
  * work). When the harness's text still makes it close something else, its references are made inert; failing that, the
  * body becomes Factory's alone; failing that, it throws (code "closing-refs") and the stage Blocks.
  */
-async function closingChecked(repo, pr, { issue, splitPart, harnessBody, footer }, opts) {
+async function closingChecked(repo, pr, { issue, splitPart, harnessBody, footer, head = "" }, opts) {
   const want = splitPart ? "" : String(issue);
   // GitHub's reading, retried; an API error is "unknown", never a pass.
   const read = async () => {
@@ -621,7 +650,7 @@ async function closingChecked(repo, pr, { issue, splitPart, harnessBody, footer 
   };
   let got = await read();
   if (got === want) return pr;
-  for (const body of [withFooter(inertRefs(harnessBody), footer), withFooter("Factory could not publish the harness's description here without it linking other issues; see the plan comment and the commits.", footer)]) {
+  for (const body of [withFooter(`${head}${inertRefs(harnessBody)}`, footer), withFooter(`${head}Factory could not publish the harness's description here without it linking other issues; see the plan comment and the commits.`, footer)]) {
     pr = (await updatePr(repo, pr.number, { body }, opts).catch(() => null)) || pr;
     got = await read();
     if (got === want) return pr;
@@ -756,7 +785,8 @@ export async function openHandoff({ repo, issue, issueData, env, opts, outbox, b
     const base = await outbox.feed();
     const pr = prNumber ? await getPr(repo, prNumber, opts).catch(() => null) : await findPr(repo, branch, opts).catch(() => null);
     plan = planHanded(await planComment(repo, issue, opts).catch(() => null), record);
-    await writeIn(dirs, inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body, decisions, plan, pr, reviewComments, checks, diff, parts, base }), env);
+    const handover = (await handoverPosted(repo, issue, opts).catch(() => null))?.patch ?? null;
+    await writeIn(dirs, inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body, decisions, plan, pr, handover, reviewComments, checks, diff, parts, base }), env);
   };
   const collect = async () => {
     const r = await readOut(dirs, env);

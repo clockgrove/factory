@@ -742,7 +742,7 @@ async function main() {
   await beforeExit?.(true);
   // The harness's account of what blocked it, posted on the issue.
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
-  if (decision.exit === "blocked" && !pr && !delta.count && handoverLeft) await handoverOnIssue(repo, { issue, patch: handoverLeft, defaultBranch }, token).catch((e) => log(`hand-over on the issue: ${e.message.slice(0, 120)}`));
+  if (decision.handoverOnly) await handoverOnIssue(repo, { issue, patch: handoverLeft, defaultBranch }, token).catch((e) => log(`hand-over on the issue: ${e.message.slice(0, 120)}`));
   if (decision.exit === "delivered" && pr) {
     // A split Objective: this part's PR joins the record, with the items left for the next part (none for the last).
     const remaining = partLeft(asked.record);

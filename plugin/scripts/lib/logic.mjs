@@ -760,7 +760,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              Question, asked whether or not the run committed, before any other check but the hard stops
  *  sessionCap: string, sessionCapNote: the sandbox vendor's session cut this stage's wall clock; a time cap names it
  *  handoverRefused: string, why the worker's workflow hand-over could not go out (handover.mjs handoverRefusedReason)
- *  handoverOnly: boolean, the run left a workflow hand-over Factory accepted and nothing to push
+ *  handoverOnly: boolean, the run left a workflow hand-over Factory accepted and nothing to push; it Blocks as the
+ *              hand-over (`handoverOnly: true` on the result) only when the harness ended ok and the record is delivered
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
  * Returns {exit: 'delivered'|'question'|'blocked', reason}, a blocked one with its `cause` (BLOCK_CAUSES), plus `deniedHosts` when the worker Blocked on hosts its
@@ -790,9 +791,10 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // A worker that stopped because the sandbox denied a host it needs, or its shell lacked a secret: its own reason and
     // the names, not the missing commits.
     if (record?.exit === "blocked" && (record.deniedHosts?.length || record.missingSecrets?.length)) return workerBlocked(record);
-    // Nothing to push but a workflow hand-over: no PR can hold it, so it waits on the issue for a person (the owner's
-    // trust stance: Factory's token has no Workflows permission), a setting and not the work.
-    if (commits === 0 && handoverOnly) return { exit: "blocked", reason: "the whole change is a workflow hand-over, which Factory never pushes: a person applies it with the command in the hand-over comment on this issue", cause: "setup" };
+    // Nothing to push but a workflow hand-over, from a harness that ended well and a worker that says it delivered: no
+    // PR can hold it, so it waits on the issue for a person (the owner's trust stance: Factory's token has no Workflows
+    // permission), a setting and not the work. A worker's own Block or Question, and a failed harness, keep their exits.
+    if (commits === 0 && handoverOnly && harness?.ok && record?.exit === "delivered") return { exit: "blocked", reason: "the whole change is a workflow hand-over, which Factory never pushes: a person applies it with `factory handover`, as Factory's hand-over comment on this issue says", cause: "setup", handoverOnly: true };
     if (commits === 0) {
       // A worker that stopped on purpose before any commit: its own Block or Question, with the reason it gave. A record
       // Factory filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.

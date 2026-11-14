@@ -18,7 +18,7 @@ import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
-import { handoverProblem } from "./handover.mjs";
+import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
@@ -745,39 +745,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * Whether the worker's workflow hand-over (handover.mjs) can go out: git's own reading of `patch` in this mirror, the
-   * files it names (`git apply --numstat -z`) and whether it applies to the tree of the branch as GitHub has it (the
-   * default branch's when there is none), checked on a scratch index (`git apply --check --cached`): nothing is written.
-   * {ok: true} or {ok: false, problem} (handoverProblem's words, or git's refusal in Factory's words).
+   * The worker's workflow hand-over as Factory publishes it (checkHandover), checked against the tree of the branch as
+   * GitHub has it (the default branch's when there is none): {ok: true, patch, files} or {ok: false, problem}.
    */
-  box.handover = async (patch) => {
-    const text = String(patch ?? "");
-    const stat = await git(["apply", "--numstat", "-z", "-"], { input: text });
-    if (stat.code !== 0) return { ok: false, problem: "is no patch git can read" };
-    // -z: `added\tdeleted\tpath\0`, or for a rename `added\tdeleted\t\0from\0to\0`; `-` counts mark a binary change.
-    const fields = String(stat.stdout).split("\0");
-    const files = [];
-    let binary = false;
-    for (let i = 0; i < fields.length; i += 1) {
-      const m = /^([0-9-]+)\t([0-9-]+)\t(.*)$/s.exec(fields[i]);
-      if (!m) continue;
-      if (m[1] === "-" || m[2] === "-") binary = true;
-      if (m[3]) files.push(m[3]);
-      else files.push(fields[++i] ?? "", fields[++i] ?? "");
-    }
-    const problem = handoverProblem(text, { files: files.filter(Boolean), binary });
-    if (problem) return { ok: false, problem };
-    const index = join(scratch, `handover-${Date.now()}.index`);
-    try {
-      const env = { ...gitEnv(), GIT_INDEX_FILE: index };
-      if ((await git(["read-tree", expected || base], { env })).code !== 0) return { ok: false, problem: "could not be checked: Factory's mirror could not read the branch's tree" };
-      const check = await git(["apply", "--check", "--cached", "-"], { env, input: text });
-      if (check.code !== 0) return { ok: false, problem: `does not apply to ${expected ? branch : defaultBranch} as GitHub has it` };
-    } finally {
-      rmSync(index, { force: true });
-    }
-    return { ok: true };
-  };
+  box.handover = async (patch) => checkHandover(git, { patch, tree: expected || base, index: join(scratch, `handover-${Date.now()}.index`), against: expected ? branch : defaultBranch });
 
   /** How many commits the default branch has that the Objective's branch (as GitHub has it) lacks. */
   box.behind = async () => (expected ? Number(await must(["rev-list", "--count", `${expected}..${base}`])) || 0 : 0);
@@ -1105,4 +1076,41 @@ export async function scratchHistory({ remote, token = () => null, objects = nul
   }
   if (objects) writeFileSync(join(dir, "objects", "info", "alternates"), `${objects}\n`);
   return { git, close };
+}
+
+/**
+ * A workflow hand-over (handover.mjs) as Factory publishes it: the worker's `patch` really applied (`git apply --cached`)
+ * to `tree` on a scratch `index`, the changes read back from git (`diff-index --raw -z --no-renames`) and held to
+ * entriesProblem, and then git's own diff of those files (no renames, no external diff or textconv, no colour) held to
+ * patchTextProblem. Only that regenerated diff is ever published or applied, never the worker's text, so whatever the
+ * worker's patch says (a rename or copy from outside, a mode, a garbage or header-only line) the published one shows
+ * exactly the files and changes it makes. A rename or copy in the worker's patch (git's own summary of it) is refused
+ * outright. `git(args, {env, input})` runs git in a repository holding `tree`, with `git.env()` its environment;
+ * nothing is written to it but objects and the scratch index, which is removed. `against` names the tree in a refusal.
+ * {ok: true, patch, files} or {ok: false, problem}.
+ */
+export async function checkHandover(git, { patch, tree, index, against }) {
+  const text = String(patch ?? "");
+  const before = patchTextProblem(text);
+  if (before) return { ok: false, problem: before };
+  const env = { ...git.env(), GIT_INDEX_FILE: index };
+  try {
+    const summary = await git(["apply", "--summary", "-"], { env, input: text });
+    if (summary.code !== 0) return { ok: false, problem: "is no patch git can read" };
+    if (/^ (rename|copy) /m.test(summary.stdout)) return { ok: false, problem: "renames or copies a file: hand over the new file whole" };
+    if ((await git(["read-tree", tree], { env })).code !== 0) return { ok: false, problem: "could not be checked: git could not read the tree to apply it to" };
+    if ((await git(["apply", "--cached", "-"], { env, input: text })).code !== 0) return { ok: false, problem: `does not apply to ${against} as GitHub has it` };
+    const raw = await git(["diff-index", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", tree], { env });
+    const entries = raw.code === 0 ? rawEntries(raw.stdout) : null;
+    const problem = entriesProblem(entries);
+    if (problem) return { ok: false, problem };
+    const files = entries.map((e) => e.path);
+    const diff = await git(["diff-index", "--cached", "-p", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", tree, "--", ...files], { env });
+    if (diff.code !== 0) return { ok: false, problem: "could not be read back from git" };
+    const after = patchTextProblem(diff.stdout);
+    if (after) return { ok: false, problem: after };
+    return { ok: true, patch: diff.stdout, files };
+  } finally {
+    rmSync(index, { force: true });
+  }
 }

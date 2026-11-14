@@ -308,7 +308,8 @@ export async function restartObjective(repo, issue, { at, by = null, project = u
   if (fields.pr) {
     const link = record?.html_url ? ` ([the restart](${record.html_url}))` : "";
     await upsertComment(repo, fields.pr, marker(issue, "restarted", String(at).replace(/[^0-9TZ]/g, "")), `Factory: #${issue} was restarted from its current text${link}. This pull request is closed and its branch deleted; its commits and review stay here. The restarted run opens a new one.`, opts);
-    await rest(`repos/${repo.full}/pulls/${fields.pr}`, { ...opts, method: "PATCH", body: { state: "closed" } });
+    // Only an open PR is closed: one the merge queue merged before this retry stays as it is (closing it fails every tick).
+    if ((await getPr(repo, fields.pr, opts))?.state === "open") await rest(`repos/${repo.full}/pulls/${fields.pr}`, { ...opts, method: "PATCH", body: { state: "closed" } });
   }
   // The earlier plan and split record, kept readable under markers no reader looks for (handoff.mjs planOf, partsRecord,
   // which also skip anything from before the restart).

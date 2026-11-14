@@ -168,6 +168,25 @@ test("restartObjective: the record first; the earlier PR out of the queue, comme
   }
 });
 
+test("restartObjective: a PR the merge queue merged before a retry is commented on, never closed (a close would fail every tick)", async () => {
+  setSelf(BOT.login);
+  try {
+    await withEnv({}, async () => {
+      const api = fakeApi({ pr: { number: 70, draft: false, node_id: "PR_70", state: "closed", merged: true, mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "factory/7" }, base: { ref: "main" }, labels: [] } });
+      try {
+        const r = await restartObjective(REPO, 7, { at: AT, by: "maintainer", project: null }, { token: "t" });
+        assert.equal(r.finished, true);
+        assert.ok(api.writes.includes("POST /issues/70/comments <!-- factory:7:restarted:20310302T020000Z -->"));
+        assert.ok(!api.writes.some((w) => w.startsWith("PATCH /pulls/70")), api.writes.join("\n"));
+      } finally {
+        api.restore();
+      }
+    });
+  } finally {
+    setSelf(null);
+  }
+});
+
 test("dispatcher: a restart waits for a running stage to stop, never picked meanwhile; then the Objective restarts and is picked in the same tick, in any state", async () => {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const ago = (ms) => new Date(Date.now() - ms).toISOString();

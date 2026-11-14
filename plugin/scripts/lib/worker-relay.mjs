@@ -177,11 +177,17 @@ export function stageSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root =
 /**
  * Local mode's loop, before a stage that relays the gateway key starts: its socket's directory (stageSocketDir), recorded
  * in the stage's usage directory (SOCKET_DIR_RECORD, with this process as its owner) so a later loop removes it when the
- * stage died (dropDeadSocketDirs). The loop names it in the outer sandbox and hands it to the stage (RELAY_SOCKET_DIR_ENV).
+ * stage died (local.mjs reapSocketDirs). The loop names it in the outer sandbox and hands it to the stage (RELAY_SOCKET_DIR_ENV).
  */
 export function handSocketDir(usageDir, opts = {}) {
   const made = stageSocketDir(usageDir, opts);
-  writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: made.dir, owner: processRecord() }), { mode: 0o600 });
+  try {
+    writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: made.dir, owner: processRecord() }), { mode: 0o600 });
+  } catch (e) {
+    // Unrecorded, no later loop could find it: it goes now.
+    rmSync(made.dir, { recursive: true, force: true });
+    throw e;
+  }
   return made;
 }
 
@@ -196,23 +202,21 @@ export function readSocketDirRecord(usageDir) {
 }
 
 /**
- * Remove a stage's socket directory and its record (handSocketDir) from `usageDir`: only a path of the two shapes this
- * user's socket directories take under the root (socketDirLevels), and only the stage's own level (the per-user parent
- * stays). Returns whether a directory was removed.
+ * Remove a stage's socket directory and its record (handSocketDir) from `usageDir`: only one that passes checkSocketDir
+ * (the root root's and sticky, a path of the two shapes this user's socket directories take there, and every level a
+ * real directory of this user's alone, so no link anywhere on the way), and only the stage's own level (the per-user
+ * parent stays). Returns whether a directory was removed.
  */
-export function dropSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT } = {}) {
+export function dropSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = RELAY_SOCKET_ROOT, rootUid = 0 } = {}) {
   const rec = readSocketDirRecord(usageDir);
   rmSync(join(usageDir, SOCKET_DIR_RECORD), { force: true });
   if (!rec) return false;
-  let real;
   try {
-    real = realpathSync(root);
+    checkSocketDir(rec.dir, { uid, root, rootUid });
   } catch {
+    // Gone already, or no longer this user's own all the way down (a reboot cleared /tmp and someone planted a link).
     return false;
   }
-  if (!socketDirLevels(rec.dir, real, uid)) return false;
-  const st = lstatSync(rec.dir, { throwIfNoEntry: false });
-  if (!st || st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid) return false;
   rmSync(rec.dir, { recursive: true, force: true });
   return true;
 }
@@ -281,6 +285,8 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   if (!(agent && !local)) {
     try {
       const handed = local ? env[RELAY_SOCKET_DIR_ENV] || "" : "";
+      // Only the one serve made for this stage, as its record in the usage directory (which no sandbox writes) names.
+      if (handed && handed !== readSocketDirRecord(usageDir)?.dir) throw new Error(`${handed} is not the directory made for this stage`);
       if (handed) socketDir = handed;
       else {
         const m = stageSocketDir(usageDir, { ...dirOpts, fallback: !local });

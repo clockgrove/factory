@@ -2155,10 +2155,11 @@ test("a refused per-user directory: the stage's socket goes in a private mkdtemp
     assert.equal(handed.blocked, null, handed.blocked);
     assert.equal(dirname(handed.relay.socketPath), m.dir);
     await closeWorkerRelay(handed.relay);
-    assert.equal(dropSocketDir(usageDir, { root }), false, "already gone with the stage");
+    assert.equal(dropSocketDir(usageDir, { root, rootUid: uid }), false, "already gone with the stage");
     assert.equal(readSocketDirRecord(usageDir), null);
 
-    // A handed path that is not one of this user's socket directories there is refused.
+    // A handed path that is not one of this user's socket directories there is refused, even where recorded.
+    writeFileSync(join(usageDir, SOCKET_DIR_RECORD), JSON.stringify({ dir: join(root, "elsewhere") }));
     const odd = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir, env: { FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: join(root, "elsewhere") }, which: (n) => `/usr/bin/${n}`, ...opts });
     assert.match(odd.blocked, /is not a socket directory of this user's under/);
 
@@ -2238,14 +2239,14 @@ test("a loop's reap removes the socket directory of a dead stage, never a live o
     mkdirSync(join(ws, "usage-odd"));
     writeFileSync(join(ws, "usage-odd", SOCKET_DIR_RECORD), JSON.stringify({ dir: other, owner: dead }));
 
-    assert.equal(reapSocketDirs(ws, { root }), 2);
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 2);
     assert.ok(!existsSync(dirs["usage-work-dead"]), "a dead stage's: removed");
     assert.ok(!existsSync(dirs["usage-work-unstarted-dead-loop"]), "one whose loop died before the stage started: removed");
     assert.ok(existsSync(dirs["usage-work-live"]), "a live stage's: kept");
     assert.ok(existsSync(dirs["usage-work-unstarted-live-loop"]), "one a live loop is starting a stage with: kept");
     assert.ok(existsSync(other), "a path of another shape: kept");
     assert.ok(existsSync(join(root, `factory-relay-${uid}`)), "the per-user directory stays");
-    assert.equal(reapSocketDirs(ws, { root }), 0, "done once");
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 0, "done once");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2258,4 +2259,76 @@ test("local mode hands a socket directory only to a stage that relays the gatewa
   assert.equal(relaysGatewayKey("merge.mjs", env("AI_GATEWAY_API_KEY=W")), false);
   assert.equal(relaysGatewayKey("worker.mjs", env("FAL_KEY")), false);
   assert.equal(relaysGatewayKey("worker.mjs", {}), false);
+});
+
+test("removing a socket directory never goes through a link: a recorded path whose per-user parent is now a link to elsewhere stays, by reap and at the stage's end (#185)", { skip: process.platform !== "linux" && "process records read /proc" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  try {
+    // A dead stage's record; then /tmp cleared (a reboot) and another user's link planted at the per-user name.
+    const gone = spawn("sleep", ["30"]);
+    const dead = processRecord(gone.pid);
+    gone.kill("SIGKILL");
+    await new Promise((r) => gone.on("exit", r));
+    const hash = "0123456789ab";
+    const elsewhere = join(root, "clone", "x");
+    mkdirSync(join(elsewhere, hash), { recursive: true });
+    for (const d of [join(root, "clone"), elsewhere, join(elsewhere, hash)]) chmodSync(d, 0o700);
+    writeFileSync(join(elsewhere, hash, "precious.txt"), "keep");
+    symlinkSync(elsewhere, join(root, `factory-relay-${uid}`));
+    const dir = join(root, `factory-relay-${uid}`, hash);
+    const ws = join(root, "ws");
+    for (const name of ["usage-work-dead", "usage-work-ended"]) {
+      mkdirSync(join(ws, name), { recursive: true });
+      writeFileSync(join(ws, name, SOCKET_DIR_RECORD), JSON.stringify({ dir, owner: dead }));
+    }
+    assert.equal(reapSocketDirs(ws, { root, rootUid: uid }), 0);
+    assert.equal(dropSocketDir(join(ws, "usage-work-ended"), { root, rootUid: uid }), false);
+    assert.ok(existsSync(join(elsewhere, hash, "precious.txt")), "nothing removed through the link");
+    for (const name of ["usage-work-dead", "usage-work-ended"]) assert.equal(readSocketDirRecord(join(ws, name)), null, "the records go");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("locally the stage takes only the socket directory made for it: another stage's live one, or one with no record, is refused; an unrecorded directory is never left behind (#185)", { skip: process.platform === "win32" && "unix" }, async () => {
+  const uid = process.getuid();
+  const root = stickyRoot();
+  const shell = { [RELAYED_NAME]: KEY };
+  const opts = { socketRoot: root, socketRootUid: uid };
+  const env = (dir) => ({ FACTORY_LOCAL: "1", PATH: "/nope", [RELAY_SOCKET_DIR_ENV]: dir });
+  // Any relay a failed check let start is closed below, so a failure here never hangs the run.
+  const opened = [];
+  try {
+    const [a, b] = ["a", "b"].map((n) => {
+      const usageDir = join(root, `usage-${n}`);
+      mkdirSync(usageDir);
+      return { usageDir, dir: handSocketDir(usageDir, { root, rootUid: uid }).dir };
+    });
+    // Stage a handed stage b's directory: one of this user's, of the right shape, yet not its own.
+    const other = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: a.usageDir, env: env(b.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (other.relay) opened.push(other.relay);
+    assert.equal(other.relay, null);
+    assert.match(other.blocked, new RegExp(`its socket's directory: ${b.dir} is not the directory made for this stage`));
+    assert.ok(!(RELAYED_NAME in other.shell));
+    const unrecorded = join(root, "usage-c");
+    mkdirSync(unrecorded);
+    const none = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: unrecorded, env: env(a.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (none.relay) opened.push(none.relay);
+    assert.match(none.blocked, /is not the directory made for this stage/);
+    const own = await openWorkerRelay({ inputs: { harness: "codex", maxUsd: 5 }, shell, usageDir: a.usageDir, env: env(a.dir), which: (n) => `/usr/bin/${n}`, ...opts });
+    if (own.relay) opened.push(own.relay);
+    assert.equal(own.blocked, null, own.blocked);
+    assert.equal(dirname(own.relay.socketPath), a.dir);
+    await closeWorkerRelay(own.relay);
+    assert.ok(existsSync(b.dir), "the other stage's directory untouched");
+
+    // The record cannot be written (here: no usage directory): the directory just made goes too.
+    const missing = join(root, "usage-missing");
+    assert.throws(() => handSocketDir(missing, { root, rootUid: uid }), /ENOENT/);
+    assert.ok(!existsSync(relaySocketDir(missing, { root })), "no directory left without a record");
+  } finally {
+    for (const r of opened) await closeWorkerRelay(r);
+    rmSync(root, { recursive: true, force: true });
+  }
 });

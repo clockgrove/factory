@@ -1518,8 +1518,9 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
  * `ripgrep`: nestedGitScanScript's path (writeNestedGitScan).
- * `relaySocketDir`: the directory of the stage's gateway relay socket (worker-relay.mjs relaySocketDir): the one socket
- * directory that stays reachable inside, for the forwarder Factory's bwrap shim starts in each command's sandbox
+ * `relaySocketDir`: the directory of the stage's gateway relay socket, as serve made it (worker-relay.mjs handSocketDir;
+ * null for a stage that relays nothing, which then reaches no socket directory at all): the one socket directory that
+ * stays reachable inside, for the forwarder Factory's bwrap shim starts in each command's sandbox
  * (relay-shim.mjs); never writable.
  */
 export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relaySocketDir = null, ripgrep = null } = {}) {

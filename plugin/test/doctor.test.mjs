@@ -219,3 +219,33 @@ test("mintInstallationToken reads a personal account from the installation and s
   assert.deepEqual(got.User, { userAccount: true, missing: [] });
   assert.deepEqual(got.Organization, { userAccount: false, missing: ["projects:write"] });
 });
+
+test("secrets on a repository a user owns: GitHub's 422 for organization secrets means none, so a missing secret still FAILs and present ones PASS", async () => {
+  const { secretChecks } = await import("../scripts/doctor.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const run = async (repoSecrets, orgStatus) => {
+    globalThis.fetch = async (url) => {
+      const p = new URL(url).pathname;
+      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (p === "/repos/me/app/actions/secrets") return json({ secrets: repoSecrets.map((name) => ({ name })) });
+      if (p === "/repos/me/app/actions/organization-secrets") return orgStatus === 200 ? json({ secrets: [] }) : json({ message: "Validation Failed" }, orgStatus);
+      return json({ message: "unexpected" }, 500);
+    };
+    return secretChecks({ inputs: { harness: "claude", credential: "api" }, repo: { owner: "me", name: "app", full: "me/app" } });
+  };
+  try {
+    const [missing] = await run(["FACTORY_APP_ID"], 422);
+    assert.equal(missing.status, "FAIL");
+    assert.match(missing.detail, /missing FACTORY_APP_PRIVATE_KEY, ANTHROPIC_API_KEY/);
+    const [all] = await run(["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY"], 422);
+    assert.equal(all.status, "PASS");
+    const [unreadable] = await run(["FACTORY_APP_ID"], 403);
+    assert.equal(unreadable.status, "WARN", "any other refusal is still unreadable");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});

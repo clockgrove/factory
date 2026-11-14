@@ -446,18 +446,55 @@ export const SESSION_TOTALS_FILE = "session-totals.json";
  * counted (SESSION_TOTALS_FILE).
  */
 export async function stageSpendSoFar() {
-  let usd = STAGE_SPEND.done;
-  let estimated = STAGE_SPEND.estimated;
-  const totals = Object.fromEntries(SESSION_TOTALS);
+  // What has finished is taken before any meter is read: a pass that ends meanwhile is never counted twice.
+  const base = stageSpendBase();
+  const reads = [];
   for (const [m, { session }] of STAGE_SPEND.open) {
     const read = await m.usd().catch(() => 0);
-    usd += read;
     const est = read > 0 && !!m.estimated?.();
-    if (est) estimated = true;
-    if (!session) continue;
     // The running pass's session as this figure counts it; none known (or an estimate) leaves the session out, so the
     // next stage counts the pass again rather than not at all.
-    const counted = est ? null : await m.session?.().catch(() => null);
+    const counted = session && !est ? await m.session?.().catch(() => null) : null;
+    reads.push({ session, read, est, counted });
+  }
+  return stageSpendOf(base, reads);
+}
+
+/**
+ * stageSpendSoFar read at once, with no await: each running pass's meter from its stream alone (live-spend.mjs `now`).
+ * For a process that is stopping (session.mjs progressReporter), where nothing asynchronous runs any more.
+ */
+export function stageSpendNow() {
+  const base = stageSpendBase();
+  const reads = [];
+  for (const [m, { session }] of STAGE_SPEND.open) {
+    let r = null;
+    try {
+      r = m.now?.() ?? null;
+    } catch {
+      // read as nothing
+    }
+    const read = Math.max(0, Number(r?.usd) || 0);
+    const est = read > 0 && !!m.estimated?.();
+    reads.push({ session, read, est, counted: session && !est ? (r?.session ?? null) : null });
+  }
+  return stageSpendOf(base, reads);
+}
+
+const stageSpendBase = () => ({ done: STAGE_SPEND.done, estimated: STAGE_SPEND.estimated, totals: Object.fromEntries(SESSION_TOTALS) });
+
+/**
+ * The stage's spend: what had finished (`base`) and its running passes' readings ({session, read, est, counted}), with
+ * its commit (stageSpendSoFar).
+ */
+function stageSpendOf(base, reads) {
+  let usd = base.done;
+  let estimated = base.estimated;
+  const totals = base.totals;
+  for (const { session, read, est, counted } of reads) {
+    usd += read;
+    if (est) estimated = true;
+    if (!session) continue;
     if (counted) totals[session] = counted;
     else delete totals[session];
   }

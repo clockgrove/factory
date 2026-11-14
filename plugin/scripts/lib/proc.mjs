@@ -465,6 +465,18 @@ export const GROUP_RECORD = /^harness-group-\d+\.json$/;
 /** This process's live `group` runs: leader pid → {tag, record}. */
 const GROUPS = new Map();
 let trapped = false;
+/** What runs once the groups are killed on a stop signal, before the exit (atStop). */
+const AT_STOP = new Set();
+
+/**
+ * Run `fn(sig)` when a stop signal ends a process with a live or past `group` run: after its groups are killed, before
+ * it exits, synchronously (stopGroups: no other code of the process runs meanwhile), so `fn` must bound its own time.
+ * A throw is ignored. Returns a function that removes it.
+ */
+export function atStop(fn) {
+  AT_STOP.add(fn);
+  return () => AT_STOP.delete(fn);
+}
 
 /** `sysctl -n kern.boottime` ("{ sec = 1731450000, usec = 12345 } Thu Nov 12 ...") as its seconds, a string; else null. */
 export const boottimeSeconds = (text) => /\bsec = (\d+)/.exec(String(text || ""))?.[1] ?? null;
@@ -628,10 +640,11 @@ function untrackGroup(pid) {
 }
 
 /**
- * On SIGTERM, SIGHUP or SIGINT: every live group run's process group and tagged processes are killed, then the process
- * exits as the signal would have ended it (128 + its number), unless another handler of that signal is installed and
- * decides when. All at once, with no await between: no code of the stage runs (a next pass, a post) once it is told
- * to stop, and nothing of the harness is left when it exits. A killed pass's session is not carried over anyway.
+ * On SIGTERM, SIGHUP or SIGINT: every live group run's process group and tagged processes are killed, then what atStop
+ * registered runs, then the process exits as the signal would have ended it (128 + its number), unless another handler
+ * of that signal is installed and decides when. All at once, with no await between: no code of the stage runs (a next
+ * pass, a post) once it is told to stop, and nothing of the harness is left when it exits. A killed pass's session is
+ * not carried over anyway.
  */
 function stopGroups(sig) {
   for (const [pid, g] of [...GROUPS]) {
@@ -642,6 +655,14 @@ function stopGroups(sig) {
     }
     killTagged(g.tag);
     untrackGroup(pid);
+  }
+  for (const fn of [...AT_STOP]) {
+    AT_STOP.delete(fn);
+    try {
+      fn(sig);
+    } catch {
+      // the exit goes ahead
+    }
   }
   if (process.listenerCount(sig) <= 1) process.exit(128 + (osConstants.signals[sig] || 15));
 }

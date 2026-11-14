@@ -1323,7 +1323,7 @@ test("workflowScopeReason: the cause and what to do, whether the branch changed 
   assert.match(behind, /^push rejected \(workflow scope\): GitHub refused factory\/7 because its \.github\/workflows\/factory\.yml is not the version main has/);
   assert.match(behind, /bring the branch up to date with main/);
   const own = workflowScopeReason({ branch: "factory/7", defaultBranch: "main", paths: ["a", "b", "c", "d"], own: ["a", "b", "c", "d"] });
-  assert.match(own, /because it changes a, b, c and 1 more, .*a person makes workflow changes/);
+  assert.match(own, /because it changes a, b, c and 1 more, .*hands a workflow change over in \$FACTORY_OUT\/workflow\.patch/);
   // Blocked as it stands: decideExit keeps a reason that starts with "push rejected".
   assert.equal(decideExit({ harness: { ok: true }, pushRejected: behind }).reason, behind);
   // The branch's workflow files matched the default branch Factory read: it moved again during the push.

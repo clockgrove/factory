@@ -63,6 +63,7 @@ import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
 import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
+import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
 import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
@@ -525,6 +526,7 @@ while IFS= read -r f; do
 done < <(git diff --cached --name-only)
 if [ -n "$bad" ]; then
   echo "factory: refusing commit on protected path(s):$bad" >&2
+  case "$bad" in *" ${WORKFLOWS_DIR}"*) echo "factory: Factory never pushes a workflow file; keep the change out of your commits and hand it over in \\$FACTORY_OUT/${HANDOVER_FILE} (factory-deliver-pr)" >&2 ;; esac
   exit 1
 fi
 ${lfsHook()}`;

@@ -59,6 +59,9 @@ export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budg
   };
 }
 
+/** Where GitHub reads workflows from: a token without the Workflows permission may not create or update a file here. */
+export const WORKFLOWS_DIR = ".github/workflows/";
+
 /** The protected list: Factory's fixed entries plus the repository's additions, deduped. */
 export const FACTORY_PROTECTED = [
   ".github/",
@@ -95,6 +98,15 @@ export function protectedCovers(rule, path) {
   if (!clean) return false;
   if (clean.endsWith("/")) return path.startsWith(clean);
   return path === clean || (!root && path.endsWith(`/${clean}`));
+}
+
+/**
+ * The Blocked reason for commits on protected paths. When every one is a workflow file, the fix is the hand-over
+ * (handover.mjs): the change goes in $FACTORY_OUT/workflow.patch, never in a commit.
+ */
+export function protectedReason(hits) {
+  const why = `touched protected path ${hits.join(", ")}`;
+  return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun` : why;
 }
 
 /** Changed files that fall under a protected path (protectedCovers). */
@@ -431,7 +443,7 @@ export const fixScopeReason = (files) =>
  */
 export const workflowScopeReason = ({ branch, defaultBranch, paths = [], own = [] }) => {
   const list = (p) => `${p.slice(0, 3).join(", ")}${p.length > 3 ? ` and ${p.length - 3} more` : ""}`;
-  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Factory's token may not create or update workflow files; a person makes workflow changes, so take them out of the Objective or push them yourself, then re-apply the label`;
+  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Factory's token may not create or update workflow files; the worker hands a workflow change over in $FACTORY_OUT/workflow.patch instead (factory-deliver-pr), so re-apply the label to rerun`;
   if (paths.length) return `push rejected (workflow scope): GitHub refused ${branch} because its ${list(paths)} is not the version ${defaultBranch} has, and Factory's token may not create or update workflow files; bring the branch up to date with ${defaultBranch} (re-apply the label to rerun)`;
   // The branch's workflow files match the default branch as Factory last read it: it moved again before the push.
   return `push rejected (workflow scope): GitHub refused ${branch} for a workflow file Factory's token may not create or update, though its workflow files matched ${defaultBranch} when Factory read it; ${defaultBranch} likely changed one again during the push (re-apply the label to rerun)`;
@@ -747,6 +759,9 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  planNeeds:  string, why the plan needs another repository (one-repo.mjs planNeeds): a
  *              Question, asked whether or not the run committed, before any other check but the hard stops
  *  sessionCap: string, sessionCapNote: the sandbox vendor's session cut this stage's wall clock; a time cap names it
+ *  handoverRefused: string, why the worker's workflow hand-over could not go out (handover.mjs handoverRefusedReason)
+ *  handoverOnly: boolean, the run left a workflow hand-over Factory accepted and nothing to push; it Blocks as the
+ *              hand-over (`handoverOnly: true` on the result) only when the harness ended ok and the record is delivered
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
  * Returns {exit: 'delivered'|'question'|'blocked', reason}, a blocked one with its `cause` (BLOCK_CAUSES), plus `deniedHosts` when the worker Blocked on hosts its
@@ -754,7 +769,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "" }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "", handoverRefused = "", handoverOnly = false }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
   // GitHub's Git LFS quota or storage (the outbox's `lfs-quota` refusal) is a plan limit a person raises; any other LFS refusal is setup.
   if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: lfsQuota ? "provider-quota" : "setup" };
@@ -767,13 +782,19 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
   if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "factory" : "max-usd" };
-  if (protectedHits.length) return { exit: "blocked", reason: `touched protected path ${protectedHits.join(", ")}`, cause: "work" };
+  if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
+  // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
+  if (handoverRefused) return { exit: "blocked", reason: handoverRefused, cause: "work" };
   // The plan needs another repository: the owner decides, so no commit (the plan-time stop) is no Block.
   if (planNeeds) return { exit: "question", reason: planNeeds };
   if (!pr?.exists) {
     // A worker that stopped because the sandbox denied a host it needs, or its shell lacked a secret: its own reason and
     // the names, not the missing commits.
     if (record?.exit === "blocked" && (record.deniedHosts?.length || record.missingSecrets?.length)) return workerBlocked(record);
+    // Nothing to push but a workflow hand-over, from a harness that ended well and a worker that says it delivered: no
+    // PR can hold it, so it waits on the issue for a person (the owner's trust stance: Factory's token has no Workflows
+    // permission), a setting and not the work. A worker's own Block or Question, and a failed harness, keep their exits.
+    if (commits === 0 && handoverOnly && harness?.ok && record?.exit === "delivered") return { exit: "blocked", reason: "the whole change is a workflow hand-over, which Factory never pushes: a person applies it with `factory handover`, as Factory's hand-over comment on this issue says", cause: "setup", handoverOnly: true };
     if (commits === 0) {
       // A worker that stopped on purpose before any commit: its own Block or Question, with the reason it gave. A record
       // Factory filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.

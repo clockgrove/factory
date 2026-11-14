@@ -149,11 +149,12 @@ Factory is a plugin of [Agent Skills](https://agentskills.io): one folder per sk
 | [`factory-review`](plugin/skills/factory-review/SKILL.md) | "Review Clockgrove Factory PR 57." | Runs the reviewer on one Factory PR in your session |
 | [`factory-serve`](plugin/skills/factory-serve/SKILL.md) | "Start the Clockgrove Factory local loop." | Starts the local loop ([docs/LOCAL.md](docs/LOCAL.md)) |
 | [`factory-queue`](plugin/skills/factory-queue/SKILL.md) | "Start the Clockgrove Factory queue." | Starts the unattended scheduler for the repository |
+| [`factory-handover`](plugin/skills/factory-handover/SKILL.md) | "Apply the Clockgrove Factory workflow hand-over for Objective 12." | Puts the workflow change Factory handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
 | [`factory-score`](plugin/skills/factory-score/SKILL.md) | "Show the Clockgrove Factory scorecard." | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
 Six more are loaded for you. The worker follows [`factory-objective-plan`](plugin/skills/factory-objective-plan/SKILL.md), [`factory-implement-split`](plugin/skills/factory-implement-split/SKILL.md), [`factory-prove-acceptance`](plugin/skills/factory-prove-acceptance/SKILL.md) and [`factory-deliver-pr`](plugin/skills/factory-deliver-pr/SKILL.md), in that order; the reviewer follows [`factory-review-pr`](plugin/skills/factory-review-pr/SKILL.md); and `factory-score` loads [`factory-scoring`](plugin/skills/factory-scoring/SKILL.md).
 
-Install Factory as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, queue, review and score skills run, so those skills do not work installed that way.
+Install Factory as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, queue, review, handover and score skills run, so those skills do not work installed that way.
 
 ## What Factory adds to your repository
 

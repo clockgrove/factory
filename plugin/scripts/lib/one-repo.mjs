@@ -16,9 +16,9 @@ const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * The values of every `KEY: value` line (any case for the key, a leading `- ` or `* ` allowed) outside fenced code.
  * `loose` (a plan line, the harness's own markdown) also takes a numbered item (`1. `), a task-list item (`- [ ] `), a
- * blockquote and a bold key.
+ * blockquote and a bold key. A plan's Needs-Workflow lines (handover.mjs) are read the same way.
  */
-function keyedLines(text, name, { loose = false } = {}) {
+export function keyedLines(text, name, { loose = false } = {}) {
   const out = [];
   let fence = null;
   const at = loose ? new RegExp(`^(?:(?:[-*+]|\\d+[.)])\\s+(?:\\[[ xX]\\]\\s+)?|>\\s*)*(?:\\*\\*|__)?${name}(?:\\*\\*|__)?:(?:\\*\\*|__)?\\s*(.*)$`, "i") : new RegExp(`^(?:[-*]\\s+)?${name}:\\s*(.*)$`, "i");

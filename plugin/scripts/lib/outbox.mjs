@@ -13,12 +13,13 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
 import { heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
+import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
@@ -65,8 +66,6 @@ export function gitError(stderr) {
   const text = (blocks.length ? blocks.join("; ") : lines[0] ?? "").replace(/(\w+:\/\/)[^\s/@'"]+@/g, "$1***@").replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, "***");
   return text.slice(0, 300);
 }
-/** Where GitHub reads workflows from: a token without the Workflows permission may not create or update a file here. */
-const WORKFLOWS = ".github/workflows/";
 
 /**
  * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
@@ -703,7 +702,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // Nothing to merge (the branch already has the default), or nothing of the branch's own to merge it into: a merge
     // there would be Factory's alone, a commit whose tree is the default branch's.
     if (!SHA.test(mb) || mb === tip || mb === head) return { head };
-    const paths = (await names([mb, tip]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
+    const paths = (await names([mb, tip]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
     if (!paths.length) return { head };
     // From here on the mirror's default branch is the one GitHub has now: the bundle, media and scope checks count from it.
     await must(["update-ref", `refs/remotes/origin/${defaultBranch}`, tip]);
@@ -757,10 +756,16 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
 
   /** The workflow files `head` has unlike the default branch, and whether the branch itself changed any of them. */
   const workflowDrift = async (head) => {
-    const differ = (await names([base, head]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
-    const own = (await names([`${base}...${head}`]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS));
+    const differ = (await names([base, head]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
+    const own = (await names([`${base}...${head}`]).catch(() => [])).filter((f) => f.startsWith(WORKFLOWS_DIR));
     return { paths: differ, own: own.filter((f) => differ.includes(f)) };
   };
+
+  /**
+   * The worker's workflow hand-over as Factory publishes it (checkHandover), checked against the tree of the branch as
+   * GitHub has it (the default branch's when there is none): {ok: true, patch, files} or {ok: false, problem}.
+   */
+  box.handover = async (patch) => checkHandover(git, { patch, tree: expected || base, index: join(scratch, `handover-${Date.now()}.index`), against: expected ? branch : defaultBranch });
 
   /** How many commits the default branch has that the Objective's branch (as GitHub has it) lacks. */
   box.behind = async () => (expected ? Number(await must(["rev-list", "--count", `${expected}..${base}`])) || 0 : 0);
@@ -942,7 +947,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const files = await stageChanges(mirror, start, gitEnv()).catch((e) => e);
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
-    if (hits.length) return refuse(`touched protected path ${hits.join(", ")}`, { kind: "protected" });
+    if (hits.length) return refuse(protectedReason(hits), { kind: "protected" });
     // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
     const leak = await secretScan(git, `${base}..${head}`);
     if (leak) return refuse(leak);
@@ -1088,4 +1093,41 @@ export async function scratchHistory({ remote, token = () => null, objects = nul
   }
   if (objects) writeFileSync(join(dir, "objects", "info", "alternates"), `${objects}\n`);
   return { git, close };
+}
+
+/**
+ * A workflow hand-over (handover.mjs) as Factory publishes it: the worker's `patch` really applied (`git apply --cached`)
+ * to `tree` on a scratch `index`, the changes read back from git (`diff-index --raw -z --no-renames`) and held to
+ * entriesProblem, and then git's own diff of those files (no renames, no external diff or textconv, no colour) held to
+ * patchTextProblem. Only that regenerated diff is ever published or applied, never the worker's text, so whatever the
+ * worker's patch says (a rename or copy from outside, a mode, a garbage or header-only line) the published one shows
+ * exactly the files and changes it makes. A rename or copy in the worker's patch (git's own summary of it) is refused
+ * outright. `git(args, {env, input})` runs git in a repository holding `tree`, with `git.env()` its environment;
+ * nothing is written to it but objects and the scratch index, which is removed. `against` names the tree in a refusal.
+ * {ok: true, patch, files} or {ok: false, problem}.
+ */
+export async function checkHandover(git, { patch, tree, index, against }) {
+  const text = String(patch ?? "");
+  const before = patchTextProblem(text);
+  if (before) return { ok: false, problem: before };
+  const env = { ...git.env(), GIT_INDEX_FILE: index };
+  try {
+    const summary = await git(["apply", "--summary", "-"], { env, input: text });
+    if (summary.code !== 0) return { ok: false, problem: "is no patch git can read" };
+    if (/^ (rename|copy) /m.test(summary.stdout)) return { ok: false, problem: "renames or copies a file: hand over the new file whole" };
+    if ((await git(["read-tree", tree], { env })).code !== 0) return { ok: false, problem: "could not be checked: git could not read the tree to apply it to" };
+    if ((await git(["apply", "--cached", "-"], { env, input: text })).code !== 0) return { ok: false, problem: `does not apply to ${against} as GitHub has it` };
+    const raw = await git(["diff-index", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", tree], { env });
+    const entries = raw.code === 0 ? rawEntries(raw.stdout) : null;
+    const problem = entriesProblem(entries);
+    if (problem) return { ok: false, problem };
+    const files = entries.map((e) => e.path);
+    const diff = await git(["diff-index", "--cached", "-p", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", tree, "--", ...files], { env });
+    if (diff.code !== 0) return { ok: false, problem: "could not be read back from git" };
+    const after = patchTextProblem(diff.stdout);
+    if (after) return { ok: false, problem: after };
+    return { ok: true, patch: diff.stdout, files };
+  } finally {
+    rmSync(index, { force: true });
+  }
 }

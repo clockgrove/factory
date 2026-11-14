@@ -23,6 +23,7 @@ The workflow sets the default harness and models (doctor names them). When the u
 ## Check before creating
 
 - **Doable now, here.** Every entry can be met from the default branch as it stands, in this one repository. Work that needs another repository is its own Objective there; work that must follow another Objective says so on a `Blocked by #N` line in the body.
+- **Workflow files:** [reference.md](reference.md), "Workflow files".
 - **Trust.** Factory acts on an issue only when its author, and its last editor, can push to the repository or is a maintainer the workflow names. `gh api repos/OWNER/NAME --jq .permissions.push` must print `true` for the login `gh` uses; otherwise say a maintainer has to file it.
 - **Nothing private.** No token, key or secret goes in an issue.
 

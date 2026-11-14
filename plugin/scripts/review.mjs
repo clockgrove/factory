@@ -32,7 +32,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -93,7 +93,7 @@ const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
  * that leaves work for the next (handoff.mjs isSplitPart): the prompt says so, so the reviewer judges the entries the
  * PR body assigns to a later part as deferred; the last part and a one-PR Objective get the prompt without it.
  */
-export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null }) {
+export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null, handover = null }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   const entries = acceptanceEntries(issueBody);
   const brief = (t) => (t.length > 160 ? `${t.slice(0, 159)}…` : t);
@@ -118,6 +118,8 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     "```diff",
     promptDiff(diff),
     "```",
+    // The workflow change the PR leaves for a person (handover.mjs), as Factory published it: part of the change.
+    ...(handover ? ["", "## Workflow hand-over", "Factory's comment on the issue hands this change to a person to apply after the merge; review it as part of the change (the factory-review-pr reference, \"Workflow hand-over\").", "```diff", handover.trimEnd(), "```"] : []),
   ].join("\n");
 }
 
@@ -602,7 +604,9 @@ async function main() {
   const part = splitPartOf(parts, pr.number);
   // A PR GitHub would read as closing anything but this Objective's issue Blocks the stage (handoff.mjs closingChecked).
   let publishRefused = "";
-  const publish = (current) => publishPr(repo, { branch, base: defaultBranch, issue, prText: io.files()["pr.md"], splitPart, pr: current }, token).catch((e) => {
+  // The answer pass may change the workflow hand-over too (handoff.mjs handoverChecker); one that cannot go out Blocks.
+  const handover = handoverChecker(() => io.files(), outbox);
+  const publish = async (current) => publishPr(repo, { branch, base: defaultBranch, issue, prText: io.files()["pr.md"], splitPart, pr: current, handover: await handover.now() }, token).catch((e) => {
     log(`PR body: ${e.message.slice(0, 160)}`);
     if (e.code === "closing-refs") publishRefused = e.message;
     return e.pr || current;
@@ -683,6 +687,8 @@ async function main() {
   const prd = await prDiff(repo, pr, token, { diffOf: (base, head) => mirrorDiff(outbox.git, base, head, { mergeBase: true, maxBytes: REVIEW_DIFF_BYTES }) });
   if (prd.source !== "history") log(`the PR's diff came from GitHub's files API (Factory's mirror: ${prd.historyError})${prd.unlisted ? `; ${prd.unlisted} file(s) are past the API's listing` : ""}`);
   const diff = prd.text;
+  // The workflow hand-over Factory published for this Objective (handoff.mjs handoverPosted), reviewed with the diff.
+  const handoverPatch = (await handoverPosted(repo, issue, token).catch(() => null))?.patch ?? null;
   if (!alreadyReviewed) {
     // The reviewer's effort is passed on its call: no harness applies its reviewer agent file's effort to this run.
     log(`reviewer on ${inputs.reviewerModel || `${inputs.harness}'s default model`} at ${inputs.reviewerEffort || `${inputs.harness}'s default effort`}`);
@@ -693,7 +699,7 @@ async function main() {
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,
-    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part }),
+    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part, handover: handoverPatch }),
     maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
     reviewer: true,
@@ -728,7 +734,7 @@ async function main() {
       harness: inputs.harness,
       model: again.model,
       effort: again.effort,
-      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part }),
+      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part, handover: handoverPatch }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
       reviewer: true,
@@ -938,6 +944,7 @@ async function main() {
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
+    handoverRefused: handover.refused(),
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });

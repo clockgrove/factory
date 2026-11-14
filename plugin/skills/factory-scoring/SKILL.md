@@ -21,7 +21,7 @@ Where there is a comparison (a bench run against a recorded baseline), the bench
 
 ## 3. Operator minutes
 
-Minutes a human spent on this Objective after the label: reading and acting on a Blocked card, answering a Question, re-filing, fixing a branch by hand. From a stopwatch or the owner's note, not estimated from timestamps. Zero on a clean merge. Report the minutes and what they went on.
+Minutes a human spent on this Objective after the label: reading and acting on a Blocked card, answering a Question, re-filing, fixing a branch by hand, applying a workflow hand-over (reference.md, "Workflow hand-over"). From a stopwatch or the owner's note, not estimated from timestamps. Zero on a clean merge. Report the minutes and what they went on.
 
 ## 4. Dollars per merged Objective
 

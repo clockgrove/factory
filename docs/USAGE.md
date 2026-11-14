@@ -105,6 +105,16 @@ Two Objectives running at once that edit the same lines can conflict: when one m
 
 Factory works in one repository per Objective. An Objective that needs a change in another repository stops with a Question on the issue before any code is written (after its plan, or before the worker starts when the issue names another repository on a `Factory-Repository:` line): split it into one Objective per repository and re-apply the label. When the Question came from the plan, you can instead answer on the issue how to do the work in this repository alone.
 
+## Workflow changes
+
+Factory never pushes a change under `.github/workflows/`, on any route: its token has no Workflows permission. When an Objective needs one, the run hands that part over and the rest lands as usual:
+
+- **Before any model spend,** an issue that names a path under `.github/workflows/` gets a comment saying so. Name the workflow files you know of in the issue to get it then. A need the issue does not name shows in the plan (a `Needs-Workflow:` line), with the same comment, or only in the PR.
+- **In the PR,** the first line points to Factory's comment on the issue, which holds the exact change, and the PR's Undone section says why. The issue carries the `factory:handover` label. That comment with the label is the hand-over, never text in a PR body, and the only command to run for it is `factory handover <issue>`: after the PR merges, run it in a clone (or ask your agent: "Apply the Clockgrove Factory workflow hand-over for Objective 12"). It takes the comment only from the Factory App you name with `--app <id>` (the repository's `FACTORY_APP_ID`, shown on the App's settings page; or `FACTORY_LOCAL_APP_ID`) or from someone who can write to the repository, and says whose it is. It puts the change on a new branch from the default branch, shows you the diff and stops. Read it before you push: a workflow runs with the repository's secrets, and one that runs `on: push` runs as soon as its branch is pushed. Then `factory handover <issue> --push` commits it, pushes the branch and opens its pull request. Remove the `factory:handover` label once it merges: a removal by someone who can write marks the hand-over applied, and Factory leaves the label off from then on. Until then the Objective is done with that step pending.
+- **When the workflow change is all there is,** there is no PR: the comment on the issue holds it, and the Objective is Blocked until you apply it the same way and close the issue.
+
+To have Factory build on a workflow change instead, land that change yourself first, then start the Objective.
+
 ## Commands
 
 With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words and use the full name, Clockgrove Factory: each request below loads the Factory skill that does it, and the full name keeps your agent from picking up another product called Factory. Where your agent offers skills as slash commands, the command works too.
@@ -122,6 +132,7 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 | "Review Clockgrove Factory PR 57." | `/factory:factory-review <pr>` | Runs the reviewer on one Factory PR in your session |
 | "Start the Clockgrove Factory local loop." | `/factory:factory-serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
 | "Start the Clockgrove Factory queue." | `/factory:factory-queue` | Starts the unattended scheduler for the repository |
+| "Apply the Clockgrove Factory workflow hand-over for Objective 12." | `/factory:factory-handover <issue>` | Puts the workflow change Factory handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
 | "Show the Clockgrove Factory scorecard." | `/factory:factory-score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
 On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).

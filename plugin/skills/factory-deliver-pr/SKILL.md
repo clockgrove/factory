@@ -23,6 +23,10 @@ These sections, in this order, each under exactly this `##` heading (Factory rea
 - `## Undone`: anything the issue asked for that this PR does not deliver, with the reason and, for a split Objective, that a later part delivers it.
 - `## Blocked` (only when blocked beyond recovery): what blocked you, in one paragraph.
 
+## Workflow hand-over
+
+Factory never pushes a change under `.github/workflows/`, and the commit hook refuses one. When the Objective needs one, keep it out of your commits and hand it over as `$FACTORY_OUT/workflow.patch`: read [reference.md](reference.md), "Workflow hand-over", first.
+
 ## Reviewer comments
 
 When the PR has review comments (`$FACTORY_IN/review-comments.json` holds them), read [reference.md](reference.md) beside this file first: its "Reviewer comments" section says how to answer each one once, then finish the pass.

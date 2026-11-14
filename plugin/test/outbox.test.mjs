@@ -93,7 +93,7 @@ test("outbox: a protected path or a plain blob LFS should hold is refused before
   r.run(r.work, "commit", "-q", "-m", "widen ci");
   const before = r.run(r.origin, "rev-parse", "factory/1");
   assert.equal(await box.push(), false);
-  assert.equal(box.error, "touched protected path .github/workflows/ci.yml");
+  assert.equal(box.error, "touched protected path .github/workflows/ci.yml; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun");
   assert.equal(r.run(r.origin, "rev-parse", "factory/1"), before);
 
   const r2 = repos();

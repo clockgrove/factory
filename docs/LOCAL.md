@@ -54,6 +54,7 @@ factory review <pr> [--wait]                     # a review re-run
 factory issue <issue> [--out FILE]               # the issue for a session (/factory:factory-run --here, /factory:factory-review), only when its author and last editor can push; without --out, its plan.md too when made from this text
 factory deliver <issue> [--out DIR]              # Factory's half of /factory:factory-run --here: push, PR, plan, replies, exit
 factory post-review <pr> <findings.json>         # post a /factory:factory-review pass made in a session
+factory handover <issue> [--push] [--app ID]     # apply Factory's workflow hand-over on factory-workflow/<issue> and show it; --push, once you read it, commits, pushes and opens its PR (/factory:factory-handover; PLAN.md, Workflow hand-over). Locally Factory posts as you, so taking factory:handover off yourself marks the hand-over applied
 ```
 
 Every command takes `--repo OWNER/NAME` and `--dir CLONE` too. `--help` or `-h` prints its usage and exits 0; an unknown flag, a flag without its value, a non-number for `--interval` or a missing or non-numeric `<issue>` or `<pr>` exits 64 with the usage, before anything starts. `factory-db --help` prints its own usage.

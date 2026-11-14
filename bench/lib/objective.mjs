@@ -22,6 +22,7 @@
 import { dispatchLatency, factoryLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf } from "../../plugin/scripts/lib/logic.mjs";
+import { carriesHandover } from "../../plugin/scripts/lib/handover.mjs";
 
 export const ROW_VERSION = 1;
 const BRANCH = (issue) => `factory/${issue}`;
@@ -353,6 +354,7 @@ export function humanActions(collected, since, { bots = new Set(), label = OBJEC
  *   question        the factory:question label, or QUESTION in the plan comment or a Factory PR's body
  *   blocked         the factory:blocked label, or the blocked marker comment
  *   review request  a review requested on a factory/<issue> PR
+ *   workflow hand-over  each merged PR whose body carries Factory's hand-over line (handoverSteps), at its merge
  * A request stays open until Factory next labels the Objective factory:running (it picked the work up again).
  */
 export function factoryRequests(collected, since, { bots = new Set() } = {}) {
@@ -375,6 +377,7 @@ export function factoryRequests(collected, since, { bots = new Set() } = {}) {
     if (body.startsWith(`<!-- factory:${n}:plan -->`) && /\bQUESTION\b/.test(body)) out.push({ at: c.created_at, kind: "question" });
   }
   for (const pr of branchPulls(collected)) {
+    for (const step of handoverSteps(collected, [pr])) if (after(step.at)) out.push({ at: step.at, kind: "workflow hand-over" });
     if (after(pr.created_at) && /\bQUESTION\b/.test(pr.body || "") && byFactory(pr.created_at, pr.user, "opened")) out.push({ at: pr.created_at, kind: "question" });
     for (const e of collected.pullDetails?.[pr.number]?.timeline || []) if (e.event === "review_requested" && after(e.created_at) && byFactory(e.created_at, e.actor, e.event)) out.push({ at: e.created_at, kind: "review request" });
   }
@@ -384,6 +387,19 @@ export function factoryRequests(collected, since, { bots = new Set() } = {}) {
       const next = resumed.filter((t) => t > ms(r.at)).sort((a, b) => a - b)[0];
       return { ...r, until: next === undefined ? null : new Date(next).toISOString() };
     });
+}
+
+/**
+ * A workflow hand-over is operator input on every route: Factory never pushes a workflow file, so each merged PR of the
+ * Objective (every part of a split one) whose body carries Factory's hand-over line (plugin handover.mjs, read on its
+ * marker) leaves a person's step, one action at its merge, asked for (factoryRequests reads the same list). Its minutes
+ * come from a stopwatch like any other operator minute. `pulls`: the Objective's PRs (branchPulls).
+ */
+export function handoverSteps(collected, pulls = branchPulls(collected)) {
+  return pulls
+    .filter((pr) => pr.merged_at && carriesHandover(pr.body, collected.issue.number))
+    .sort((a, b) => ms(a.merged_at) - ms(b.merged_at))
+    .map((pr) => ({ at: pr.merged_at, where: `PR #${pr.number}`, kind: "workflow hand-over", by: "a person (applies the patch)", detail: "" }));
 }
 
 /**
@@ -758,6 +774,7 @@ export function scoreObjective(collected, opts = {}) {
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   actions.push(...unattributedAnswers(collected, since, actions, merged?.merged_at ?? null, { bots }));
+  actions.push(...handoverSteps(collected).filter((a) => ms(a.at) > ms(since)));
   actions.sort((a, b) => ms(a.at) - ms(b.at));
   if (collected.workflowRuns === null) missing.push("workflow runs (a hand-started or re-run Factory run is not seen)"); // undefined: not attempted
   // The input sources this row could not read (null: unreadable; undefined: never collected, an old snapshot or a
@@ -835,7 +852,7 @@ export function scoreObjective(collected, opts = {}) {
   if (typeof given === "number" && Number.isFinite(given)) operator = { minutes: given, basis: "--minutes (stopwatch)" };
   else if (walkAway.value) operator = { minutes: 0, basis: "clean merge" };
   else if (merged && !blocked && !actions.length) operator = { minutes: 0, basis: "no human action (stalled)" };
-  else operator = { minutes: "unknown", basis: "give --minutes <issue>=<n> from a stopwatch" };
+  else operator = { minutes: "unknown", basis: actions.some((a) => a.kind === "workflow hand-over") ? "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" : "give --minutes <issue>=<n> from a stopwatch" };
 
   const candidateSha = merged?.merge_commit_sha ?? merged?.head?.sha ?? open?.head?.sha ?? pulls[0]?.head?.sha ?? null;
   const quality = {

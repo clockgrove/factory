@@ -1,6 +1,6 @@
 ---
 name: run
-description: /factory:run <issue> [--here]. Run one Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Factory Objective by issue number on their machine.
+description: "/factory:run <issue> [--here]. Run one Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Factory Objective by issue number on their machine."
 ---
 
 # /factory:run <issue> [--here]
@@ -21,7 +21,7 @@ Work the Objective here, unsandboxed, when the user wants to watch or steer: the
 
 ### Render the task card
 
-Read `templates/task-card.md` in this plugin's root (`${CLAUDE_PLUGIN_ROOT}`; in Codex `~/.codex/plugins/cache/<marketplace>/factory/<version>/`) and fill the placeholders:
+Read `templates/task-card.md` in this plugin's root (two directories above this file) and fill the placeholders:
 
 | Placeholder | Value |
 | --- | --- |

@@ -1,10 +1,10 @@
 # Using Factory
 
-How to write an Objective, what you see while it runs, what the two stops mean and how to answer them. [INSTALL.md](INSTALL.md) covers setup; [PLAN.md](PLAN.md) has the full contracts.
+How to write an Objective, what you see while it runs, and what to do when a run ends Blocked or with a Question. [INSTALL.md](INSTALL.md) covers setup; [PLAN.md](PLAN.md) has the full contracts.
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: nobody answers questions during the run.
+An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: the worker cannot ask you for more detail while it runs.
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading such as `Acceptance` (`Done when`, `Definition of done`, `Must be true` and `Criteria` are read the same way). The reviewer judges each entry, met or not, with the line that shows it. Without such a section, the reviewer names the entries from the issue text itself.
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
@@ -30,7 +30,12 @@ While a job runs, one comment on the issue (edited in place, one per run) carrie
 
 ## Blocked and Question
 
-Nothing asks a question during a run. The only stops are **Blocked** (a draft PR, the card in the Blocked column, one comment with the reason) and **Question** (a draft PR whose body asks the one thing a human must decide), and neither stops the queue.
+A run never pauses halfway to wait for you. When it cannot merge on its own it ends in one of two states, and neither stops the queue:
+
+- **Blocked** means the run could not get there. You get a draft PR, the card in the Blocked column, and one comment with the reason.
+- **Question** means the work depends on a decision that should be yours: one that would change or remove an existing public contract, contradict a recorded decision or grant new access. The worker takes the simplest reading, finishes everything else, and leaves a draft PR whose body asks the one thing a human must decide.
+
+What to do with each:
 
 - **Blocked:** fix what the comment names, then re-apply `factory:objective` to run the Objective again.
 - **Question:** comment the decision on the issue or the PR (a review or a line comment works too) and mark the PR ready: the review job applies it, and with no answer since the question the PR goes back to a Question rather than merging. Re-applying `factory:objective` instead reruns the worker with it.

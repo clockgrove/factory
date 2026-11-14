@@ -12,7 +12,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledAfter, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -22,7 +22,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
-import { RELAUNCH_MAX, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, stintKey, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_FALLBACK_MS, RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -269,10 +269,16 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // plan's "re-apply the label"). An explicit --issue from workflow_dispatch is the same
   // human intent.
   const reset = [];
+  // Each timeline read here, kept for the relaunch pass below (its outage notice and record are on it too).
+  const timelines = {};
   for (const issue of wanted) {
     const state = stateOf(issue, statuses[issue.number] ?? null);
     if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
-    const again = inputs.issue === issue.number || (await relabeledAfter(repo, issue.number, inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], opts, [DRAFT_LABEL]).catch(() => false));
+    let again = inputs.issue === issue.number;
+    if (!again) {
+      timelines[issue.number] = await timelineOf(repo, issue.number, opts).catch(() => null);
+      again = !!timelines[issue.number] && relabeledIn(timelines[issue.number], inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], [DRAFT_LABEL]);
+    }
     if (!again) continue;
     reset.push(issue.number);
     issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
@@ -439,31 +445,39 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // A stage lost to a network failure on the Action's runners or the cloud sandbox (lib/relaunch.mjs): one that ended on
   // an `outage` (its Block, below) or vanished with no exit (the Running pass) starts its work again on its branch, in
   // the slot it held, at most RELAUNCH_MAX times since a person last started the Objective; then it Blocks. A local loop
-  // pauses and resumes its own stages; a stopped or draft Objective is never here (not in `issues`), and a restarting one
-  // is left to its restart.
+  // pauses and resumes its own stages; a stopped or draft Objective is never here (not in `issues`); a restarting one is
+  // never relaunched (a vanished one gets the vanished Block, and its restart goes ahead from any state).
   const relaunched = [];
   const relaunchesUsed = [];
   const relaunches = backend().name !== "local";
-  // One lost stage: `{relaunch: true, tries}` once its relaunch is recorded and its new Running stint begun, `{block:
-  // true, tries}` with the relaunches used up, `{left: true}` when a read or write failed (next tick tries again).
-  const lostStage = async (issue, { lost, key, comments = null }) => {
+  // A relaunch spends like a pick: none starts while today's spend has reached daily_usd (it waits for the UTC day, or
+  // for a spend that can be read, as a Queued pick does), and none past max_concurrent.
+  const spentNow = relaunches ? await spend : null;
+  const dayCapped = !!spentNow && Number(inputs.dailyUsd) > 0 && spentNow.spentToday >= Number(inputs.dailyUsd);
+  const capHold = (n) => {
+    if (!dayCapped) return false;
+    if (!spentNow.usageError) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
+    log(`  #${n}: its stage was lost; relaunched once daily_usd allows (${spentNow.usageError ? "today's spend unread" : `$${spentNow.spentToday.toFixed(2)} of $${Number(inputs.dailyUsd)}`})`);
+    return true;
+  };
+  // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
+  // `{block, tries}` (relaunchDecision).
+  const decideLost = (n, events, { lost, key }) => {
+    const comments = commentsOf(events);
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString() });
+  };
+  // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
+  // Running stint. False when a write failed (next tick tries again).
+  const relaunchLost = async (issue, d, lost) => {
     const n = issue.number;
-    const [events, list] = await Promise.all([timelineOf(repo, n, opts).catch(() => null), comments ?? listComments(repo, n, opts).catch(() => null)]);
-    if (!events || !list) {
-      retry(`#${n}'s relaunch record`);
-      return { left: true };
-    }
-    const d = relaunchDecision({ record: relaunchRecordOf(list, n), start: personStart(events, list, inputs.objectiveLabel), key, lost, at: new Date().toISOString() });
-    if (d.block) return d;
     if (!dryRun) {
       try {
-        // The count first: a relaunch the record does not hold could repeat without end.
         if (d.record) await writeRelaunchRecord(repo, n, d.record, d.tries, opts);
         await newStint(repo, n, { project, wasRunning: lost === "vanished" }, opts);
       } catch (e) {
         log(`  #${n}: its relaunch could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
         retry(`#${n}'s relaunch`);
-        return { left: true };
+        return false;
       }
     }
     relaunched.push(n);
@@ -472,38 +486,44 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     statuses[n] = "Running";
     issue.labels = [...(issue.labels || []).filter((l) => !/^factory:(running|blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name)), { name: "factory:running" }];
     log(`  #${n}: its stage was lost (${lost === "outage" ? "it ended on its network" : "it vanished with no exit"}); relaunched, ${d.tries} of ${RELAUNCH_MAX}`);
-    return d;
+    return true;
   };
-  // A stage that ended on its network wrote an `outage` Block (session.mjs outageExit), the issue's newest Blocked notice.
-  // Its relaunch takes the slot the stage held: none is taken while max_concurrent is reached, and relaunches go before
-  // new picks. Used up, the dispatcher's own notice says so and mentions the person.
+  // Past RELAUNCH_FALLBACK_MS from the loss with its relaunch still unrecorded (reads or writes failing), it Blocks.
+  const fallbackDue = (lostAt) => Number.isFinite(Date.parse(lostAt)) && Date.now() - Date.parse(lostAt) > RELAUNCH_FALLBACK_MS;
+  // A stage that ended on its network wrote an `outage` Block (session.mjs outageExit): the issue's newest Blocked notice,
+  // written since the Objective last became Running, read from the timeline the recovery pass read above. Used up, the
+  // dispatcher's own notice says so and mentions the person, whatever the caps.
   if (relaunches) {
-    const lostHere = wanted.filter((i) => !hasLocalLabel(i) && !restarting[i.number] && stateOf(i, statuses[i.number] ?? null) === "Blocked");
-    const read = {};
-    await pooled(lostHere, RELATION_READS, async (i) => {
-      read[i.number] = await listComments(repo, i.number, opts).catch(() => null);
-    });
     let busy = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
-    for (const issue of lostHere) {
+    for (const issue of wanted) {
       const n = issue.number;
-      if (!read[n]) {
-        retry(`#${n}'s comments`);
+      if (hasLocalLabel(issue) || restarting[n] || stateOf(issue, statuses[n] ?? null) !== "Blocked") continue;
+      const events = timelines[n];
+      if (!events) {
+        retry(`#${n}'s timeline`);
         continue;
       }
-      const block = outageBlockOf(read[n], n);
+      const block = outageBlockOf(commentsOf(events), n, lastRunningAt(events));
       if (!block) continue;
-      if (busy >= inputs.maxConcurrent) {
-        log(`  #${n}: its stage ended on its network; relaunched once a slot frees (max_concurrent reached)`);
-        continue;
+      const d = decideLost(n, events, { lost: "outage", key: block.key });
+      let why = d.block ? `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)` : null;
+      if (!why) {
+        if (capHold(n)) continue;
+        if (busy >= inputs.maxConcurrent) {
+          log(`  #${n}: its stage ended on its network; relaunched once a slot frees (max_concurrent reached)`);
+          continue;
+        }
+        if (await relaunchLost(issue, d, "outage")) {
+          busy += 1;
+          continue;
+        }
+        if (!fallbackDue(block.at)) continue;
+        why = "the stage ended on its network, and Factory could not record its relaunch for over an hour (the outage notice above names the host and since when)";
       }
-      const d = await lostStage(issue, { lost: "outage", key: block.key, comments: read[n] });
-      if (d.relaunch) busy += 1;
-      if (!d.block) continue;
       relaunchesUsed.push(n);
       if (dryRun) continue;
       const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-      const reason = `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)`;
-      await applyExit(repo, { issue: n, pr, exit: "blocked", reason, fix: "Re-apply `factory:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
+      await applyExit(repo, { issue: n, pr, exit: "blocked", reason: why, fix: "Re-apply `factory:objective` once the runner's or the sandbox's network is back; the relaunch count starts over.", cause: "outage", notify: inputs.notify, stage: "relaunch" }, opts).catch((e) => {
         log(`  #${n}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`);
         retry(`#${n}'s Block`);
       });
@@ -597,18 +617,31 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
           continue;
         }
-        // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first.
-        let tries = 0;
+        // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
+        // unless it left a sign its network was not what ended it (a cancelled job, a sandbox stage that recorded its end).
+        let note = "";
         if (relaunches && !hold && !local && !restarting[issue.number]) {
-          const d = await lostStage(issue, { lost: "vanished", key: stintKey(since) });
-          if (!d.block) continue;
-          tries = d.tries;
+          const n = issue.number;
+          const events = await timelineOf(repo, n, opts).catch(() => null);
+          const record = sandbox && events ? sandboxRecord(commentsOf(events), n) : null;
+          const job = !sandbox && events ? await stintWorkJob(repo, n, since, readToken).catch(() => null) : null;
+          const lostAt = since ? new Date(Date.parse(since) + 15 * 60_000).toISOString() : null;
+          if (events && endedNotLost({ record, job })) log(`  #${n}: its ${sandbox ? "sandbox stage recorded its end" : "work job was cancelled"}; not a network loss, so not relaunched`);
+          else if (!events && !fallbackDue(lostAt)) {
+            retry(`#${n}'s relaunch record`);
+            continue;
+          } else if (events) {
+            const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
+            if (d.block) note = `; Factory relaunched its stage ${d.tries} times since the Objective was last started`;
+            else if (capHold(n) || (await relaunchLost(issue, d, "vanished")) || !fallbackDue(lostAt)) continue;
+            else note = "; Factory could not record its relaunch for over an hour";
+          } else note = "; Factory could not record its relaunch for over an hour";
         }
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : `worker job vanished: Running with no job in progress${tries ? `; Factory relaunched its stage ${tries} times since the Objective was last started` : ""}`, hold || local ? "setup" : "factory");
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : `worker job vanished: Running with no job in progress${note}`, hold || local ? "setup" : "factory");
       }
     }
   }

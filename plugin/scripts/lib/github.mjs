@@ -398,7 +398,11 @@ export async function blockedByRelations(repo, number, opts) {
  * one of `removedStarts` (a draft label: starting the draft) counts as re-applying `label`.
  */
 export async function relabeledAfter(repo, number, label, since, opts, removedStarts = []) {
-  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  return relabeledIn((await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label, since, removedStarts);
+}
+
+/** relabeledAfter on timeline events already read. */
+export function relabeledIn(events, label, since, removedStarts = []) {
   let last = null;
   let lastSince = null;
   for (const e of events) {

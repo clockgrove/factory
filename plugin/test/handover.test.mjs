@@ -475,7 +475,7 @@ function personClone(r) {
   execFileSync("git", ["clone", "-q", r.origin, person], { env });
   const bin = join(r.root, "bin");
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" > ${JSON.stringify(join(r.root, "gh-args"))}\necho https://github.test/acme/app/pull/71\n`);
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\0' "$@" > ${JSON.stringify(join(r.root, "gh-args"))}\necho https://github.test/acme/app/pull/71\n`);
   chmodSync(join(bin, "gh"), 0o755);
   return { person, envFor: (gh) => ({ ...env, GITHUB_API_URL: gh.url, FACTORY_LOCAL_TOKEN: "t", PATH: `${bin}:${process.env.PATH}` }) };
 }
@@ -517,7 +517,16 @@ test("hand-over: `factory handover` takes the Factory App's comment, says whose 
     assert.equal(git(r.origin, "show", "factory-workflow/7:.github/workflows/ci.yml"), "name: ci\non: [push, pull_request]");
     assert.equal(git(r.origin, "show", "factory-workflow/7:.github/workflows/release.yml"), "name: release\non: workflow_dispatch");
     assert.equal(git(r.origin, "log", "-1", "--format=%s", "factory-workflow/7"), "#7: the workflow change Factory handed over");
-    assert.equal(readFileSync(join(r.root, "gh-args"), "utf8").trim(), "pr create --repo acme/app --base main --head factory-workflow/7 --fill");
+    // Each value one argument (no shell); the body names the Objective without closing it and links the hand-over.
+    const ghArgs = readFileSync(join(r.root, "gh-args"), "utf8").split("\0").slice(0, -1);
+    assert.deepEqual(ghArgs.slice(0, -1), ["pr", "create", "--repo", "acme/app", "--base", "main", "--head", "factory-workflow/7", "--title", "#7: the workflow change Factory handed over", "--body"]);
+    const body = ghArgs.at(-1);
+    const { handoverPrBody } = await import("../scripts/local.mjs");
+    assert.equal(body, handoverPrBody({ issue: 7, url: "https://github.test/acme/app/issues/7#issuecomment-2" }));
+    assert.match(body, /^Refs #7\n/);
+    assert.doesNotMatch(body, /\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #7/i, "the Objective's own PR closes it");
+    assert.match(body, /hand-over comment: https:\/\/github\.test\/acme\/app\/issues\/7#issuecomment-2/);
+    assert.match(body, /reviewed the workflow change before pushing it/);
     assert.match(push.out, /https:\/\/github\.test\/acme\/app\/pull\/71/);
     assert.throws(() => readFileSync(join(person, "hook-ran")), "the commit ran no hook");
   } finally {

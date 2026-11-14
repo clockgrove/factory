@@ -21,6 +21,10 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund --prefix tools/deps
           node tools/deps/sync.mjs --check
+      # Correctness only, no style: a name never defined, a binding read before it is set (a parameter default that
+      # names itself), a local that hides an import. Unit tests stub what they call and miss these.
+      - name: Lint for undefined names and hidden imports
+        run: npm run lint --prefix tools/deps
       # Every skill follows the Agent Skills standard (agentskills.io): its name matches its folder, its description and
       # frontmatter are what Claude Code, Codex and Copilot accept. A skill they would drop silently fails here instead.
       - name: Every skill follows the Agent Skills standard

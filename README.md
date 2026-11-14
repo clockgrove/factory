@@ -8,6 +8,8 @@ Label a GitHub issue, walk away, come back to merged work.
 
 Factory turns an issue into a merged pull request with no one watching. You write the goal and what "done" means. A coding agent (Claude Code, Codex or GitHub Copilot) plans and builds the change, a second one reviews it, and Factory merges it once your own CI is green. That makes Factory exactly as safe as your CI: with no tests, it merges whatever builds.
 
+> **Free and open source (MIT).** Factory charges nothing and has no paid tier or hosted service. What you pay for is your own: the model your coding agent uses, your CI runners, and a cloud sandbox if you choose one.
+
 > **Status:** 0.9.x, the release candidate for 1.0. Run it on real work; there is no stability promise until 1.0 ([Versioning](#versioning)).
 
 ## How it works
@@ -31,6 +33,14 @@ A run never pauses halfway to wait for you. When it cannot merge on its own, it 
 - **You need admin rights on the repository**, the [`gh` CLI](https://cli.github.com) logged in, and Node 22 or newer.
 
 ## What it costs, and how to stay in control
+
+Factory itself is free. Every cost goes to a provider you already pick and pay directly:
+
+- **Your coding agent's model:** your Anthropic, OpenAI or Copilot account, or your Vercel AI Gateway key.
+- **Your CI runners:** GitHub Actions minutes, or your own machine in local mode.
+- **A cloud sandbox,** only if you opt in: your Vercel account.
+
+Factory never handles a payment, and no bill comes from Clockgrove. To keep those costs in check:
 
 - **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change costs a dollar or a few; a large Objective can reach the job cap. Setup asks for both caps.
 - **Runs take from about ten minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`).

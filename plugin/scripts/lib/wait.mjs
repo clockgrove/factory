@@ -77,37 +77,15 @@ export function parseKinds(text) {
 }
 
 /**
- * The kind one repository issue event tells, before a close is told apart as merged, on an issue carrying the Objective
- * label: `labeled` with a state label Factory sets (blocked, question, in-review), or `closed`. Null for any other event,
- * any event on another issue, and any event on a pull request.
+ * The kind one repository issue event tells, on its own payload only: `labeled` with a state label (blocked, question,
+ * in-review), which only Factory sets, or `closed` (told apart as merged or closed by closedAs). Null for any other
+ * event and any event on a pull request.
  */
-export function eventKind(e, objectiveLabel) {
-  if (!e?.issue || e.issue.pull_request || !names(e.issue).includes(objectiveLabel)) return null;
+export function eventKind(e) {
+  if (!e?.issue || e.issue.pull_request) return null;
   if (e.event === "labeled") return STATE_KINDS[e.label?.name] ?? null;
   if (e.event === "closed") return "closed";
   return null;
-}
-
-/**
- * Each event's issue with its labels as they were right after the event: GitHub gives every event its issue as it is
- * now, so walking one issue's events (oldest first, as eventsAfter gives them) back from its newest takes each later
- * label change off again. Keyed by event id.
- */
-export function issuesAsOf(events) {
-  const now = new Map();
-  const out = new Map();
-  for (let k = events.length - 1; k >= 0; k -= 1) {
-    const e = events[k];
-    if (!e?.issue) continue;
-    const n = e.issue.number;
-    if (!now.has(n)) now.set(n, { ...e.issue, labels: names(e.issue) });
-    const i = now.get(n);
-    out.set(e.id, { ...i, labels: [...i.labels] });
-    const label = e.label?.name;
-    if (e.event === "labeled") i.labels = i.labels.filter((l) => l !== label);
-    else if (e.event === "unlabeled" && label && !i.labels.includes(label)) i.labels = [...i.labels, label];
-  }
-  return out;
 }
 
 /**
@@ -171,7 +149,8 @@ export async function closedAs(repo, issue, opts) {
  * conditional read, free while they are unchanged), and drained is told when that finds the queue drained and the read
  * before did not (or its state was unknown). A wait that starts from now reads whether it already is, and the cursor
  * carries that state on, so neither a queue already drained nor one still drained after a restart is told again. Every
- * other kind is an event, told once by its id, on its issue's labels as they were right after it.
+ * other kind is an event, told once by its id and judged on its own payload: a state label only Factory sets, or a close
+ * of an issue with a PR on factory/<issue> or the Objective label.
  *
  * A read moves the cursor only once all its reads (events, PRs, the open Objectives) have answered, so a read cut off
  * leaves it where it was. Besides the events: a `gap` line when the cursor was more than WAIT_MAX_PAGES pages back
@@ -256,17 +235,16 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     const { events, read, gap } = await eventsAfter(repo, cursor, { opts, cache, seen });
     const next = events.length ? { id: Math.max(cursor.id ?? 0, events.at(-1).id) } : cursor;
     const lines = gap ? [{ event: "gap", issue: null, at: at() }] : [];
-    const asOf = issuesAsOf(events);
-    for (const ev of events) {
-      if (watched && !watched.has(ev.issue?.number)) continue;
-      // Its kind on the issue's labels as they were right after the event, never as later events left them.
-      const e = { ...ev, issue: asOf.get(ev.id) ?? ev.issue };
-      let kind = eventKind(e, objectiveLabel);
+    for (const e of events) {
+      if (watched && !watched.has(e.issue?.number)) continue;
+      let kind = eventKind(e);
       if (!kind) continue;
       let pr;
       if (kind === "closed") {
         if (!kinds.includes("merged") && !kinds.includes("closed")) continue;
         ({ kind, pr } = await closedAs(repo, e.issue.number, opts));
+        // An Objective's close: it has a PR on factory/<issue>, or its issue carries the Objective label.
+        if (pr === null && !names(e.issue).includes(objectiveLabel)) continue;
       }
       if (!kinds.includes(kind)) continue;
       lines.push({ event: kind, issue: e.issue.number, title: e.issue.title, url: e.issue.html_url, at: e.created_at, ...(pr !== undefined ? { pr } : {}) });

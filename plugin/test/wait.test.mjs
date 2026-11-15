@@ -133,7 +133,7 @@ test("Question and In review are told, the state labels coming off are not; with
   assert.deepEqual(r.slept, [30_000, 30_000, 30_000, 10_000], "the last wait ends at the timeout");
 });
 
-test("a closed Objective is merged when the newest PR on factory/<issue> merged, else closed; other issues (a state label on one that is no Objective included) and PRs are not told", async () => {
+test("a closed Objective is merged when the newest PR on factory/<issue> merged, else closed; another issue's close and PRs are not told", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:in-review"]);
   gh.issue(6, [OBJ, "factory:in-review"]);
@@ -142,7 +142,7 @@ test("a closed Objective is merged when the newest PR on factory/<issue> merged,
   gh.s.prs["factory/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
   // A split Objective's earlier part merged; its newest PR was closed unmerged.
   gh.s.prs["factory/6"] = [{ number: 73, merged_at: null }, { number: 72, merged_at: "2026-11-14T13:00:00Z" }];
-  const r = await waiting(gh, [() => (gh.event(70, "closed"), gh.event(9, "labeled", "factory:blocked"), gh.event(9, "closed"), gh.state(5, null), gh.event(5, "closed"), gh.event(6, "closed"), gh.event(70, "labeled", "factory:blocked"))], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
+  const r = await waiting(gh, [() => (gh.event(70, "closed"), gh.event(9, "closed"), gh.state(5, null), gh.event(5, "closed"), gh.event(6, "closed"), gh.event(70, "labeled", "factory:blocked"))], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
   assert.deepEqual(r.lines.map(({ event, issue, pr }) => ({ event, issue, pr })), [{ event: "merged", issue: 5, pr: 71 }, { event: "closed", issue: 6, pr: 73 }]);
   assert.ok(gh.s.seen.includes("GET pulls?state=all&head=acme%3Afactory%2F5&per_page=1"), gh.s.seen.join("\n"));
 });
@@ -400,13 +400,12 @@ test("a restart --since a cursor (#285 review) tells an event GitHub lists late,
   assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 6], ["timeout", null]]);
 });
 
-test("each event is decided on its issue's labels as they were then (#285 review), not as later events in the read left them", async () => {
+test("an event is judged on its own payload (#285 review): a Block GitHub lists late, after the Objective label's removal was read, is told", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:running"]);
-  gh.issue(9, ["bug"]);
   gh.event(5, "labeled", "factory:running");
-  // Between two reads: #5 Blocks, then loses the Objective label; #9, no Objective, gets a state label, then the Objective label.
-  const r = await waiting(gh, [() => (gh.state(5, "factory:blocked"), gh.event(5, "unlabeled", OBJ), gh.event(9, "labeled", "factory:question"), gh.event(9, "labeled", OBJ))], { follow: true, timeoutMs: 35_000, kinds: ["blocked", "question"] });
+  // One read takes in #5's Objective label coming off; then GitHub lists #5's Block, its id below that removal.
+  const r = await waiting(gh, [() => gh.event(5, "unlabeled", OBJ), () => gh.event(5, "labeled", "factory:blocked", gh.s.events.at(-1).id - 3)], { follow: true, timeoutMs: 65_000, kinds: ["blocked"] });
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["blocked", 5], ["timeout", null]]);
 });
 

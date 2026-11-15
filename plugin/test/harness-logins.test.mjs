@@ -21,6 +21,7 @@ function fakeHome() {
   return h;
 }
 
+const within = (p, d) => p === d || p.startsWith(`${d}/`);
 const covered = (list, p) => list.some((q) => p === q || p.startsWith(`${q}/`));
 const codexDenied = (args) => args.find((a) => a.startsWith("permissions.factory="));
 
@@ -105,18 +106,51 @@ test("#260: a stage on CLAUDE_CONFIG_DIR keeps .claude.json there, reads its own
   assert.ok(codexOuter.includes(join(h, ".codex")) && !codexOuter.includes(join(h, ".codex-two")));
 });
 
-test("#260: a Codex stage on another CODEX_HOME can still run the Codex its installer put in ~/.codex", () => {
+// The standalone installer's layout: releases in ~/.codex/packages/standalone/releases, a `current` link to one, and
+// ~/.local/bin/codex linking through it. The default home's config.toml (a dummy) beside it.
+function installedCodex(h) {
+  const releases = join(h, ".codex", "packages", "standalone", "releases");
+  const rel = join(releases, "1.0.0-x");
+  for (const d of [join(rel, "bin"), join(rel, "codex-resources"), join(releases, "0.9.0-x", "bin"), join(h, ".codex", "sessions"), join(h, ".codex", "log"), join(h, ".local", "bin"), join(h, "dotfiles")]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(rel, "bin", "codex"), "#!/bin/sh\n", { mode: 0o755 });
+  writeFileSync(join(h, ".codex", "config.toml"), 'model = "fake"\n');
+  writeFileSync(join(h, ".codex", "packages", "standalone", "install.lock"), "");
+  writeFileSync(join(h, "dotfiles", "mcp.toml"), "");
+  symlinkSync(join(h, "dotfiles", "mcp.toml"), join(h, ".codex", "mcp.toml"));
+  symlinkSync("releases/1.0.0-x", join(h, ".codex", "packages", "standalone", "current"));
+  symlinkSync(join(h, ".codex", "packages", "standalone", "current", "bin", "codex"), join(h, ".local", "bin", "codex"));
+  return rel;
+}
+const deniedBy = (args) => [...codexDenied(args).matchAll(/"([^"]+)"="deny"/g)].map((m) => m[1]);
+
+test("#269: a Codex stage on another CODEX_HOME reads nothing in ~/.codex but the release its codex runs from", () => {
   const h = fakeHome();
-  const bin = join(h, ".codex", "packages", "standalone", "bin");
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "codex"), "#!/bin/sh\n");
-  const env = { CODEX_HOME: join(h, ".codex-two") };
+  const rel = installedCodex(h);
+  const env = { CODEX_HOME: join(h, ".codex-two"), PATH: join(h, ".local", "bin") };
   const credentials = credentialPaths(h, env, { own: stageLogin("codex", env, h) });
+  const d = join(h, ".codex");
   for (const args of [codexLocalConfig({ home: h, env }), codexLocalConfig({ home: h, env, credentials })]) {
-    const denied = [...codexDenied(args).matchAll(/"([^"]+)"="deny"/g)].map((m) => m[1]);
-    assert.deepEqual(denied.filter((p) => join(bin, "codex").startsWith(`${p.replace(/\*$/, "")}/`) || p === join(bin, "codex")), [], "nothing above its binary");
-    for (const p of [join(h, ".codex", "auth.json*"), join(h, ".codex", "sessions"), join(h, ".codex-two", "auth.json*"), join(h, ".codex-two", "sessions")]) assert.ok(denied.includes(p), p);
+    const denied = deniedBy(args);
+    // What is there, what Codex makes there later (history.jsonl, memories), other releases, a link leading out of it.
+    for (const p of [join(d, "config.toml"), join(d, "auth.json*"), join(d, "sessions"), join(d, "log"), join(d, "history.jsonl"), join(d, "memories"), join(d, "mcp.toml"), join(d, "packages", "standalone", "install.lock"), join(d, "packages", "standalone", "releases", "0.9.0-x")]) assert.ok(denied.includes(p), p);
+    // Codex's sandbox denies where a link leads, so nothing at, above or inside the release, nor the link to it.
+    assert.deepEqual(denied.filter((p) => within(rel, p) || within(p, rel) || p === join(d, "packages", "standalone", "current")), [], "its release stays runnable");
+    for (const p of [join(h, ".codex-two", "auth.json*"), join(h, ".codex-two", "sessions")]) assert.ok(denied.includes(p), `its own home by its login: ${p}`);
   }
+  // No codex on its PATH: ~/.codex whole.
+  assert.ok(deniedBy(codexLocalConfig({ home: h, env: { CODEX_HOME: env.CODEX_HOME } })).includes(d));
+  // A default-home stage: its own home by its login, config.toml its own.
+  const own = deniedBy(codexLocalConfig({ home: h, env: { PATH: env.PATH } })).filter((p) => within(p, d));
+  assert.deepEqual(own, [join(d, "auth.json*"), join(d, "sessions")]);
+  // ~/.codex a link to its real folder: each entry once (the profile is a TOML table) and where it really is.
+  const l = mkdtempSync(join(tmpdir(), "home-"));
+  mkdirSync(join(l, "codex-real"));
+  mkdirSync(join(l, ".codex-two"));
+  symlinkSync(join(l, "codex-real"), join(l, ".codex"));
+  installedCodex(l);
+  const linked = deniedBy(codexLocalConfig({ home: l, env: { CODEX_HOME: join(l, ".codex-two"), PATH: join(l, ".local", "bin") } }));
+  assert.equal(linked.length, new Set(linked).size);
+  assert.ok(linked.includes(join(l, "codex-real", "config.toml")) && !linked.includes(join(l, "codex-real")));
 });
 
 test("#260: a login file of the stage's own that links into another login is never its own: denied, refused and named by doctor", () => {

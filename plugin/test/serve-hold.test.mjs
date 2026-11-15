@@ -827,25 +827,26 @@ test("serve: one harness's spent usage limit holds only that harness's work; an 
 });
 
 test("limitPaused: a provider that refuses past its stated reset is held 2, 5, 10, then 15 minutes, not every tick; a reset further out starts over (#254)", async () => {
-  const loop = await claimLoop();
+  // No repository: this loop posts no pause notice (#265), so nothing here reaches GitHub.
+  const loop = Object.assign(await claimLoop(), { repo: null });
   let t = Date.parse("2026-11-14T23:01:00Z");
   loop.clock = () => t;
   const pause = (reset, extra = {}) => loop.limitPaused(7, { exit: "paused", stage: "work", usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(t).toISOString(), ...extra } });
   const holds = [];
   for (let i = 0; i < 5; i++) {
-    pause(t - 60_000);
+    await pause(t - 60_000);
     holds.push((loop.offline.get(7).reset - t) / 60_000);
     t = loop.offline.get(7).reset;
   }
   assert.deepEqual(holds, [2, 5, 10, 15, 15]);
   // A stage held before it ran counts nothing.
-  pause(t + 60_000, { held: true });
+  await pause(t + 60_000, { held: true });
   assert.equal(loop.offline.get(7).reset, t + 60_000);
   // A real window ahead: its reset, and the count starts again.
-  pause(t + 60 * 60_000);
+  await pause(t + 60 * 60_000);
   assert.equal(loop.offline.get(7).reset, t + 60 * 60_000);
   t += 60 * 60_000;
-  pause(t - 1);
+  await pause(t - 1);
   assert.equal(loop.offline.get(7).reset, t + 2 * 60_000);
 });
 

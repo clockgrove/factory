@@ -233,18 +233,20 @@ export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
 
 /**
  * Why Factory does not act on one of `labels`, or null when each one's latest `labeled` event on the issue's timeline is
- * by a person who can push or a pinned maintainer: one timeline read for all of them. The reason names the label and
- * ends `so <what>`. `gh` (labelers, permission) is a test's own.
+ * by a person who can push or a pinned maintainer: one timeline read for all of them. With `event` "unlabeled", the
+ * latest removal of each is checked instead. The reason names the label and ends `so <what>`. `gh` (labelers,
+ * permission) is a test's own.
  */
-export async function labelsVouched(repo, issue, labels, opts, gh = {}, what = "Factory does not act on it") {
+export async function labelsVouched(repo, issue, labels, opts, gh = {}, what = "Factory does not act on it", event = "labeled") {
   const read = { labelers: labelersOf, permission: collaboratorPermission, ...gh };
-  const by = await read.labelers(repo, issue, labels, opts);
+  const by = await read.labelers(repo, issue, labels, opts, event);
+  const did = event === "unlabeled" ? "removed" : "applied";
   for (const label of labels) {
     const a = by?.[label]?.actor;
     // The REST timeline's actor, in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches.
     const actor = a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null;
-    if (!actor) return `who applied \`${label}\` could not be read from the issue's timeline, so ${what}`;
-    if (!(await vouches(repo, actor, opts, read))) return `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`;
+    if (!actor) return `who ${did} \`${label}\` could not be read from the issue's timeline, so ${what}`;
+    if (!(await vouches(repo, actor, opts, read))) return `\`${label}\` was ${did} by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`;
   }
   return null;
 }

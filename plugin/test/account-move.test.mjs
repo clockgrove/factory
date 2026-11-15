@@ -50,16 +50,18 @@ async function withHome(h, fn) {
 }
 
 /**
- * A GitHub for Objective #8: its labels (each `labeled` on the timeline, by `maintainer`, who can push, unless another
- * login is given), comments, and a count of timeline reads. Every write is kept in `writes`.
+ * A GitHub for Objective #8: its labels (each `labeled` or `unlabeled` on the timeline, by `kirk`, who can push, unless
+ * another login is given), comments, the people who can push (`writers`), and a count of timeline reads. The issue's
+ * `updated_at` moves as GitHub's does: on a label change and a new comment. Every write is kept in `writes`.
  */
 function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:running"]) {
-  const state = { labels: new Set(labels), timeline: [], comments: [], writes: [], timelineReads: 0 };
+  const state = { labels: new Set(labels), timeline: [], comments: [], writes: [], timelineReads: 0, writers: new Set(["maintainer", "kirk"]), updated: 0 };
+  const touch = () => (state.updated += 1);
   let id = 100;
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
-  const issue = () => ({ number: 8, state: "open", title: "t", body: "b", labels: [...state.labels].map((name) => ({ name })) });
+  const issue = () => ({ number: 8, state: "open", title: "t", body: "b", labels: [...state.labels].map((name) => ({ name })), updated_at: new Date(Date.UTC(2026, 10, 15) + state.updated * 1000).toISOString() });
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method || "GET";
@@ -69,7 +71,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
     if (p === "/user") return json({ login: "maintainer", type: "User" });
     if (p === "/collaborators") return json([{ login: "maintainer" }]);
     const perm = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
-    if (perm) return json({ permission: perm[1] === "maintainer" ? "write" : "read" });
+    if (perm) return json({ permission: state.writers.has(perm[1]) ? "write" : "read" });
     if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
     if (method === "GET" && p === "/issues/8/timeline") return (state.timelineReads += 1), json(state.timeline);
     if (method === "GET" && p === "/issues/8") return json(issue());
@@ -78,6 +80,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
     if (method === "POST" && p === "/issues/8/comments") {
       const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };
       state.comments.push(c);
+      touch();
       return json(c, 201);
     }
     const one = /^\/issues\/comments\/(\d+)$/.exec(p);
@@ -91,9 +94,10 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
       return json({});
     }
     const label = /^\/issues\/8\/labels\/(.+)$/.exec(p);
-    if (label && method === "DELETE") return state.labels.delete(decodeURIComponent(label[1])) ? json([]) : json({ message: "Not Found" }, 404);
+    if (label && method === "DELETE") return state.labels.delete(decodeURIComponent(label[1])) ? (touch(), json([])) : json({ message: "Not Found" }, 404);
     if (p === "/issues/8/labels" && method === "POST") {
       for (const l of JSON.parse(init.body).labels) state.labels.add(l);
+      touch();
       return json([]);
     }
     if (p === "/graphql") return json({ data: {} });
@@ -103,13 +107,15 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
   return {
     ...state,
     state,
-    apply(name, by = "maintainer") {
+    apply(name, by = "kirk") {
       state.labels.add(name);
-      state.timeline.push({ event: "labeled", label: { name }, created_at: new Date().toISOString(), actor: { login: by, id: 5, type: "User" } });
+      touch();
+      state.timeline.push({ event: "labeled", label: { name }, created_at: new Date(Date.UTC(2026, 10, 15) + state.timeline.length * 1000).toISOString(), actor: { login: by, id: 5, type: "User" } });
     },
-    remove(name) {
+    remove(name, by = "kirk") {
       state.labels.delete(name);
-      state.timeline.push({ event: "unlabeled", label: { name }, created_at: new Date().toISOString(), actor: { login: "maintainer", id: 5, type: "User" } });
+      touch();
+      state.timeline.push({ event: "unlabeled", label: { name }, created_at: new Date(Date.UTC(2026, 10, 15) + state.timeline.length * 1000).toISOString(), actor: { login: by, id: 5, type: "User" } });
     },
     notices: () => state.comments.filter((c) => c.body.startsWith(NOTICE)),
     blocked: () => state.comments.filter((c) => c.body.includes("factory:block")),
@@ -208,7 +214,11 @@ test("#264/#265: a hold keeps the limit's window, and the pause notice names the
   assert.match(pauseNoticeBody({ harness: "codex", account: "codex", reset: t, free: [] }), /Codex \(this machine's one Codex login\) reached it \(its window was not reported\)[\s\S]*No other Codex account on this machine is free now\./);
 });
 
-test("#265: a pause posts one notice, updated in place; a trusted label moves the paused Objective to a free account at once, read once; a pinned account that is held waits for its reset; removing the label goes back to the default", async () => {
+
+const reads = (gh) => gh.state.timelineReads;
+const delivered = { exit: "delivered", tokens: { output: 10 } };
+
+test("#265: a pause posts one notice, updated in place; a trusted label moves the paused Objective to a free account at once, read once per label change; a held pin waits for its reset; a removal by someone who can push goes back to the default", async () => {
   const h = fakeHome();
   const gh = fakeGitHub();
   let t = Date.now();
@@ -226,17 +236,17 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
       assert.ok(!first.includes("@"), "no @mention");
       assert.ok(!first.includes(h), "no path");
       assert.deepEqual(await loop.pausedHere(new Map()), [], "no label: it waits for alpha's reset");
-      assert.equal(gh.state.timelineReads, 0, "and reads nothing to decide it");
+      assert.equal(reads(gh), 0, "and reads nothing to decide it");
       // A person who can push applies factory:account:beta: resumed now, its labeler read once over several ticks.
       gh.apply("factory:account:beta");
       for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), [8]);
-      assert.equal(gh.state.timelineReads, 1, "the trust check once per label change, not every tick");
-      // The resume's stage runs on beta, its env made for beta; the pin is read from the same kept check.
-      loop.result = { exit: "delivered", tokens: { output: 10 } };
+      assert.equal(reads(gh), 1, "once per label change, not every tick");
+      // The resume's stage runs on beta, its env made for beta; a stage start reads the labeler afresh.
+      loop.result = delivered;
       const moved = await work(loop);
       assert.deepEqual([moved.exit, moved.account, moved.pinned], ["delivered", "beta", true]);
       assert.deepEqual(loop.ran(), ["alpha", "beta"]);
-      assert.equal(gh.state.timelineReads, 1);
+      assert.equal(reads(gh), 2);
       // beta meets its own limit, reset in two hours: one notice still, now naming beta; alpha is still held, gamma is free.
       t += 5 * MIN;
       loop.result = limited(t + 120 * MIN, t, "seven_day");
@@ -251,12 +261,11 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
       const held = await loop.stage(8, "work", "worker.mjs", []);
       assert.deepEqual([held.exit, held.account, held.usageLimit.held], ["paused", "beta", true]);
       assert.equal(loop.ran().length, 3);
-      // The label comes off: back to the default, alpha, which is free now: resumed before beta's reset.
+      // A person who can push takes the label off: back to the default, alpha, free now: resumed before beta's reset.
       gh.remove("factory:account:beta");
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
-      loop.result = { exit: "delivered", tokens: { output: 10 } };
+      loop.result = delivered;
       assert.equal((await work(loop)).account, "alpha");
-      assert.deepEqual(loop.ran().at(-1), "alpha");
       assert.equal(gh.blocked().length, 0, "nothing Blocked");
     });
   } finally {
@@ -264,14 +273,116 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
   }
 });
 
-test("#265: a running stage finishes on its own account, and the pin applies from the next stage; a queued Objective's first stage uses it, past the default's hold", async () => {
+test("#265: someone who cannot push moves nothing: removing a trusted pin leaves a paused Objective waiting, and a second label keeps it waiting on no account, never on the default", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = serveOn(h, () => t);
+      gh.apply("factory:account:beta");
+      loop.result = limited(t + 120 * MIN, t);
+      assert.equal((await work(loop)).account, "beta");
+      // alpha, the default, is free: a removal by a stranger does not move it there.
+      gh.remove("factory:account:beta", "stranger");
+      for (let i = 0; i < 2; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
+      assert.match(gh.notices()[0].body, /`factory:account:beta` was removed by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective off that account, so it stays paused/);
+      // The pin back, and a stranger adds a second label: two labels, it waits, past beta's reset too, said once.
+      gh.apply("factory:account:beta");
+      gh.apply("factory:account:gamma", "stranger");
+      const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/")).length;
+      const before = patches();
+      t += 121 * MIN;
+      for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
+      assert.equal(patches() - before, 1, "said once");
+      assert.match(gh.notices()[0].body, /`factory:account:beta`, `factory:account:gamma`: more than one account label moves nothing, so the Objective waits, on no account, until one is left/);
+      // A stage started anyway (a race with the tick) starts nothing and Blocks nothing: it waits.
+      const waits = await loop.withClaim(8, () => loop.stage(8, "work", "worker.mjs", []));
+      assert.equal(waits.exit, "paused");
+      assert.equal(loop.ran().length, 1, "nothing ran, on the default or anywhere");
+      assert.deepEqual(await loop.pausedHere(new Map()), [], "still two labels: still waiting");
+      // One left: it goes on, on that one.
+      gh.remove("factory:account:gamma");
+      assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+      loop.result = delivered;
+      assert.equal((await work(loop)).account, "beta");
+      assert.equal(gh.blocked().length, 0, "never Blocked for it");
+      // The dispatcher holds a queued Objective with two labels, whatever its accounts' holds.
+      assert.match(loop.limitHold(["factory:objective", "factory:account:beta", "factory:account:gamma"], 8, "x"), /more than one account label moves nothing/);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#265: a stage start reads the labeler afresh, so a label removed and applied again with no tick between is judged by its new labeler, both ways, and revoked push access counts at once", async () => {
   const h = fakeHome();
   const gh = fakeGitHub();
   const t = Date.now();
   try {
     await withHome(h, async () => {
       const loop = serveOn(h, () => t);
-      loop.result = { exit: "delivered", tokens: { output: 10 } };
+      loop.result = delivered;
+      gh.apply("factory:account:beta");
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
+      // Removed, and applied again by a stranger, with no tick between: Blocked, nothing ran on beta.
+      gh.remove("factory:account:beta");
+      gh.apply("factory:account:beta", "stranger");
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "blocked");
+      assert.match(gh.blocked().at(-1).body, /`factory:account:beta` was applied by `stranger`/);
+      assert.deepEqual(loop.ran(), ["beta"]);
+      // The other way: kirk takes it off and applies it himself, no tick between: it runs on beta.
+      gh.remove("factory:account:beta");
+      gh.apply("factory:account:beta");
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
+      // kirk loses push access: the next stage start knows it.
+      gh.state.writers.delete("kirk");
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "blocked");
+      assert.deepEqual(loop.ran(), ["beta", "beta"]);
+      assert.equal(reads(gh), 4, "one read per stage start");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#265: a paused Objective's kept check follows the issue's updated_at: a stranger's label, then the same label re-applied by someone who can push before the next tick, moves it", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = serveOn(h, () => t);
+      loop.result = limited(t + 60 * MIN, t);
+      await work(loop);
+      gh.apply("factory:account:beta", "stranger");
+      assert.deepEqual(await loop.pausedHere(new Map()), []);
+      gh.remove("factory:account:beta");
+      gh.apply("factory:account:beta");
+      assert.deepEqual(await loop.pausedHere(new Map()), [8], "read again: the issue changed");
+      // And the reverse: a trusted label removed and re-applied by a stranger before the next tick does not move it.
+      const other = serveOn(h, () => t);
+      other.result = limited(t + 60 * MIN, t);
+      gh.remove("factory:account:beta");
+      await work(other);
+      gh.apply("factory:account:beta");
+      gh.remove("factory:account:beta");
+      gh.apply("factory:account:beta", "stranger");
+      assert.deepEqual(await other.pausedHere(new Map()), []);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#265: a running stage finishes on its own account and the pin applies from the next stage; the dispatcher weighs a pin only once its labeler is known to be trusted", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = serveOn(h, () => t);
+      loop.result = delivered;
       loop.wait = true;
       const running = loop.stage(8, "work", "worker.mjs", []);
       while (loop.ran().length === 0) await new Promise((r) => setTimeout(r, 20));
@@ -281,13 +392,24 @@ test("#265: a running stage finishes on its own account, and the pin applies fro
       loop.wait = false;
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "gamma");
       assert.deepEqual(loop.ran(), ["alpha", "gamma"]);
-      // The dispatcher's hold, on the labels it listed: alpha held, so an unpinned Objective waits and a pinned one starts.
+      // alpha held: an unpinned Objective waits; a trusted pin to beta starts once its labeler is read (in the
+      // background, for the next tick); until then the default is weighed.
       loop.holds.limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
-      assert.match(loop.limitHold(["factory:objective"], 9), /^claude account alpha's usage limit is spent until /);
-      assert.equal(loop.limitHold(["factory:objective", "factory:account:beta"], 9), null);
-      assert.match(loop.limitHold(["factory:objective", "factory:account:alpha"], 9), /alpha's usage limit is spent/, "pinned to the held one: it waits");
-      assert.equal(loop.limitHold(["factory:objective", "factory:account:nobody"], 9), null, "a name it cannot run on starts, and Blocks at the start");
-      assert.match(loop.limitHold(["factory:objective", "factory:account:beta", "factory:account:gamma"], 9), /alpha's usage limit is spent/, "two labels move nothing");
+      assert.match(loop.limitHold(["factory:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /);
+      gh.remove("factory:account:gamma");
+      gh.apply("factory:account:beta");
+      const pinned = ["factory:objective", "factory:account:beta"];
+      assert.match(loop.limitHold(pinned, 8, "u2"), /alpha's usage limit is spent/, "labeler not known yet: the default");
+      await loop.pinReading.get(8);
+      assert.equal(loop.limitHold(pinned, 8, "u2"), null, "trusted: beta, free");
+      // A stranger's pin to a held account never holds a queued Objective whose default is free.
+      loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 8 * 24 * 60 * MIN, now: t });
+      gh.remove("factory:account:beta");
+      gh.apply("factory:account:gamma", "stranger");
+      const strangers = ["factory:objective", "factory:account:gamma"];
+      assert.match(loop.limitHold(strangers, 8, "u3"), /alpha's usage limit is spent/);
+      await loop.pinReading.get(8);
+      assert.match(loop.limitHold(strangers, 8, "u3"), /alpha's usage limit is spent/, "refused: the default, not gamma's eight days");
     });
   } finally {
     gh.restore();
@@ -295,12 +417,12 @@ test("#265: a running stage finishes on its own account, and the pin applies fro
 });
 
 for (const [what, apply, says] of [
-  ["two account labels", (gh) => (gh.apply("factory:account:beta"), gh.apply("factory:account:gamma")), /`factory:account:beta`, `factory:account:gamma`: more than one account label moves nothing, so it keeps waiting for the reset/],
   ["an unknown name", (gh) => gh.apply("factory:account:nobody"), /`factory:account:nobody` names no Claude Code account this machine declares \(`alpha`, `beta`, `gamma`\), so it stays paused/],
+  ["an unknown name from someone who cannot push", (gh) => gh.apply("factory:account:nobody", "stranger"), /`factory:account:nobody` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective to that account, so it stays paused/],
   ["another harness's account", (gh) => gh.apply("factory:account:cx"), /`factory:account:cx` names a Codex account, and this Objective runs on Claude Code, so it stays paused/],
   ["a labeler who cannot push", (gh) => gh.apply("factory:account:beta", "stranger"), /`factory:account:beta` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective to that account, so it stays paused/],
 ]) {
-  test(`#265: ${what}: a paused Objective stays paused, said once on its notice; ${what === "two account labels" ? "never Blocked: its next stage runs on the default" : "at a stage start it Blocks, cause setup, naming the problem"}`, async () => {
+  test(`#265: ${what}: a paused Objective stays paused, said once on its notice; at a stage start it Blocks, cause setup, naming the problem`, async () => {
     const h = fakeHome();
     const gh = fakeGitHub();
     let t = Date.now();
@@ -316,24 +438,30 @@ for (const [what, apply, says] of [
         assert.equal(patches() - before, 1, "said once");
         assert.match(gh.notices()[0].body, says);
         assert.equal(gh.notices().length, 1);
-        assert.ok(gh.state.timelineReads <= 1, "the labeler read at most once");
+        if (/stranger/.test(what) || what.includes("cannot push")) assert.ok(!gh.notices()[0].body.includes("`alpha`, `beta`"), "a stranger's label never lists the accounts");
         assert.equal(gh.blocked().length, 0, "a paused Objective is not Blocked for it");
-        // At the reset, the stage starts.
+        // At the reset, the stage starts and Blocks.
         t += 61 * MIN;
         assert.deepEqual(await loop.pausedHere(new Map()), [8]);
-        loop.result = { exit: "delivered", tokens: { output: 10 } };
+        loop.result = delivered;
         const r = await loop.stage(8, "work", "worker.mjs", []);
-        if (what === "two account labels") {
-          assert.deepEqual([r.exit, r.account], ["delivered", "alpha"]);
-          assert.equal(gh.blocked().length, 0);
-          return;
-        }
         assert.equal(r.exit, "blocked");
         assert.deepEqual(loop.ran(), ["alpha"], "nothing ran");
         const block = gh.blocked()[0].body;
         assert.match(block, new RegExp(says.source.replace(/, so it stays paused$/, "").replace(/^`/, "local mode: `")));
         assert.match(block, /"cause":"setup"/);
         assert.match(block, /Apply one `factory:account:<name>` naming an account of this Objective's harness/);
+        // The problem fixed (the label off, by someone who can push; the Objective re-applied), then back: said again.
+        gh.remove(accountLabelsOf(gh)[0]);
+        gh.state.labels.delete("factory:blocked");
+        gh.state.labels.add("factory:running");
+        loop.result = delivered;
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "delivered");
+        loop.result = limited(t + 60 * MIN, t);
+        await work(loop);
+        apply(gh);
+        await loop.pausedHere(new Map());
+        assert.match(gh.notices()[0].body, says, "a problem that comes back is said again");
       });
     } finally {
       gh.restore();
@@ -341,25 +469,4 @@ for (const [what, apply, says] of [
   });
 }
 
-test("#265: a label applied again after it came off is checked again: removing it forgets the check", async () => {
-  const h = fakeHome();
-  const gh = fakeGitHub();
-  const t = Date.now();
-  try {
-    await withHome(h, async () => {
-      const loop = serveOn(h, () => t);
-      loop.result = { exit: "delivered", tokens: { output: 10 } };
-      gh.apply("factory:account:beta");
-      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
-      assert.equal(gh.state.timelineReads, 1);
-      // Taken off (a tick's listing shows none), then applied again by someone who cannot push.
-      gh.remove("factory:account:beta");
-      assert.equal(loop.limitHold([...gh.state.labels], 8), null);
-      gh.apply("factory:account:beta", "stranger");
-      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "blocked");
-      assert.equal(gh.state.timelineReads, 2);
-    });
-  } finally {
-    gh.restore();
-  }
-});
+const accountLabelsOf = (gh) => [...gh.state.labels].filter((l) => l.startsWith("factory:account:"));

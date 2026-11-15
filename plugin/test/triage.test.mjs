@@ -681,6 +681,21 @@ test("workflowJobs: a roll-up gathers what it needs through skipped jobs and thr
   assert.deepEqual(lead, ["ci (required check), from lint", "build / compile"], "neither is called not required");
 });
 
+test("workflowJobs: a matrix job whose name has an expression is matched leg by leg, its name evaluated over each leg's values (#280 review)", async () => {
+  const { workflowJobs } = await import("../scripts/lib/triage.mjs");
+  const { leadJobs } = await import("../scripts/lib/reds.mjs");
+  const yml = `jobs:\n  test:\n    name: Test \${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-26.04, windows-2025]\n    continue-on-error: \${{ matrix.os != 'ubuntu-26.04' }}\n    steps: [{ run: x }]\n  ci:\n    needs: test\n    if: always()\n    steps: [{ run: x }]\n`;
+  // GitHub lists the Windows leg first.
+  const runs = [{ id: 1, name: "Test windows-2025" }, { id: 2, name: "Test ubuntu-26.04" }, { id: 3, name: "ci" }];
+  const { coe, needs } = workflowJobs(yml, runs);
+  assert.deepEqual([coe.get(1), coe.get(2)], [true, false]);
+  const j = (r, line, more = {}) => ({ name: r.name, id: r.id, suite: 9, required: false, aggregate: false, sig: { line, lines: line ? [line] : [] }, coe: coe.get(r.id), ...more });
+  const lead = leadJobs([j(runs[0], "windows broke"), j(runs[1], "linux broke"), j(runs[2], "", { required: true, aggregate: true, gathers: needs.get(3) })]).map((x) => x.name);
+  assert.deepEqual(lead, ["ci (required check), from Test ubuntu-26.04", "Test windows-2025 (not required: continue-on-error)"]);
+  // A name that reads another context is not guessed at.
+  assert.equal(workflowJobs(yml.replace("Test \${{ matrix.os }}", "Test \${{ github.ref }}"), [{ id: 1, name: "Test refs/heads/main" }]).coe.get(1), null);
+});
+
 test("matrixLegs: GitHub's documented include example makes its six legs; an include never merges into a leg an earlier include made", async () => {
   const { matrixLegs } = await import("../scripts/lib/triage.mjs");
   const legs = matrixLegs({ fruit: ["apple", "pear"], animal: ["cat", "dog"], include: [{ color: "green" }, { color: "pink", animal: "cat" }, { fruit: "apple", shape: "circle" }, { fruit: "banana" }, { fruit: "banana", animal: "cat" }] });

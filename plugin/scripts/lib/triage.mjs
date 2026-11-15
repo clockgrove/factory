@@ -552,26 +552,53 @@ export function matrixLegs(matrix) {
 }
 
 /**
- * The matrix values of the leg a check run named `name` reports, for the job whose check name is `own`: GitHub names a
- * leg `<own> (<its values, comma separated>)`. Null unless exactly one leg shows those values (all of them, or the ones
- * the product gave it), or the job has no matrix and the name is `own` ({}).
+ * The matrix values of the leg a check run named `name` reports, for the job whose check name is `own`. A plain name
+ * gets ` (<the leg's values, comma separated>)` added; a name with `${{ }}` in it is each leg's name with them
+ * evaluated over its values (matrixExpression), as GitHub shows it, with or without that suffix. Null unless exactly
+ * one leg matches (its values shown all, or the ones the product gave it), or the job has no matrix and the name is
+ * `own` ({}).
  */
 export function legValues(job, own, name) {
   const matrix = job?.strategy?.matrix;
-  if (matrix === undefined || matrix === null) return name === own ? {} : null;
-  if (!name.startsWith(`${own} (`) || !name.endsWith(")")) return null;
-  const suffix = name.slice(own.length + 2, -1);
+  const templated = /\$\{\{[\s\S]*?\}\}/.test(own);
+  if ((matrix === undefined || matrix === null) && !templated) return name === own ? {} : null;
+  const legs = matrix === undefined || matrix === null ? [{ values: {}, own: [] }] : matrixLegs(matrix) || [];
   const shown = (vals) => (vals.every(shownValue) ? vals.map(String).join(", ") : null);
-  const hits = (matrixLegs(matrix) || []).filter((l) => shown(Object.values(l.values)) === suffix || shown(l.own.map((k) => l.values[k])) === suffix);
+  const suffixes = (l) => [shown(Object.values(l.values)), shown(l.own.map((k) => l.values[k]))].filter((x) => x !== null).map((x) => ` (${x})`);
+  const hits = legs.filter((l) => {
+    const base = templated ? expandName(own, l.values) : own;
+    return base !== null && [...(templated ? [""] : []), ...suffixes(l)].some((x) => `${base}${x}` === name);
+  });
   return hits.length === 1 ? hits[0].values : null;
 }
 
+/** A job name template with each `${{ }}` evaluated over one leg's `matrix` (matrixExpression); null when any cannot be. */
+function expandName(template, matrix) {
+  let ok = true;
+  const out = template.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, src) => {
+    const v = matrixExpression(src, matrix);
+    if (v === null) ok = false;
+    return v === null ? "" : v.coerceString();
+  });
+  return ok ? out : null;
+}
+
 /**
- * Whether a job may fail without failing its workflow run (its `continue-on-error`), for the leg whose matrix values
- * are `matrix` (typed as GitHub reads them: parseYaml `typed`): true or false, read from the YAML value or, for a `${{ }}` expression, evaluated with GitHub's own
- * expression library over the leg's `matrix` context. Null when that cannot be known: the expression reads any other
- * context, or the leg's values are not known.
+ * One `${{ }}` expression's value over a leg's `matrix` context, with GitHub's own expression library: only one of at
+ * most EXPRESSION_CAP characters made of literals, `matrix` lookups, comparisons and logic (plainExpression). Null
+ * when it is anything else or does not evaluate.
  */
+function matrixExpression(src, matrix) {
+  if (!matrix || src.length > EXPRESSION_CAP) return null;
+  try {
+    const expr = new Parser(new Lexer(src).lex().tokens, ["matrix"], []).parse();
+    if (!plainExpression(expr)) return null;
+    return new Evaluator(expr, JSON.parse(JSON.stringify({ matrix }), exprData.reviver)).evaluate();
+  } catch {
+    return null;
+  }
+}
+
 export function continueOnError(job, matrix) {
   const v = job?.["continue-on-error"];
   if (v === undefined || v === null) return false;
@@ -580,14 +607,8 @@ export function continueOnError(job, matrix) {
   if (/^(?:true|True|TRUE)$/.test(s)) return true;
   if (/^(?:false|False|FALSE)$/.test(s)) return false;
   const m = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
-  if (!m || !matrix || m[1].length > EXPRESSION_CAP) return null;
-  try {
-    const expr = new Parser(new Lexer(m[1]).lex().tokens, ["matrix"], []).parse();
-    if (!plainExpression(expr)) return null;
-    return !falsy(new Evaluator(expr, JSON.parse(JSON.stringify({ matrix }), exprData.reviver)).evaluate());
-  } catch {
-    return null;
-  }
+  const value = m ? matrixExpression(m[1], matrix) : null;
+  return value === null ? null : !falsy(value);
 }
 
 /** The longest `continue-on-error` expression evaluated; a longer one is unknown. */

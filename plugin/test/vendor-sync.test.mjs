@@ -46,6 +46,6 @@ test("sync --check: a copy byte for byte passes; a scope folder or a library fol
     symlinkSync(elsewhere, at);
     const r = t2.check();
     assert.equal(r.status, 1, `${linked}: ${r.stdout}`);
-    assert.match(r.stderr, new RegExp(`plugin/vendor/${linked.replace(/\//g, "\\/")} is not a real directory`), r.stderr);
+    assert.ok(r.stderr.includes(`plugin/vendor/${linked} is not a real directory`), r.stderr);
   }
 });

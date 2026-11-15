@@ -1,47 +1,51 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { localLoginChecks } from "../scripts/doctor.mjs";
 import { harnessCommand } from "../scripts/lib/harness.mjs";
-import { CREDENTIAL_PATHS, claudeLocalSettings, codexLocalConfig, copilotLocalSettings, credentialPaths, harnessHomeGuards, harnessHomes, harnessOuterSettings, keyDirExposedBy, localSandbox, loginsExposedBy, srtSettings, stageLogin, versionSettings } from "../scripts/lib/local.mjs";
+import { CREDENTIAL_PATHS, claudeLocalSettings, codexLocalConfig, copilotLocalSettings, credentialPaths, harnessHomeGuards, harnessHomes, harnessOuterSettings, keyDirExposedBy, localSandbox, loginsExposedBy, ownLoginProblems, srtSettings, stageLogin, versionSettings } from "../scripts/lib/local.mjs";
 
-// A stand-in home: the default Claude Code and Codex logins, a second Claude Code login, a second Codex home, and a
-// `.claude-*` folder that holds no login. Every file is a dummy.
+// A stand-in home: the default Claude Code and Codex logins (a `.claude.json` backup beside the default one), a second
+// Claude Code login, a second Codex home, and a `.claude-*` folder with no login yet. Every file is a dummy.
 function fakeHome() {
   const h = mkdtempSync(join(tmpdir(), "home-"));
   for (const d of [".claude", ".claude-two", ".claude-notes", ".codex", ".codex-two"]) mkdirSync(join(h, d));
   writeFileSync(join(h, ".claude", ".credentials.json"), "{}");
   writeFileSync(join(h, ".claude.json"), "{}");
+  writeFileSync(join(h, ".claude.json.backup.7"), "{}");
   writeFileSync(join(h, ".claude-two", ".credentials.json"), "{}");
   writeFileSync(join(h, ".codex-two", "auth.json"), "{}");
   return h;
 }
 
+const covered = (list, p) => list.some((q) => p === q || p.startsWith(`${q}/`));
 const codexDenied = (args) => args.find((a) => a.startsWith("permissions.factory="));
 
 test("#260: every sandbox kind denies a second login's whole folder; the default stage's own login stays readable to its harness process alone", () => {
   const h = fakeHome();
   const two = join(h, ".claude-two");
   const codexTwo = join(h, ".codex-two");
-  const others = [two, codexTwo];
+  // `.claude-notes` holds no login yet: denied all the same, so one made there during a stage is hidden from the start.
+  const others = [join(h, ".claude-notes"), two, codexTwo];
   for (const p of others) assert.ok(credentialPaths(h, {}).includes(p), p);
-  // A default-home Claude Code stage (serve's list): the default homes denied as before, CREDENTIAL_PATHS, then the other logins.
+  // A default-home Claude Code stage (serve's list): CREDENTIAL_PATHS as before, then what else bears its own login (its
+  // `.claude.json` backups, `backups`, `sessions`), then the other logins.
+  const own = [join(h, ".claude.json.backup.7"), join(h, ".claude", "backups"), join(h, ".claude", "sessions")];
   const list = credentialPaths(h, {}, { own: stageLogin("claude", {}, h) });
-  assert.ok(!list.some((p) => p.startsWith(join(h, ".claude-notes"))), "a .claude-* folder with no login is no login");
   assert.deepEqual(list.slice(0, CREDENTIAL_PATHS.length), CREDENTIAL_PATHS.map((p) => join(h, p)));
-  assert.deepEqual(list.slice(CREDENTIAL_PATHS.length), others);
+  assert.deepEqual(list.slice(CREDENTIAL_PATHS.length), [...own, ...others]);
 
   const claude = claudeLocalSettings({ home: h, env: {} });
   for (const p of others) assert.ok(claude.sandbox.filesystem.denyRead.includes(p) && claude.permissions.deny.includes(`Read(/${p}/**)`), `claude: ${p}`);
-  assert.ok(claude.sandbox.filesystem.denyRead.includes(join(h, ".claude", ".credentials.json")), "its commands never read its own login");
+  for (const p of [join(h, ".claude", ".credentials.json"), join(h, ".claude.json"), ...own]) assert.ok(claude.sandbox.filesystem.denyRead.includes(p), `its commands never read its own login: ${p}`);
   assert.ok(!claude.sandbox.filesystem.denyRead.includes(join(h, ".claude")), "its own folder is not denied whole");
 
   const codex = codexDenied(codexLocalConfig({ home: h, env: {} }));
   for (const p of others) assert.ok(codex.includes(`${JSON.stringify(p)}="deny"`), `codex: ${p}`);
-  assert.ok(codex.includes(`${JSON.stringify(join(h, ".codex", "auth.json*"))}="deny"`), "its own home by its login file");
+  for (const p of [join(h, ".codex", "auth.json*"), join(h, ".codex", "sessions")]) assert.ok(codex.includes(`${JSON.stringify(p)}="deny"`), `its own home by its login: ${p}`);
 
   for (const platform of ["linux", "darwin"]) {
     const denied = copilotLocalSettings({ home: h, env: {}, platform }).sandbox.userPolicy.filesystem.deniedPaths;
@@ -56,7 +60,7 @@ test("#260: every sandbox kind denies a second login's whole folder; the default
 
   const outerClaude = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env: {} }).filesystem.denyRead;
   for (const p of [...others, join(h, ".codex")]) assert.ok(outerClaude.includes(p), `claude outer: ${p}`);
-  for (const p of [join(h, ".claude", ".credentials.json"), join(h, ".claude.json")]) assert.ok(!outerClaude.includes(p), `its own login: ${p}`);
+  for (const p of [join(h, ".claude", ".credentials.json"), join(h, ".claude.json"), ...own]) assert.ok(!outerClaude.includes(p), `its own login: ${p}`);
   const outerCodex = harnessOuterSettings({ harness: "codex", writable: ["/c"], home: h, env: {} }).filesystem.denyRead;
   for (const p of [...others, join(h, ".claude", ".credentials.json"), join(h, ".claude.json")]) assert.ok(outerCodex.includes(p), `codex outer: ${p}`);
   assert.ok(!outerCodex.includes(join(h, ".codex")), "its own home");
@@ -83,23 +87,73 @@ test("#260: a stage on CLAUDE_CONFIG_DIR keeps .claude.json there, reads its own
   assert.ok(guards.includes(join(two, ".claude.json")) && !guards.includes(join(h, ".claude.json")));
   const outer = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env });
   const deny = outer.filesystem.denyRead;
-  for (const p of [join(h, ".claude", ".credentials.json"), join(h, ".claude.json"), join(h, ".codex-two")]) assert.ok(deny.includes(p), `denied: ${p}`);
+  // No entry of its folder links to the same name in ~/.claude: the default folder goes whole, with ~/.claude.json.
+  for (const p of [join(h, ".claude"), join(h, ".claude.json"), join(h, ".claude.json.backup.7"), join(h, ".codex-two")]) assert.ok(deny.includes(p), `denied: ${p}`);
   for (const p of [two, join(two, ".credentials.json"), join(two, ".claude.json")]) assert.ok(!deny.includes(p), `its own: ${p}`);
   assert.ok(outer.filesystem.allowWrite.includes(two), "it refreshes its own login");
   // Its commands read no login, their own included; the folder itself stays readable (state Claude Code's commands use).
   const inner = claudeLocalSettings({ home: h, env }).sandbox.filesystem.denyRead;
-  for (const p of [join(two, ".credentials.json"), join(two, ".claude.json"), join(h, ".claude", ".credentials.json"), join(h, ".claude.json")]) assert.ok(inner.includes(p), `inner: ${p}`);
+  for (const p of [join(two, ".credentials.json"), join(two, ".claude.json"), join(h, ".claude", ".credentials.json"), join(h, ".claude.json")]) assert.ok(covered(inner, p), `inner: ${p}`);
   assert.ok(!inner.includes(two));
   // The folder named through a link: its own login by its real path too.
   symlinkSync(two, join(h, ".claude-link"));
   const linked = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env: { CLAUDE_CONFIG_DIR: join(h, ".claude-link") } }).filesystem.denyRead;
   for (const p of [two, join(two, ".credentials.json"), join(h, ".claude-link", ".credentials.json")]) assert.ok(!linked.includes(p), `linked own: ${p}`);
-  // A Codex stage on CODEX_HOME: its home readable to Codex, the default one denied, Codex's own sandbox denies its auth.json.
+  // A Codex stage on CODEX_HOME: its home readable to Codex, the default one denied to the outer sandbox.
   const cenv = { CODEX_HOME: join(h, ".codex-two") };
   const codexOuter = harnessOuterSettings({ harness: "codex", writable: ["/c"], home: h, env: cenv }).filesystem.denyRead;
   assert.ok(codexOuter.includes(join(h, ".codex")) && !codexOuter.includes(join(h, ".codex-two")));
-  const profile = codexDenied(codexLocalConfig({ home: h, env: cenv }));
-  assert.ok(profile.includes(`${JSON.stringify(join(h, ".codex-two", "auth.json*"))}="deny"`) && profile.includes(`${JSON.stringify(join(h, ".codex"))}="deny"`));
+});
+
+test("#260: a Codex stage on another CODEX_HOME can still run the Codex its installer put in ~/.codex", () => {
+  const h = fakeHome();
+  const bin = join(h, ".codex", "packages", "standalone", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "codex"), "#!/bin/sh\n");
+  const env = { CODEX_HOME: join(h, ".codex-two") };
+  const credentials = credentialPaths(h, env, { own: stageLogin("codex", env, h) });
+  for (const args of [codexLocalConfig({ home: h, env }), codexLocalConfig({ home: h, env, credentials })]) {
+    const denied = [...codexDenied(args).matchAll(/"([^"]+)"="deny"/g)].map((m) => m[1]);
+    assert.deepEqual(denied.filter((p) => join(bin, "codex").startsWith(`${p.replace(/\*$/, "")}/`) || p === join(bin, "codex")), [], "nothing above its binary");
+    for (const p of [join(h, ".codex", "auth.json*"), join(h, ".codex", "sessions"), join(h, ".codex-two", "auth.json*"), join(h, ".codex-two", "sessions")]) assert.ok(denied.includes(p), p);
+  }
+});
+
+test("#260: a login file of the stage's own that links into another login is never its own: denied, refused and named by doctor", () => {
+  const h = fakeHome();
+  const two = join(h, ".claude-two");
+  rmSync(join(two, ".credentials.json"));
+  symlinkSync(join(h, ".claude", ".credentials.json"), join(two, ".credentials.json"));
+  const env = { CLAUDE_CONFIG_DIR: two };
+  assert.deepEqual(ownLoginProblems("claude", env, h), [{ path: join(two, ".credentials.json"), real: join(h, ".claude", ".credentials.json") }]);
+  const deny = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env }).filesystem.denyRead;
+  assert.ok(deny.includes(join(h, ".claude", ".credentials.json")), "the other login's file stays denied");
+  const rows = localLoginChecks({ inputs: { harness: "claude" }, env, local: true, home: h });
+  assert.ok(rows.some((r) => r.status === "WARN" && r.detail.includes(join(two, ".credentials.json")) && r.detail.includes("login-link")));
+  assert.deepEqual(ownLoginProblems("claude", {}, h), [], "a plain default login");
+});
+
+test("#260: the outer sandbox denies the list serve built, so a login only serve's environment names stays hidden", () => {
+  const h = fakeHome();
+  const dev = join(h, "my-copilot");
+  mkdirSync(dev);
+  const credentials = credentialPaths(h, { COPILOT_HOME: dev });
+  const outer = harnessOuterSettings({ harness: "copilot", writable: ["/c"], home: h, env: { COPILOT_HOME: join(h, "factory-copilot") }, credentials }).filesystem.denyRead;
+  assert.ok(outer.includes(dev), "serve's COPILOT_HOME, not the stage's");
+  assert.ok(!outer.includes(join(h, "factory-copilot")));
+});
+
+test("#260: a link from the stage's folder to or above another Claude folder never downgrades it from whole", () => {
+  const h = fakeHome();
+  const solo = join(h, ".claude-solo");
+  mkdirSync(solo);
+  writeFileSync(join(solo, ".credentials.json"), "{}");
+  symlinkSync(join(h, ".claude-two"), join(solo, "two"));
+  symlinkSync(join(h, ".claude"), join(solo, "peek"));
+  const env = { CLAUDE_CONFIG_DIR: solo };
+  const deny = harnessOuterSettings({ harness: "claude", writable: ["/c"], home: h, env }).filesystem.denyRead;
+  // No entry links to the same name in ~/.claude: the default folder goes whole, with its .claude.json beside it.
+  for (const p of [join(h, ".claude-two"), join(h, ".claude"), join(h, ".claude.json"), join(solo, "two"), join(solo, "peek")]) assert.ok(deny.includes(p), p);
 });
 
 test("#260: doctor --local names a login a harness home holds, locally only; a key folder inside any login folder is exposed", () => {

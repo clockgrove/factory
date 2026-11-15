@@ -1,11 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { test } from "node:test";
 import { ACCOUNT_NAME_MAX, accountEnv, accountReason, accountsFile, declaredLogins, defaultAccount, loadAccounts, sandboxRoots } from "../scripts/lib/accounts.mjs";
-import { credentialPaths, gitPinFile, harnessLogins, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
+import { credentialPaths, gatewayKeyFile, gitPinFile, harnessLogins, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
 import { FACTORY_CONTROL_KEYS, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { ranWith } from "../scripts/lib/choice.mjs";
 import { harnessMarker } from "../scripts/lib/logic.mjs";
@@ -313,4 +314,129 @@ test("#263: doctor --local checks each declared account and names the failing on
   rmSync(accountsFile(h));
   assert.deepEqual((await localAccountChecks({ env: {}, local: true, home: h })).map((r) => r.status), ["PASS"]);
   assert.deepEqual(await localAccountChecks({ env: { GITHUB_ACTIONS: "true" }, local: true, home: h }), [], "never in an Actions log");
+});
+
+// ------------------------------------------------------------------ security review of #294
+
+test("#263: serve's own CLAUDE_CONFIG_DIR or CODEX_HOME counts when relative too, resolved as the harness resolves it", () => {
+  const h = fakeHome();
+  mkdirSync(join(h, "work", "claude-own"));
+  const rel = relative(process.cwd(), join(h, "work", "claude-own"));
+  assert.ok(!rel.startsWith("/"), "a relative path");
+  assert.deepEqual(problems(h, { claude: [good(h).claude[0]] }, { env: { CLAUDE_CONFIG_DIR: rel } }), [["CLAUDE_CONFIG_DIR", "this shell's CLAUDE_CONFIG_DIR names a folder no declared Claude Code account has; declare it as one, or unset CLAUDE_CONFIG_DIR"]]);
+  assert.deepEqual(problems(h, { codex: good(h).codex }, { env: { CODEX_HOME: relative(process.cwd(), join(h, "work", "claude-own")) } }).map((p) => p[0]), ["CODEX_HOME"]);
+  assert.deepEqual(problems(h, good(h), { env: { CLAUDE_CONFIG_DIR: relative(process.cwd(), join(h, "work", "claude-b")) } }), [], "a declared one, named relatively");
+});
+
+test("#263: the root folder is around everything: no account may be on /", () => {
+  const h = fakeHome();
+  assert.deepEqual(problems(h, { claude: [{ name: "root", home: "/" }] }), [["root", "its folder is in or around ~/.config/factory"]]);
+  assert.deepEqual(problems(h, { codex: [{ name: "root", home: "/" }] }).map((p) => p[0]), ["root"]);
+});
+
+test("#263: a declaration this user cannot read is an account problem with a fixed reason; harnessFor Blocks on it and rethrows anything else", async () => {
+  const h = fakeHome();
+  declare(h, good(h));
+  const keys = join(h, ".config", "factory");
+  const { local } = await fakeLoop(h);
+  Object.assign(local, { repoFull: "acme/app", repo: { owner: "acme", name: "app", full: "acme/app" }, opts: { token: "t" } });
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const json = (v) => new Response(JSON.stringify(v), { status: 200, headers: { "content-type": "application/json" } });
+    if (/\/user$/.test(u)) return json({ login: "me", type: "User" });
+    if (/\/collaborators\?/.test(u)) return json([{ login: "dev" }]);
+    if (/\/issues\/8\/timeline/.test(u)) return json([]);
+    if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: [{ name: "factory:objective" }] });
+    throw new Error(`unexpected ${u}`);
+  };
+  chmodSync(keys, 0o000);
+  try {
+    assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file cannot be read (EACCES)" }]);
+    assert.deepEqual(declaredLogins(h), [], "nothing to hide when nothing can be read");
+    const r = await withHome(h, {}, () => local.harnessFor(8));
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /^local mode: `the accounts file` in this machine's account declaration cannot be used \(account\)/);
+    chmodSync(keys, 0o700);
+    // Anything but a declaration that cannot be used is Factory's own failure, never a Block with no reason.
+    local.accountFor = () => {
+      throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+    };
+    await assert.rejects(withHome(h, {}, () => local.harnessFor(8)), /EIO/);
+  } finally {
+    globalThis.fetch = real;
+    chmodSync(keys, 0o700);
+  }
+});
+
+test("#263: a Copilot token file may not be one of Factory's own secrets, and a blank one is empty", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  const own = "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)";
+  const one = (token_file, env = {}) => problems(h, { copilot: [{ name: "gh", token_file }] }, { env });
+  assert.deepEqual(one(accountsFile(h)), [["gh", own]], "the accounts file itself");
+  writeFileSync(gatewayKeyFile(h), "vck_dummy\n", { mode: 0o600 });
+  assert.deepEqual(one(gatewayKeyFile(h)), [["gh", own]], "the AI Gateway key");
+  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  assert.deepEqual(one(join(keys, "tokens", "acme", "app")), [["gh", own]], "a repository's GitHub token");
+  writeFileSync(join(keys, "app.pem"), "-----BEGIN DUMMY-----\n", { mode: 0o600 });
+  assert.deepEqual(one(join(keys, "app.pem"), { FACTORY_LOCAL_APP_KEY: "~/.config/factory/app.pem" }), [["gh", own]], "the App's key, by its real path");
+  assert.deepEqual(one(join(keys, "app.pem")), [], "a file of that name is only the App's key when FACTORY_LOCAL_APP_KEY names it");
+  writeFileSync(join(keys, "blank"), " \n\t\n", { mode: 0o600 });
+  assert.deepEqual(one(join(keys, "blank")), [["gh", "its token file is empty"]]);
+});
+
+test("#263: an account may not take another harness's name, which its hold and label key on", () => {
+  const h = fakeHome();
+  const g = good(h);
+  assert.deepEqual(problems(h, { codex: [{ name: "claude", home: g.codex[0].home }] }), [["claude", "the name is another harness's (its account when none is declared)"]]);
+  assert.deepEqual(problems(h, { claude: [{ name: "copilot", home: g.claude[0].home }] }).map((p) => p[0]), ["copilot"]);
+  assert.deepEqual(problems(h, { claude: [{ name: "claude", home: g.claude[0].home }] }), [], "its own harness's name");
+});
+
+test("#263: the accounts file is held to the rules for secrets: this user's, one link, in a folder no one else writes", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  declare(h, good(h));
+  assert.equal(loadAccounts({ home: h, env: {} }).ok, true);
+  assert.deepEqual(loadAccounts({ home: h, env: {}, uid: process.getuid() + 1 }).problems, [{ account: "the accounts file", why: "the accounts file belongs to another user" }]);
+  linkSync(accountsFile(h), join(h, "work", "accounts-copy.json"));
+  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file has more than one hard link; keep one copy" }]);
+  assert.equal(declaredLogins(h).length, 3, "what a refused file names is still hidden");
+  rmSync(join(h, "work", "accounts-copy.json"));
+  chmodSync(keys, 0o770);
+  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "~/.config/factory is writable by others; chmod 700 it" }]);
+  chmodSync(keys, 0o700);
+  assert.equal(loadAccounts({ home: h, env: {} }).ok, true);
+});
+
+test("#263, the real path: Factory's git on the clone before a stage gets no secret, a Copilot account's token included", async () => {
+  const h = fakeHome();
+  declare(h, good(h));
+  const { local, clone, usage } = await fakeLoop(h, "copilot");
+  rmSync(join(clone, ".git"), { recursive: true });
+  execFileSync("git", ["init", "-q", clone]);
+  pinGitDir(clone, gitPinFile(local.ws(8)));
+  // srt stands where local mode's git sandbox would: it records the environment Factory's git starts with, then runs it.
+  const bin = join(h, "bin");
+  const seen = join(h, "srt-env.txt");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "srt"), `#!/bin/sh\nenv >> "${seen}"\nshift 3\nexec "$@"\n`, { mode: 0o755 });
+  const caches = [join(h, "pnpm"), join(h, "bun")];
+  for (const d of caches) mkdirSync(d);
+  local.harnessFor = async () => ({ ok: true, harness: "copilot", account: local.accountFor("copilot") });
+  local.limitUntil = () => null;
+  // The stage's env: the real Copilot part (its account's token), with the git sandbox's settings.
+  local.stageEnv = (issue, usageDir, c, stageTmp, script, harness, account) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(h, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], ...local.harnessEnv(issue, [stageTmp], c, usage, null, harness, account) });
+  local.children = {
+    add(child) {
+      child.kill("SIGKILL");
+      throw new Error("stop after the set-up");
+    },
+  };
+  await withHome(h, { CLAUDE_CONFIG_DIR: join(h, "work", "claude-b"), CODEX_HOME: join(h, "work", "codex-a") }, () => assert.rejects(local.stage(8, "work", "worker.mjs", []), /stop after the set-up/));
+  const env = readFileSync(seen, "utf8");
+  assert.ok(env.includes("FACTORY_LOCAL_SRT_GIT="), "srt ran Factory's git with its sandbox settings");
+  assert.ok(!env.includes("copilot-token-a") && !env.includes("COPILOT_GITHUB_TOKEN="), "no Copilot token");
 });

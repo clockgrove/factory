@@ -42,6 +42,7 @@ import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handover
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
+import { scrubbedEnv } from "./lib/harness.mjs";
 import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
@@ -546,6 +547,8 @@ export class Local {
     try {
       account = this.accountFor(harness);
     } catch (e) {
+      // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Factory's own.
+      if (e?.code !== "account" || typeof e.reason !== "string") throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
       return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/factory/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `factory:objective`." };
     }
@@ -947,7 +950,9 @@ export class Local {
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
       const locks = staleGitLocks(clone);
       for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
-      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true, locks: locks.stale });
+      // That git runs on the model's clone: with no secret in its env (scrubbedEnv), as every other git there.
+      const gitEnv = scrubbedEnv(env);
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, gitEnv), { env: gitEnv }), { fresh: true, locks: locks.stale });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();

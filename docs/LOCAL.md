@@ -108,7 +108,7 @@ Local mode runs the validation commands itself, so their order is its wall time.
 
 ## Accounts
 
-A machine can name several accounts of each harness; every local stage runs on one of them for its whole run and says which. Declare them in `~/.config/factory/accounts.json`, on this machine only: never in a repository or the workflow file. No sandbox can read it; it must be a regular file no one else may write.
+A machine can name several accounts of each harness; every local stage runs on one of them for its whole run and says which. Declare them in `~/.config/factory/accounts.json`, on this machine only: never in a repository or the workflow file. No sandbox can read it; it must be a regular file of yours, with one link, that no one else may write, in a `~/.config/factory` that is a real directory no one else may write.
 
 ```json
 {
@@ -118,18 +118,18 @@ A machine can name several accounts of each harness; every local stage runs on o
 }
 ```
 
-- **An account** is a Claude Code config folder (`CLAUDE_CONFIG_DIR`), a Codex home (`CODEX_HOME`) or a Copilot token file. Its name is lowercase letters, digits and hyphens, at most 34 characters (it fits a `factory:account:<name>` label), and unique on the machine. A harness's first account is its default, and its stages run on it.
+- **An account** is a Claude Code config folder (`CLAUDE_CONFIG_DIR`), a Codex home (`CODEX_HOME`) or a Copilot token file. Its name is lowercase letters, digits and hyphens, at most 34 characters (it fits a `factory:account:<name>` label), and unique on the machine; it may not be another harness's name (`claude`, `codex`, `copilot`). A harness's first account is its default, and its stages run on it.
 - **Nothing declared:** each harness has one account, named after it (`claude`, `codex`, `copilot`), and runs on the login `serve`'s shell names, as above.
 - **Used in place:** a stage uses its account's folder or token where it is and never copies it (OpenAI allows one `auth.json` per machine). Factory sets the stage's `CLAUDE_CONFIG_DIR` or `CODEX_HOME` explicitly, whatever `serve`'s shell sets. For the default `~/.claude` it leaves `CLAUDE_CONFIG_DIR` unset, since Claude Code keeps that login's `.claude.json` in the home. A Copilot stage gets its account's token from its file, never from `COPILOT_GITHUB_TOKEN`. The harness process reads only that account's login: every other declared login is hidden from the stage, as every login is (above).
 - **Recorded by name:** the stage's `result.json` (`account`), its progress comment's harness line and the scorecard's Harness column name the account. No path, credential or token reaches GitHub or a log.
 - **Checked at every stage start, every account:** a bad one stops `serve` from starting, and Blocks a stage (cause `setup`), naming only the account; the loop's log says why, without a path. Fix the file, then re-apply `factory:objective`. Factory never creates an account folder. These are bad:
-  - an invalid or repeated name;
+  - an invalid or repeated name, or another harness's name;
   - a path that is not absolute, or is not its own real path (a link on the way);
   - a folder that does not exist or is no directory, or a token file that does not exist;
   - two accounts on one real path;
   - a folder in or around another account's, another harness login, `~/.config/factory`, or a directory a sandbox may write (this repository's clone, the stages' temp directories, `/tmp/claude`);
-  - a token file outside `~/.config/factory`, or one that is not a regular file with one link and no group or world bits (as the App's key), or is empty;
-  - with accounts declared for a harness, a `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in `serve`'s shell that names a folder no account declares and the search for logins (above) does not find.
+  - a token file outside `~/.config/factory`, one of Factory's own secrets there (the accounts file, `ai-gateway-key`, a repository's token under `tokens/`, the App's key), or one that is not a regular file with one link and no group or world bits (as the App's key), or is empty or blank;
+  - with accounts declared for a harness, a `CLAUDE_CONFIG_DIR` or `CODEX_HOME` in `serve`'s shell (absolute or relative) that names a folder no account declares and the search for logins (above) does not find.
 - **Readiness per account:** the harness checks (its CLI, Copilot's token and sandbox, Codex's sandbox self-test) and the key-folder checks (no harness home holds `~/.config/factory`) run for each account a stage runs on, not once per harness.
 - **`doctor.mjs --local`** checks each declared account and names a failing one: declared as above, its folder owner-only, its login hidden from every sandbox and in no home another account's harness may write, and its login working (`claude auth status` or `codex login status` on its folder, by exit code; GitHub accepting a Copilot token).
 

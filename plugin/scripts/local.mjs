@@ -2478,7 +2478,7 @@ export class Local {
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
    * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
    * draft, its issue still a Question, marked ready after the Question was asked (readyAfter). The review applies the
-   * answer, or with none since the Question makes it a Question again (review.mjs readyMark).
+   * answer; with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
    */
   async pendingReviews() {
     const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];

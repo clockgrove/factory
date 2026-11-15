@@ -322,7 +322,9 @@ export function answerScope(comments, protectedList) {
 
 /**
  * Whether this review is a person marking a Question's PR ready, the Question's answer cue: then only what a maintainer
- * said since the Question answers it, and with nothing new the PR goes back to a Question. On Actions it is the
+ * said since the Question answers it, and with nothing new a PR whose body still asks a `QUESTION:` goes back to a
+ * Question. A Question asked on the issue (plan time) is not in the body: its review goes on and may merge the part
+ * done so far, as its notice (session.mjs questionNotice) warns. On Actions it is the
  * `ready_for_review` event a person fired (`action`, `sender`). The local route fires no event: serve starts the review
  * for a PR out of draft whose issue is still a Question (local.mjs pendingReviews), so on that route (`local`) that state
  * is the mark. Read on the PR and the issue as this stage sees them.
@@ -833,8 +835,8 @@ async function main() {
     const reason = "marked ready, but no maintainer answer since the question; answer in a comment on the issue or the PR, then mark it ready again";
     log(`PR #${pr.number}: ${reason}`);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "question", reason, notify: inputs.notify, stage: "review" }, token);
-    await finish("question", reason);
+    const applied = await applyExit(repo, { issue, pr, exit: "question", reason, notify: inputs.notify, stage: "review" }, token);
+    await finish(applied?.exit ?? "question", applied?.reason ?? reason);
     return;
   }
   // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
@@ -1503,8 +1505,8 @@ async function main() {
   // A Block that came from an outage (a merge-path step that met it) ends the stage on that outage instead (session.mjs
   // outageFirst, outageExit); with its label already off, serve's resume runs the review again (local.mjs resume).
   outageFirst(decision);
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
-  await finish(decision.exit, decision.reason);
+  const applied = await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
+  await finish(applied?.exit ?? decision.exit, applied?.exit === decision.exit ? decision.reason : (applied?.reason ?? decision.reason));
   }
 }
 

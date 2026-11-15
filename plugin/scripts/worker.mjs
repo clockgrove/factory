@@ -1002,8 +1002,8 @@ async function main() {
   // A Block that came from an outage (an exit step that met it) ends the stage on that outage instead (session.mjs
   // outageFirst, outageExit); any other Block stands.
   outageFirst(decision);
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix, cause: decision.cause }, token);
-  await finish(decision.exit, decision.reason);
+  const applied = await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix, cause: decision.cause }, token);
+  await finish(applied?.exit ?? decision.exit, applied?.exit === decision.exit ? decision.reason : (applied?.reason ?? decision.reason));
   }
 }
 

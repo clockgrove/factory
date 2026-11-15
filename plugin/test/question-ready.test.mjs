@@ -95,3 +95,51 @@ test("the review reads the person's ready mark on every route, and the Question 
   assert.equal(readyMark({ local: true, issue: question, pr: { ...out, draft: true } }), false, "local: still a draft");
   assert.match(questionNotice({ reason: "which name?", pr: out }), /Answer in a comment on the issue or the PR, then mark the PR ready\.$/);
 });
+
+test("a Question whose PR GitHub will not draft Blocks once, naming it, rather than leaving a ready PR serve would ask again each tick", async () => {
+  const { applyExit } = await import("../scripts/lib/session.mjs");
+  const pr = { number: 70, node_id: "PR_70", draft: false, head: { sha: "abc" }, user: { login: "factory[bot]" } };
+  const writes = [];
+  const run = (refuse) =>
+    withApi(async () => {
+      writes.length = 0;
+      const real = globalThis.fetch;
+      globalThis.fetch = async (url, init = {}) => {
+        const u = new URL(url);
+        const method = init.method || "GET";
+        const body = init.body ? JSON.parse(init.body) : null;
+        const json = (b) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+        if (u.pathname === "/graphql") {
+          if (/convertPullRequestToDraft/.test(body?.query || "")) {
+            writes.push("draft");
+            return json(refuse ? { errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] } : { data: {} });
+          }
+          return json({ data: {} });
+        }
+        if (method !== "GET") writes.push(`${method} ${decodeURIComponent(u.pathname).replace("/repos/acme/app", "")}${body?.body ? ` ${body.body}` : ""}${body?.labels ? ` ${body.labels.join(",")}` : ""}`);
+        if (u.pathname === "/repos/acme/app/pulls/70") return json(pr);
+        return json(method === "GET" && /\/comments$/.test(u.pathname) ? [] : {});
+      };
+      try {
+        return await applyExit(REPO, { issue: 7, pr, exit: "question", reason: "which name?", notify: "kirk", stage: "review" }, { token: "t" });
+      } finally {
+        globalThis.fetch = real;
+      }
+    });
+  const asked = await run(false);
+  assert.equal(asked.exit, "question");
+  assert.ok(writes.some((w) => w === "POST /issues/7/labels factory:question"), writes.join("\n"));
+  const blocked = await run(true);
+  assert.equal(blocked.exit, "blocked", "the stage ends as it was applied");
+  assert.match(blocked.reason, /^PR #70 could not be made a draft for its Question \(graphql: Resource not accessible by integration\), so the Question is not asked; the question was: which name\?$/);
+  assert.ok(!writes.some((w) => /factory:question/.test(w) && w.startsWith("POST")), `no Question label: ${writes.join("\n")}`);
+  assert.ok(!writes.some((w) => /Question \(review\)/.test(w)), "no Question notice");
+  assert.ok(!writes.some((w) => /requested_reviewers/.test(w)), "no review request");
+  const notice = writes.find((w) => /^POST \/issues\/7\/comments /.test(w)) || "";
+  assert.match(notice, /Blocked \(review\): PR #70 could not be made a draft/, writes.join("\n"));
+  assert.match(notice, /"cause":"factory"/, "cause factory");
+  assert.match(notice, /Fix by letting Factory's token convert PR #70 to a draft, or by making it one by hand/);
+  assert.ok(!/was delivered|is a draft/.test(notice), "the notice never says the PR is a draft");
+  assert.equal(writes.filter((w) => w === "draft").length, 1, "one draft attempt");
+  assert.ok(writes.includes("POST /issues/7/labels factory:blocked"), writes.join("\n"));
+});

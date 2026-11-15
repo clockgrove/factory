@@ -3,7 +3,7 @@
 // one serve follows, and a verified checkout of that release to run from.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ const COMMIT = /^[0-9a-f]{40}$/;
 
 /** The checkout this process runs from: <root>/plugin/scripts/local.mjs is its loop. */
 const OWN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-/** Where serve keeps the releases it fetched, one checkout per ref (Factory's cache, which no sandbox may write). */
+/** Where serve keeps the releases it fetched, a fresh checkout per switch (Factory's cache, read-only in every sandbox). */
 export const releasesDir = (home = homedir()) => join(home, ".cache", "factory", "releases");
 
 /**
@@ -29,7 +29,8 @@ export const releasesDir = (home = homedir()) => join(home, ".cache", "factory",
  */
 export function runningFactory(root = OWN_ROOT, version = FACTORY_VERSION, home = homedir()) {
   const git = (args) => {
-    const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] });
+    // No hook or file monitor a checkout's own config names runs here.
+    const r = spawnSync("git", ["-C", root, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", ...args], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] });
     return r.status === 0 ? r.stdout.trim() : null;
   };
   let commit = null;
@@ -48,69 +49,113 @@ export function runningFactory(root = OWN_ROOT, version = FACTORY_VERSION, home 
 /** How this Factory names itself in serve's log: its release, and its commit when known. */
 export const runningName = (running) => `v${running.version}${running.commit ? ` (${running.commit.slice(0, 7)})` : ""}`;
 
+/** A release tag's version as numbers, for order. */
+const versionOf = (v) => String(v).replace(/^v/, "").split(".").map(Number);
+/** Whether release `a` is older than release `b` (both X.Y.Z, with or without the v). */
+export const olderRelease = (a, b) => {
+  const [x, y] = [versionOf(a), versionOf(b)];
+  for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+};
+
+/** What serve says of a pin to an older Factory, which it never takes by itself. */
+export const DOWNGRADE_LINE = "the pin is older than what serve runs; start serve from it yourself to downgrade";
+
 /**
  * What serve does with the workflow's Factory pins (lib/local.mjs workflowPins) against the Factory it runs:
- * `{same: true}` (nothing to take: the same release or commit, or no pin), `{follow: true, ref}` (a release tag vX.Y.Z or a
- * full commit SHA serve can take), or `{follow: false, ref, why}` (a pin serve does not run code from: a branch, a short
- * SHA, a moving tag, or steps that disagree).
+ * `{same: true}` (nothing to take: the same release or commit, or no pin), `{follow: true, ref}` (a later release tag
+ * vX.Y.Z, or a full commit SHA, which releaseCheckout takes only when it comes after the running commit), or
+ * `{follow: false, ref, why}` (a pin serve runs no code from: a branch, a short SHA, a moving tag, steps that disagree,
+ * or an older release: a release before this one would never follow a pin again, and lacks this one's fixes).
  */
 export function pinDecision(pins, running) {
   if (!pins?.length) return { same: true };
   if (pins.length > 1) return { follow: false, ref: pins.join(", "), why: `the workflow's steps call clockgrove/factory at more than one ref (${pins.join(", ")})` };
   const [ref] = pins;
-  if (RELEASE_TAG.test(ref)) return ref === `v${running.version}` ? { same: true } : { follow: true, ref };
+  if (RELEASE_TAG.test(ref)) {
+    if (ref === `v${running.version}`) return { same: true };
+    return olderRelease(ref, running.version) ? { follow: false, ref, older: true, why: `clockgrove/factory@${ref}: ${DOWNGRADE_LINE}` } : { follow: true, ref };
+  }
   if (COMMIT.test(ref)) return ref === running.commit ? { same: true } : { follow: true, ref };
   return { follow: false, ref, why: `clockgrove/factory@${ref} is neither a release tag (vX.Y.Z) nor a full commit SHA` };
 }
 
-const gitEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_SMUDGE: "1" });
-const defaultGit = (cwd, args) => exec("git", ["-c", "credential.helper=", ...args], { cwd, env: gitEnv(), timeoutMs: 5 * 60_000 });
+/**
+ * Git for a release: none of this machine's git config (no url.insteadOf, credential helper, hook or file monitor), no
+ * GIT_* variable from this shell, and a home of its own with no .netrc, so nothing redirects the fetch or sends a token.
+ */
+function releaseGitEnv(home) {
+  const own = join(releasesDir(home), ".home");
+  mkdirSync(own, { recursive: true, mode: 0o700 });
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+  return { ...env, HOME: own, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_SMUDGE: "1" };
+}
+const GIT_SAFE = ["-c", "credential.helper=", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"];
+const defaultGit = (home) => (cwd, args) => exec("git", [...GIT_SAFE, ...args], { cwd, env: releaseGitEnv(home), timeoutMs: 5 * 60_000 });
 
 /**
- * The checkout at `dir` when it is exactly `ref` of Factory, untouched: HEAD the tag's commit (a tag) or the SHA itself on
- * Factory's main (a SHA), no change to a tracked file and no file added, the loop present, and a tag's plugin.json naming
- * that release. {dir, commit, version} or null.
+ * Why the checkout serve fetched for a release (releaseCheckout's {dir, commit, ref}) is no longer exactly that release,
+ * or null: HEAD the commit it was fetched at, every tracked file plain (no assume-unchanged or skip-worktree flag that
+ * would hide a change), no change to one, no file added (ignored ones included), the loop present, and a tag's
+ * plugin.json naming that release. Synchronous: run again right before serve starts on it (Local.restartOn).
  */
-async function verified(dir, ref, git) {
-  const out = async (args) => {
-    const r = await git(dir, args).catch(() => null);
-    return r?.code === 0 ? String(r.stdout).trim() : null;
+export function checkoutProblem({ dir, commit, ref }, { home = homedir() } = {}) {
+  const git = (args) => spawnSync("git", ["-C", dir, ...GIT_SAFE, ...args], { encoding: "utf8", timeout: 60_000, env: releaseGitEnv(home), stdio: ["ignore", "pipe", "ignore"] });
+  const out = (args) => {
+    const r = git(args);
+    return r.status === 0 ? r.stdout : null;
   };
-  const head = await out(["rev-parse", "HEAD"]);
-  if (!head) return null;
-  const tag = RELEASE_TAG.test(ref);
-  const want = tag ? await out(["rev-parse", "--verify", "-q", `refs/tags/${ref}^{commit}`]) : ref;
-  if (head !== want) return null;
-  if (!tag && (await git(dir, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"]).catch(() => null))?.code !== 0) return null;
-  if ((await out(["status", "--porcelain", "--untracked-files=all"])) !== "") return null;
-  if (!existsSync(join(dir, "plugin", "scripts", "local.mjs"))) return null;
-  let version = null;
+  if ((out(["rev-parse", "HEAD"]) || "").trim() !== commit) return "its HEAD is not the commit fetched";
+  const files = out(["ls-files", "-v"]);
+  if (files === null || files.split("\n").some((l) => l && !l.startsWith("H "))) return "a tracked file is flagged to hide its changes";
+  if (git(["diff", "--no-ext-diff", "--no-textconv", "--quiet", "HEAD"]).status !== 0) return "a tracked file changed";
+  if (out(["status", "--porcelain", "--untracked-files=all", "--ignored"]) !== "") return "a file was added";
+  if (!existsSync(join(dir, "plugin", "scripts", "local.mjs"))) return "it has no loop";
   try {
-    version = JSON.parse(readFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), "utf8")).version;
+    const { version } = JSON.parse(readFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), "utf8"));
+    if (RELEASE_TAG.test(ref) && `v${version}` !== ref) return `its plugin.json names v${version}`;
   } catch {
-    return null;
+    return "its plugin.json does not read";
   }
-  if (tag && `v${version}` !== ref) return null;
-  return { dir, commit: head, version };
+  return null;
+}
+
+/** Entries of releasesDir serve keeps besides the one it runs: the newest few. */
+export const RELEASES_KEPT = 3;
+
+/**
+ * Remove the release checkouts in releasesDir past the newest RELEASES_KEPT, never `keep` (the one serve runs, and the one
+ * it switches to), nor a fetch under way (a `.part` less than an hour old).
+ */
+export function pruneReleases(home = homedir(), keep = []) {
+  const root = releasesDir(home);
+  let names = [];
+  try {
+    names = readdirSync(root).filter((n) => !n.startsWith("."));
+  } catch {
+    return;
+  }
+  const kept = new Set(keep.map((d) => resolve(d)));
+  const entries = names.map((n) => ({ dir: join(root, n), part: n.endsWith(".part"), at: statSync(join(root, n), { throwIfNoEntry: false })?.mtimeMs ?? 0 }));
+  const done = entries.filter((e) => !e.part).sort((a, b) => b.at - a.at);
+  const gone = [...done.slice(RELEASES_KEPT), ...entries.filter((e) => e.part && Date.now() - e.at > 60 * 60_000)];
+  for (const e of gone) if (!kept.has(resolve(e.dir))) rmSync(e.dir, { recursive: true, force: true });
 }
 
 /**
- * A checkout of Factory at `ref` (a release tag or a full SHA the workflow names, pinDecision), fetched from Factory's own
- * repository only: a tag's one commit, or for a SHA Factory's main, which must contain it. Kept in releasesDir by ref
- * and verified on every use; one that fails the check is fetched again. Throws with what failed.
+ * A fresh checkout of Factory at `ref` (a release tag or a full SHA the workflow names, pinDecision), fetched from
+ * Factory's own repository only, into a new directory of releasesDir each time: nothing kept from an earlier fetch is
+ * trusted. A tag's one commit; for a SHA, Factory's main, which must contain it and the commit serve runs (`running`), so
+ * serve never moves back to an earlier one by itself. Throws with what failed (`code` "older" for a downgrade); the
+ * checkouts past the newest few go (pruneReleases). {dir, commit, ref, version}.
  */
-export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_URL, git = defaultGit } = {}) {
+export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_URL, git = defaultGit(home), running = null } = {}) {
   const tag = RELEASE_TAG.test(ref);
   if (!tag && !COMMIT.test(ref)) throw new Error(`clockgrove/factory@${ref} is neither a release tag nor a full commit SHA`);
   const root = releasesDir(home);
-  const dir = join(root, ref);
-  if (existsSync(dir)) {
-    const kept = await verified(dir, ref, git);
-    if (kept) return kept;
-    rmSync(dir, { recursive: true, force: true });
-  }
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  const part = `${dir}.${randomBytes(4).toString("hex")}.part`;
+  const dir = join(root, `${ref}-${Date.now().toString(36)}${randomBytes(3).toString("hex")}`);
+  const part = `${dir}.part`;
   const must = async (cwd, args, what) => {
     const r = await git(cwd, args);
     if (r.code !== 0) throw new Error(`${what}: ${String(r.stderr || "").trim().slice(0, 300) || `git exited ${r.code ?? r.signal}`}`);
@@ -123,26 +168,23 @@ export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_UR
     else {
       await must(part, ["fetch", "-q", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], `fetching main from ${url}`);
       if ((await git(part, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"])).code !== 0) throw new Error(`${ref} is not a commit on ${url}'s main`);
+      if (!running?.commit || (await git(part, ["merge-base", "--is-ancestor", running.commit, ref])).code !== 0) throw Object.assign(new Error(`clockgrove/factory@${ref}: ${DOWNGRADE_LINE} (it does not come after ${running?.commit ? running.commit.slice(0, 7) : "the commit serve runs"} on Factory's main)`), { code: "older" });
     }
-    await must(part, ["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", tag ? `refs/tags/${ref}^{commit}` : ref], `checking out ${ref}`);
-    const ok = await verified(part, ref, git);
-    if (!ok) throw new Error(`the checkout of ${ref} is not ${tag ? "that release" : "that commit"} (its plugin.json, HEAD or files differ)`);
-    try {
-      renameSync(part, dir);
-    } catch (e) {
-      // Another serve on this machine put the same release there first: theirs is used once it checks out the same.
-      const theirs = existsSync(dir) ? await verified(dir, ref, git) : null;
-      if (theirs) return theirs;
-      throw e;
-    }
-    return { ...ok, dir };
+    const commit = String((await must(part, ["rev-parse", "--verify", tag ? `refs/tags/${ref}^{commit}` : `${ref}^{commit}`], `resolving ${ref}`)).stdout).trim();
+    await must(part, ["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit], `checking out ${ref}`);
+    const problem = checkoutProblem({ dir: part, commit, ref }, { home });
+    if (problem) throw new Error(`the checkout of ${ref} is not ${tag ? "that release" : "that commit"}: ${problem}`);
+    renameSync(part, dir);
+    const { version } = JSON.parse(readFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), "utf8"));
+    pruneReleases(home, [dir, ...(running?.root ? [running.root] : [])]);
+    return { dir, commit, ref, version };
   } finally {
     rmSync(part, { recursive: true, force: true });
   }
 }
 
-/** Whether the loop of the checkout at `dir` loads on this Node: its usage, exit 0. A reason, or null. */
+/** Whether the loop of the checkout at `dir` loads on this Node, with nothing of this shell's env: its usage, exit 0. A reason, or null. */
 export async function startProblem(dir) {
-  const r = await exec(process.execPath, [join(dir, "plugin", "scripts", "local.mjs"), "--help"], { timeoutMs: 60_000 }).catch((e) => ({ code: null, stderr: e.message }));
+  const r = await exec(process.execPath, [join(dir, "plugin", "scripts", "local.mjs"), "--help"], { cwd: dir, env: { PATH: process.env.PATH || "" }, timeoutMs: 60_000 }).catch((e) => ({ code: null, stderr: e.message }));
   return r.code === 0 ? null : `its loop does not start on this Node (${String(r.stderr || `exit ${r.code ?? r.signal}`).trim().slice(0, 200)})`;
 }

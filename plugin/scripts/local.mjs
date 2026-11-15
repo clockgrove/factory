@@ -47,7 +47,7 @@ import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
-import { RELEASES_URL, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
+import { RELEASES_URL, checkoutProblem, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
@@ -58,6 +58,10 @@ const onPath = (bin) => whichSync(bin) !== null;
 export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
 /** A pinned release serve could not fetch or start is tried again after this long (followPin). */
 export const PIN_RETRY_MS = 10 * 60_000;
+/** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
+export const SWITCH_GAP_MS = 30 * 60_000;
+/** The env name a serve that started again on a new release (restartOn) learns when it last switched from. */
+const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
@@ -208,14 +212,18 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
   }
 }
 
-/** The workflow's FACTORY_* names local mode takes no setting from (inputs.mjs workflowSettings), said at start and on a change. */
-const droppedLine = (dropped) => `.github/workflows/factory.yml: ${dropped.join(", ")} ${dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`;
-
 /**
  * What changed between two sets of workflow settings (workflowSettings's `kept`), one `NAME: old → new` each, in name
  * order; one this shell also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as
  * in baseEnv. Values are the workflow's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
  */
+/**
+ * The workflow settings a running serve takes from the default branch at its next tick (refreshSettings): how many run,
+ * on which models and effort, what validation runs, how a session resumes and its cache. What a stage may reach or
+ * receive, spend, protect or be set up with is taken only when serve starts.
+ */
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
+
 export function settingsChanges(before = {}, after = {}, env = process.env) {
   const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
   return [...new Set([...Object.keys(before), ...Object.keys(after)])]
@@ -246,15 +254,10 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   if (platform() === "win32") problems.push("native Windows has no sandbox for the harness; run local mode inside WSL2");
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
-  problems.push(...localDbProblems(wf, { env, os }));
+  if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length }));
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
-}
-
-/** FACTORY_LOCAL_DB where it cannot run (preflight; a running serve's new settings too, Local.refreshSettings). */
-export function localDbProblems(wf = {}, { env = process.env, os = platform() } = {}) {
-  return os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1" ? ["FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it"] : [];
 }
 
 /**
@@ -495,8 +498,7 @@ export class Local {
     // The workflow file is repository content: only its settings reach a stage, never a name Factory reads as its own
     // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
     const wf = workflowSettings(committed.wf);
-    if (wf.dropped.length) log(droppedLine(wf.dropped));
-    this.dropped = wf.dropped;
+    if (wf.dropped.length) log(`.github/workflows/factory.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`);
     this.wf = wf.kept;
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
@@ -515,6 +517,10 @@ export class Local {
     // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
     // was are a dead loop's (deadHereHolder), resumed at once as after any restart.
     this.holder = holderId();
+    // When this process last switched releases (restartOn), if it did, within the last day: the next switch waits SWITCH_GAP_MS.
+    const switched = Number(process.env[SWITCHED_ENV]);
+    this.switchedAt = Number.isFinite(switched) && switched <= Date.now() && Date.now() - switched < 24 * 60 * 60_000 ? switched : 0;
+    delete process.env[SWITCHED_ENV];
     this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
@@ -1750,11 +1756,12 @@ export class Local {
   }
 
   /**
-   * The workflow's settings as the default branch has them now, read at each serve tick (#276): a change applies to every
-   * stage that starts from then on and to this loop's own limits, never to a stage in flight, and is said once, by name.
-   * A setting this shell sets still wins, as at the start. A new harness for the loop, or FACTORY_LOCAL_DB, is taken only
-   * when it passes the start's own check of it; otherwise serve keeps the settings it has and says why, once. The read
-   * also brings the workflow's Factory pin (followPin).
+   * The workflow's settings as the default branch has them now, read at each serve tick (#276). Only HOT_SETTINGS (caps,
+   * models and effort, validation, resume policy, cache TTL) apply while serve runs: from that tick, to this loop's limit,
+   * the dispatcher's caps and every stage that starts from then on, never to a stage in flight or being set up, and said
+   * once, by name. Every other setting (what a stage may reach or receive, budgets, maintainers, protected paths, the
+   * harness, setup) keeps its value from serve's start until serve starts again, said once. The read also brings the
+   * workflow's Factory pin (followPin).
    */
   async refreshSettings() {
     if (!this.settingsBranch) return;
@@ -1768,42 +1775,31 @@ export class Local {
     this.pins = now.pins;
     // A stage being set up keeps the settings it started with (stage()): the change is taken at a later tick.
     if (this.settingUp > 0) return;
-    const next = workflowSettings(now.wf);
-    const changes = settingsChanges(this.wf, next.kept);
-    if (!changes.length) {
-      this.settingsRefused = null;
-      return;
+    const next = workflowSettings(now.wf).kept;
+    const hot = { ...this.wf };
+    for (const k of HOT_SETTINGS) if (next[k] === undefined) delete hot[k];
+    else hot[k] = next[k];
+    const changes = settingsChanges(this.wf, hot);
+    // The rest, against what serve started with: said once for each set of differences.
+    const held = settingsChanges(this.wf, { ...next, ...Object.fromEntries(HOT_SETTINGS.map((k) => [k, this.wf[k]])) });
+    const heldKey = held.join("\n");
+    if (heldKey !== (this.settingsHeld ?? "")) {
+      if (held.length) log(`the workflow's settings on origin/${this.settingsBranch} changed; these take effect when serve restarts, and until then serve keeps the values it started with: ${held.join("; ")}`);
+      this.settingsHeld = heldKey;
     }
-    // Settings refused once are not checked again at every tick: a later change to the workflow is.
-    const key = JSON.stringify(next.kept);
-    if (key === this.settingsRefused) return;
-    const harness = (process.env.FACTORY_HARNESS || next.kept.FACTORY_HARNESS || "claude").toLowerCase();
-    const problems = [...localDbProblems(next.kept), ...(harness !== this.harness ? this.harnessReady(harness) : [])];
-    if (problems.length) {
-      this.settingsRefused = key;
-      log(`the workflow's settings on origin/${this.settingsBranch} changed (${changes.join("; ")}), and serve does not take them: ${problems.join("; ")}; it keeps the settings it has until the workflow changes again`);
-      return;
-    }
-    this.settingsRefused = null;
+    if (!changes.length) return;
     log(`the workflow's settings on origin/${this.settingsBranch} changed; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
-    if (next.dropped.join() !== (this.dropped || []).join() && next.dropped.length) log(droppedLine(next.dropped));
-    this.dropped = next.dropped;
-    this.wf = next.kept;
-    if (harness !== this.harness) {
-      this.harness = harness;
-      this.copilotToken = harness === "copilot" ? copilotToken() : "";
-      log(`this loop's harness is ${harness} now`);
-    }
-    for (const c of localDatabaseChecks({ checkout: this.dev, env: process.env, wf: this.wf })) if (c.status !== "PASS") log(`${c.status} ${c.name}: ${c.detail} — fix: ${c.fix}`);
+    this.wf = hot;
   }
 
   /**
    * The workflow's Factory pin against the Factory this serve runs (#276), at each tick. A new release tag or commit
    * SHA there is taken at a stage boundary: serve fetches it from Factory's own repository (lib/release.mjs), starts no
    * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), which resumes
-   * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve fetched): one
-   * started from any other checkout, a branch or a change of your own, keeps running what you started, and says the pin
-   * differs. Said once per pin. Returns true while new stages wait for the switch.
+   * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve
+   * fetched): one started from any other checkout, a branch or a change of your own, keeps running what you started, and
+   * says the pin differs. Never an older release (pinDecision, releaseCheckout). A switch starts at most once in
+   * SWITCH_GAP_MS. Said once per pin. Returns true while new stages wait for the switch.
    */
   async followPin(inFlight, { once = false } = {}) {
     this.factory ??= runningFactory();
@@ -1828,10 +1824,12 @@ export class Local {
     if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
     if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
     if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
+    if (!this.repin && Date.now() - this.switchedAt < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
     if (!this.repin) {
+      this.switchedAt = Date.now();
       log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
       const r = (this.repin = { ref, state: "fetching" });
-      r.fetch = releaseCheckout(ref, this.releaseOpts)
+      r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
         .then(async (c) => {
           const problem = await startProblem(c.dir);
           if (problem) throw new Error(problem);
@@ -1839,9 +1837,12 @@ export class Local {
           r.state = "ready";
         })
         .catch((e) => {
-          r.state = "failed";
+          // An older commit than this one: never taken by itself, nor tried again until the pin changes.
+          r.state = e?.code === "older" ? "refused" : "failed";
           r.retryAt = Date.now() + PIN_RETRY_MS;
-          if (this.repin === r) log(`clockgrove/factory@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+          if (this.repin !== r) return;
+          if (r.state === "refused") log(`${String(e.message).slice(0, 300)}; serve keeps running ${name}`);
+          else log(`clockgrove/factory@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
         });
     }
     const r = this.repin;
@@ -1855,8 +1856,10 @@ export class Local {
   /**
    * Start serve again on the release `r` names, in this same process (process.execve): its pid, its terminal and its
    * front end stay. The new loop takes up the claims this one leaves (paused work, a stage that lapsed) at once, as a
-   * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. Where the process cannot be replaced, says how to restart instead and
-   * goes on with the release it runs. Returns false when it did not restart.
+   * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. The checkout is checked
+   * once more first (checkoutProblem): one changed since its fetch is not run, and is fetched afresh later. Where the
+   * process cannot be replaced, says how to restart instead and goes on with the release it runs. Returns false when it
+   * did not restart.
    */
   restartOn(r) {
     const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
@@ -1865,8 +1868,15 @@ export class Local {
       log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
       return false;
     }
+    const problem = checkoutProblem(r.checkout, this.releaseOpts);
+    if (problem) {
+      r.state = "failed";
+      r.retryAt = Date.now() + PIN_RETRY_MS;
+      log(`the checkout of clockgrove/factory@${r.ref} at ${r.checkout.dir} changed since serve fetched it (${problem}); serve does not run it, goes on with ${runningName(this.factory)} and fetches it afresh in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+      return false;
+    }
     log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
-    const env = { ...process.env };
+    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()) };
     // The new release's skills and agents, from beside its own scripts.
     delete env.FACTORY_PLUGIN_ROOT;
     try {

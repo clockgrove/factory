@@ -51,7 +51,7 @@ import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
-import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
+import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -2253,7 +2253,7 @@ async function waitForQueue(flags) {
     follow: !!flags.follow,
     intervalMs: flags.interval ? flags.interval * 1000 : WAIT_POLL_MS,
     timeoutMs,
-    emit: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
+    emit: (line) => process.stdout.write(`${jsonLine(line)}\n`),
   });
   return r.code;
 }

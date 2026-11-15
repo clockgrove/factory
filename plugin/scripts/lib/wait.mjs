@@ -14,6 +14,10 @@ export const WAIT_TIMEOUT_EXIT = 3;
 export const WAIT_POLL_MS = 30_000;
 /** The events page size: small enough that a poll reads little, and the page's ETag changes with few issues. */
 export const WAIT_PAGE = 30;
+/** The most pages one read goes back for a cursor: past it, a `gap` line says events before it may be missing. */
+export const WAIT_MAX_PAGES = 10;
+/** How many of the newest event ids read are kept, so an event GitHub lists late, below one already read, is still told. */
+export const WAIT_SEEN = 200;
 
 const STATE_KINDS = { "factory:blocked": "blocked", "factory:question": "question", "factory:in-review": "in-review" };
 const STATE_LABELS = new Set(["factory:running", ...Object.keys(STATE_KINDS)]);
@@ -37,6 +41,12 @@ export function parseCursor(text) {
 /** A cursor as a line prints it, which --since takes back: with the queue's state at it, when known. */
 export const cursorText = (c, drained = null) => (c.id !== undefined ? `${c.id}${drained === true ? "d" : drained === false ? "a" : ""}` : new Date(c.at).toISOString());
 
+/**
+ * One event as the line `factory wait` prints: JSON, with the line and paragraph separators (U+2028, U+2029) and NEL
+ * (U+0085), which JSON.stringify leaves as they are, escaped, so a reader that splits on them never splits a title.
+ */
+export const jsonLine = (o) => JSON.stringify(o).replace(/[\u2028\u2029\u0085]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 /** `--on`'s kinds, checked: the list, or null when one is not a kind. Empty means every kind. */
 export function parseKinds(text) {
   const list = String(text ?? "").split(/[\s,]+/).filter(Boolean);
@@ -45,14 +55,14 @@ export function parseKinds(text) {
 }
 
 /**
- * The kind one repository issue event tells, before a close is told apart as merged: `labeled` with a state label
- * Factory sets (blocked, question, in-review), or `closed` on an issue carrying the Objective label. Null for any other
- * event, and for any event on a pull request.
+ * The kind one repository issue event tells, before a close is told apart as merged, on an issue carrying the Objective
+ * label: `labeled` with a state label Factory sets (blocked, question, in-review), or `closed`. Null for any other event,
+ * any event on another issue, and any event on a pull request.
  */
 export function eventKind(e, objectiveLabel) {
-  if (!e?.issue || e.issue.pull_request) return null;
+  if (!e?.issue || e.issue.pull_request || !names(e.issue).includes(objectiveLabel)) return null;
   if (e.event === "labeled") return STATE_KINDS[e.label?.name] ?? null;
-  if (e.event === "closed" && names(e.issue).includes(objectiveLabel)) return "closed";
+  if (e.event === "closed") return "closed";
   return null;
 }
 
@@ -84,23 +94,33 @@ export function drainedOf(open, watched = null) {
 
 /**
  * The repository's issue events after `cursor`, oldest first: page 1 as a conditional read (`cache`), then older pages
- * only while every event on a page is new (a resume after a long gap). Deduplicated by id, since events arriving while
- * pages are read shift older ones onto the next page.
+ * only while every event on a page is new (a resume after a long gap), at most WAIT_MAX_PAGES (`gap` when the cursor
+ * was not reached). Deduplicated by id, since events arriving while pages are read shift older ones onto the next page.
+ * With `seen` (ids already read, at most WAIT_SEEN), an unseen event at or below the cursor but within the ids kept is
+ * new too: GitHub listed it after a newer one was read. `read` is every id read. A cursor newer than every event of the
+ * repository is no cursor of it: an error with code `cursor-elsewhere`.
  */
-export async function eventsAfter(repo, cursor, { opts, cache }) {
-  const isNew = (e) => (cursor.id !== undefined ? e.id > cursor.id : Date.parse(e.created_at) > cursor.at);
+export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
+  const floor = seen?.size ? Math.min(...seen) : Infinity;
+  const isNew = (e) => (cursor.id !== undefined ? e.id > cursor.id || (e.id > floor && !seen.has(e.id)) : Date.parse(e.created_at) > cursor.at);
   const found = new Map();
+  const read = [];
   for (let page = 1; ; page += 1) {
+    if (page > WAIT_MAX_PAGES) return { events: sorted(found), read, gap: true };
     const list = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}${page > 1 ? `&page=${page}` : ""}`, { ...opts, cache: page === 1 ? cache : null })) || [];
+    if (page === 1 && cursor.id !== undefined && list.length && list.every((e) => e.id < cursor.id)) {
+      throw Object.assign(new Error(`the cursor ${cursor.id} is newer than every event of ${repo.full}: it is no cursor of this repository`), { code: "cursor-elsewhere" });
+    }
     let reached = list.length < WAIT_PAGE;
     for (const e of list) {
+      read.push(e.id);
       if (isNew(e)) found.set(e.id, e);
       else reached = true;
     }
-    if (reached) break;
+    if (reached) return { events: sorted(found), read, gap: false };
   }
-  return [...found.values()].sort((a, b) => a.id - b.id);
 }
+const sorted = (found) => [...found.values()].sort((a, b) => a.id - b.id);
 
 /** How a closed Objective ended: merged when the newest PR on its factory/<issue> branch is merged, else closed. */
 export async function closedAs(repo, issue, opts) {
@@ -116,9 +136,14 @@ export async function closedAs(repo, issue, opts) {
  * Without `since` it starts from now. `issues` (numbers) narrows it to those Objectives, drained included; `kinds` to
  * those kinds. Drained is told when an event moves the queue and leaves it drained, once until it is no longer so; a
  * wait that starts from now reads whether it already is, and the cursor carries that state on, so neither a queue
- * already drained nor one still drained after a restart is told again. Returns {code, cursor}: 0 after the first read
- * that told something (with `follow`, it never returns so), WAIT_TIMEOUT_EXIT once `timeoutMs` passed with nothing
- * told, or `opts.signal` aborted a read (the command's deadline), after a `timeout` line with the cursor.
+ * already drained nor one still drained after a restart is told again.
+ *
+ * A read moves the cursor only once all its reads (events, PRs, the open Objectives) have answered, so a read cut off
+ * leaves it where it was. Besides the events: a `gap` line when the cursor was more than WAIT_MAX_PAGES pages back
+ * (events before the oldest read may be missing; the read's other lines follow it); a `timeout` line once `timeoutMs`
+ * passed with nothing told, or `opts.signal` aborted a read (the command's deadline); an `error` line (with `message`)
+ * before a failure is thrown. Returns {code, cursor}: 0 after the first read that told something (with `follow`, it
+ * never returns so), WAIT_TIMEOUT_EXIT after the timeout line.
  */
 export async function waitQueue(repo, { opts, objectiveLabel = "factory:objective", issues = null, kinds = WAIT_KINDS, since = null, follow = false, intervalMs = WAIT_POLL_MS, timeoutMs = null, emit, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
   const cache = new Map();
@@ -127,46 +152,68 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
   const openRead = async () => drainedOf((await rest(`repos/${repo.full}/issues?state=open&labels=${encodeURIComponent(objectiveLabel)}&per_page=100`, { ...opts, paginate: true, cache })) || [], watched);
   let cursor = since;
   let wasDrained = since?.drained ?? null;
-  const newest = async () => ({ id: ((await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || []).reduce((m, e) => Math.max(m, e.id), 0) });
-  const timedOut = (c) => {
-    emit({ event: "timeout", issue: null, at: new Date(now()).toISOString(), cursor: c });
-    return { code: WAIT_TIMEOUT_EXIT, cursor: c };
+  // The newest event ids read, at most WAIT_SEEN; empty until the first read, so a cursor alone decides it.
+  const seen = new Set();
+  const remember = (ids) => {
+    for (const id of ids) seen.add(id);
+    if (seen.size > WAIT_SEEN) for (const id of [...seen].sort((a, b) => a - b).slice(0, seen.size - WAIT_SEEN)) seen.delete(id);
+  };
+  const at = () => new Date(now()).toISOString();
+  const text = () => (cursor ? cursorText(cursor, wasDrained) : null);
+  // A read cut off at the deadline ends as a timeout; any other failure gets its line, with the cursor to go on from.
+  const failed = (e) => {
+    if (opts?.signal?.aborted) {
+      emit({ event: "timeout", issue: null, at: at(), cursor: text() });
+      return { code: WAIT_TIMEOUT_EXIT, cursor: text() };
+    }
+    emit({ event: "error", issue: null, at: at(), cursor: text(), message: String(e?.message || e).slice(0, 300) });
+    throw e;
   };
   try {
     if (!cursor) {
-      cursor = await newest();
+      const page = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || [];
+      const start = { id: page.reduce((m, e) => Math.max(m, e.id), 0) };
+      let state = null;
       // The queue's state at the cursor, when no event came between the two event reads (the second then a 304); else
       // it stays unknown, so a drain the events after the cursor make is told, never taken as the state at the start.
       if (kinds.includes("drained")) {
         const d = (await openRead()).drained;
-        if ((await newest()).id === cursor.id) wasDrained = d;
+        const again = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || [];
+        if (again.reduce((m, e) => Math.max(m, e.id), 0) === start.id) state = d;
       }
+      cursor = start;
+      wasDrained = state;
+      remember(page.map((e) => e.id));
     }
   } catch (e) {
-    if (opts?.signal?.aborted) return timedOut(cursor ? cursorText(cursor) : null);
-    throw e;
+    return failed(e);
   }
   for (;;) {
-    let lines;
+    let r;
     try {
-      lines = await poll();
+      r = await poll();
     } catch (e) {
-      if (opts?.signal?.aborted) return timedOut(cursorText(cursor, wasDrained));
-      throw e;
+      return failed(e);
     }
-    const c = cursorText(cursor, wasDrained);
-    for (const line of lines) emit({ ...line, cursor: c });
-    if (lines.length && !follow) return { code: 0, cursor: c };
+    cursor = r.cursor;
+    wasDrained = r.drained;
+    remember(r.read);
+    const c = text();
+    for (const line of r.lines) emit({ ...line, cursor: c });
+    if (r.lines.length && !follow) return { code: 0, cursor: c };
     const left = deadline - now();
-    if (left <= 0) return timedOut(c);
+    if (left <= 0) {
+      emit({ event: "timeout", issue: null, at: at(), cursor: c });
+      return { code: WAIT_TIMEOUT_EXIT, cursor: c };
+    }
     await sleep(Math.min(intervalMs, left));
   }
 
-  /** One read: the lines it tells, with `cursor` and `wasDrained` moved on. */
+  /** One read: its lines and the cursor, drained state and ids read it leads to, nothing changed until it all answered. */
   async function poll() {
-    const events = await eventsAfter(repo, cursor, { opts, cache });
-    if (events.length) cursor = { id: events.at(-1).id };
-    const lines = [];
+    const { events, read, gap } = await eventsAfter(repo, cursor, { opts, cache, seen });
+    const next = events.length ? { id: Math.max(cursor.id ?? 0, events.at(-1).id) } : cursor;
+    const lines = gap ? [{ event: "gap", issue: null, at: at() }] : [];
     let moved = false;
     for (const e of events) {
       if (watched && !watched.has(e.issue?.number)) continue;
@@ -181,11 +228,12 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
       if (!kinds.includes(kind)) continue;
       lines.push({ event: kind, issue: e.issue.number, title: e.issue.title, url: e.issue.html_url, at: e.created_at, ...(pr !== undefined ? { pr } : {}) });
     }
+    let drained = wasDrained;
     if (moved && kinds.includes("drained")) {
       const d = await openRead();
-      if (d.drained && wasDrained !== true) lines.push({ event: "drained", issue: null, at: new Date(now()).toISOString(), blocked: d.blocked, question: d.question });
-      wasDrained = d.drained;
+      if (d.drained && wasDrained !== true) lines.push({ event: "drained", issue: null, at: at(), blocked: d.blocked, question: d.question });
+      drained = d.drained;
     }
-    return lines;
+    return { lines, cursor: next, drained, read };
   }
 }

@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { WAIT_KINDS, WAIT_TIMEOUT_EXIT, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
+import { WAIT_KINDS, WAIT_MAX_PAGES, WAIT_PAGE, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
 import { parseArgs } from "../scripts/local.mjs";
 
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
@@ -24,14 +24,14 @@ const T0 = Date.parse("2026-11-14T14:00:00Z");
 function repoState() {
   const s = { issues: new Map(), events: [], prs: {}, nextId: 36_000_000_000, at: T0, seen: [] };
   const issue = (number, labels = [OBJ], extra = {}) => s.issues.set(number, { number, title: `Objective ${number}`, html_url: `https://github.com/acme/widgets/issues/${number}`, state: "open", labels: labels.map((name) => ({ name })), ...extra });
-  const event = (number, event, label = null) => {
+  const event = (number, event, label = null, id = null) => {
     const i = s.issues.get(number);
     if (event === "labeled") i.labels = [...i.labels.filter((l) => l.name !== label), { name: label }];
     if (event === "unlabeled") i.labels = i.labels.filter((l) => l.name !== label);
     if (event === "closed") i.state = "closed";
     if (event === "reopened") i.state = "open";
     s.at += 1000;
-    s.events.push({ id: (s.nextId += 7), event, created_at: new Date(s.at).toISOString(), ...(label ? { label: { name: label } } : {}), issue: i });
+    s.events.push({ id: id ?? (s.nextId += 7), event, created_at: new Date(s.at).toISOString(), ...(label ? { label: { name: label } } : {}), issue: i });
   };
   /** Factory's setStateLabel: every other state label off, then this one on. */
   const state = (number, to) => {
@@ -72,6 +72,8 @@ async function waiting(gh, steps, options = {}) {
   const saved = { fetch: globalThis.fetch, sleep: RETRY.sleep };
   RETRY.sleep = async () => {};
   globalThis.fetch = async (url, init = {}) => {
+    // As fetch does: a request on an aborted signal fails at once.
+    if (init.signal?.aborted) throw new DOMException("This operation was aborted", "AbortError");
     const h = Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
     const [status, body, headers] = gh.answer(init.method || "GET", String(url), h);
     return new Response(status === 304 ? null : body, { status, headers: { "content-type": "application/json", ...headers } });
@@ -127,7 +129,7 @@ test("Question and In review are told, the state labels coming off are not; with
   assert.deepEqual(r.slept, [30_000, 30_000, 30_000, 10_000], "the last wait ends at the timeout");
 });
 
-test("a closed Objective is merged when the newest PR on factory/<issue> merged, else closed; other issues and PRs are not told", async () => {
+test("a closed Objective is merged when the newest PR on factory/<issue> merged, else closed; other issues (a state label on one that is no Objective included) and PRs are not told", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:in-review"]);
   gh.issue(6, [OBJ, "factory:in-review"]);
@@ -136,7 +138,7 @@ test("a closed Objective is merged when the newest PR on factory/<issue> merged,
   gh.s.prs["factory/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
   // A split Objective's earlier part merged; its newest PR was closed unmerged.
   gh.s.prs["factory/6"] = [{ number: 73, merged_at: null }, { number: 72, merged_at: "2026-11-14T13:00:00Z" }];
-  const r = await waiting(gh, [() => (gh.event(70, "closed"), gh.event(9, "closed"), gh.state(5, null), gh.event(5, "closed"), gh.event(6, "closed"), gh.event(70, "labeled", "factory:blocked"))], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
+  const r = await waiting(gh, [() => (gh.event(70, "closed"), gh.event(9, "labeled", "factory:blocked"), gh.event(9, "closed"), gh.state(5, null), gh.event(5, "closed"), gh.event(6, "closed"), gh.event(70, "labeled", "factory:blocked"))], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
   assert.deepEqual(r.lines.map(({ event, issue, pr }) => ({ event, issue, pr })), [{ event: "merged", issue: 5, pr: 71 }, { event: "closed", issue: 6, pr: 73 }]);
   assert.ok(gh.s.seen.includes("GET pulls?state=all&head=acme%3Afactory%2F5&per_page=1"), gh.s.seen.join("\n"));
 });
@@ -234,6 +236,87 @@ test("drained after a restart (#272 review): the cursor carries the queue's stat
   assert.deepEqual(active.lines.map((l) => [l.event, l.issue]), [["blocked", 8], ["drained", null]]);
 });
 
+test("a read cut off at --timeout (#285 review) leaves the cursor where it was: the timeout line carries it, and a restart from it tells the batch", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:in-review"]);
+  gh.s.prs["factory/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
+  const stop = new AbortController();
+  const answer = gh.answer;
+  // The deadline comes while the merged PR is read (a network drop the client waits on until then).
+  gh.answer = (method, url, h) => {
+    if (/\/pulls\?/.test(url) && !stop.signal.aborted) {
+      stop.abort();
+      throw new DOMException("This operation was aborted", "AbortError");
+    }
+    return answer(method, url, h);
+  };
+  const before = gh.s.events.length ? String(gh.s.events.at(-1).id) : "0";
+  const r = await waiting(gh, [() => (gh.state(5, null), gh.event(5, "closed"))], { opts: { token: "t", signal: stop.signal } });
+  assert.equal(r.code, WAIT_TIMEOUT_EXIT);
+  assert.deepEqual(r.lines.map((l) => [l.event, l.cursor]), [["timeout", `${before}a`]], "the cursor from before the read, not past the close");
+  const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor) });
+  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
+});
+
+test("a failure ends with an error line carrying the cursor to go on from (#285 review); a cursor of another repository is one", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:running"]);
+  const answer = gh.answer;
+  let refuse = false;
+  gh.answer = (method, url, h) => (refuse && /\/issues\?state=open/.test(url) ? [403, JSON.stringify({ message: "Resource not accessible by personal access token" }), {}] : answer(method, url, h));
+  const first = await waiting(gh, [() => gh.state(5, "factory:in-review")]);
+  const cursor = first.lines.at(-1).cursor;
+  // The Block's read of the open Objectives is refused: the wait fails, after an error line with the cursor before it.
+  refuse = true;
+  const failed = [];
+  await assert.rejects(waiting(gh, [() => gh.state(6, "factory:blocked")], { since: parseCursor(cursor), emit: (l) => failed.push(l) }), /403/);
+  assert.deepEqual(failed.map((l) => [l.event, l.cursor]), [["error", cursor]]);
+  assert.match(failed[0].message, /403/);
+  refuse = false;
+  const again = await waiting(gh, [], { since: parseCursor(failed[0].cursor) });
+  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 6]], "restarted from it, the Block is told (#5, In review, keeps the queue active)");
+  const elsewhere = [];
+  await assert.rejects(waiting(gh, [], { since: parseCursor(String(gh.s.events.at(-1).id + 1_000_000)), emit: (l) => elsewhere.push(l) }), (e) => e.code === "cursor-elsewhere");
+  assert.deepEqual(elsewhere.map((l) => l.event), ["error"]);
+});
+
+test("a cursor more than WAIT_MAX_PAGES pages back (#285 review): a gap line first, then what the pages read tell", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(9, ["bug"]);
+  gh.event(9, "labeled", "P1");
+  const cursor = String(gh.s.events.at(-1).id);
+  for (let i = 0; i < WAIT_MAX_PAGES * WAIT_PAGE + 5; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
+  gh.state(5, "factory:blocked");
+  const r = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["blocked"] });
+  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["gap", null], ["blocked", 5]]);
+  assert.equal(r.lines[0].cursor, String(gh.s.events.at(-1).id));
+  assert.equal(gh.s.seen.filter((l) => /issues\/events/.test(l)).length, WAIT_MAX_PAGES);
+});
+
+test("an event GitHub lists late, below an id already read (#285 review), is told on the next read, and once", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:running"]);
+  gh.event(5, "labeled", "factory:running");
+  let late;
+  const r = await waiting(gh, [() => gh.state(5, "factory:in-review"), () => {
+    // Its id is below #5's In review, which the last read already returned.
+    late = gh.s.events.at(-1).id - 3;
+    gh.event(6, "unlabeled", "factory:running", late);
+    gh.event(6, "labeled", "factory:blocked", late + 1);
+  }, () => {}], { follow: true, timeoutMs: 95_000, kinds: ["blocked", "in-review"] });
+  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["in-review", 5], ["blocked", 6], ["timeout", null]]);
+});
+
+test("jsonLine escapes U+2028, U+2029 and U+0085, and parses back to the same value", () => {
+  const o = { title: "a\u2028b\u2029c\u0085d" };
+  const line = jsonLine(o);
+  assert.doesNotMatch(line, /[\u2028\u2029\u0085\n\r]/);
+  assert.deepEqual(JSON.parse(line), o);
+});
+
 test("factory wait's command line: issue numbers, a cursor or a time, kinds, --follow; anything else is a usage error", () => {
   assert.deepEqual(parseArgs(["wait", "166", "169", "--since", "36176470266", "--on", "blocked,question", "--timeout", "600"]), { cmd: "wait", flags: { _: ["wait", "166", "169"], since: "36176470266", on: "blocked,question", timeout: 600 } });
   assert.deepEqual(parseArgs(["wait", "--follow", "--since=2026-11-14T14:00:00Z"]), { cmd: "wait", flags: { _: ["wait"], follow: true, since: "2026-11-14T14:00:00Z" } });
@@ -247,7 +330,8 @@ test("factory wait's command line: issue numbers, a cursor or a time, kinds, --f
 
 test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited out as serve does; the Block after it is one JSON line and exit 0; with nothing by --timeout, or a read still in flight at it, a timeout line and exit 3", async () => {
   const gh = repoState();
-  gh.issue(5, [OBJ, "factory:running"]);
+  // A title with the separators JSON.stringify leaves raw: the line must stay one line for any reader.
+  gh.issue(5, [OBJ, "factory:running"], { title: "Objective 5\u2028second\u2029third\u0085fourth" });
   gh.event(5, "labeled", "factory:running");
   let reads = 0;
   let hang = false;
@@ -286,7 +370,8 @@ test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited o
     assert.equal(told.code, 0, told.out + told.err);
     const lines = told.out.trim().split("\n");
     assert.equal(lines.length, 1, told.out);
-    assert.deepEqual(JSON.parse(lines[0]), { event: "blocked", issue: 5, title: "Objective 5", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: String(gh.s.events.at(-1).id) });
+    assert.doesNotMatch(told.out, /[\u2028\u2029\u0085]/);
+    assert.deepEqual(JSON.parse(lines[0]), { event: "blocked", issue: 5, title: "Objective 5\u2028second\u2029third\u0085fourth", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: String(gh.s.events.at(-1).id) });
     assert.ok(gh.s.seen.some((l) => / 304$/.test(l)), gh.s.seen.join("\n"));
     assert.match(told.out + told.err, /rate limit on 127\.0\.0\.1:\d+ is spent until/);
     assert.deepEqual(gh.s.seen.slice(0, 4), ["GET issues/events?per_page=30", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30"], "one read again after the reset, none before it");

@@ -30,7 +30,7 @@ import { authorGate, choiceGate, planGate, startedAt } from "./lib/objective-tru
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
-import { refusalExit } from "./lib/local.mjs";
+import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
@@ -314,6 +314,9 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
+  openStageHosts(chosen.hosts);
+  if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
   progress.ran(ranWith(inputs, chosenLabels));
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 

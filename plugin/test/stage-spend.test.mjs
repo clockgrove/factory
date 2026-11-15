@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { refusingOrigin } from "./ports.mjs";
 import { spendMarker, spendOf, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { costOf } from "../../bench/lib/cost.mjs";
 import { spendRecords } from "../../bench/lib/objective.mjs";
@@ -152,12 +153,9 @@ async function stages(plan) {
   mkdirSync(join(root, "bin"));
   mkdirSync(ws);
   fakeCodex(join(root, "bin"));
-  // An address nothing listens on: a request to it is refused before anything is sent.
-  const dead = createServer();
-  await new Promise((r) => dead.listen(0, "127.0.0.1", r));
-  const deadUrl = `http://127.0.0.1:${dead.address().port}`;
-  await new Promise((r) => dead.close(r));
-  const env = { GITHUB_API_URL: gh.url, FAKE_DEAD: deadUrl, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
+  // An address nothing listens on, for all the stages' runs: a request to it is refused before anything is sent.
+  const dead = await refusingOrigin();
+  const env = { GITHUB_API_URL: gh.url, FAKE_DEAD: dead.origin, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), PATH: `${join(root, "bin")}:${process.env.PATH}` };
   const script = (name, how) => `
     import { existsSync, mkdirSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
@@ -233,6 +231,7 @@ async function stages(plan) {
     }
   } finally {
     gh.close();
+    await dead.close();
   }
   const last = new Map();
   for (const body of gh.progress) last.set(/^<!-- factory:7:progress:work:(\S+) -->/.exec(body)?.[1], body);
@@ -289,24 +288,24 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const dead = createServer();
-  await new Promise((r) => dead.listen(0, "127.0.0.1", r));
-  const deadUrl = `http://127.0.0.1:${dead.address().port}`;
-  await new Promise((r) => dead.close(r));
+  // Refused for the whole run: a port closed and handed on could be taken by another process meanwhile.
+  const dead = await refusingOrigin();
   const script = `
     import { restSync } from ${JSON.stringify(LIB("rest-sync.mjs"))};
     import { holdSecrets } from ${JSON.stringify(LIB("inputs.mjs"))};
     holdSecrets(["WORKERSECRETVALUE123"]);
-    const call = (url, token = () => "tok-1") => {
-      const r = restSync(url, { method: "PATCH", body: { body: "status: echo WORKERSECRETVALUE123" }, token }, { ms: 1500 });
+    // An answered call returns at its answer, so its wait is long: a loaded machine's slow thread start never reads as
+    // "no answer". The silent call's wait is spent in full, and is still many times a thread's start.
+    const call = (url, token = () => "tok-1", ms = 30_000) => {
+      const r = restSync(url, { method: "PATCH", body: { body: "status: echo WORKERSECRETVALUE123" }, token }, { ms });
       return r.ok ? { ok: true, data: r.data } : { ok: false, sent: r.sent };
     };
     console.log(JSON.stringify({
       landed: call(${JSON.stringify(base)} + "/ok"),
       refused: call(${JSON.stringify(base)} + "/422"),
       failed: call(${JSON.stringify(base)} + "/502"),
-      silent: call(${JSON.stringify(base)} + "/hang"),
-      unreachable: call(${JSON.stringify(deadUrl)} + "/x"),
+      silent: call(${JSON.stringify(base)} + "/hang", undefined, 3000),
+      unreachable: call(${JSON.stringify(dead.origin)} + "/x"),
       noToken: call(${JSON.stringify(base)} + "/never", () => { throw new Error("no token"); }),
     }));
   `;
@@ -314,6 +313,7 @@ test("restSync: a getter's token, the held secrets redacted here, and whether th
   const code = await s.exited;
   server.closeAllConnections();
   server.close();
+  await dead.close();
   assert.equal(code, 0, s.err());
   assert.deepEqual(JSON.parse(s.out().trim().split("\n").at(-1)), {
     landed: { ok: true, data: { id: 5 } },

@@ -13,6 +13,9 @@ import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor
 import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
+import { exec } from "./proc.mjs";
+import { parseYaml } from "./yaml.mjs";
+import { releasesDir } from "./release.mjs";
 import { declaredLogins } from "./accounts.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
@@ -23,6 +26,14 @@ export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
 const CLAIM_SKEW_MS = 2 * 60_000;
 export const claimMarker = (issue) => marker(issue, "local");
+
+/**
+ * Factory's own code on this machine that a serve may run (lib/release.mjs releasesDir): no sandbox may write it. Every
+ * sandbox only writes where it is told to, so this is already out of reach; it is named in each one's write denials too,
+ * so a later widening of what a sandbox may write cannot take it in. Named only when it is there: a sandbox cannot bind
+ * a path that does not exist, and none can create it (none may write ~/.cache/factory).
+ */
+export const factoryCodeDirs = (home = homedir()) => [releasesDir(home)].filter((d) => existsSync(d));
 
 /** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
 export const LOCAL_LABEL = "factory:local";
@@ -1169,7 +1180,7 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       // writable: the package caches, for shell commands only (no file tool, and no CLAUDE.md read from them).
       // readable: the stage's node and package manager, read-only (local.mjs stageEnv, #137): its sandbox shows nothing of
       // the home but these, the working and added directories.
-      filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP] },
+      filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP, ...factoryCodeDirs(home)] },
       // The model's credential (and any other the harness holds) is not in a command's environment.
       credentials: { envVars: [...new Set(secretEnv)].map((name) => ({ name, mode: "deny" })) },
       // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
@@ -1277,7 +1288,7 @@ export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDir
   // .git/commondir and .git/info/attributes likewise by absolute path: relative, Codex would make them in every root
   // that has no .git.
   // `exists`: on a runner the checkout is the agent's (700), so what is there is listed as the agent (codex-runner.mjs).
-  const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly].map((p) => `${tq(p)}="read"`);
+  const ro = [...(clone ? codexReadOnly(clone).filter(exists) : []), ...readOnly, ...factoryCodeDirs(home)].map((p) => `${tq(p)}="read"`);
   const roots = addDirs.map((d) => `${tq(d)}=true`);
   // Host names only (sandboxHosts): Codex's proxy ignores an entry's port, so `127.0.0.1:N` would admit every port (#108).
   const net = sandboxHosts(domains).map((d) => `${tq(d)}="allow"`);
@@ -1340,7 +1351,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // `readable`: paths outside these that a runner's commands read (copilot-runner.mjs: the agent's read-only GitHub
         // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
         // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
-        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home, env).filter(isDir) : credentialPaths(home, env))), ...alsoDenied] },
+        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable, ...factoryCodeDirs(home)])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home, env).filter(isDir) : credentialPaths(home, env))), ...alsoDenied] },
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: sandboxHosts(domains) },
       },
     },
@@ -1374,7 +1385,7 @@ export function copilotTmpdir(local, env = {}) {
 export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = process.env, credentials = credentialPaths(home, env), readOnly = [], ripgrep = null } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: [...credentials, "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP] },
+    filesystem: { denyRead: [...credentials, "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...factoryCodeDirs(home)] },
     // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
     ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
@@ -1505,7 +1516,7 @@ export const copilotCacheHome = (env = {}, home = homedir(), platform = osPlatfo
  */
 export const versionSettings = (harness, env = {}, home = homedir()) => ({
   network: { allowedDomains: [], deniedDomains: [] },
-  filesystem: { denyRead: [...credentialPaths(home, harness === "copilot" ? { ...env, COPILOT_HOME: "" } : env), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: [] },
+  filesystem: { denyRead: [...credentialPaths(home, harness === "copilot" ? { ...env, COPILOT_HOME: "" } : env), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: factoryCodeDirs(home) },
 });
 
 /**
@@ -1981,7 +1992,7 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
       denyRead: [...(credentials ?? credentialPaths(home, env, { own: stageLogin(harness, env, home) })).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
-      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install],
+      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home)],
     },
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.
@@ -2090,12 +2101,55 @@ export function readWorkflowEnv(dir) {
 export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }) } = {}) {
   const ok = (r) => (r.status === 0 ? String(r.stdout) : null);
   // No clone here (doctor run with --repo only): nothing to read the default branch from, which says nothing about serve.
-  if (ok(git(["rev-parse", "--git-dir"])) === null) return { wf: {}, branch: null, error: "no git clone here", noClone: true };
+  if (ok(git(["rev-parse", "--git-dir"])) === null) return { wf: {}, pins: [], branch: null, error: "no git clone here", noClone: true };
   const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ok(git(["ls-remote", "--symref", "origin", "HEAD"])) || "")?.[1] || (ok(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) || "").trim().replace(/^origin\//, "") || null;
-  if (!branch) return { wf: {}, branch: null, error: "origin's default branch could not be read" };
+  if (!branch) return { wf: {}, pins: [], branch: null, error: "origin's default branch could not be read" };
   git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  const text = ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`]));
-  return text === null ? { wf: {}, branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), branch, error: null, text };
+  return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`])), branch);
+}
+
+/** committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file). */
+const committedWorkflow = (text, branch) => (text === null ? { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text });
+
+/**
+ * The same read for a running `serve`, every few minutes (#276): the default branch serve found at its start, fetched now,
+ * without blocking the loop's event loop while git talks to GitHub. A fetch that fails (offline) reads nothing:
+ * `unfetched`, and serve keeps the settings it has, never an older commit's. The developer works in this clone
+ * meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git from
+ * moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and their
+ * `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
+ */
+export async function committedWorkflowNow(dir, branch, { token = "", timeoutMs = 60_000, git = (args) => exec("git", ["-C", dir, ...args], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs, group: true }) } = {}) {
+  const own = `refs/factory/serve/${branch}`;
+  // serve's own token for GitHub, never the developer's credential helper; no maintenance run in their clone; a stalled
+  // transfer ends (http.lowSpeed*), and at the timeout the whole command does, every process it started included.
+  const helper = '!f() { echo username=x-access-token; echo "password=$FACTORY_LOCAL_TOKEN"; }; f';
+  const safe = ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"];
+  const fetched = await git([...safe, "fetch", "-q", "--no-tags", "--no-auto-maintenance", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
+  if (fetched?.code !== 0) return { wf: {}, pins: [], branch, error: `origin/${branch} could not be fetched`, unfetched: true };
+  const r = await git(["-c", "core.fsmonitor=", "show", `${own}:.github/workflows/factory.yml`]).catch(() => null);
+  return committedWorkflow(r?.code === 0 ? String(r.stdout) : null, branch);
+}
+
+/**
+ * The Factory refs a workflow's steps call (`uses: clockgrove/factory@<ref>` in jobs.<job>.steps), each once, in order of
+ * first use: the release a repository pins. A workflow that does not parse pins nothing serve can follow.
+ */
+export function workflowPins(text) {
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return [];
+  }
+  const refs = [];
+  for (const job of Object.values(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {})) {
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      const ref = typeof step?.uses === "string" ? /^clockgrove\/factory@(\S+)$/.exec(step.uses.trim())?.[1] : null;
+      if (ref && !refs.includes(ref)) refs.push(ref);
+    }
+  }
+  return refs;
 }
 
 /**

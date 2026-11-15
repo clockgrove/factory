@@ -56,29 +56,45 @@ import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
-import { HARNESS_NAMES, accountEnv, accountLabels, accountPin, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
+import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
+import { lastStage } from "./lib/continue.mjs";
 import { accountHolds, holdsDir, windowOf } from "./lib/holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
+/** An account's key in the readiness checks (Local.harnessReady, Local.accountReady): its harness, name and login. */
+const readyKey = (a) => `${a.harness}:${a.name}:${a.home || a.tokenFile || ""}`;
+/** How long automatic account choice passes over an account whose harness checks failed before it checks it again. */
+export const UNREADY_RETRY_MS = 10 * 60_000;
+/** How long an account automatic choice picked counts as just started in this loop before its stage's start is recorded. */
+const PICK_MS = 60_000;
 /** An account in a hold's log line and reason: the harness alone for the one named after it (none declared). */
 const limitName = (harness, account) => (account === harness ? harness : `${harness} account ${account}`);
 /**
  * The pause notice's text (Local.pauseNotice, #265): the account a usage limit paused the Objective on (`account`, its
  * name; the harness's own name with none declared), its reset (`reset`, ms) and window (`window`, as the harness named
  * it, or null), and `free`, the names of the harness's other accounts free now, each with its label. `note`: a line
- * about the issue's account labels. Account names only: no path, no login, no @mention.
+ * about the issue's account labels. `auto`: automatic account choice is on (#266), so the loop moves the Objective to a
+ * free account itself. `guessed`: every account was held and `reset` is the end of a no-reset limit's guess (holds.mjs
+ * spent), an estimate, never called a reset. Account names only: no path, no login, no @mention.
  */
-export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null }) {
+export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null, auto = false, guessed = false }) {
   const h = HARNESS_NAMES[harness] || harness;
   const who = account === harness ? `${h} (this machine's one ${h} login)` : `${h} account \`${account}\``;
   // The window as the harness named it, only in its own form: harness output never reaches the issue as it is.
   const named = windowOf(window);
-  const moves = free.length
-    ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
-    : `No other ${h} account on this machine is free now.`;
-  return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
+  const moves = auto
+    ? free.length
+      ? `Free now: ${free.map((n) => `\`${n}\``).join(", ")}. This machine chooses accounts by itself, so \`factory serve\` here resumes this Objective on a free one at its next tick, with no label; a \`factory:account:<name>\` label still pins it to one account.`
+      : `No other ${h} account on this machine is free now. This machine chooses accounts by itself, so \`factory serve\` here resumes this Objective on the first ${h} account that comes free.`
+    : free.length
+      ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
+      : `No other ${h} account on this machine is free now.`;
+  const head = guessed
+    ? `Factory: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Factory resumes this Objective on this machine then, or sooner on an account that comes free.`
+    : `Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`;
+  return [head, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
 /**
@@ -93,7 +109,8 @@ const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more th
 /** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */
 const PIN_FIX = "Apply one `factory:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/factory/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `factory:objective`.";
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
-const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+/** A usage limit or quota that Blocked it with no reset reported (`limitRefused`) is a refusal too, never a served pass. */
+const servedPass = (r) => !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
 /** A pinned release serve could not fetch or start is tried again after this long (followPin). */
 export const PIN_RETRY_MS = 10 * 60_000;
 /** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
@@ -346,8 +363,8 @@ export function stageRelay({ logFile, prefix, write = (s) => process.stdout.writ
   };
 }
 
-/** Local settings for this process only, never copied into a stage's env: the token, and where the App's key is. */
-const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
+/** Local settings for this process only, never copied into a stage's env: the token, where the App's key is, and automatic account choice. */
+const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", AUTO_ACCOUNT_ENV];
 
 /** How often serve tries a refused local token again (a 401 GitHub gave for a moment); tests lower it. */
 export const REFUSED_PROBE = { ms: 60_000 };
@@ -544,6 +561,11 @@ export class Local {
     // every stage checks them again; a declaration that cannot be used starts nothing, naming the accounts only.
     const accounts = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
     this.startAccount = accounts.ok ? defaultAccount(accounts, this.harness) : implicitAccount(this.harness);
+    // Automatic account choice (#266): this shell's setting only, read once; off, every stage runs on its pin or default.
+    const auto = autoAccountSetting(process.env);
+    this.auto = auto.on;
+    if (auto.problem) log(auto.problem);
+    if (auto.on) log(`${AUTO_ACCOUNT_ENV}=1: a stage with no account label starts on a free account of its harness, the one limited least recently, then in turn`);
     this.copilotToken = this.harness === "copilot" ? copilotTokenOf(this.startAccount) : "";
     const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/factory/accounts.json): ${p.why}`);
     problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf, account: this.startAccount }));
@@ -629,10 +651,13 @@ export class Local {
    * machine as the loop's own was at its start (harnessReady), on the account the stage runs on: the one its
    * `factory:account:<name>` label pins it to (pinFor, #265; its labeler read afresh at each stage start), else its
    * harness's default (accountFor). A pin this machine cannot act on (an untrusted labeler, a name no account of its
-   * harness has) Blocks; two pins start nothing ({ok: false, wait}: the Objective waits, never Blocked).
-   * {ok, harness, hosts, account, pinned, pin} or {ok: false, reason, fix} or {ok: false, wait}.
+   * harness has) Blocks; two pins start nothing ({ok: false, wait}: the Objective waits, never Blocked). With automatic
+   * account choice on (#266) and no pin, the account is chosen (autoAccount, `auto`) among those ready here, preferring
+   * the one the Objective's last stage here paused on (pausedOn; `own`, this stage's usage directory, is not that stage);
+   * with none of its harness's accounts ready, it Blocks naming them.
+   * {ok, harness, hosts, account, pinned, pin, auto} or {ok: false, reason, fix} or {ok: false, wait}.
    */
-  async harnessFor(issue) {
+  async harnessFor(issue, { own = null } = {}) {
     const env = this.baseEnv();
     const args = { repo: this.repoFull };
     await primeWriters(this.repo, this.opts, { maintainers: resolveInputs({ args, env }).maintainers });
@@ -641,9 +666,16 @@ export class Local {
     const harness = chosen.inputs.harness;
     let account;
     let pin;
+    let auto = false;
+    let unready = null;
     try {
       account = this.accountFor(harness);
       pin = await this.pinFor(issue, chosen.names, harness);
+      if (this.auto && !pin.account && !pin.problem && !pin.two) {
+        const pick = this.autoAccount(harness, { prefer: this.pausedOn(issue, own), pick: true });
+        if (pick.account) [account, auto] = [pick.account, true];
+        else unready = pick.unready;
+      }
     } catch (e) {
       // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Factory's own.
       if (e?.code !== "account" || typeof e.reason !== "string") throw e;
@@ -658,9 +690,15 @@ export class Local {
     // Two account labels: no move, to the default or anywhere else. The stage does not start; the Objective waits.
     if (pin.two) return { ok: false, wait: twoPinsLine(pin.two) };
     this.pinClear(issue);
+    if (unready) {
+      // Each account's problems are in this machine's log already (accountReady); GitHub gets the names alone.
+      const h = HARNESS_NAMES[harness] || harness;
+      log(`#${issue}: no ${h} account can run here: ${unready.map((u) => u.name).join(", ")}`);
+      return { ok: false, reason: `local mode on this machine cannot run ${h} on any of its accounts (${unready.map((u) => `\`${u.name}\``).join(", ")}); the loop's log names what is missing for each`, fix: "Set those accounts' logins up on this machine (doctor.mjs --local checks each), then re-apply `factory:objective`." };
+    }
     if (pin.account) account = pin.account;
     const problems = this.harnessReady(harness, account);
-    if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account, ...(pin.account ? { pinned: true, pin: pin.label } : {}) };
+    if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account, ...(pin.account ? { pinned: true, pin: pin.label } : {}), ...(auto ? { auto } : {}) };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
     return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
@@ -673,6 +711,92 @@ export class Local {
    */
   accountFor(harness) {
     return defaultAccount(this.loadedAccounts(), harness);
+  }
+
+  /**
+   * The account a `harness` stage with no account label runs on with automatic choice on (#266; lib/accounts.mjs
+   * chooseAccount): a free one (no hold, limitUntil), `prefer` first when it is free, else the one limited least recently,
+   * then the one started on least recently (the machine's round-robin, kept with the holds, and this loop's picks of the
+   * last PICK_MS, whose stages are still starting); with every one held, the one whose hold ends first. Held includes a
+   * no-reset limit's guess (holds.mjs spent). Of those, the first that is ready here (accountReady); one that is not is
+   * passed over. `pick`: a stage starts on it, so this loop counts it as just started meanwhile. {account, unready:
+   * [{name, problems}]}, account null when none is ready. Throws as accountFor.
+   */
+  autoAccount(harness, { prefer = null, pick = false } = {}) {
+    const now = (this.clock ?? Date.now)();
+    const list = harnessAccounts(this.loadedAccounts(), harness);
+    const holds = new Map(list.map((a) => [a, this.holdOf(a)]));
+    const picked = (key) => (this.picked?.get(key) > now - PICK_MS ? this.picked.get(key) : -Infinity);
+    const opts = {
+      until: (a) => this.limitUntil(holds.get(a), { guess: true }),
+      limitedAt: (a) => this.holdStore(holds.get(a)).limitedAt(holds.get(a).key, now),
+      startedAt: (a) => Math.max(this.holdStore(holds.get(a)).startedAt(holds.get(a).key, now) ?? -Infinity, picked(holds.get(a).key)),
+      prefer,
+    };
+    const left = [...list];
+    const unready = [];
+    while (left.length) {
+      const a = chooseAccount(left, opts);
+      const problems = this.accountReady(harness, a);
+      if (!problems.length) {
+        if (pick) (this.picked ??= new Map()).set(holds.get(a).key, now);
+        return { account: a, unready };
+      }
+      unready.push({ name: a.name, problems });
+      left.splice(left.indexOf(a), 1);
+    }
+    return { account: null, unready: list.map((a) => unready.find((u) => u.name === a.name)).filter(Boolean) };
+  }
+
+  /**
+   * Why `account` cannot run a `harness` stage here (harnessReady), for automatic choice: a failure is kept for
+   * UNREADY_RETRY_MS, so a broken login is not probed at every start, and logged once until it changes or clears.
+   */
+  accountReady(harness, account) {
+    const key = readyKey(account);
+    const now = (this.clock ?? Date.now)();
+    const seen = this.unready?.get(key);
+    if (seen && now < seen.until) return seen.problems;
+    const problems = this.harnessReady(harness, account);
+    if (!problems.length) {
+      this.unready?.delete(key);
+      return [];
+    }
+    const text = problems.join("; ");
+    if (seen?.text !== text) log(`${limitName(harness, account.name)} cannot run here: ${text}; automatic account choice passes it over, and checks it again in ${minutesText(UNREADY_RETRY_MS)}`);
+    (this.unready ??= new Map()).set(key, { until: now + UNREADY_RETRY_MS, problems, text });
+    return problems;
+  }
+
+  /** Whether automatic choice passes `account` over now: its harness checks failed within UNREADY_RETRY_MS (accountReady). */
+  knownUnready(account) {
+    return (this.unready?.get(readyKey(account))?.until ?? 0) > (this.clock ?? Date.now)();
+  }
+
+  /**
+   * A stage starts on `account` now (its process is about to run): the round-robin automatic choice reads (autoAccount),
+   * kept with the holds. The start records of names this machine no longer declares go.
+   */
+  startedOn(account) {
+    const hold = this.holdOf(account);
+    const store = this.holdStore(hold);
+    store.started({ harness: account.harness, account: hold.key, now: (this.clock ?? Date.now)() });
+    this.picked?.delete(hold.key);
+    try {
+      store.forgetStarts(Object.values(this.loadedAccounts().accounts).flat().map((a) => a.name));
+    } catch {
+      // a declaration that cannot be used: kept until it can be read
+    }
+  }
+
+  /**
+   * The name of the account the Objective's newest earlier stage on this machine (continue.mjs lastStage; `own` is the
+   * stage starting now) ran on when that stage ended paused on its usage limit, else null: automatic choice resumes it
+   * there when that account is free, where its harness session carries over (a Codex thread does nowhere else).
+   */
+  pausedOn(issue, own = null) {
+    const r = lastStage(this.ws(issue), own)?.result;
+    return r?.exit === "paused" && r.usageLimit && typeof r.account === "string" ? r.account : null;
   }
 
   /** This machine's account declaration, read and checked afresh (loadAccounts); throws as accountFor says. */
@@ -769,7 +893,7 @@ export class Local {
    * Codex's sandbox), each checked with that account's login; a yes is kept per account.
    */
   harnessReady(harness, account = implicitAccount(harness)) {
-    const key = (a) => `${a.harness}:${a.name}:${a.home || a.tokenFile || ""}`;
+    const key = readyKey;
     this.ready ??= new Set([key(this.startAccount ?? implicitAccount(this.harness))]);
     if (this.ready.has(key(account))) return [];
     const env = accountEnv(process.env, account);
@@ -1130,7 +1254,7 @@ export class Local {
     }
     // The harness this Objective runs on here (harnessFor): a label no writer applied, a model its harness cannot run or a
     // harness this machine cannot run Blocks before anything is set up for it.
-    const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue) : { ok: true, harness: this.harness };
+    const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue, { own: usageDir }) : { ok: true, harness: this.harness };
     // Two account labels (#265): nothing starts and nothing Blocks; the Objective waits here for one to be left (pinWaiting).
     if (runs.wait) {
       rmSync(usageDir, { recursive: true, force: true });
@@ -1145,12 +1269,16 @@ export class Local {
     // stage starts on it until the reset. The Objective pauses as that stage did, and pausedHere resumes it after the reset.
     const account = runs.account?.name ?? runs.harness;
     const hold = this.holdOf(runs.account ?? implicitAccount(runs.harness));
-    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(hold) : null;
+    // An account automatic choice picked is held by a no-reset limit's guess too (it was the first to end).
+    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(hold, { guess: !!runs.auto }) : null;
     if (until !== null) {
       rmSync(usageDir, { recursive: true, force: true });
-      this.saidLimit(runs.harness, account, hold, until);
-      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+      // A guess's end (no reset was reported: holds.mjs spent) is no reset, and is said as an estimate.
+      const guessed = until !== this.limitUntil(hold);
+      this.saidLimit(runs.harness, account, hold, until, guessed);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true, ...(guessed ? { guessed: true } : {}) } };
     }
+    if (runs.auto) log(`#${issue}: the ${name} stage runs on ${limitName(runs.harness, account)}, chosen automatically`);
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. Removed when the stage ends or fails to
@@ -1193,6 +1321,8 @@ export class Local {
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
     }
+    // With automatic account choice on, the round-robin counts this start (a pinned one too): its process runs now.
+    if (this.auto && runs.account) this.startedOn(runs.account);
     return new Promise((done) => {
       if (this.firstSetup.has(issue)) {
         env.FACTORY_LOCAL_FIRST_SETUP_MS = String(this.firstSetup.get(issue));
@@ -1242,6 +1372,13 @@ export class Local {
           // A pass on its account completed (the provider served it, and no usage limit ended it): its back-off streak ends,
           // when the stage started after the newest limit met there (holds.mjs served).
           if (runs.account && result && servedPass(result)) this.holdStore(hold).served({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), started });
+          // Blocked on its usage limit with no reset reported (session.mjs writeUsage `limitRefused`): automatic account
+          // choice, in this serve and any other here that has it on, passes the account over for a while (holds.mjs spent);
+          // nothing else holds on it, and a serve with it off writes no guess.
+          if (this.auto && runs.account && result?.exit === "blocked" && result.limitRefused) {
+            const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null });
+            log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
+          }
           done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
@@ -1548,8 +1685,9 @@ export class Local {
     if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now, window: l.limitType ?? null });
     (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset, hold: hold.key, account, pinned: !!result.pinned, pin: result.pin ?? null });
     this.lapsed?.delete(issue);
-    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
-    if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null });
+    const until = l.guessed ? `is passed over until about ${new Date(reset).toISOString()} (no reset was reported)` : `is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}`;
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit ${until}; the claim stays and this loop resumes it after then`);
+    if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null, pinned: !!result.pinned, ...(l.guessed ? { guessed: true } : {}) });
   }
 
   /**
@@ -1615,7 +1753,7 @@ export class Local {
   async pauseNotice(issue, pause) {
     if (!this.repo) return;
     (this.pauses ??= new Map()).set(issue, pause);
-    const body = pauseNoticeBody({ ...pause, free: this.freeAccounts(pause.harness, pause.hold) });
+    const body = pauseNoticeBody({ ...pause, free: this.freeAccounts(pause.harness, pause.hold), auto: !!this.auto && !pause.pinned });
     if ((this.pauseBodies ??= new Map()).get(issue) === body) return;
     await upsertComment(this.repo, issue, marker(issue, "account-limit"), body, this.opts).then(
       () => this.pauseBodies.set(issue, body),
@@ -1623,7 +1761,16 @@ export class Local {
     );
   }
 
-  /** The names of `harness`'s declared accounts free now (no hold), but the one held under `heldKey`; none on a bad declaration. */
+  /** The pause notice of an Objective paused on a pin that is gone (movesEarly), said again as automatic choice words it. */
+  async unpinnedNotice(issue) {
+    const pause = this.offline?.get(issue)?.harness ? this.pauses?.get(issue) : null;
+    if (pause?.pinned) await this.pauseNotice(issue, { ...pause, pinned: false });
+  }
+
+  /**
+   * The names of `harness`'s declared accounts free now (no hold), but the one held under `heldKey`; none on a bad
+   * declaration. With automatic choice on, the ones it would choose: no guess holds them and none is known unready.
+   */
   freeAccounts(harness, heldKey) {
     let loaded;
     try {
@@ -1633,7 +1780,7 @@ export class Local {
     }
     return (loaded.accounts?.[harness] || []).filter((a) => {
       const hold = this.holdOf(a);
-      return hold.key !== heldKey && this.limitUntil(hold) === null;
+      return hold.key !== heldKey && this.limitUntil(hold, { guess: !!this.auto }) === null && !(this.auto && this.knownUnready(a));
     }).map((a) => a.name);
   }
 
@@ -1645,20 +1792,36 @@ export class Local {
    * else made moves nothing). Yes when that account is another than the one it paused on and is not held; a pinned
    * account that is held waits for its own reset. A label this machine cannot act on (pinFor) keeps it paused, said once
    * in the log and on the pause notice; at the reset the stage starts and Blocks on it (harnessFor). A failed read keeps
-   * it paused for the next tick. More than one account label is pausedHere's to hold.
+   * it paused for the next tick. More than one account label is pausedHere's to hold. With automatic account choice on
+   * (#266), no label moves it to a free account by itself (autoAccount), where it would otherwise wait for the default.
    */
   async movesEarly(issue, off, names, at) {
     let to;
     try {
       if (!accountLabels(names).length) {
-        // Paused on the harness's default with no label: nothing to move to, and nothing read.
-        if (!off.pinned || !off.pin) return false;
-        const refused = await this.pinTrust(issue, off.pin, at, "unlabeled");
-        if (refused) {
-          await this.saidPin(issue, `${refused}, so it stays paused`, { note: true });
-          return false;
+        if (!off.pinned || !off.pin) {
+          // Paused on no label: with automatic choice, on whichever account is free; else nothing to move to, and nothing read.
+          if (!this.auto) return false;
+          try {
+            to = this.autoAccount(off.harness, { prefer: this.pausedOn(issue) }).account;
+          } catch {
+            // A declaration that cannot be used Blocks the stage at its start, after the reset (harnessFor).
+            return false;
+          }
+          if (!to) return false;
+        } else {
+          const refused = await this.pinTrust(issue, off.pin, at, "unlabeled");
+          if (refused) {
+            await this.saidPin(issue, `${refused}, so it stays paused`, { note: true });
+            return false;
+          }
+          if (this.auto) {
+            // The pin is gone: the loop moves it itself now, which its notice says.
+            await this.unpinnedNotice(issue);
+            to = this.autoAccount(off.harness, { prefer: this.pausedOn(issue) }).account;
+            if (!to) return false;
+          } else to = this.accountFor(off.harness);
         }
-        to = this.accountFor(off.harness);
       } else {
         const pin = await this.pinFor(issue, names, off.harness, at);
         if (pin.problem) {
@@ -1674,8 +1837,8 @@ export class Local {
     }
     this.pinClear(issue);
     const hold = this.holdOf(to);
-    if (hold.key === off.hold || this.limitUntil(hold) !== null) return false;
-    log(`#${issue}: moving to ${limitName(off.harness, to.name)}, which is free, before ${limitName(off.harness, off.account)}'s reset`);
+    if (hold.key === off.hold || this.limitUntil(hold, { guess: this.auto && !accountLabels(names).length }) !== null) return false;
+    log(`#${issue}: moving to ${limitName(off.harness, to.name)}, which is free, before ${limitName(off.harness, off.account)}'s reset${this.auto && !accountLabels(names).length ? " (chosen automatically)" : ""}`);
     return true;
   }
 
@@ -1709,9 +1872,13 @@ export class Local {
     return { key: `${account.harness}@${createHash("sha256").update(at).digest("hex").slice(0, 12)}`, shared: true };
   }
 
-  /** The reset (ms) of `hold`'s usage limit (holdOf) when a stage on this machine met it and it is still ahead, else null. */
-  limitUntil(hold) {
-    return this.holdStore(hold).until(hold.key, (this.clock ?? Date.now)());
+  /**
+   * The reset (ms) of `hold`'s usage limit (holdOf) when a stage on this machine met it and it is still ahead, else null.
+   * With `guess`, for automatic account choice, a no-reset limit's guess too (holds.mjs avoidUntil).
+   */
+  limitUntil(hold, { guess = false } = {}) {
+    const now = (this.clock ?? Date.now)();
+    return guess ? this.holdStore(hold).avoidUntil(hold.key, now) : this.holdStore(hold).until(hold.key, now);
   }
 
   /**
@@ -1723,7 +1890,8 @@ export class Local {
    * own path: an account label's labeler is the kept check (pinTrustKept), read in the background for the next tick, and
    * until it is known (or when it is refused) the default account is the one weighed. A pin this machine cannot act on
    * starts, and Blocks at the start (harnessFor). The account declaration is read only while an account of that
-   * harness is held. Each hold is said once.
+   * harness is held. Each hold is said once. With automatic account choice on (#266), an Objective the pin does not
+   * place is held only while every account of its harness is held, until the first of them resets.
    */
   limitHold(labels, issue = null, at = null) {
     const c = choiceOf(labels || []);
@@ -1735,8 +1903,9 @@ export class Local {
     }
     if (issue !== null && this.twoNoted?.has(issue)) this.noting(this.twoCleared(issue));
     const now = (this.clock ?? Date.now)();
-    if (!this.holdStore().held(harness, now) && !this.ownHolds?.held(harness, now)) return null;
+    if (!this.holdStore().held(harness, now, !!this.auto) && !this.ownHolds?.held(harness, now, !!this.auto)) return null;
     let account;
+    let every = null;
     try {
       const loaded = this.loadedAccounts();
       account = defaultAccount(loaded, harness);
@@ -1745,10 +1914,24 @@ export class Local {
         // A name this machine cannot run the Objective on Blocks its stage at the start (harnessFor): not a hold.
         if (r.problem) return null;
         account = r.account;
-      }
+      } else if (this.auto) every = harnessAccounts(loaded, harness);
     } catch {
       // A declaration that cannot be used Blocks the stage at its start (harnessFor): not a hold.
       return null;
+    }
+    if (every) {
+      const ends = every.map((a) => ({ a, hold: this.holdOf(a), until: this.limitUntil(this.holdOf(a), { guess: true }) }));
+      // One free and not known unready: it starts. None held (each unready): the start Blocks, naming them (harnessFor).
+      if (ends.some((e) => e.until === null && !this.knownUnready(e.a))) return null;
+      const held = ends.filter((e) => e.until !== null);
+      if (!held.length) return null;
+      const first = held.reduce((x, y) => (y.until < x.until ? y : x));
+      for (const e of held) this.saidLimit(harness, e.a.name, e.hold, e.until, e.until !== this.limitUntil(e.hold));
+      const h = HARNESS_NAMES[harness] || harness;
+      // The first to end may be a guess (no reset reported): an estimate, said as one.
+      const at = `${first.until !== this.limitUntil(first.hold) ? "about " : ""}${new Date(first.until).toISOString()}`;
+      if (every.length === 1) return `${limitName(harness, first.a.name)}'s usage limit is spent until ${at}`;
+      return held.length === every.length ? `every ${h} account on this machine has its usage limit spent; the first, ${limitName(harness, first.a.name)}, resets at ${at}` : `every ${h} account on this machine has its usage limit spent or cannot run here; the first to reset, ${limitName(harness, first.a.name)}, resets at ${at}`;
     }
     const hold = this.holdOf(account);
     const until = this.limitUntil(hold);
@@ -1758,12 +1941,13 @@ export class Local {
   }
 
   /** The log line that no stage starts on `account` until its usage limit's reset (`until`, ms): once per reset. */
-  saidLimit(harness, account, hold, until) {
+  saidLimit(harness, account, hold, until, guessed = false) {
     const key = `${hold.key}@${until}`;
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
     const who = limitName(harness, account);
-    log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
+    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${new Date(until).toISOString()}`);
+    else log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
   }
 
   /**

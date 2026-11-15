@@ -272,7 +272,7 @@ async function main() {
   } catch (e) {
     if (!unreachable(e)) throw e;
     const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
-    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token) : null });
+    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: null, stage: "outage" }, token) : null });
     if (issue) setOutput("issue", String(issue));
     return;
   }
@@ -353,7 +353,7 @@ async function main() {
       return;
     }
     // This machine's network, not the stage: paused locally (its review label stays, for serve's resume), an `outage`
-    // Block elsewhere (session.mjs outageExit).
+    // Block elsewhere (session.mjs outageExit) that mentions no one: the dispatcher relaunches the Objective's work.
     if (unreachable(e)) {
       await outageExit(e, {
         local,
@@ -361,7 +361,7 @@ async function main() {
         finish,
         block: async (reason) => {
           await dropLabel();
-          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: inputs.notify, stage: "outage" }, token);
+          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "outage", notify: null, stage: "outage" }, token);
         },
       });
       return;

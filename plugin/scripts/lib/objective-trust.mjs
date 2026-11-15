@@ -320,31 +320,39 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
 
 /**
  * The account label that still pins an Objective with none on it now (#267), or null (its harness's default): its
- * timeline's account-label events by someone who can push or a pinned maintainer (vouches), walked newest first; the
- * first `labeled` one with no later such `unlabeled` of the same label is the pin. Events by anyone else are ignored, so
- * a person who cannot push can neither move the pin nor take it away, and a pusher's newest choice wins. It never yields
- * two: two account labels wait only while both are on the issue. `gh` (timeline, permission) is a test's own; each
- * actor's permission is read once.
+ * timeline's account-label events replayed oldest first with two sets. `actual`, the labels on the issue, follows every
+ * event. `trusted`, the pins of people who can push or pinned maintainers (vouches), follows only theirs: a trusted
+ * `labeled X` keeps the pins still on the issue just before it and adds X (a pin already gone is replaced), a trusted
+ * `unlabeled X` takes X away, and anyone else's event changes nothing. A person who cannot push can neither move the pin
+ * nor take it away, and a pin a pusher replaced never comes back. With more than one left, the most recently added; it
+ * never yields two (two labels wait only while both are on the issue). `gh` (timeline, permission) is a test's own;
+ * each actor's permission is read once.
  */
 export async function trustedRoutePin(repo, issue, opts, gh = {}) {
   const read = { permission: collaboratorPermission, ...gh };
   const events = ((await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [])
     .filter((e) => (e.event === "labeled" || e.event === "unlabeled") && typeof e.label?.name === "string" && e.label.name.toLowerCase().startsWith(ACCOUNT_LABEL_PREFIX))
-    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-  const trusted = new Map();
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  const vouchedBy = new Map();
   const vouched = async (a) => {
     if (!a?.login) return false;
     const key = `${a.type}:${a.login}:${a.id}`;
-    if (!trusted.has(key)) trusted.set(key, await vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, read));
-    return trusted.get(key);
+    if (!vouchedBy.has(key)) vouchedBy.set(key, await vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, read));
+    return vouchedBy.get(key);
   };
-  const removed = new Set();
+  const actual = new Set();
+  // Trusted pins in the order they were added: the last is the newest.
+  let trusted = [];
   for (const e of events) {
-    if (!(await vouched(e.actor))) continue;
-    if (e.event === "unlabeled") removed.add(e.label.name);
-    else if (!removed.has(e.label.name)) return e.label.name;
+    const x = e.label.name;
+    if (await vouched(e.actor)) {
+      if (e.event === "labeled") trusted = [...trusted.filter((t) => t !== x && actual.has(t)), x];
+      else trusted = trusted.filter((t) => t !== x);
+    }
+    if (e.event === "labeled") actual.add(x);
+    else actual.delete(x);
   }
-  return null;
+  return trusted.at(-1) ?? null;
 }
 
 /**

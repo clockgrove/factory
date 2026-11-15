@@ -30,7 +30,7 @@ import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, stor
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
-import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
@@ -1041,7 +1041,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     // Stopped since the earlier stage's end when the record says it stopped then; its storage is this stage's to book.
     const stoppedAt = prior?.state === "stopped" && !prior.stopError ? (prior.stoppedAt ?? null) : null;
     const handoff = { progress: stageProgressKey(runId, claim), launch: startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }) };
-    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: harnessVersionFor(inputs.harness, run.defaults.harness, inputs.harnessVersion), plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
+    result = await startInSandbox({ adapter, repo, repoId, issue: n, recordedId: prior?.id ?? null, recordedImage: prior?.image ?? null, image, baseImage: adapter.baseImage(inputs.nodeVersion), claim, env, budgetMs, vcpus, harness: inputs.harness, harnessVersion: harnessVersionFor(inputs.harness, workflowHarness(), inputs.harnessVersion), plugin, maxUsd: inputs.maxUsd, stoppedAt, listing, settled: run.settled ?? null, handoff, watch });
   } catch (e) {
     // The log gets the whole message; GitHub gets the error's code and HTTP status only.
     log(`#${n}: the stage did not start: ${String(e.message).slice(0, 800)}`);

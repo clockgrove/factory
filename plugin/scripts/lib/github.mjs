@@ -398,7 +398,11 @@ export async function blockedByRelations(repo, number, opts) {
  * one of `removedStarts` (a draft label: starting the draft) counts as re-applying `label`.
  */
 export async function relabeledAfter(repo, number, label, since, opts, removedStarts = []) {
-  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  return relabeledIn((await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label, since, removedStarts);
+}
+
+/** relabeledAfter on timeline events already read. */
+export function relabeledIn(events, label, since, removedStarts = []) {
   let last = null;
   let lastSince = null;
   for (const e of events) {
@@ -798,6 +802,17 @@ export async function mergeGroupRuns(repo, number, base, since, opts) {
     .filter((r) => typeof r?.head_branch === "string" && r.head_branch.startsWith(prefix) && /^[0-9a-f]{40,64}$/.test(r.head_branch.slice(prefix.length)) && r.head_sha)
     .map((r) => ({ id: r.id, sha: r.head_sha, at: r.created_at ?? null }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+}
+
+/**
+ * The branch as GitHub has it now: `{head, headAt}` its head commit and that commit's time, and `queued` how many PRs
+ * wait in its merge queue (0 with no queue). One GraphQL read. Throws when the branch is not there.
+ */
+export async function branchState(repo, branch, opts) {
+  const d = await graphql(`query($owner: String!, $name: String!, $ref: String!, $branch: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { target { oid ... on Commit { committedDate } } } mergeQueue(branch: $branch) { entries { totalCount } } } }`, { owner: repo.owner, name: repo.name, ref: `refs/heads/${branch}`, branch }, opts);
+  const target = d?.repository?.ref?.target;
+  if (!target?.oid) throw new Error(`the branch ${branch} could not be read`);
+  return { head: target.oid, headAt: target.committedDate ?? null, queued: Number(d.repository.mergeQueue?.entries?.totalCount) || 0 };
 }
 
 /** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */

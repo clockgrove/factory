@@ -82,21 +82,28 @@ test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
   assert.deepEqual(uncapped.ready, [1], "daily_usd 0 means no daily cap");
 });
 
-test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back once, then Blocks; drafts and clean PRs are left alone", async () => {
-  const { staleDecision } = await import("../scripts/lib/logic.mjs");
+test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back each time, Blocking only when stuck or at the bound; drafts and clean PRs are left alone", async () => {
+  const { REBASE_LIMIT, staleDecision } = await import("../scripts/lib/logic.mjs");
   const behind = { draft: false, auto_merge: null, mergeable_state: "behind" };
+  const dirty = { ...behind, mergeable_state: "dirty" };
+  const stuck = { from: "a".repeat(40), base: "b".repeat(40), files: ["docs/decisions.md"] };
+  assert.equal(REBASE_LIMIT, 5);
   assert.equal(staleDecision({ pr: behind }), "update", "no queue: GitHub updates a behind branch; no worker");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" } }), "rebase");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, rebaseMarkers: 1 }), "blocked", "second conflict is integration failed twice");
+  assert.equal(staleDecision({ pr: dirty }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, rebases: 1 }), "rebase", "a conflict after a rebase, on a new base, goes back again");
+  assert.equal(staleDecision({ pr: dirty, rebases: REBASE_LIMIT - 1 }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, rebases: REBASE_LIMIT }), "limit", "the bound");
+  assert.equal(staleDecision({ pr: dirty, rebases: 1, stuck }), "stuck", "the same conflict on the same base");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "clean" } }), "ignore");
   // A review job that began before a sibling's merge made the PR conflict is still running: no send-back to race it.
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: true }), "ignore");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: false }), "rebase", "labelled but no review job alive: back to rebase");
+  assert.equal(staleDecision({ pr: dirty, reviewing: true, reviewRunning: true }), "ignore");
+  assert.equal(staleDecision({ pr: dirty, reviewing: true, reviewRunning: false }), "rebase", "labelled but no review job alive: back to rebase");
   assert.equal(staleDecision({ pr: { ...behind, draft: true } }), "ignore");
   assert.equal(staleDecision({ pr: null }), "ignore");
   assert.equal(staleDecision({ pr: behind, queue: true }), "ignore", "with a queue, behind is the queue's job");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true, rebaseMarkers: 1 }), "blocked");
+  assert.equal(staleDecision({ pr: dirty, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
+  assert.equal(staleDecision({ pr: dirty, queue: true, rebases: 1 }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, queue: true, rebases: REBASE_LIMIT }), "limit");
 });
 
 test("conflictsAt: only GitHub's conflict on the head the stage pushed ends the check wait", async () => {
@@ -590,10 +597,10 @@ test("local claim read: an author that cannot be checked (the writer list unread
   const unread = await localTick({ repo: "acme/unread", open, timeline, writers: 502, comments: (n) => (n === 7 ? [{ id: 5, user: { login: "dev", type: "User" }, body: body("box-a:1:abc:m:b"), updated_at: ago(0) }] : []) });
   assert.deepEqual(unread.r.vanished, []);
   assert.ok(unread.r.deadlines.some((d) => d.kind === "retry"));
-  // With the writers read, a marker by someone who cannot push is no claim: the unclaimed Running one Blocks as before.
+  // With the writers read, a marker by someone who cannot push is no claim: the unclaimed Running one is a lost runner
+  // job, relaunched (its Block once the relaunches are used, relaunch.test.mjs).
   const stranger = await localTick({ open, timeline, comments: (n) => (n === 7 ? [{ id: 6, user: { login: "stranger", type: "User" }, body: body("box-x:1:abc:m:b"), updated_at: ago(0) }] : []) });
-  assert.deepEqual(stranger.r.vanished, [7]);
-  assert.match(stranger.blocked(7), /worker job vanished/);
+  assert.deepEqual([stranger.r.vanished, stranger.r.relaunched], [[], [7]]);
   assert.ok(!stranger.writes.includes("DELETE /issues/comments/6"), "a stranger's comment is not Factory's to delete");
 });
 
@@ -624,10 +631,10 @@ test("local deadlines: a factory:local Objective with no claim waits a day, Runn
   // In review with no review owed (reviewed, waiting on a person): no deadline.
   const reviewed = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: () => labelled("factory:in-review", ago(25 * HOUR)), pulls: () => [{ ...pr(8)[0], labels: [] }] });
   assert.deepEqual(reviewed.r.vanished, []);
-  // An unlabelled Objective's runner job still gets 15 minutes.
+  // An unlabelled Objective's runner job still gets 15 minutes; then it is lost, and relaunched (relaunch.test.mjs).
   const runner = await localTick({ open: [{ ...localIssue(9, "factory:running", []) }], timeline: () => labelled("factory:running", ago(20 * 60_000)) });
-  assert.deepEqual(runner.r.vanished, [9]);
-  assert.match(runner.blocked(9), /worker job vanished[^]*<!-- factory:block \{"cause":"factory"\} -->/, "a lost runner job is Factory's own");
+  assert.deepEqual([runner.r.vanished, runner.r.relaunched], [[], [9]]);
+  assert.ok(!runner.writes.some((w) => w.includes("<!-- factory:9:blocked:")), "no Block notice");
 });
 
 test("local claim age: GitHub's update time, not the machine's clock in the body; an expired claim's Block names its holder (#167)", async () => {

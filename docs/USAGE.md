@@ -89,6 +89,7 @@ A run that goes well needs nothing from you. When one needs you, Factory does al
 What to do with each:
 
 - **Blocked:** fix what the comment names, then re-apply `factory:objective` to run the Objective again. When your fix was an edit to the issue, the worker makes its plan again from the new text.
+- **Lost to the network:** on GitHub Actions and the cloud sandbox, a stage whose runner or sandbox lost its network (its outage notice, which mentions no one, names the host) or vanished without a word is relaunched on its own, at most twice since you last started the Objective, its work resuming from its branch and PR; a Factory comment on the issue counts them. A relaunch waits while today's spend has reached `daily_usd` or `max_concurrent` Objectives run, and each stage spends within `max_usd`, so a start can spend up to three times `max_usd` before you hear of it. Only then is it Blocked, the notice saying how many relaunches were tried; re-apply the label once the network is back, and the count starts over. A stage cancelled on Actions (by a person or its timeout), or a sandbox stage that recorded its end, is not a network loss: it is Blocked as before. The local route pauses and resumes such a stage instead ([LOCAL.md](LOCAL.md)).
 - **Question:** comment the decision on the issue or the PR (a review or a line comment works too) and mark the PR ready: the review job applies it, and with no answer since the question the PR goes back to a Question rather than merging. Re-applying `factory:objective` instead reruns the worker with it.
 
 A comment counts when its author has write access to the repository or is a maintainer the workflow names (`notify`, and the optional `maintainers` list), since an App cannot always see an organization member's access.
@@ -99,7 +100,7 @@ Code lands with no human read. The gate is your CI workflow's checks on the revi
 
 ## Siblings that touch the same files
 
-Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
+Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
 
 ## One repository per Objective
 

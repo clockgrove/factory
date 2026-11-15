@@ -477,6 +477,73 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return { ops: [...new Set(String(r.stdout).split("\n").map((l) => ops[l.trim()]).filter(Boolean))] };
   };
 
+  /**
+   * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
+   * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
+   * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
+   * a head that does not contain `onto` (the conflict pass gave up); or one of the branch's own commits missing from it.
+   * A rebase keeps each commit's author, author time and subject while its patch changes to resolve the conflict, so a
+   * commit is found by those, and only a commit that changes something counts as one. One missing (a `rebase --skip`)
+   * is lost unless its patch is already in the head (it reverse-applies there), as git rebase drops a commit whose
+   * change the base already has. Read on git's exit codes and fields, never its messages.
+   */
+  box.rebaseLeft = async ({ from, onto }) => {
+    const busy = await box.inProgress();
+    if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
+    if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
+    let head;
+    try {
+      head = await take();
+    } catch (e) {
+      return `the checkout's head could not be read: ${e.message}`;
+    }
+    if ((await git(["merge-base", "--is-ancestor", onto, head])).code !== 0) return "the branch it left is not rebased onto it";
+    const old = (await git(["merge-base", from, onto])).stdout.trim();
+    const commits = async (range) => {
+      const r = await git(["log", "--no-merges", "-z", "--format=%H%x01%ae%x01%at%x01%s", range]);
+      if (r.code !== 0) throw new Error(`git log exited ${r.code}`);
+      return r.stdout.split("\0").filter(Boolean).map((l) => {
+        const [id, ...key] = l.replace(/^\n/, "").split("\x01");
+        return { id, key: key.join("\x01") };
+      });
+    };
+    // Whether commit `id` changes nothing (`git diff-tree --quiet` against its parent exits 0).
+    const empty = async (id) => (await git(["diff-tree", "--quiet", id])).code === 0;
+    // Whether the head already has commit `id`'s patch: it reverse-applies to the head's tree, in a scratch index.
+    const inHead = async (id) => {
+      const patch = await git(["diff", "--binary", "--no-ext-diff", "--no-textconv", `${id}^`, id]);
+      if (patch.code !== 0) throw new Error(`git diff exited ${patch.code}`);
+      const env = { ...gitEnv(), GIT_INDEX_FILE: join(scratch, `onto-${process.pid}-${Date.now()}.index`) };
+      try {
+        if ((await git(["read-tree", head], { env })).code !== 0) throw new Error("git read-tree failed");
+        return (await git(["apply", "--cached", "--check", "-R", "-"], { env, input: patch.stdout })).code === 0;
+      } finally {
+        rmSync(env.GIT_INDEX_FILE, { force: true });
+      }
+    };
+    try {
+      if (!SHA.test(old)) throw new Error("no merge base");
+      // A commit that changes nothing keeps no work, whatever its author, time and subject: it is no counterpart.
+      const kept = new Map();
+      for (const c of await commits(`${onto}..${head}`)) if (!(await empty(c.id))) kept.set(c.key, (kept.get(c.key) || 0) + 1);
+      const lost = [];
+      for (const c of (await commits(`${old}..${from}`)).reverse()) {
+        if (await empty(c.id)) continue;
+        if (kept.get(c.key)) {
+          kept.set(c.key, kept.get(c.key) - 1);
+          continue;
+        }
+        // Dropped by git as already upstream only when its patch is already in the head.
+        if (await inHead(c.id)) continue;
+        lost.push(c.id);
+      }
+      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")})`;
+    } catch {
+      return "Factory could not compare the rebased branch with the branch before it";
+    }
+    return "";
+  };
+
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */
   box.block = (reason) => refuse(reason);
 

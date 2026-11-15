@@ -369,3 +369,64 @@ test("secrets on a repository a user owns: GitHub's 422 for organization secrets
     else process.env.GITHUB_API_URL = saved;
   }
 });
+
+test("doctor: an unknown flag exits 64 naming it before any check; --checkout and --dir both name the clone it checks (#324)", async () => {
+  const { createServer } = await import("node:http");
+  const { spawn } = await import("node:child_process");
+  const doctor = join(import.meta.dirname, "..", "scripts", "doctor.mjs");
+  // A GitHub that knows the repository and answers every list empty and every other read 404, so doctor runs to its end.
+  const asked = [];
+  const server = createServer((req, res) => {
+    asked.push(req.url);
+    const json = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    if (req.url === "/repos/o/r") return json(200, { full_name: "o/r", default_branch: "main", private: false, owner: { login: "o", type: "User" }, permissions: {} });
+    if (req.url.includes("per_page")) return json(200, req.url.startsWith("/repos/o/r/actions/workflows?") ? { workflows: [] } : []);
+    return json(404, { message: "Not Found" });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const api = `http://127.0.0.1:${server.address().port}`;
+  const env = { ...process.env, GITHUB_API_URL: api, GITHUB_GRAPHQL_URL: `${api}/graphql`, FACTORY_APP_TOKEN: "t" };
+  for (const k of ["GITHUB_ACTIONS", "GITHUB_WORKSPACE"]) delete env[k];
+  // Run from a directory that is no clone: doctor checks the clone it is pointed at, or this one.
+  const elsewhere = mkdtempSync(join(tmpdir(), "elsewhere-"));
+  const run = (...args) =>
+    new Promise((done) => {
+      const child = spawn(process.execPath, [doctor, ...args], { cwd: elsewhere, env, stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("exit", (status) => done({ status, stdout, stderr }));
+    });
+  try {
+    for (const bad of [["--bogus"], ["--dir"], ["--json=yes"], ["extra"]]) {
+      const r = await run("--repo", "o/r", ...bad);
+      assert.equal(r.status, 64, bad.join(" "));
+      assert.ok(r.stderr.includes(bad[0].split("=")[0]), `${bad.join(" ")}: the refusal names it`);
+      assert.match(r.stderr, /usage: .*--checkout CLONE/);
+      assert.equal(r.stdout, "", "no check ran");
+    }
+    assert.deepEqual(asked, [], "nothing read from GitHub");
+    const help = await run("--help");
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /^usage: .*--checkout CLONE/);
+    const root = clone(wf("v0.9.32"));
+    execFileSync("git", ["init", "-q", root]);
+    writeFileSync(join(root, "package-lock.json"), "{}\n");
+    const rows = async (...args) => {
+      const r = await run("--repo", "o/r", "--json", ...args);
+      assert.equal(r.status, 1, `${args.join(" ")}: the fake repository has failures (${r.stderr})`);
+      return Object.fromEntries(JSON.parse(r.stdout).checks.map((c) => [c.name, c.status]));
+    };
+    for (const flag of ["--checkout", "--dir"]) {
+      const got = await rows(flag, root);
+      assert.equal(got.lockfile, "PASS", `${flag}: the clone's lockfile is found`);
+      assert.equal(got["workflow settings"], undefined, `${flag}: the settings are the clone's workflow's, not GitHub's`);
+    }
+    const here = await rows();
+    assert.equal(here.repository, "WARN", "without one, doctor checks the directory it runs in, which is no clone");
+    assert.equal(here.lockfile, undefined);
+  } finally {
+    server.close();
+  }
+});

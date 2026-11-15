@@ -161,6 +161,46 @@ export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOK
 /** A name that carries one of Factory's own service keys: the bare name, or the input under FACTORY_ or FACTORY_INPUT_. */
 export const isFactorySecret = (k) => FACTORY_SECRET_KEYS.some((n) => k === n || k === `FACTORY_${n}` || k === `FACTORY_INPUT_${n}`);
 
+/** Other names a command-line flag answers to: `--dir` is `--checkout`, the clone's flag on every command that takes one. */
+export const FLAG_ALIASES = { dir: "checkout" };
+
+/**
+ * A command line checked against its flags (`spec`: name → `bool`, which takes no value, or {value, number?}, which
+ * takes one, a positive number where `number` is set), FLAG_ALIASES read as their names: {_: arguments, flag: value}.
+ * Throws `fail(why)` for an unknown flag, a value given to a bool, or a missing or non-numeric value.
+ */
+export function readFlags(argv, spec, fail) {
+  const flags = { _: [] };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!a.startsWith("-")) {
+      flags._.push(a);
+      continue;
+    }
+    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
+    const key = m && Object.hasOwn(FLAG_ALIASES, m[1]) ? FLAG_ALIASES[m[1]] : m?.[1];
+    const kind = m && Object.hasOwn(spec, key) ? spec[key] : null;
+    if (!kind) throw fail(`unknown flag ${a}`);
+    if (kind === "bool") {
+      if (m[2] !== undefined) throw fail(`--${m[1]} takes no value`);
+      flags[key] = true;
+      continue;
+    }
+    let value = m[2];
+    if (value === undefined) {
+      value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) throw fail(`--${m[1]} needs a value`);
+      i += 1;
+    }
+    if (kind.number) {
+      const n = Number(value);
+      if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${m[1]} needs a positive number, not ${JSON.stringify(value)}`);
+      flags[key] = n;
+    } else flags[key] = value;
+  }
+  return flags;
+}
+
 /** Parse `--name value`, `--name=value` and bare `--flag` into {name: value}. Names use underscores. */
 export function parseArgs(argv) {
   const out = { _: [] };

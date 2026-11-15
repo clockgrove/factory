@@ -9,6 +9,7 @@ import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
+import { accountHolds } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
 // fails every one of its tries.
@@ -64,6 +65,13 @@ async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => fals
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
   return { labels, timeline, writes, reads: () => reads, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((ok) => server.close(ok)) };
+}
+
+/** This machine's holds (in memory) with `account`'s usage limit spent for the next hour, as a stage here would leave it. */
+function heldOn(account) {
+  const holds = accountHolds();
+  holds.limit({ harness: account, account, reset: Date.now() + 60 * 60_000, now: Date.now() });
+  return holds;
 }
 
 /** The labels a listing from before the stage's exit labels landed shows: no state label at all. */
@@ -778,7 +786,8 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
     stopAfter: 3,
     stubs: {
       harness: "claude",
-      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      holds: heldOn("claude"),
+      accountFor: (harness) => ({ name: harness, harness, declared: false }),
       pendingReviews: async () => [{ issue: 8, pr: 18 }],
       review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
     },
@@ -797,7 +806,8 @@ test("serve: one harness's spent usage limit holds only that harness's work; an 
     stopAfter: 3,
     stubs: {
       harness: "claude",
-      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      holds: heldOn("claude"),
+      accountFor: (harness) => ({ name: harness, harness, declared: false }),
       pendingReviews: async () => [{ issue: 8, pr: 18 }],
       review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
     },

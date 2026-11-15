@@ -53,12 +53,15 @@ import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { accountEnv, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
+import { accountHolds, holdsDir } from "./lib/holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
-/** The least a usage-limit hold lasts past now, by how many such pauses on one harness came in a row (Local.limitPaused). */
-export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
+/** An account in a hold's log line and reason: the harness alone for the one named after it (none declared). */
+const limitName = (harness, account) => (account === harness ? harness : `${harness} account ${account}`);
+/** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
+const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
@@ -512,6 +515,8 @@ export class Local {
     this.opts = { token: this.token, notice: this.notice };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
     this.holder = holderId();
+    // This machine's usage-limit holds, per account (lib/holds.mjs): shared with every serve here and kept across restarts.
+    this.holds = accountHolds({ dir: holdsDir(homedir()), onError: (e) => log(`a usage-limit hold could not be kept in ${holdsDir(homedir())} for the machine's other serves (${String(e?.message || e).slice(0, 160)}); this loop still holds it`) });
     this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
@@ -950,13 +955,14 @@ export class Local {
       await this.block(issue, name, runs.reason, { fix: runs.fix });
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
-    // That harness's usage limit is spent (a stage here met it, limitPaused): no stage starts on it until the reset. The
-    // Objective pauses as that stage did, and pausedHere resumes it after the reset.
-    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(runs.harness) : null;
+    // The account it runs on has its usage limit spent (a stage on this machine met it, limitPaused, in any serve): no
+    // stage starts on it until the reset. The Objective pauses as that stage did, and pausedHere resumes it after the reset.
+    const account = runs.account?.name ?? runs.harness;
+    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(account) : null;
     if (until !== null) {
       rmSync(usageDir, { recursive: true, force: true });
-      this.saidLimit(runs.harness, until);
-      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+      this.saidLimit(runs.harness, account, until);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
     }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
@@ -1043,7 +1049,9 @@ export class Local {
             // no record: the child failed before writing one
           }
           dropStage();
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          // A pass on its account completed (the provider served it, and no usage limit ended it): its back-off streak ends.
+          if (runs.account && result && servedPass(result)) this.holdStore().served({ harness: runs.harness, account, now: (this.clock ?? Date.now)() });
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1272,59 +1280,68 @@ export class Local {
   }
 
   /**
-   * A stage that ended `paused` on its harness's usage limit (session.mjs usageLimitExit): the reset it names
-   * (`result.usageLimit`: harness, reset, since) is kept in this loop's memory, for the Objective (pausedHere resumes it
-   * after the reset, with no bound: the reset is known) and for the harness (no stage starts on it until then, stage).
-   * No lapse is counted; the claim stays. A provider that refuses again past the reset it stated (or states one no
-   * more than LIMIT_BACKOFF_MS's last ahead) is not taken at its word every tick: the hold is at least now plus a backoff
-   * that grows with each such pause in a row on that harness (2, 5, 10, then 15 minutes), and a reset further out than
-   * that starts the count again. A stage `stage` held before it ran (`held`) counts nothing.
+   * A stage that ended `paused` on its usage limit (session.mjs usageLimitExit): the reset it names (`result.usageLimit`:
+   * harness, reset, since) holds the account the stage ran on (`result.account`, by name; else the one named after the
+   * harness) in this machine's holds (lib/holds.mjs), which every serve here reads: no stage starts on that account
+   * until then (startStage, limitHold), in this loop or another, now or after a restart. The Objective is kept in this
+   * loop's memory, and pausedHere resumes it after the reset, with no bound: the reset is known. No lapse is counted; the
+   * claim stays. A provider that refuses again past the reset it stated is held at least 2, 5, 10, then 15 minutes per
+   * such pause in a row on that account (lib/holds.mjs accountHolds.limit). A stage held before it ran (`held`) adds no
+   * hold and counts nothing.
    */
   limitPaused(issue, result) {
     const l = result.usageLimit;
     const now = (this.clock ?? Date.now)();
     const stated = Date.parse(l.reset);
     const since = Date.parse(l.since);
+    const account = result.account || l.harness;
     let reset = Number.isFinite(stated) ? stated : now;
-    if (!l.held && l.harness) {
-      const streak = (this.limitStreak ??= new Map());
-      const n = reset - now > LIMIT_BACKOFF_MS.at(-1) ? 0 : (streak.get(l.harness) ?? 0) + 1;
-      streak.set(l.harness, n);
-      if (n) reset = Math.max(reset, now + LIMIT_BACKOFF_MS[Math.min(n, LIMIT_BACKOFF_MS.length) - 1]);
-    }
+    if (!l.held && l.harness) reset = this.holdStore().limit({ harness: l.harness, account, reset, now });
     (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset });
-    if (l.harness && reset > (this.limits?.get(l.harness) ?? 0)) (this.limits ??= new Map()).set(l.harness, reset);
     this.lapsed?.delete(issue);
-    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${l.harness}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
   }
 
-  /** The reset (ms) of `harness`'s usage limit when a stage here met it and the reset is still ahead, else null. */
-  limitUntil(harness) {
-    const at = this.limits?.get(harness);
-    return at !== undefined && at > (this.clock ?? Date.now)() ? at : null;
+  /** This machine's holds (lib/holds.mjs); a loop made without the constructor (a test's) keeps them in its memory. */
+  holdStore() {
+    return (this.holds ??= accountHolds());
+  }
+
+  /** The reset (ms) of `account`'s usage limit when a stage on this machine met it and the reset is still ahead, else null. */
+  limitUntil(account) {
+    return this.holdStore().until(account, (this.clock ?? Date.now)());
   }
 
   /**
-   * Why an Objective with these labels starts nothing now, or null: its harness (its harness label, choice.mjs choiceOf,
-   * else the loop's) has its usage limit spent (limitUntil). Read on labels the caller already holds (the dispatcher's
-   * listing, pendingReviews' read), never a read of its own; each harness's hold is said once (saidLimit).
+   * Why an Objective with these labels starts nothing now, or null: the account it runs on (its harness, from its harness
+   * label, choice.mjs choiceOf, else the loop's; that harness's default account, accountFor) has its usage limit spent
+   * (limitUntil). Read on labels the caller already holds (the dispatcher's listing, pendingReviews' read), never a read
+   * of its own; the account declaration is read only while an account of that harness is held. Each hold is said once.
    */
   limitHold(labels) {
-    if (!this.limits?.size) return null;
     const c = choiceOf(labels || []);
     const harness = (c.ok && c.choice.harness) || this.harness;
-    const until = this.limitUntil(harness);
+    if (!this.holdStore().held(harness, (this.clock ?? Date.now)())) return null;
+    let account;
+    try {
+      account = this.accountFor(harness).name;
+    } catch {
+      // A declaration that cannot be used Blocks the stage at its start (harnessFor): not a hold.
+      return null;
+    }
+    const until = this.limitUntil(account);
     if (until === null) return null;
-    this.saidLimit(harness, until);
-    return `${harness}'s usage limit is spent until ${new Date(until).toISOString()}`;
+    this.saidLimit(harness, account, until);
+    return `${limitName(harness, account)}'s usage limit is spent until ${new Date(until).toISOString()}`;
   }
 
-  /** The log line that no stage starts on `harness` until its usage limit's reset (`until`, ms): once per reset. */
-  saidLimit(harness, until) {
-    const key = `${harness}@${until}`;
+  /** The log line that no stage starts on `account` until its usage limit's reset (`until`, ms): once per reset. */
+  saidLimit(harness, account, until) {
+    const key = `${account}@${until}`;
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
-    log(`${harness}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${harness} until then`);
+    const who = limitName(harness, account);
+    log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
   }
 
   /**
@@ -1837,8 +1854,8 @@ export class Local {
         running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
-      // A harness whose usage limit is spent (limitPaused): no review and no new work on it starts until its reset, said
-      // once; work on any other harness goes on. Each Objective's harness is its harness label, else the loop's.
+      // An account whose usage limit is spent (limitPaused, in any serve on this machine): no review and no new work on
+      // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
       const free = pending.filter((r) => !this.limitHold(r.labels));
       const reviews = free.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes

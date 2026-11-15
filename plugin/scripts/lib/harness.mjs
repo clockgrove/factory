@@ -988,14 +988,18 @@ export function providerOrigin(harness, env = {}) {
  * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
  * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
  * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
- * A pass that failed after the process gave up waiting for a host (network.mjs givenUp; a spent rate limit cuts no pass
- * off) is no death and runs no more: it throws that outage's NetworkDown, which the stage ends on (session.mjs outageExit).
+ * In a process that gave up waiting (stoppedWaiting), a pass that failed while a host it gave up on still does not answer
+ * (network.mjs givenUp) is no death and runs no more: it throws that outage, which the stage ends on (session.mjs
+ * outageExit). With every such host answering again, the outage it gave up on cut the pass off as any other would.
  */
 async function outageCut(rec, { harness, env }) {
   if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
-  const down = stoppedWaiting() ? givenUp() : null;
-  if (down && !Number.isFinite(down.resetAt)) throw down;
-  if (!waitingOutages()) return null;
+  const gaveUp = stoppedWaiting();
+  if (gaveUp) {
+    const down = await givenUp();
+    if (down) throw down;
+  }
+  if (!gaveUp && !waitingOutages()) return null;
   const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
   const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
   return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);

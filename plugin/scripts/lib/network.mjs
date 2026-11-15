@@ -226,15 +226,23 @@ export const downFor = (origin) => {
 };
 
 /**
- * The outage this process gave up waiting for, as the NetworkDown its requests to that host now fail with: the latest
- * host it stopped waiting for, or a quota whose spent rate limit it gave up on while that reset is still ahead. Null when
- * there is none. What a stage decides after that point (a Block, the harness asked for an exit record) is the outage's to
- * decide: the stage ends on it instead (session.mjs outageFirst).
+ * A host this process gave up waiting for (past its limit, or stopped waiting while it was lost) that still fails a probe
+ * now, as the NetworkDown its requests fail with: its host, code and first loss. Null when there is none, or each such host
+ * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass that fails and
+ * a run left with no exit record are that outage's (harness.mjs outageCut, session.mjs exitRecord).
  */
-export const givenUp = () => {
-  const g = [...GIVEN_UP.values()].findLast((x) => !Number.isFinite(x.resetAt) || x.resetAt > OUTAGE.now());
-  return g ? new NetworkDown(g) : null;
-};
+export async function givenUp() {
+  const hosts = [...GIVEN_UP.values()].filter((g) => !Number.isFinite(g.resetAt)).sort((a, b) => b.since - a.since);
+  for (const g of hosts) if ((await probe(g.origin)) !== null) return new NetworkDown(g);
+  return null;
+}
+
+/**
+ * The outage a failed call met, as its error: a host this machine could not reach (unreachable: a NetworkDown, or a bare
+ * connect-level failure), or GitHub's core REST quota spent, the one every write of Factory's goes against. Else null: a
+ * spent GraphQL or search quota is no outage of the stage's writes, and any answer from the host is no outage at all.
+ */
+export const outageMet = (e) => (unreachable(e) && (e.code !== RATE_LIMIT_SPENT || quotaName(e.key) === "core") ? e : null);
 
 /** Record that quota `key` (quotaKey) answered spent until `resetAt` (ms), its latest answer; any process (spentUntil). */
 export function noteSpent(key, resetAt) {

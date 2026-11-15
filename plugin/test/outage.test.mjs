@@ -489,11 +489,12 @@ test("rest: a flap that then stays down past a minute is logged as its own loss,
   );
 });
 
-// --- #337: once a stage gave up waiting for its host, whichever step met the outage, the stage ends on it. ---
+// --- #337: a Block that came from an outage, and a run the outage cut off, end the stage on the outage. ---
 
 // Looked up at run time, so each test names what it needs.
 const net = await import("../scripts/lib/network.mjs");
 const sessionLib = await import("../scripts/lib/session.mjs");
+const REPO = { owner: "o", name: "r", full: "o/r" };
 
 const thrown = (fn) => {
   try {
@@ -504,30 +505,32 @@ const thrown = (fn) => {
   return null;
 };
 
-/** GitHub lost for good: every request and probe fails as DNS does. Gives up after the stage's fifteen minutes. */
+/** The stage gives up on GitHub: its fifteen minutes pass with every request and probe failing (the answer decides). */
 async function giveUp() {
   waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-  return rest("repos/o/r/issues/7", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+  const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+  assert.ok(e instanceof NetworkDown, String(e));
+  return e;
 }
 
-test("#337: the split record's write that met the outage ends the stage paused on it, not a factory Block; a Block with no outage given up stands", async () => {
+test("#337: the worker's split record, its write failed on the outage, ends the stage paused on that outage, not a factory Block", async () => {
   const { recordPart } = await import("../scripts/lib/handoff.mjs");
   let down = false;
   await offline(
+    // The record is read; its write is the first request that cannot leave, and GitHub stays lost.
     (req) => (down || req.probe ? Promise.reject(dns()) : req.method === "POST" ? ((down = true), Promise.reject(dns())) : json([])),
     async ({ now }) => {
-      // No outage met yet: a Block the stage decides stands.
-      assert.equal(thrown(() => sessionLib.outageFirst("blocked")), null);
       waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
       const lostAt = now();
-      // The record is read, then its write cannot leave this machine: it waits the stage's fifteen minutes, then fails.
-      const e = await recordPart({ owner: "o", name: "r", full: "o/r" }, 7, 70, 2, { token: "t" }).then(() => assert.fail("written"), (x) => x);
-      assert.ok(e instanceof NetworkDown, String(e));
-      // The worker turns that failure into a Block (worker.mjs: "the split record could not be written"); the Block is the outage's.
-      const end = thrown(() => sessionLib.outageFirst("blocked"));
+      const decision = { exit: "delivered", reason: "" };
+      // The worker's step, as worker.mjs runs it.
+      await sessionLib.exitStep(decision, "the split record could not be written", () => recordPart(REPO, 7, 70, 2, { token: "t" }));
+      assert.equal(decision.exit, "blocked");
+      assert.equal(decision.cause, "factory");
+      assert.match(decision.reason, /^the split record could not be written: api\.github\.test unreachable from this machine/);
+      const end = thrown(() => sessionLib.outageFirst(decision));
       assert.ok(end instanceof NetworkDown, String(end));
       assert.deepEqual({ origin: end.origin, since: end.since, code: end.code }, { origin: "https://api.github.test", since: lostAt, code: "EAI_AGAIN" });
-      assert.equal(thrown(() => sessionLib.outageFirst("delivered")), null, "any other exit stands");
       const ends = [];
       const blocks = [];
       await outageExit(end, { local: true, records: [], finish: async (...a) => ends.push(a), block: async (r) => blocks.push(r) });
@@ -538,7 +541,41 @@ test("#337: the split record's write that met the outage ends the stage paused o
   );
 });
 
-test("#337: with no exit record after the stage gave up on the outage, the harness is not asked; the stage ends on the outage", async () => {
+test("#337: host back after the stage gave up: a real Block stays a Block, a step GitHub answered is no outage, and the harness is asked for its record", async () => {
+  const { bin, calls } = fakeCodex({ fail: 0 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  let down = true;
+  try {
+    await offline(
+      (req) => (down ? Promise.reject(dns()) : req.probe ? new Response(null, { status: 200 }) : json({ message: "Validation Failed" }, 422)),
+      async () => {
+        await giveUp();
+        down = false;
+        assert.equal(await net.givenUp(), null, "a host that answers again stops counting");
+        // Blocks no outage caused: protected paths, the dollar cap, validation.
+        for (const reason of ["protected paths touched: .github/workflows/ci.yml", "dollar cap reached", "validation red after 2 passes"]) assert.equal(thrown(() => sessionLib.outageFirst({ exit: "blocked", reason, cause: "work" })), null, reason);
+        // A step GitHub answered with a refusal: a factory Block that stands.
+        const decision = { exit: "delivered", reason: "" };
+        await sessionLib.exitStep(decision, "the review label could not be applied", () => rest("repos/o/r/issues/70/labels", { method: "POST", body: { labels: ["x"] }, token: "t" }));
+        assert.equal(decision.exit, "blocked");
+        assert.equal(decision.outage, null);
+        assert.equal(thrown(() => sessionLib.outageFirst(decision)), null);
+        // No exit record: the harness is asked, as ever.
+        const asked = await sessionLib.exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: null, canResume: false }, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, eventsFile: join(bin, "events.jsonl"), deadlineAt: Date.now() + 60 * 60_000, maxUsd: 0 });
+        assert.equal(calls().length, 1, "asked once");
+        assert.equal(asked.record.exit, "blocked");
+        // An exit record the harness wrote stands.
+        const written = await sessionLib.exitRecord({ text: JSON.stringify({ exit: "blocked", reason: "the issue asks for two repositories" }), harness: "codex", model: "gpt-6.1-sol", deadlineAt: Date.now() + 60 * 60_000, maxUsd: 0 });
+        assert.equal(written.record.reason, "the issue asks for two repositories");
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test("#337: with no exit record while the host the stage gave up on still does not answer, the harness is not asked; the stage ends on the outage", async () => {
   const { bin } = fakeCodex({ fail: 0 });
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
@@ -547,7 +584,6 @@ test("#337: with no exit record after the stage gave up on the outage, the harne
       () => Promise.reject(dns()),
       async () => {
         const lost = await giveUp();
-        assert.ok(lost instanceof NetworkDown);
         const asked = sessionLib.exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: null, canResume: false }, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, eventsFile: join(bin, "events.jsonl"), deadlineAt: Date.now() + 60 * 60_000, maxUsd: 0 });
         await assert.rejects(asked, (x) => x instanceof NetworkDown && x.since === lost.since && x.origin === lost.origin);
         assert.equal(existsSync(join(bin, "calls.jsonl")), false, "no harness call");
@@ -558,7 +594,7 @@ test("#337: with no exit record after the stage gave up on the outage, the harne
   }
 });
 
-test("#337: a pass that fails after the stage gave up on the outage is no death and runs no more: it ends the stage on the outage", async () => {
+test("#337: a pass that fails while the host the stage gave up on still does not answer is no death and runs no more: it ends the stage on the outage", async () => {
   const { bin, calls } = fakeCodex({ fail: Infinity });
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
@@ -578,33 +614,25 @@ test("#337: a pass that fails after the stage gave up on the outage is no death 
   }
 });
 
-test("#337: a spent rate limit given up on is the stage's end only while its reset is ahead, and cuts no pass off", async () => {
+test("#337: only GitHub's core REST quota spent is an outage of a write: a spent GraphQL or search quota leaves a Block to stand", async () => {
   await offline(
     () => Promise.reject(dns()),
     async ({ now }) => {
       waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
       const resetAt = now() + 60 * 60_000;
-      await assert.rejects(networkBack("https://api.github.test", net.RATE_LIMIT_SPENT, { resetAt, key: "https://api.github.test core anonymous" }), NetworkDown);
-      assert.equal(net.givenUp()?.resetAt, resetAt);
-      assert.throws(() => sessionLib.outageFirst("blocked"), (x) => x.resetAt === resetAt);
+      const spent = (url) => () => networkBack("https://api.github.test", net.RATE_LIMIT_SPENT, { resetAt, key: net.quotaKey(url, "t") });
+      for (const url of ["https://api.github.test/graphql", "https://api.github.test/search/issues"]) {
+        const decision = { exit: "delivered", reason: "" };
+        await sessionLib.exitStep(decision, "a read", spent(url));
+        assert.equal(decision.exit, "blocked", url);
+        assert.equal(decision.outage, null, url);
+        assert.equal(thrown(() => sessionLib.outageFirst(decision)), null, url);
+      }
+      const decision = { exit: "delivered", reason: "" };
+      await sessionLib.exitStep(decision, "the review label could not be applied", spent("https://api.github.test/repos/o/r/issues/70/labels"));
+      const end = thrown(() => sessionLib.outageFirst(decision));
+      assert.equal(end?.resetAt, resetAt, "the core quota: the stage ends on it, until its reset");
       assert.equal(net.stoppedWaiting(), false, "the stage still waits for its other hosts and quotas");
-      await OUTAGE.sleep(61 * 60_000);
-      assert.equal(net.givenUp(), null, "past its reset");
     },
   );
-});
-
-test("#337: the work and review stages put outageFirst before the exit they apply (the review also before its label comes off)", () => {
-  const SCRIPTS = join(import.meta.dirname, "..", "scripts");
-  const worker = readFileSync(join(SCRIPTS, "worker.mjs"), "utf8");
-  const final = worker.lastIndexOf("await applyExit(repo, { issue, pr, exit: decision.exit");
-  const gate = worker.lastIndexOf("outageFirst(decision.exit);");
-  assert.ok(gate > 0 && gate < final && !worker.slice(gate, final).includes("await "), "worker: the gate right before its exit");
-  assert.ok(gate > worker.indexOf("the split record could not be written"), "worker: after the split record's write");
-  const review = readFileSync(join(SCRIPTS, "review.mjs"), "utf8");
-  const first = review.indexOf("outageFirst(decision.exit);");
-  assert.ok(first > review.indexOf("const decision = decideExit(") && first < review.indexOf("await dropLabel();", first), "review: before its label comes off");
-  const last = review.lastIndexOf("outageFirst(decision.exit);");
-  const reviewFinal = review.lastIndexOf("await applyExit(repo, { issue, pr, exit: decision.exit");
-  assert.ok(last > review.indexOf("the merge failed (") && last < reviewFinal && !review.slice(last, reviewFinal).includes("await "), "review: after its merge path, right before its exit");
 });

@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -33,7 +33,7 @@ import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, prepareClone, refusalExit } from "./lib/local.mjs";
-import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, outageMet, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, reviewsCover, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
@@ -825,6 +825,9 @@ async function main() {
     publishPr(repo, { branch, base: defaultBranch, issue, issueTitle: issueData.title, prText: io.files()["pr.md"], fallbackBody: lastMessage(inputs.harness, rec), splitPart: splitNow(), pr: current, handover: await handoverNow() }, token).catch((e) => {
       log(`PR could not be ${current ? "updated" : "opened"}: ${e.message.slice(0, 200)}`);
       if (e.code === "closing-refs") publishRefused = e.message;
+      // No PR to deliver on because of an outage (network.mjs outageMet): the stage ends on that outage, not on a Block
+      // for the missing PR.
+      if (!(e.pr || current) && outageMet(e)) throw e;
       return e.pr || current;
     });
   if (found || (delta.count > 0 && !hits.length && !outbox.failed)) found = await publish(found);
@@ -928,15 +931,12 @@ async function main() {
   if (decision.exit === "delivered" && pr) {
     // A split Objective: this part's PR joins the record, with the items left for the next part (none for the last).
     const remaining = partLeft(asked.record);
-    try {
+    // Each of these exit steps that fails Blocks, tagged with the outage it met, if any (session.mjs exitStep, outageFirst).
+    await exitStep(decision, "the split record could not be written", async () => {
       const rec = await recordPart(repo, issue, pr.number, remaining, token);
       pr = await publishPr(repo, { branch, base: defaultBranch, issue, prText: null, splitPart: isSplitPart(rec, pr.number), pr }, token);
       if (rec) log(remaining ? `split: PR #${pr.number} is part ${rec.prs.length}; ${remaining} item(s) remain for the next part` : `split: PR #${pr.number} is the last of ${rec.prs.length} part(s)`);
-    } catch (e) {
-      decision.exit = "blocked";
-      decision.cause = "factory";
-      decision.reason = `the split record could not be written: ${e.message.slice(0, 160)}`;
-    }
+    });
   }
   if (decision.exit === "delivered" && pr && conflict) {
     // Ready, unvalidated and unlabelled: the dispatcher sends a ready In-review PR that conflicts back to a worker.
@@ -965,38 +965,24 @@ async function main() {
     // A maintainer's comment no pass has read (a change asked for after the review) has not reached the code: no merge.
     // The review job runs instead (relabel below) and its answer pass applies it. Unreadable comments Block.
     if (rebaseMode && reviewed) {
-      try {
+      await exitStep(decision, "the maintainers' comments could not be read before the merge", async () => {
         const { unread } = await unreadNow(repo, { issue, prNumber: pr.number, self: await progress.self() }, token);
         if (unread.length) {
           log(`${unread.length} maintainer decision(s) no pass has read; the review job applies them before any merge`);
           reviewed = false;
         }
-      } catch (e) {
-        decision.exit = "blocked";
-        decision.cause = "factory";
-        decision.reason = `the maintainers' comments could not be read before the merge: ${e.message.slice(0, 160)}`;
-      }
+      });
     }
     if (decision.exit === "delivered" && rebaseMode && reviewed && inputs.autoMerge) {
-      try {
+      await exitStep(decision, "the rebased head could not be recorded for the merge", async () => {
         await recordMergeable(repo, pr.number, issue, rebasedTo, token);
         log(`PR #${pr.number} rebased onto ${defaultBranch} as ${outbox.expected().slice(0, 7)}; it merges once its required checks are green`);
-      } catch (e) {
-        decision.exit = "blocked";
-        decision.cause = "factory";
-        decision.reason = `the rebased head could not be recorded for the merge: ${String(e.stderr || e.message).slice(0, 160)}`;
-      }
+      });
     }
     // Remove, then add: a label already present (a harness applied it early) fires no labeled event.
     if (decision.exit === "delivered") {
       if (!(rebaseMode && reviewed)) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
-      try {
-        await addLabels(repo, pr.number, [REVIEW_LABEL], token);
-      } catch (e) {
-        decision.exit = "blocked";
-        decision.cause = "factory";
-        decision.reason = `the review label could not be applied, so no review job would run: ${e.message.slice(0, 160)}`;
-      }
+      await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }
   }
   // The AI Gateway refused a relayed call for its own budget or credits, or the relay shut the gateway for calls it could
@@ -1013,9 +999,9 @@ async function main() {
   // its shell lacked: the opt-in (worker_secrets) and where the value goes on this route.
   const fixes = decision.exit === "blocked" ? [decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null, decision.missingSecrets ? missingSecretsFix(decision.missingSecrets, inputs.workerSecrets, backend().name === "local" ? "local" : "runner") : null].filter(Boolean) : [];
   const fix = fixes.length ? fixes.join(" ") : null;
-  // A Block decided after this stage gave up on an outage (a delivery write it failed, the harness's account of a run it
-  // cut off) is the outage's: the stage ends on it instead (session.mjs outageFirst, outageExit).
-  outageFirst(decision.exit);
+  // A Block that came from an outage (an exit step that met it) ends the stage on that outage instead (session.mjs
+  // outageFirst, outageExit); any other Block stands.
+  outageFirst(decision);
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation?.lastOutput : "", notify: inputs.notify, stage: "work", askOnIssue: askedAtPlan, fix, cause: decision.cause }, token);
   await finish(decision.exit, decision.reason);
   }

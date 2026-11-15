@@ -367,6 +367,31 @@ for (const [stage, end, how] of [
   });
 }
 
+test("outagePaused: pauses on GitHub's spent rate limit one after another count from the first, however long the runs between, so the 12-hour bound holds (#337)", async () => {
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    const first = Date.parse("2026-11-15T22:40:00Z");
+    let t = first;
+    loop.clock = () => t;
+    const paused = (at) => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "RATE_LIMIT_SPENT", since: new Date(at).toISOString(), reset: new Date(at + 40 * 60_000).toISOString(), quota: "core" } });
+    await loop.withClaim(7, paused(first));
+    // Resumed after the reset; the run lasts an hour, then meets the spent quota again.
+    t = first + 41 * 60_000;
+    loop.offline.get(7).resumedAt = t;
+    t += 60 * 60_000;
+    await loop.withClaim(7, paused(t));
+    assert.equal(loop.offline.get(7).since, first, "the same pause, counted from the first");
+    // A network pause long after a resume is still a new outage of its own.
+    loop.offline.get(7).resumedAt = t;
+    const net = t + OUTAGE.stageWaitMs + 60_000;
+    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "EAI_AGAIN", since: new Date(net).toISOString() } }));
+    assert.equal(loop.offline.get(7).since, net);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("resume: a review paused on an outage after its label came off (on its merge path) runs again; with no such pause here, nothing runs (#337)", async () => {
   const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "factory/7" }, labels: [] } });
   try {

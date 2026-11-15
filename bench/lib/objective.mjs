@@ -730,10 +730,13 @@ export function accountUse(usage) {
 /**
  * The usage records given and the stages' progress-line records (spendRecords) together, each stage once: a line whose
  * progress comment a given record names (its `progressRun`, plugin session.mjs writeUsage) is left out for that record.
+ * A given record of an account that names no comment (one written before `progressRun`) cannot be matched to a line,
+ * so that account's lines are all left out and the records given count alone for it.
  */
 export const withLines = (records = [], lines = []) => {
   const named = new Set(records.map((r) => r?.progressRun).filter((k) => typeof k === "string"));
-  return [...records, ...lines.filter((l) => !named.has(l.progressRun))];
+  const unmatched = new Set(records.filter((r) => typeof r?.account === "string" && typeof r.progressRun !== "string").map((r) => r.account));
+  return [...records, ...lines.filter((l) => !named.has(l.progressRun) && !unmatched.has(l.account))];
 };
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20, 1 limit pause)". */

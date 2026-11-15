@@ -856,3 +856,65 @@ test("#266: a paused Objective's move and its stage weigh the same account; when
     gh.restore();
   }
 });
+
+test("#266: no-reset refusals in a row on one account are passed over 1, 4, then 24 hours, though each pass had output; a served pass ends the guess for good; guesses stay out of the back-off count; a serve with the setting off writes none", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      gh.apply("factory:account:alpha");
+      loop.result = { exit: "blocked", tokens: { output: 500 }, limitRefused: { harness: "claude" } };
+      const ends = [];
+      for (let i = 0; i < 3; i++) {
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+        ends.push(loop.holds.avoidUntil("alpha", t) - t);
+        t += 1000;
+      }
+      assert.deepEqual(ends, [60, 240, 1440].map((m) => m * MIN));
+      assert.equal(loop.holds.until("alpha", t), null, "never a hold");
+      // Off: a refusal writes no guess.
+      const off = serveOn(h, () => t);
+      gh.remove("factory:account:alpha");
+      off.result = loop.result;
+      assert.equal((await off.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(off.holds.avoidUntil("beta", t), null);
+      assert.equal(loop.holds.avoidUntil("alpha", t) - (t - 1000), 1440 * MIN, "the count unchanged by it");
+    });
+  } finally {
+    gh.restore();
+  }
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t0 = Date.now();
+  const holds = accountHolds({ dir });
+  holds.spent({ harness: "claude", account: "a", now: t0 });
+  holds.spent({ harness: "claude", account: "a", now: t0 + 1 });
+  holds.served({ harness: "claude", account: "a", now: t0 + 2 * MIN, started: t0 + MIN });
+  for (const later of [2 * MIN, 61 * MIN, 125 * MIN, 230 * MIN]) assert.equal(accountHolds({ dir }).avoidUntil("a", t0 + later), null, `ended for good (${later / MIN} min on)`);
+  // Two guesses, then a limit with a near reset: its back-off is the first step, not the third.
+  holds.spent({ harness: "claude", account: "b", now: t0 });
+  holds.spent({ harness: "claude", account: "b", now: t0 + 1 });
+  assert.equal(holds.limit({ harness: "claude", account: "b", reset: t0 + 2 + MIN, now: t0 + 2 }), t0 + 2 + 2 * MIN);
+});
+
+test("#266: with every account held and the first to end a guess, the pause says an estimate, never a reset", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      loop.holds.spent({ harness: "claude", account: "alpha", now: t });
+      for (const n of ["beta", "gamma"]) loop.holds.limit({ harness: "claude", account: n, reset: t + 120 * MIN, now: t });
+      assert.match(loop.limitHold(["factory:objective"], 8, "u"), /the first, claude account alpha, resets at about /);
+      const held = await work(loop);
+      assert.deepEqual([held.exit, held.account, held.usageLimit.guessed], ["paused", "alpha", true]);
+      const body = gh.notices()[0].body;
+      assert.match(body, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about \S+, an estimate/);
+      assert.ok(!body.includes("resets at"), body);
+    });
+  } finally {
+    gh.restore();
+  }
+});

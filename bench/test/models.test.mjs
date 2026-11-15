@@ -76,6 +76,12 @@ test("#266: the row gives each local account its stages, dollars and usage-limit
     { account: "alpha", stages: 1, usd: 0.5, limitPauses: 1 },
     { account: "beta", stages: 2, usd: 1.55, limitPauses: 0 },
   ], "the records' figures for their stages, the review's line added, nothing twice");
+  // A result.json from before `progressRun` cannot be matched to a line: its account's lines are left out, never both.
+  c.usage = [{ artifact: "usage-work-1/result.json", harness: "codex", account: "alpha", usd: 0.5, exit: "paused", usageLimit: { harness: "codex", reset: "2031-03-02T05:00:00Z", since: "2031-03-02T00:50:00Z" } }, c.usage[1]];
+  assert.deepEqual(score(c).accountUse, [
+    { account: "alpha", stages: 1, usd: 0.5, limitPauses: 1 },
+    { account: "beta", stages: 2, usd: 1.55, limitPauses: 0 },
+  ]);
   // No dollars anywhere (no spend lines, no usage): the stages and pauses still count.
   const bare = localMerge(65);
   bare.issueComments = bare.issueComments.map((x) => ({ ...x, body: x.body.replace(/\n<!-- factory:spend [^\n]* -->/, "") }));

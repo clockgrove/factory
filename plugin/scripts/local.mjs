@@ -76,9 +76,10 @@ const limitName = (harness, account) => (account === harness ? harness : `${harn
  * name; the harness's own name with none declared), its reset (`reset`, ms) and window (`window`, as the harness named
  * it, or null), and `free`, the names of the harness's other accounts free now, each with its label. `note`: a line
  * about the issue's account labels. `auto`: automatic account choice is on (#266), so the loop moves the Objective to a
- * free account itself. Account names only: no path, no login, no @mention.
+ * free account itself. `guessed`: every account was held and `reset` is the end of a no-reset limit's guess (holds.mjs
+ * spent), an estimate, never called a reset. Account names only: no path, no login, no @mention.
  */
-export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null, auto = false }) {
+export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null, auto = false, guessed = false }) {
   const h = HARNESS_NAMES[harness] || harness;
   const who = account === harness ? `${h} (this machine's one ${h} login)` : `${h} account \`${account}\``;
   // The window as the harness named it, only in its own form: harness output never reaches the issue as it is.
@@ -90,7 +91,10 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
     : free.length
       ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
       : `No other ${h} account on this machine is free now.`;
-  return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
+  const head = guessed
+    ? `Factory: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Factory resumes this Objective on this machine then, or sooner on an account that comes free.`
+    : `Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`;
+  return [head, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
 /**
@@ -105,7 +109,8 @@ const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more th
 /** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */
 const PIN_FIX = "Apply one `factory:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/factory/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `factory:objective`.";
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
-const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+/** A usage limit or quota that Blocked it with no reset reported (`limitRefused`) is a refusal too, never a served pass. */
+const servedPass = (r) => !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
 /** A pinned release serve could not fetch or start is tried again after this long (followPin). */
 export const PIN_RETRY_MS = 10 * 60_000;
 /** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
@@ -1302,8 +1307,10 @@ export class Local {
     const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(hold, { guess: !!runs.auto }) : null;
     if (until !== null) {
       rmSync(usageDir, { recursive: true, force: true });
-      this.saidLimit(runs.harness, account, hold, until);
-      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+      // A guess's end (no reset was reported: holds.mjs spent) is no reset, and is said as an estimate.
+      const guessed = until !== this.limitUntil(hold);
+      this.saidLimit(runs.harness, account, hold, until, guessed);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true, ...(guessed ? { guessed: true } : {}) } };
     }
     if (runs.auto) log(`#${issue}: the ${name} stage runs on ${limitName(runs.harness, account)}, chosen automatically`);
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
@@ -1400,8 +1407,9 @@ export class Local {
           // when the stage started after the newest limit met there (holds.mjs served).
           if (runs.account && result && servedPass(result)) this.holdStore(hold).served({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), started });
           // Blocked on its usage limit with no reset reported (session.mjs writeUsage `limitRefused`): automatic account
-          // choice, in any serve here, passes the account over for a while (holds.mjs spent); nothing else holds on it.
-          if (runs.account && result?.exit === "blocked" && result.limitRefused) {
+          // choice, in this serve and any other here that has it on, passes the account over for a while (holds.mjs spent);
+          // nothing else holds on it, and a serve with it off writes no guess.
+          if (this.auto && runs.account && result?.exit === "blocked" && result.limitRefused) {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null });
             log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
           }
@@ -1711,8 +1719,9 @@ export class Local {
     if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now, window: l.limitType ?? null });
     (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset, hold: hold.key, account, pinned: !!result.pinned, pin: result.pin ?? null });
     this.lapsed?.delete(issue);
-    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
-    if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null, pinned: !!result.pinned });
+    const until = l.guessed ? `is passed over until about ${new Date(reset).toISOString()} (no reset was reported)` : `is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}`;
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit ${until}; the claim stays and this loop resumes it after then`);
+    if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null, pinned: !!result.pinned, ...(l.guessed ? { guessed: true } : {}) });
   }
 
   /**
@@ -1951,9 +1960,10 @@ export class Local {
       const held = ends.filter((e) => e.until !== null);
       if (!held.length) return null;
       const first = held.reduce((x, y) => (y.until < x.until ? y : x));
-      for (const e of held) this.saidLimit(harness, e.a.name, e.hold, e.until);
+      for (const e of held) this.saidLimit(harness, e.a.name, e.hold, e.until, e.until !== this.limitUntil(e.hold));
       const h = HARNESS_NAMES[harness] || harness;
-      const at = new Date(first.until).toISOString();
+      // The first to end may be a guess (no reset reported): an estimate, said as one.
+      const at = `${first.until !== this.limitUntil(first.hold) ? "about " : ""}${new Date(first.until).toISOString()}`;
       if (every.length === 1) return `${limitName(harness, first.a.name)}'s usage limit is spent until ${at}`;
       return held.length === every.length ? `every ${h} account on this machine has its usage limit spent; the first, ${limitName(harness, first.a.name)}, resets at ${at}` : `every ${h} account on this machine has its usage limit spent or cannot run here; the first to reset, ${limitName(harness, first.a.name)}, resets at ${at}`;
     }
@@ -1965,12 +1975,13 @@ export class Local {
   }
 
   /** The log line that no stage starts on `account` until its usage limit's reset (`until`, ms): once per reset. */
-  saidLimit(harness, account, hold, until) {
+  saidLimit(harness, account, hold, until, guessed = false) {
     const key = `${hold.key}@${until}`;
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
     const who = limitName(harness, account);
-    log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
+    if (guessed) log(`${who} reached its usage limit with no reset reported; automatic account choice passes it over until about ${new Date(until).toISOString()}`);
+    else log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
   }
 
   /**

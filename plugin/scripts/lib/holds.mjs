@@ -102,22 +102,26 @@ function readDir(dir, now, uid) {
 
 /**
  * An account's hold from its records: the latest reset any names (`until`, and that record's window, when it names one;
- * null with only guesses), the newest record's streak (of two made in the same millisecond, the longer streak), when the
- * newest usage limit was met (`limitedAt`: a served pass's record is no limit), and the guess (`guess`: accountHolds.spent)
- * its newest unserved no-reset limit stands for, {until, streak}, or null; null with no record.
+ * null with only guesses), the newest such record's back-off streak and time (`streak`, `at`: of two made in the same
+ * millisecond, the longer streak; 0 and null with none), when the newest usage limit was met (`limitedAt`: a served
+ * pass's record is no limit), and the guess (`guess`: accountHolds.spent) its no-reset limits since the last served pass
+ * stand for, {until, streak, at} (their own count, apart from the back-off's), or null; null with no record.
  */
 function fold(records, account, now) {
   const mine = records.filter((r) => r.account === account && now - r.until <= HOLD_FORGET_MS);
   if (!mine.length) return null;
-  const newest = mine.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a));
+  const newestOf = (list) => (list.length ? list.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a)) : null);
   const hard = mine.filter((r) => !r.guess);
-  const latest = hard.length ? hard.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a)) : null;
+  const newest = newestOf(hard);
+  // A served pass's record holds nothing: its end only keeps it as long as the hold and the guess it outlives.
+  const limitsMet = hard.filter((r) => !r.served);
+  const latest = limitsMet.length ? limitsMet.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a)) : null;
   const limits = mine.filter((r) => !r.served).map((r) => r.at);
   // A served pass after a no-reset limit shows the account is not spent: that guess is over.
   const served = Math.max(-Infinity, ...mine.filter((r) => r.served).map((r) => r.at));
   const guesses = mine.filter((r) => r.guess && r.at > served);
-  const guess = guesses.length ? guesses.reduce((a, b) => (b.at > a.at ? b : a)) : null;
-  return { harness: newest.harness, until: latest?.until ?? null, streak: newest.streak, at: newest.at, window: latest?.window ?? null, limitedAt: limits.length ? Math.max(...limits) : null, guess: guess ? { until: Math.max(...guesses.map((r) => r.until)), streak: guess.streak } : null };
+  const guess = newestOf(guesses);
+  return { harness: newestOf(mine).harness, until: latest?.until ?? null, streak: newest?.streak ?? 0, at: newest?.at ?? null, window: latest?.window ?? null, limitedAt: limits.length ? Math.max(...limits) : null, guess: guess ? { until: Math.max(...guesses.map((r) => r.until)), streak: guess.streak, at: guess.at } : null };
 }
 
 /** A stage-start record's file (accountHolds.started): one per account, replaced whole at each start. */
@@ -135,7 +139,8 @@ const START = (key) => `${key}.started.json`;
  *   last ahead) is not taken at its word: the hold is at least now plus a backoff that grows with each such pause in
  *   a row on that account (2, 5, 10, then 15 minutes); a reset further out starts the count again. Returns the hold's end.
  * - `served({harness, account, now, started})`: a pass on the account completed, its stage started at `started` (ms):
- *   the streak ends (its hold, if any, stays) when that start is after the newest record's.
+ *   the streak ends (its hold, if any, stays) when that start is after the newest record's, and a guess (`spent`) made
+ *   before that start is over.
  * - `limitedAt(account, now)`: when a stage last met the account's usage limit (ms), while its records are kept; else null.
  * - `spent({harness, account, now, window})`: a stage on the account was Blocked on its usage limit with no reset reported.
  *   Only automatic account choice (#266) weighs it (`avoidUntil`), for SPENT_GUESS_MS by how many in a row, until a pass
@@ -195,7 +200,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       return h && h.until > now ? h.window : null;
     },
     held(harness, now, guesses = false) {
-      return records(now).some((r) => r.harness === harness && (guesses || !r.guess) && r.until > now);
+      return records(now).some((r) => r.harness === harness && !r.served && (guesses || !r.guess) && r.until > now);
     },
     avoidUntil(account, now) {
       const h = of(account, now);
@@ -219,8 +224,10 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     served({ harness, account, now, started }) {
       const h = of(account, now);
       // Only a pass that started after the newest limit met: one that ran before it says nothing of the account now.
-      // Its record lasts as long as the hold, so the older streak never becomes the newest again when it is forgotten.
-      if (h?.streak > 0 && started > h.at) put({ harness, account, until: Math.max(now, h.until ?? now), streak: 0, at: now, served: true });
+      // Its record lasts as long as the hold and the guess it ends, so neither older record stands again once it is gone.
+      const backoff = h?.streak > 0 && started > h.at;
+      const guess = !!h?.guess && started > h.guess.at;
+      if (backoff || guess) put({ harness, account, until: Math.max(now, h.until ?? now, h.guess?.until ?? now), streak: 0, at: now, served: true });
     },
     limitedAt(account, now) {
       return of(account, now)?.limitedAt ?? null;

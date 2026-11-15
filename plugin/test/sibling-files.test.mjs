@@ -348,3 +348,57 @@ test("#277: a rebase stage's progress comment carries its rebase line on every r
   assert.match(table.split("\n")[0], /\| Rebases \| Harness \|$/);
   assert.match(table.split("\n")[2], /\| 2, \$1\.25 \|/);
 });
+
+test("#277: a stopped rebase stage whose end runs out of time still leaves its rebase line: set before the slow read, written by the stop's write, never overwritten by the fallback", async () => {
+  const { createServer } = await import("node:http");
+  const { spawn } = await import("node:child_process");
+  const { pathToFileURL } = await import("node:url");
+  const { join } = await import("node:path");
+  const lib = (f) => JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", f)).href);
+  const bodies = [];
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.method === "GET") return res.end("[]");
+      const text = JSON.parse(b || "{}").body || "";
+      bodies.push(`${req.method} ${text}`);
+      res.end(JSON.stringify({ id: 9, user: { login: "me", type: "User" }, body: text }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const run = async (steps) => {
+    const script = `
+      import { progressReporter, rebaseExitLine, stoppedRebase } from ${lib("session.mjs")};
+      import { repoOf } from ${lib("github.mjs")};
+      const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "1", soFar: null });
+      await progress("harness");
+      ${steps}
+      progress.flushNow();
+      process.exit(0);
+    `;
+    bodies.length = 0;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    child.stderr.on("data", (c) => (err += c));
+    assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);
+    return bodies.at(-1) || "";
+  };
+  try {
+    // The end's read of the earlier rebases never answers; the stop's fallback (worker endNow) runs meanwhile.
+    const slow = await run(`void rebaseExitLine(progress, 7, { usd: 0.6, conflict: true, passes: 1 }, () => new Promise(() => {}));
+      stoppedRebase(progress, true, [{ label: "work-1", usd: null }]);`);
+    assert.match(slow, /^PATCH /, "the stop's write is made");
+    assert.deepEqual(rebaseCostOf(slow), { usd: 0.6, conflict: true }, "the end's own figure, not the fallback's");
+    // A clean rebase stopped before its end set the line: $0 spend already shown, the rebase line still written.
+    const clean = await run(`progress.spend(0);
+      stoppedRebase(progress, false, [{ label: "rebase", usd: 0, noRun: true }]);`);
+    assert.deepEqual(rebaseCostOf(clean), { usd: 0, conflict: false });
+    // A stopped pass counts at its live reading (stop.mjs stoppedRecords).
+    const cut = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: 0.42, usdLowerBound: true }]);`);
+    assert.deepEqual(rebaseCostOf(cut), { usd: 0.42, conflict: false });
+  } finally {
+    server.close();
+  }
+});

@@ -76,7 +76,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalField
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCostMarker, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -782,6 +782,28 @@ export const progressTail = ({ harness = null, model = "", ran = null, spend = n
   `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`factory:host:\` labels).` : "");
+/**
+ * A send-back rebase stage's end (#277): its rebase line (`usd`, `conflict`) is set on the progress comment first, so a
+ * stop's write (progress.flushNow) carries it even when the read after it outlasts the stop; then the earlier rebases are
+ * read (`read`, the issue's comments; null reads none) for the exit line's words (logic.mjs rebaseLine).
+ */
+export async function rebaseExitLine(progress, issue, { usd, conflict, passes = 0 }, read = null) {
+  progress.rebase({ usd, conflict });
+  const comments = read ? await read().catch(() => null) : null;
+  return rebaseLine({ usd, conflict, passes }, comments ? rebaseTally(comments, issue) : null);
+}
+
+/**
+ * The rebase line of a stopped rebase stage whose end ran out of time (worker endNow), unless the end set it already:
+ * its passes' dollars as the stop read them (stop.mjs stoppedRecords: a pass cut short counts at its live reading),
+ * $0 with no harness pass, unmetered when a pass that ran has no figure.
+ */
+export function stoppedRebase(progress, conflict, recs = []) {
+  if (progress.rebased()) return;
+  const unpriced = recs.some((r) => r && !r.noRun && !(typeof r.usd === "number" && Number.isFinite(r.usd)));
+  progress.rebase({ usd: unpriced ? null : Math.round(sumSpend(recs) * 1e4) / 1e4, conflict });
+}
+
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 
@@ -813,6 +835,9 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   // The comment as the last write that landed left it: its id and the spend its line shows.
   let commentId = null;
   let shown = 0;
+  // The spend part of the last body that landed (bodyOf `interim`), and whether that body carried the rebase line.
+  let shownInterim = {};
+  let rebaseShown = false;
   let stopHook = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
@@ -836,25 +861,32 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     if (spend !== null || commentId === null) return;
     let live = null;
     try {
-      live = soFarNow();
+      live = soFarNow ? soFarNow() : null;
     } catch {
-      return;
+      live = null;
     }
-    if (!Number.isFinite(live?.usd) || !(live.usd > shown)) return;
-    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(interimOf(live))}` }, token }, { ms: STOP_WRITE_MS });
-    if (!r.ok) log(`progress: the stopped stage's spend line ($${live.usd}) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
-    if (r.ok || r.sent) live.commit?.();
+    const more = Number.isFinite(live?.usd) && live.usd > shown;
+    // A rebase line set since the last write that landed (progress.rebase) is written now too, the spend part kept.
+    const withRebase = rebase !== null;
+    if (!more && !(withRebase && !rebaseShown)) return;
+    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(more ? interimOf(live) : shownInterim)}` }, token }, { ms: STOP_WRITE_MS });
+    if (!r.ok) log(`progress: the stopped stage's ${more ? `spend line ($${live.usd})` : "rebase line"} ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+    if (r.ok && withRebase) rebaseShown = true;
+    if (more && (r.ok || r.sent)) live.commit?.();
   };
   const write = async () => {
     const live = spend === null && soFar ? await soFar().catch(() => null) : null;
     const counted = spend === null && Number.isFinite(live?.usd);
     const interim = counted ? interimOf(live) : { spend, spendParts };
     const body = bodyOf(interim);
+    const withRebase = rebase !== null;
     lastWrite = Date.now();
     const wrote = await upsertComment(repo, issue, key, body, { token }).then(
       (c) => {
         if (Number.isInteger(c?.id)) commentId = c.id;
         shown = Number(interim.spend) || 0;
+        shownInterim = interim;
+        if (withRebase) rebaseShown = true;
         return true;
       },
       (e) => {
@@ -899,16 +931,25 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   progress.flushNow = () => {
     if (spend === null) return stopWrite();
-    // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once.
-    if (commentId === null || !(spend > shown)) return;
+    // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once,
+    // with the rebase line when that has not landed either.
+    const withRebase = rebase !== null;
+    if (commentId === null || (!(spend > shown) && !(withRebase && !rebaseShown))) return;
     const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf({ spend, spendParts })}` }, token }, { ms: STOP_WRITE_MS });
-    if (r.ok) shown = spend;
-    else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+    if (r.ok) {
+      shown = spend;
+      if (withRebase) rebaseShown = true;
+    } else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
   };
-  /** A send-back's rebase stage: its rebase line (logic.mjs rebaseCostMarker), written with the next write. */
+  /**
+   * A send-back's rebase stage: its rebase line (logic.mjs rebaseCostMarker), written with the next write, or by a stop's
+   * write (flushNow) when the stage's end runs out of time.
+   */
   progress.rebase = (r) => {
     rebase = r;
   };
+  /** Whether the rebase line is set (progress.rebase). */
+  progress.rebased = () => rebase !== null;
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;

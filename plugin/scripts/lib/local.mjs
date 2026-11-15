@@ -1548,11 +1548,12 @@ export function homePlaces(harness, env = {}, home = homedir()) {
   const roots = [...new Set([...(own ? [own.dir] : []), ...(harness === "claude" ? [join(home, ".claude")] : [])].map(realPlace))];
   // The stage's own login's entries (credentialPaths `own`: what bears it, or a Codex or Copilot home whole) leave the
   // refused list, its login files excepted; every other login's stay, one nested in the stage's own folder included.
+  // Every name of it: a default home linked to the folder CLAUDE_CONFIG_DIR or CODEX_HOME names is one login, listed twice.
   const logins = harnessLogins(home, env, { declared: own ? [own] : [] });
-  const mine = own ? logins.find((l) => l.harness === own.harness && sameDir(l.dir, own.dir)) : null;
-  const ownEntries = new Set((mine ? (mine.harness === "claude" ? mine.bearing : mine.files) : []).map(realPlace));
+  const isMine = (l) => !!own && l.harness === own.harness && sameDir(l.dir, own.dir);
+  const ownEntries = new Set(logins.filter(isMine).flatMap((l) => (l.harness === "claude" ? l.bearing : l.files)).map(realPlace));
   const ownFiles = harness === "claude" ? ownLogin("claude", env, home) : harness === "codex" && own ? [join(own.dir, "auth.json")] : [];
-  const others = logins.filter((l) => l !== mine).flatMap((l) => [...l.files, ...l.bearing]);
+  const others = logins.filter((l) => !isMine(l)).flatMap((l) => [...l.files, ...l.bearing]);
   const denied = [...new Set([...credentialPaths(home, env, { own }).map(realPlace).filter((c) => !ownEntries.has(c)), ...others.map(realPlace), ...ownFiles.map(realPlace)])];
   const where = (real) => (denied.some((c) => within(real, c)) ? "in a credential store or another harness login" : roots.some((r) => within(real, r) || r.startsWith(`${real}/`)) ? null : "outside the harness homes this stage may write");
   return {

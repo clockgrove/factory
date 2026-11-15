@@ -1,10 +1,10 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ensureHarnessHomes, gitPinFile, pinGitDir } from "../scripts/lib/local.mjs";
+import { credentialPaths, ensureHarnessHomes, gitPinFile, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
 import { Local, homeLinkReason } from "../scripts/local.mjs";
 
 // A stand-in home with a second Claude Code config folder (`.claude-two`, CLAUDE_CONFIG_DIR) that shares the default
@@ -105,6 +105,33 @@ test("#261: another login nested in the stage's own folder stays refused: a link
   symlinkSync(join(two2, "own-plans"), join(two2, "plans"));
   ensureHarnessHomes("claude", { ...env2, CODEX_HOME: join(two2, "codex") }, h2);
   assert.ok(lstatSync(join(two2, "own-plans")).isDirectory());
+});
+
+test("#261: a default home that is a link to the stage's own folder is the stage's own login, not another's", () => {
+  // Codex: ~/.codex a link to the folder CODEX_HOME names; Claude Code: ~/.claude a link to CLAUDE_CONFIG_DIR's folder.
+  for (const [harness, name, variable] of [["codex", ".codex", "CODEX_HOME"], ["claude", ".claude", "CLAUDE_CONFIG_DIR"]]) {
+    const h = mkdtempSync(join(tmpdir(), "home-"));
+    const real = join(h, "mnt", harness);
+    mkdirSync(real, { recursive: true });
+    symlinkSync(real, join(h, name));
+    const env = { [variable]: real };
+    ensureHarnessHomes(harness, env, h);
+    assert.ok(lstatSync(join(real, "skills")).isDirectory(), `${harness}: its state is made`);
+    if (harness === "claude") assert.ok(lstatSync(join(real, "sessions")).isDirectory(), "its own sessions too");
+    // The same through the default name.
+    ensureHarnessHomes(harness, {}, h);
+    // #260's list: the stage's own folder is never denied as another login's (Claude Code), nor beyond its own home (Codex).
+    const own = stageLogin(harness, env, h);
+    const denied = credentialPaths(h, env, { own });
+    if (harness === "claude") assert.ok(!denied.includes(real) && !denied.includes(join(h, ".claude")), "not denied whole");
+    else assert.deepEqual(denied.filter((p) => p === real || p.startsWith(`${real}/`) || p === join(h, ".codex")).sort(), [join(h, ".codex"), real].sort(), "its home, under both names, as for any Codex stage");
+    // A guarded directory planted as a link to its own login file, not there yet, is still refused.
+    const file = join(real, harness === "claude" ? ".credentials.json" : "auth.json");
+    const link = join(real, harness === "claude" ? "plans" : "memories");
+    rmSync(link, { recursive: true });
+    symlinkSync(file, link);
+    refused(() => ensureHarnessHomes(harness, env, h), { link, target: file });
+  }
 });
 
 test("#261: a file where the harness keeps a directory, or a link to one, is refused with home-link", () => {

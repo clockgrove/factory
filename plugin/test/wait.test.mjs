@@ -240,20 +240,40 @@ test("drained after a restart (#272 review): the cursor carries the queue's stat
   assert.deepEqual(active.lines.map((l) => [l.event, l.issue]), [["blocked", 8], ["drained", null]]);
 });
 
-test("drained again within one read (#285 review): an Objective back to work and Blocked again before the next read is a new drain", async () => {
+test("drained is the queue's state (#285 review): told when a read finds it drained and the read before did not, and only then", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:running"]);
   gh.issue(6, [OBJ, "factory:blocked"]);
-  // Both steps happen between two reads: #6 re-queued, run and Blocked again while #5 has Blocked.
-  const r = await waiting(gh, [() => gh.state(5, "factory:blocked"), () => (gh.state(6, null), gh.state(6, "factory:running"), gh.state(6, "factory:blocked")), () => gh.event(5, "closed")], { follow: true, timeoutMs: 125_000, kinds: ["drained"] });
+  // #5 Blocks; #6 goes back to work (a read sees it Running), then Blocks again; then #5, Blocked, closes.
+  const r = await waiting(gh, [() => gh.state(5, "factory:blocked"), () => gh.state(6, "factory:running"), () => gh.state(6, "factory:blocked"), () => gh.event(5, "closed")], { follow: true, timeoutMs: 155_000, kinds: ["drained"] });
   assert.deepEqual(r.lines.map((l) => l.event), ["drained", "drained", "timeout"], "the close of a Blocked one is no new drain");
-  // The Done pass's tidy of a closed Blocked one (its state label off) resumes nothing: no drain again.
-  const tidy = await waiting(gh, [() => (gh.event(6, "closed"), gh.event(6, "unlabeled", "factory:blocked"))], { since: parseCursor(r.lines.at(-1).cursor), follow: true, timeoutMs: 35_000, kinds: ["drained"] });
+  // The Done pass's tidy of a closed Blocked one (its state label off) leaves the queue drained: no drain again.
+  const tidy = await waiting(gh, [() => (gh.event(5, "unlabeled", "factory:blocked"))], { since: parseCursor(r.lines.at(-1).cursor), follow: true, timeoutMs: 35_000, kinds: ["drained"] });
   assert.deepEqual(tidy.lines.map((l) => l.event), ["timeout"]);
-  // Reopened (back to Queued) and closed again between two reads: both events carry the issue closed, yet it went back
-  // to work in between, so the queue drains anew.
-  const again = await waiting(gh, [() => (gh.event(6, "reopened"), gh.event(6, "closed"))], { since: parseCursor(tidy.lines.at(-1).cursor), follow: true, timeoutMs: 35_000, kinds: ["drained"] });
-  assert.deepEqual(again.lines.map((l) => l.event), ["drained", "timeout"]);
+});
+
+test("a Blocked Objective closed and reopened, still Blocked (#285 review), leaves the queue drained: no second drain", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:blocked"]);
+  const r = await waiting(gh, [() => gh.state(5, "factory:blocked"), () => (gh.event(6, "closed"), gh.event(6, "reopened"))], { follow: true, timeoutMs: 65_000, kinds: ["drained"] });
+  assert.deepEqual(r.lines.map((l) => l.event), ["drained", "timeout"]);
+});
+
+test("a read pages back through the cursor's window (#285 review): an event GitHub lists late, one page below the newest, is told", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(9, ["bug"]);
+  gh.event(5, "labeled", "factory:running");
+  for (let i = 0; i < WAIT_PAGE - 1; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
+  const r = await waiting(gh, [() => {
+    for (let i = 0; i < 15; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
+  }, () => {
+    // #5's Block, its id just above the 31st newest event: GitHub lists it on page 2, below ids the last read returned.
+    const below = [...gh.s.events].sort((x, y) => y.id - x.id)[WAIT_PAGE];
+    gh.event(5, "labeled", "factory:blocked", below.id + 3);
+  }], { follow: true, timeoutMs: 65_000, kinds: ["blocked"] });
+  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["blocked", 5], ["timeout", null]]);
 });
 
 test("a wait whose kinds leave drained out (#285 review) carries no queue state on its cursor, so a later wait tells the drain", async () => {

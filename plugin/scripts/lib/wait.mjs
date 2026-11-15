@@ -1,8 +1,10 @@
 // `factory wait` (#272): an orchestrating session waits on the queue and is told when an Objective Blocks, asks a
 // Question, goes In review, merges or closes, or the queue drains. It reads GitHub only, so it works for every route
-// (the Action, a cloud sandbox, any machine's `factory serve`) with or without a loop on this machine. One conditional
-// read of the repository's issue events per poll: an unchanged page is a 304, which GitHub's rate limit does not count.
-// Decided on structure only: the event's type, the label it names, the issue's labels and its PR's merge time.
+// (the Action, a cloud sandbox, any machine's `factory serve`) with or without a loop on this machine. Each poll reads
+// the repository's issue events back through the cursor's window, and the open Objectives when an event is new, all
+// conditional: an unchanged page is a 304, which GitHub's rate limit does not count. Blocks, Questions, In review and
+// closes are events, each told once by id; drained is the open Objectives' state. Decided on structure only: the
+// event's type, the label it names, the issue's labels and its PR's merge time.
 import { rest } from "./github.mjs";
 import { DRAFT_LABEL, isDraft } from "./stop.mjs";
 
@@ -21,10 +23,9 @@ export const WAIT_MAX_PAGES = 10;
  * late, below one already read, is still told, after a restart too; at most WAIT_SEEN of them.
  */
 export const WAIT_LOOKBACK_MS = 5 * 60_000;
-export const WAIT_SEEN = 100;
+export const WAIT_SEEN = 50;
 
 const STATE_KINDS = { "factory:blocked": "blocked", "factory:question": "question", "factory:in-review": "in-review" };
-const STATE_LABELS = new Set(["factory:running", ...Object.keys(STATE_KINDS)]);
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
 /**
@@ -87,22 +88,9 @@ export function eventKind(e, objectiveLabel) {
 }
 
 /**
- * Whether an event can change whether the queue is drained: a state label or the Objective label on or off, or, on an
- * issue carrying the Objective label, the draft label on or off, a close or a reopen.
- */
-export function movesQueue(e, objectiveLabel) {
-  if (!e?.issue || e.issue.pull_request) return false;
-  const label = e.label?.name;
-  const labelling = e.event === "labeled" || e.event === "unlabeled";
-  if (labelling && (STATE_LABELS.has(label) || label === objectiveLabel)) return true;
-  if (!names(e.issue).includes(objectiveLabel)) return false;
-  return e.event === "closed" || e.event === "reopened" || (labelling && label === DRAFT_LABEL);
-}
-
-/**
- * Each event's issue as it was right after the event: GitHub gives every event its issue as it is now, so walking one
- * issue's events (oldest first, as eventsAfter gives them) back from its newest takes each later close, reopen and label
- * change off again. Keyed by event id.
+ * Each event's issue with its labels as they were right after the event: GitHub gives every event its issue as it is
+ * now, so walking one issue's events (oldest first, as eventsAfter gives them) back from its newest takes each later
+ * label change off again. Keyed by event id.
  */
 export function issuesAsOf(events) {
   const now = new Map();
@@ -115,27 +103,10 @@ export function issuesAsOf(events) {
     const i = now.get(n);
     out.set(e.id, { ...i, labels: [...i.labels] });
     const label = e.label?.name;
-    if (e.event === "closed") i.state = "open";
-    else if (e.event === "reopened") i.state = "closed";
-    else if (e.event === "labeled") i.labels = i.labels.filter((l) => l !== label);
+    if (e.event === "labeled") i.labels = i.labels.filter((l) => l !== label);
     else if (e.event === "unlabeled" && label && !i.labels.includes(label)) i.labels = [...i.labels, label];
   }
   return out;
-}
-
-/**
- * Whether an event puts an Objective back to work (Queued, Running or In review), on an issue open, no draft and
- * carrying the Objective label right after it (issuesAsOf): its Objective label on, a Blocked or Question label off, the
- * Running or In review label on, the draft label off, or a reopen. A drain told before it can then be told again, even
- * when the read after it finds the queue drained once more, and even when the Objective has closed again since.
- */
-export function activates(e, objectiveLabel) {
-  // Only on an Objective that can run: a closed, draft or stopped one's labels coming off (the Done pass's tidy) resume nothing.
-  if (!e?.issue || e.issue.pull_request || e.issue.state !== "open" || isDraft(e.issue) || !names(e.issue).includes(objectiveLabel)) return false;
-  const label = e.label?.name;
-  if (e.event === "labeled") return label === objectiveLabel || label === "factory:running" || label === "factory:in-review";
-  if (e.event === "unlabeled") return label === "factory:blocked" || label === "factory:question" || label === DRAFT_LABEL;
-  return e.event === "reopened";
 }
 
 /**
@@ -152,21 +123,23 @@ export function drainedOf(open, watched = null) {
 }
 
 /**
- * The repository's issue events after `cursor`, oldest first: page 1 as a conditional read (`cache`), then older pages
- * only while every event on a page is new (a resume after a long gap), at most WAIT_MAX_PAGES (`gap` when the cursor
- * was not reached). Deduplicated by id, since events arriving while pages are read shift older ones onto the next page.
- * With `seen` (ids already read, at most WAIT_SEEN), an unseen event at or below the cursor but within the ids kept is
- * new too: GitHub listed it after a newer one was read. `read` is every event read. A cursor newer than every event of the
- * repository is no cursor of it: an error with code `cursor-elsewhere`.
+ * The repository's issue events after `cursor`, oldest first, each page a conditional read (`cache`): pages back until
+ * one reaches the cursor's window, at most WAIT_MAX_PAGES (`gap` when it was not reached). For an id cursor the window
+ * is `seen` (the ids already read, the cursor's own included): an unseen event above its oldest id is new too, since
+ * GitHub listed it after a newer one was read, so the pages go back to that oldest id, not to the first id seen. For a
+ * time cursor, to an event at or before it. Deduplicated by id, since events arriving while pages are read shift older
+ * ones onto the next page. `read` is every event read. A cursor newer than every event of the repository is no cursor
+ * of it: an error with code `cursor-elsewhere`.
  */
 export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
-  const floor = seen?.size ? Math.min(...seen.keys()) : Infinity;
-  const isNew = (e) => (cursor.id !== undefined ? e.id > cursor.id || (e.id > floor && !seen.has(e.id)) : Date.parse(e.created_at) > cursor.at);
+  const floor = cursor.id !== undefined ? Math.min(cursor.id, ...(seen?.keys() ?? [])) : null;
+  const isNew = (e) => (cursor.id !== undefined ? e.id > cursor.id || (e.id > floor && !seen?.has(e.id)) : Date.parse(e.created_at) > cursor.at);
+  const reaches = (e) => (cursor.id !== undefined ? e.id <= floor : !isNew(e));
   const found = new Map();
   const read = [];
   for (let page = 1; ; page += 1) {
     if (page > WAIT_MAX_PAGES) return { events: sorted(found), read, gap: true };
-    const list = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}${page > 1 ? `&page=${page}` : ""}`, { ...opts, cache: page === 1 ? cache : null })) || [];
+    const list = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}${page > 1 ? `&page=${page}` : ""}`, { ...opts, cache })) || [];
     if (page === 1 && cursor.id !== undefined && list.length && list.every((e) => e.id < cursor.id)) {
       throw Object.assign(new Error(`the cursor ${cursor.id} is newer than every event of ${repo.full}: it is no cursor of this repository`), { code: "cursor-elsewhere" });
     }
@@ -174,7 +147,7 @@ export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
     for (const e of list) {
       read.push(e);
       if (isNew(e)) found.set(e.id, e);
-      else reached = true;
+      if (reaches(e)) reached = true;
     }
     if (reached) return { events: sorted(found), read, gap: false };
   }
@@ -193,10 +166,11 @@ export async function closedAs(repo, issue, opts) {
  * cursor} (and `pr` for merged and closed; `blocked` and `question`, the numbers left, for drained). Every line of one
  * read carries the same `cursor`, the newest event read: `--since` it to go on with nothing missed or told twice.
  * Without `since` it starts from now. `issues` (numbers) narrows it to those Objectives, drained included; `kinds` to
- * those kinds. Drained is told when an event moves the queue and leaves it drained, once until an Objective goes back to
- * work (activates, which a read that finds it drained again does not hide); a wait that starts from now reads whether
- * it already is, and the cursor carries that state on, so neither a queue already drained nor one still drained after
- * a restart is told again.
+ * those kinds. Drained is a state, not a replay of events: a read with any new event reads the open Objectives (a
+ * conditional read, free while they are unchanged), and drained is told when that finds the queue drained and the read
+ * before did not (or its state was unknown). A wait that starts from now reads whether it already is, and the cursor
+ * carries that state on, so neither a queue already drained nor one still drained after a restart is told again. Every
+ * other kind is an event, told once by its id, on its issue's labels as they were right after it.
  *
  * A read moves the cursor only once all its reads (events, PRs, the open Objectives) have answered, so a read cut off
  * leaves it where it was. Besides the events: a `gap` line when the cursor was more than WAIT_MAX_PAGES pages back
@@ -281,15 +255,11 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     const { events, read, gap } = await eventsAfter(repo, cursor, { opts, cache, seen });
     const next = events.length ? { id: Math.max(cursor.id ?? 0, events.at(-1).id) } : cursor;
     const lines = gap ? [{ event: "gap", issue: null, at: at() }] : [];
-    let moved = false;
-    let active = false;
     const asOf = issuesAsOf(events);
     for (const ev of events) {
       if (watched && !watched.has(ev.issue?.number)) continue;
-      // Every decision on the issue as it was right after the event, never as later events left it.
+      // Its kind on the issue's labels as they were right after the event, never as later events left them.
       const e = { ...ev, issue: asOf.get(ev.id) ?? ev.issue };
-      if (movesQueue(e, objectiveLabel)) moved = true;
-      if (activates(e, objectiveLabel)) active = true;
       let kind = eventKind(e, objectiveLabel);
       if (!kind) continue;
       let pr;
@@ -301,9 +271,9 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
       lines.push({ event: kind, issue: e.issue.number, title: e.issue.title, url: e.issue.html_url, at: e.created_at, ...(pr !== undefined ? { pr } : {}) });
     }
     let drained = wasDrained;
-    if (moved && kinds.includes("drained")) {
+    if (events.length && kinds.includes("drained")) {
       const d = await openRead();
-      if (d.drained && (wasDrained !== true || active)) lines.push({ event: "drained", issue: null, at: at(), blocked: d.blocked, question: d.question });
+      if (d.drained && wasDrained !== true) lines.push({ event: "drained", issue: null, at: at(), blocked: d.blocked, question: d.question });
       drained = d.drained;
     }
     return { lines, cursor: next, drained, read };

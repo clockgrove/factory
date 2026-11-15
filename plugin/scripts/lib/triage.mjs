@@ -10,6 +10,7 @@
 // own process, never in a harness: the key stays here, and scrubbedEnv (harness.mjs) keeps it out of every child.
 import { createHash } from "node:crypto";
 import { Evaluator, Lexer, Parser, data as exprData } from "../../vendor/@actions/expressions/dist/index.js";
+import { Binary, ContextAccess, Grouping, IndexAccess, Literal, Logical, Unary } from "../../vendor/@actions/expressions/dist/ast.js";
 import { falsy } from "../../vendor/@actions/expressions/dist/result.js";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -528,8 +529,9 @@ const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
  * A job's matrix legs as GitHub makes them: the product of its keys' lists, less each `exclude`, then each `include`
- * added to every leg whose own values it does not change, or as a leg of its own when it fits none. Each leg is
- * {values, own}: `own` the keys the product gave it. Null when the matrix is not lists (an expression, a non-list value).
+ * added to every leg of that product whose own values it does not change (a value an earlier include added may be
+ * overwritten), or as a leg of its own when it fits none; a leg an include made never takes a later include. Each leg
+ * is {values, own}: `own` the keys the product gave it. Null when the matrix is not lists (an expression, a non-list value).
  */
 export function matrixLegs(matrix) {
   if (!matrix || typeof matrix !== "object" || Array.isArray(matrix)) return null;
@@ -538,14 +540,15 @@ export function matrixLegs(matrix) {
   let legs = keys.length ? [{}] : [];
   for (const k of keys) legs = legs.flatMap((l) => matrix[k].map((v) => ({ ...l, [k]: v })));
   const exclude = Array.isArray(matrix.exclude) ? matrix.exclude.filter((e) => e && typeof e === "object") : [];
-  legs = legs.filter((l) => !exclude.some((e) => Object.entries(e).every(([k, v]) => sameValue(l[k], v)))).map((values) => ({ values, own: Object.keys(values) }));
+  const product = legs.filter((l) => !exclude.some((e) => Object.entries(e).every(([k, v]) => sameValue(l[k], v)))).map((values) => ({ values, own: Object.keys(values) }));
+  const added = [];
   for (const inc of Array.isArray(matrix.include) ? matrix.include : []) {
     if (!inc || typeof inc !== "object" || Array.isArray(inc)) return null;
-    const fits = legs.filter((l) => Object.entries(inc).every(([k, v]) => !l.own.includes(k) || sameValue(l.values[k], v)));
+    const fits = product.filter((l) => Object.entries(inc).every(([k, v]) => !l.own.includes(k) || sameValue(l.values[k], v)));
     for (const l of fits) Object.assign(l.values, inc);
-    if (!fits.length) legs.push({ values: { ...inc }, own: Object.keys(inc) });
+    if (!fits.length) added.push({ values: { ...inc }, own: Object.keys(inc) });
   }
-  return legs;
+  return [...product, ...added];
 }
 
 /**
@@ -577,21 +580,41 @@ export function continueOnError(job, matrix) {
   if (/^(?:true|True|TRUE)$/.test(s)) return true;
   if (/^(?:false|False|FALSE)$/.test(s)) return false;
   const m = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
-  if (!m || !matrix) return null;
+  if (!m || !matrix || m[1].length > EXPRESSION_CAP) return null;
   try {
     const expr = new Parser(new Lexer(m[1]).lex().tokens, ["matrix"], []).parse();
+    if (!plainExpression(expr)) return null;
     return !falsy(new Evaluator(expr, JSON.parse(JSON.stringify({ matrix }), exprData.reviver)).evaluate());
   } catch {
     return null;
   }
 }
 
+/** The longest `continue-on-error` expression evaluated; a longer one is unknown. */
+export const EXPRESSION_CAP = 1024;
+
+/**
+ * Whether a parsed expression is only literals, `matrix` lookups, comparisons and logic: the bounded part of the
+ * language a leg's `continue-on-error` needs. A function call (`format`, `fromJSON`…), whose cost has no bound, or
+ * anything else is not evaluated.
+ */
+function plainExpression(n) {
+  if (n instanceof Literal || n instanceof ContextAccess) return true;
+  if (n instanceof Unary) return plainExpression(n.expr);
+  if (n instanceof Binary) return plainExpression(n.left) && plainExpression(n.right);
+  if (n instanceof Logical) return n.args.every(plainExpression);
+  if (n instanceof Grouping) return plainExpression(n.group);
+  if (n instanceof IndexAccess) return plainExpression(n.expr) && plainExpression(n.index);
+  return false;
+}
+
 /**
  * What a workflow file (`text`, the one a run of failing jobs came from) says about those jobs, on structure only:
  * `coe` (by check-run id) whether each run's job may fail without failing the run (continueOnError: true, false or
- * null), and `needs` (by check-run id) the names of the failing runs whose jobs each run's job `needs`, directly, or
- * null when its job is not found. A run's job is the one job whose check name reports it (reports); a job calling a
- * reusable workflow is not read. Nothing (empty maps) when the file does not parse.
+ * null), and `needs` (by check-run id) the names of the failing runs whose jobs each run's job `needs`, directly or
+ * through jobs it needs (a job between them may have been skipped), or null when its job is not found. A run's job is
+ * the one job whose check name reports it (reports); a run `<caller> / …` is the job that calls a reusable workflow,
+ * whose own `continue-on-error` is not read here (null). Nothing (empty maps) when the file does not parse.
  */
 export function workflowJobs(text, runs) {
   const coe = new Map();
@@ -602,11 +625,28 @@ export function workflowJobs(text, runs) {
   } catch {
     return { coe, needs };
   }
-  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object" && !j.uses);
+  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object");
   const own = (id, j) => (typeof j.name === "string" || typeof j.name === "number" ? String(j.name) : id);
+  const called = (j) => typeof j.uses === "string" && !!j.uses.trim();
+  // A caller's runs are named `<caller> / <the called workflow's job>` (workflowChecks).
   const jobOf = (name) => {
-    const hits = jobs.filter(([id, j]) => reports(own(id, j), name));
+    const hits = jobs.filter(([id, j]) => reports(called(j) ? `${own(id, j)} / \${{ callee }}` : own(id, j), name));
     return hits.length === 1 ? hits[0] : null;
+  };
+  const needsOf = (j) => (Array.isArray(j?.needs) ? j.needs : j?.needs ? [j.needs] : []).map(String);
+  const byId = new Map(jobs);
+  // Every job a job needs, directly or through others: a roll-up red because a job it needs was skipped after its own
+  // need failed is red because of that failure.
+  const closure = (id) => {
+    const seen = new Set();
+    const stack = needsOf(byId.get(id));
+    while (stack.length) {
+      const n = stack.pop();
+      if (seen.has(n) || !byId.has(n)) continue;
+      seen.add(n);
+      stack.push(...needsOf(byId.get(n)));
+    }
+    return seen;
   };
   const found = new Map((runs || []).map((r) => [r.id, jobOf(r.name)]));
   for (const r of runs || []) {
@@ -617,9 +657,9 @@ export function workflowJobs(text, runs) {
       continue;
     }
     const [id, job] = hit;
-    coe.set(r.id, continueOnError(job, legValues(job, own(id, job), r.name)));
-    const wants = (Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []).map(String);
-    needs.set(r.id, (runs || []).filter((o) => o !== r && wants.includes(found.get(o.id)?.[0])).map((o) => o.name));
+    coe.set(r.id, called(job) ? null : continueOnError(job, legValues(job, own(id, job), r.name)));
+    const wants = closure(id);
+    needs.set(r.id, (runs || []).filter((o) => o !== r && wants.has(found.get(o.id)?.[0])).map((o) => o.name));
   }
   return { coe, needs };
 }

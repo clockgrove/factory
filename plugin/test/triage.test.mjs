@@ -656,6 +656,45 @@ test("workflowJobs: a matrix leg's continue-on-error from its own values, with i
   assert.deepEqual(workflowJobs("jobs: [", runs).coe.size, 0, "a file that does not parse says nothing");
 });
 
+test("workflowJobs: a roll-up gathers what it needs through skipped jobs and through a reusable workflow's caller (#280 review)", async () => {
+  const { workflowJobs } = await import("../scripts/lib/triage.mjs");
+  const { leadJobs } = await import("../scripts/lib/reds.mjs");
+  const yml = `jobs:\n  build:\n    uses: ./.github/workflows/build.yml\n  lint:\n    steps: [{ run: x }]\n  test:\n    needs: [build, lint]\n    steps: [{ run: x }]\n  ci:\n    needs: test\n    if: always()\n    steps: [{ run: x }]\n`;
+  // build's called job and lint failed; test was skipped (no failing run); ci, the required roll-up, is red.
+  const runs = [{ id: 1, name: "build / compile" }, { id: 2, name: "lint" }, { id: 3, name: "ci" }];
+  const { coe, needs } = workflowJobs(yml, runs);
+  assert.deepEqual(needs.get(3), ["build / compile", "lint"], "through the skipped test job, to the caller's run");
+  assert.equal(coe.get(1), null, "a caller's continue-on-error is not read");
+  assert.equal(coe.get(2), false);
+  const j = (r, line, more = {}) => ({ name: r.name, id: r.id, suite: 9, required: false, aggregate: false, sig: { line, lines: line ? [line] : [] }, coe: coe.get(r.id), ...more });
+  const lead = leadJobs([j(runs[0], "compile broke"), j(runs[1], "lint broke"), j(runs[2], "", { required: true, aggregate: true, gathers: needs.get(3) })]).map((x) => x.name);
+  assert.deepEqual(lead, ["ci (required check), from lint", "build / compile"], "neither is called not required");
+});
+
+test("matrixLegs: GitHub's documented include example makes its six legs; an include never merges into a leg an earlier include made", async () => {
+  const { matrixLegs } = await import("../scripts/lib/triage.mjs");
+  const legs = matrixLegs({ fruit: ["apple", "pear"], animal: ["cat", "dog"], include: [{ color: "green" }, { color: "pink", animal: "cat" }, { fruit: "apple", shape: "circle" }, { fruit: "banana" }, { fruit: "banana", animal: "cat" }] });
+  assert.deepEqual(legs.map((l) => l.values), [
+    { fruit: "apple", animal: "cat", color: "pink", shape: "circle" },
+    { fruit: "apple", animal: "dog", color: "green", shape: "circle" },
+    { fruit: "pear", animal: "cat", color: "pink" },
+    { fruit: "pear", animal: "dog", color: "green" },
+    { fruit: "banana" },
+    { fruit: "banana", animal: "cat" },
+  ]);
+});
+
+test("continueOnError: only comparisons and logic over matrix are evaluated; a function call or an expression past the cap is unknown", async () => {
+  const { EXPRESSION_CAP, continueOnError } = await import("../scripts/lib/triage.mjs");
+  const coe = (expr, matrix = { os: "windows-2025", n: 3 }) => continueOnError({ "continue-on-error": `\${{ ${expr} }}` }, matrix);
+  assert.equal(coe("matrix.os != 'ubuntu-26.04' && (matrix.n >= 2 || !matrix['os'])"), true);
+  assert.equal(coe("contains(matrix.os, 'windows')"), null, "a function call is not evaluated");
+  assert.equal(coe(`format('{0}', ${"format('{0}{0}{0}{0}', ".repeat(8)}'x'${")".repeat(8)}) == ''`), null, "nested format() is never run");
+  const long = `matrix.os == '${"w".repeat(EXPRESSION_CAP)}'`;
+  assert.equal(coe(long), null, "an expression past the cap is unknown");
+  assert.equal(EXPRESSION_CAP, 1024);
+});
+
 // ------------------------------------------------------------------ a red on GitHub's side (#165)
 
 // GitHub's jobs API for a job whose checkout failed: Set up job passed, the checkout step failed, the rest skipped.

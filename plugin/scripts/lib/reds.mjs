@@ -143,7 +143,8 @@ async function workflowAt(repo, suite, opts, actions) {
  * check comes first, as `<name> (required check)` with its own failure lines; a required roll-up with none of its own
  * (`aggregate`) is quoted from a failing job it gathers, `<name> (required check), from <job>`: one whose job may not
  * fail without failing the run first (`coe` false, then unknown, then true). Its gathered jobs are the ones its job
- * `needs` (`gathers`), or, when the workflow file could not say, every failing job of its run. A required check with no
+ * `needs`, directly or not (`gathers`), or, when the workflow file could not say or names none with a failure line,
+ * every failing job of its run. A required check with no
  * failure line anywhere says so. The other failing jobs with failure lines follow, a job no required check counts
  * marked `not required` (a gathered job that may fail without failing the run is not counted). `jobs` are redDetail's.
  * None when no failing job printed a failure line: the Block then quotes the output's tail.
@@ -164,7 +165,8 @@ export function leadJobs(jobs) {
       out.push({ name: `${r.name} (required check)`, line: r.sig.line, lines: r.sig.lines });
       continue;
     }
-    const known = Array.isArray(r.gathers);
+    // A known set holding no failing job with a failure line explains nothing: read as unknown (the run's jobs).
+    const known = Array.isArray(r.gathers) && all.some((j) => !j.required && r.gathers.includes(j.name) && lined(j));
     const under = !r.aggregate ? [] : all.filter((j) => !j.required && (known ? r.gathers.includes(j.name) : j.suite === r.suite));
     for (const j of under) {
       if (!known) maybe.add(j);

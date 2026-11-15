@@ -102,6 +102,9 @@ test("leadJobs: every red required check first and named, even when an optional 
   assert.deepEqual(out.map((x) => x.name), ["ci (required check), from b", "a (not required: continue-on-error)"]);
   const onlyFinder = leadJobs([j("a", "a broke", { coe: true }), j("ci", "", { required: true, aggregate: true, gathers: ["a"] })]);
   assert.equal(onlyFinder[0].name, "ci (required check), from a (continue-on-error)", "the only failing job it gathers is said to be one that may fail");
+  // A known set that holds no failing job with a failure line explains nothing: the roll-up's run's jobs, none called not required.
+  const stale = leadJobs([j("b", "b broke"), j("a", ""), j("ci", "", { required: true, aggregate: true, gathers: ["a", "gone"] })]);
+  assert.deepEqual(stale.map((x) => x.name), ["ci (required check), from b"]);
 });
 
 test("mirrorDiff: two-dot, the green tree against the red one; not three-dot, which after a rebase shows the whole PR again", async () => {

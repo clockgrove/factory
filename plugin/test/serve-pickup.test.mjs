@@ -506,7 +506,7 @@ test("serve: a repository variable sets a setting over the workflow; a hot one a
   });
   const text = lines.join("");
   assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; each stage that starts from now on runs with them, and stages in flight keep theirs: FACTORY_LOCAL_MAX_CONCURRENT: "1" → "2" \(repository variable\)/);
-  assert.match(text, /at most 2 Objective stage\(s\) at once on this box/);
+  assert.match(text, /this loop: at most 2 Objective stage\(s\) at once on this machine/);
   assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; these take effect when serve restarts, and until then serve keeps the values it started with: FACTORY_MAX_USD: "25" → "5" \(repository variable\)/);
   assert.equal(text.split("repository variable FACTORY_AUTO_MERGE ignored: only the reviewed workflow file sets it").length - 1, 1, "named once");
   assert.doesNotMatch(text, /FACTORY_AUTO_MERGE: /);

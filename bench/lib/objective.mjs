@@ -14,15 +14,19 @@
 //              is reported a second way, counting only what Factory asked for.
 //              A merge that sat idle longer than the stall threshold after
 //              Factory's last action (idleStall) is a stall, not a walk-away.
+//              A workflow hand-over is an owner step by default (HANDOVER_SCORING):
+//              normal work, shown apart with its own minutes, never input.
 //   quality    the judge's, not this file's: `pending` with the pair inputs
 //              when a baseline is given, else `pending` with what is known.
 //   operator   minutes from --minutes; 0 on a clean merge; `unknown` else.
+//   ownerStep  a posted workflow hand-over a person applies after the merge:
+//              its minutes from --owner-minutes, apart from the operator's.
 //   cost       lib/cost.mjs, with unit and basis per harness.
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, factoryLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf } from "../../plugin/scripts/lib/logic.mjs";
-import { carriesHandover } from "../../plugin/scripts/lib/handover.mjs";
+import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 
 export const ROW_VERSION = 1;
 const BRANCH = (issue) => `factory/${issue}`;
@@ -37,6 +41,18 @@ const BLOCKED_LABEL = "factory:blocked";
  */
 export const STALL_MINUTES = 60;
 const QUESTION_LABEL = "factory:question";
+/**
+ * How a workflow hand-over is scored (bench/README.md, the factory-scoring skill), one rule per scoring run:
+ *   owner-step  the default, for every repository: normal work. The Objective can still walk away; applying the
+ *               posted hand-over is the owner's step after the merge, shown apart (`ownerStep`) with its own minutes.
+ *   input       the strict read: each merged PR carrying the hand-over line is one asked-for human action, a miss.
+ * Why the default: Factory never pushes a workflow file and its App has no workflows permission, by design, so an
+ * Objective that needs one could never walk away under `input`, however well Factory did; that pushed adopters to split
+ * such Objectives by hand, which is worse for the record and no safer. One rule for every repository keeps the pooled
+ * 1.0 streak one rule.
+ */
+export const HANDOVER_SCORING = Object.freeze(["owner-step", "input"]);
+export const HANDOVER_DEFAULT = "owner-step";
 
 const ms = (at) => (at ? Date.parse(at) : NaN);
 export const PASSIVE_EVENTS = new Set(["mentioned", "subscribed", "cross-referenced", "connected", "referenced", "issue_type_added", "issue_type_changed", "issue_type_removed", "milestoned", "demilestoned", "pinned", "unpinned", "added_to_project", "moved_columns_in_project", "removed_from_project", "project_v2_item_status_changed", "added_to_project_v2", "removed_from_project_v2", "converted_note_to_issue"]);
@@ -135,6 +151,11 @@ export function decisionsOf(actions) {
  *   - comments: Factory's comments all carry a `<!-- factory:... -->` marker. One without a marker is a person's, even
  *     inside a run (an answer to a Question typed while the stage was running).
  *   - the merge, which the merge queue records as whoever armed auto-merge, is Factory's.
+ *   - the workflow hand-over's label, read as plugin handoff.mjs handoverApplied reads it: applying factory:handover is
+ *     Factory's when its hand-over comment (`<!-- factory:N:handover -->`, the login's) is on the issue or inside a
+ *     run's window. Removing it is Factory's only when it is Factory's drop: inside a run's window, and either that
+ *     comment carries no patch (Factory replaced it with "carries none") or Factory applied the label again later.
+ *     Any other removal is the person's mark that they applied it, which Factory takes as applied.
  *   - anything else (a push, a review, a draft toggle) is Factory's inside a run's window: the login's progress
  *     comment's creation to its last edit, with two minutes' slack.
  * On any route, a Done pass that runs under a person's login (a local loop's dispatcher) posts its `done` record before
@@ -158,6 +179,13 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
   const slack = 2 * 60_000;
   const windows = progress.map((c) => [ms(c.created_at) - slack, ms(c.updated_at || c.created_at) + slack]);
   const labels = (collected.issueTimeline || []).filter((e) => e.event === "labeled").sort((a, b) => ms(a.created_at) - ms(b.created_at));
+  const inRun = (at) => windows.some(([a, b]) => ms(at) >= a && ms(at) <= b);
+  // The workflow hand-over: the login's hand-over comment, and whether it still carries a patch (handoverOf).
+  const mark = `${handoverMarker(collected.issue?.number)}\n`;
+  const handoverBodies = (collected.issueComments || []).filter((c) => c.user?.login === login).map((c) => String(c.body || "").replace(/\r\n?/g, "\n")).filter((b) => b.startsWith(mark));
+  const handoverLabel = (at) => handoverBodies.length > 0 || inRun(at);
+  const dropped = handoverBodies.some((b) => handoverOf(b.slice(mark.length)) === null);
+  const relabeled = (at) => labels.some((e) => e.label?.name === HANDOVER_LABEL && (e.actor?.login ?? e.actor?.name) === login && ms(e.created_at) > ms(at) && handoverLabel(e.created_at));
   // Factory lifts its own Blocked only on recovery: the Objective label re-applied after the latest block.
   const recovered = (at) => {
     const block = labels.filter((e) => e.label?.name === BLOCKED_LABEL && ms(e.created_at) <= ms(at)).at(-1);
@@ -166,6 +194,8 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
   return (at, actor, kind) => {
     if (tidied(at, actor, kind)) return true;
     if ((actor?.login ?? actor?.name) !== login) return false;
+    if (kind === `labeled ${HANDOVER_LABEL}`) return handoverLabel(at);
+    if (kind === `unlabeled ${HANDOVER_LABEL}`) return inRun(at) && (dropped || relabeled(at));
     if (/^(un)?labeled /.test(kind)) return LOCAL_STATE_KIND.test(kind) && (kind !== `unlabeled ${BLOCKED_LABEL}` || recovered(at));
     if (kind === "comment") return false;
     if (kind === "marker comment" || kind === "merged") return true;
@@ -390,16 +420,53 @@ export function factoryRequests(collected, since, { bots = new Set() } = {}) {
 }
 
 /**
- * A workflow hand-over is operator input on every route: Factory never pushes a workflow file, so each merged PR of the
- * Objective (every part of a split one) whose body carries Factory's hand-over line (plugin handover.mjs, read on its
- * marker) leaves a person's step, one action at its merge, asked for (factoryRequests reads the same list). Its minutes
- * come from a stopwatch like any other operator minute. `pulls`: the Objective's PRs (branchPulls).
+ * The workflow hand-over's steps: Factory never pushes a workflow file, so each merged PR of the Objective (every part
+ * of a split one) whose body carries Factory's hand-over line (plugin handover.mjs, read on its marker) leaves a person's
+ * step at its merge, asked for (factoryRequests reads the same list). scoreObjective scores them by HANDOVER_SCORING: an
+ * owner step apart from the walk-away, or one human action each. `pulls`: the Objective's PRs (branchPulls).
  */
 export function handoverSteps(collected, pulls = branchPulls(collected)) {
   return pulls
     .filter((pr) => pr.merged_at && carriesHandover(pr.body, collected.issue.number))
     .sort((a, b) => ms(a.merged_at) - ms(b.merged_at))
     .map((pr) => ({ at: pr.merged_at, where: `PR #${pr.number}`, kind: "workflow hand-over", by: "a person (applies the patch)", detail: "" }));
+}
+
+/**
+ * Whether an act on the issue is Factory's own for the hand-over: its App's login (factoryLogin: `app`, else the App
+ * that applied factory:running), or in local mode the operator's where localFactoryActions says so. Never just any
+ * bot: another machine's comment or label is not Factory's hand-over.
+ */
+function handoverActor(collected, { app = null } = {}) {
+  const self = factoryLogin(collected.issueTimeline, app);
+  const local = localFactoryActions(collected);
+  return (at, actor, kind) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind);
+}
+
+/**
+ * Whether Factory's hand-over comment is on the issue with a patch in it (`<!-- factory:N:handover -->` first, then
+ * handoverOf's fenced diff): the hand-over a person can apply. Only Factory's own comment (handoverActor) counts.
+ */
+export function handoverPosted(collected, { app = null } = {}) {
+  const mark = `${handoverMarker(collected.issue.number)}\n`;
+  const factory = handoverActor(collected, { app });
+  return (collected.issueComments || []).some((c) => {
+    const body = String(c.body || "").replace(/\r\n?/g, "\n");
+    return body.startsWith(mark) && factory(c.created_at, c.user, "marker comment") && handoverOf(body.slice(mark.length)) !== null;
+  });
+}
+
+/**
+ * The person's mark that the hand-over is applied, as Factory reads it (plugin handoff.mjs handoverApplied): their
+ * latest removal of factory:handover in `marks`, unless Factory applied the label again after it (a later part's new
+ * patch, still pending). `{at, by}` or null.
+ */
+function handoverApplied(collected, marks, { app = null } = {}) {
+  const last = marks.at(-1);
+  if (!last) return null;
+  const factory = handoverActor(collected, { app });
+  const again = (collected.issueTimeline || []).some((e) => e.event === "labeled" && e.label?.name === HANDOVER_LABEL && ms(e.created_at) > ms(last.at) && factory(e.created_at, e.actor, `labeled ${HANDOVER_LABEL}`));
+  return again ? null : { at: last.at, by: last.by };
 }
 
 /**
@@ -757,7 +824,8 @@ export function runnerMinutes(collected) {
  * login, else read from the timeline: lib/phases.mjs factoryLogin).
  */
 export function scoreObjective(collected, opts = {}) {
-  const { prices, minutes: given, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [], app = null, stallMinutes = STALL_MINUTES } = opts;
+  const { prices, minutes: given, ownerMinutes = undefined, handover = HANDOVER_DEFAULT, baseline = null, bots = new Set(), label = OBJECTIVE_LABEL, clockAfter = null, checks = [], app = null, stallMinutes = STALL_MINUTES } = opts;
+  if (!HANDOVER_SCORING.includes(handover)) throw new Error(`handover: ${handover} is not one of ${HANDOVER_SCORING.join(", ")}`);
   // read: the owner's read of the merged diff ("ok", "defect" or "unread"), given with --read, kept across --append.
   const issue = collected.issue;
   const missing = [];
@@ -773,7 +841,7 @@ export function scoreObjective(collected, opts = {}) {
   const open = pulls.find((pr) => !pr.merged_at && pr.state === "open") ?? null;
   const blocked = blockedAt(collected, since);
   const question = questionAt(collected, since);
-  const actions = humanActions(collected, since, { bots, label });
+  let actions = humanActions(collected, since, { bots, label });
   const waiting = waitingMinutes(collected.issueTimeline, since, merged?.merged_at ?? null);
   const exit = merged ? "merged" : blocked ? "blocked" : question ? "question" : open ? (open.draft ? "draft" : "in review") : pulls.length ? "closed unmerged" : "no PR";
   // Parked: open, its label removed after Factory took it (it waits on other work). Its exit still says where it
@@ -785,8 +853,27 @@ export function scoreObjective(collected, opts = {}) {
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   actions.push(...unattributedAnswers(collected, since, actions, merged?.merged_at ?? null, { bots }));
-  actions.push(...handoverSteps(collected).filter((a) => ms(a.at) > ms(since)));
+  // A workflow hand-over (HANDOVER_SCORING): under owner-step, a posted one is the owner's step after the merge, never
+  // input; the person's removal of factory:handover from then on is their mark that they applied it, part of that step.
+  // Unposted (no Factory comment holds the patch), or under input, each step is one human action, as asked for.
+  const steps = handoverSteps(collected).filter((a) => ms(a.at) > ms(since));
+  const owned = handover === "owner-step" && steps.length > 0 && handoverPosted(collected, { app });
+  let ownerStep = null;
+  if (owned) {
+    const mark = (a) => a.where === `#${issue.number}` && a.kind === `unlabeled ${HANDOVER_LABEL}` && ms(a.at) >= ms(steps[0].at);
+    const applied = handoverApplied(collected, actions.filter(mark), { app });
+    actions = actions.filter((a) => !mark(a));
+    const timed = typeof ownerMinutes === "number" && Number.isFinite(ownerMinutes);
+    ownerStep = {
+      kind: "workflow hand-over",
+      steps: steps.map(({ at, where }) => ({ at, where })),
+      applied: applied ? { at: applied.at, by: applied.by } : null,
+      minutes: timed ? ownerMinutes : "unknown",
+      basis: timed ? "--owner-minutes (stopwatch)" : `${applied ? "" : `not applied yet (${HANDOVER_LABEL} still on); `}give --owner-minutes <issue>=<n> from a stopwatch`,
+    };
+  } else actions.push(...steps.map((a) => (handover === "owner-step" ? { ...a, detail: "Factory's hand-over comment with the patch is not on the issue" } : a)));
   actions.sort((a, b) => ms(a.at) - ms(b.at));
+  const ownerNote = ownerStep ? `; owner step: workflow hand-over (${ownerStep.steps.map((s) => s.where).join(", ")})` : "";
   if (collected.workflowRuns === null) missing.push("workflow runs (a hand-started or re-run Factory run is not seen)"); // undefined: not attempted
   // The input sources this row could not read (null: unreadable; undefined: never collected, an old snapshot or a
   // fixture): human input may hide there, so the streak never credits the row (lib/streak.mjs).
@@ -800,6 +887,8 @@ export function scoreObjective(collected, opts = {}) {
   const stallReason = stall ? `stalled ${stall.minutes} min after Factory's last action (${stall.from} to ${stall.until}; threshold ${stall.thresholdMinutes} min)` : null;
   const walkAway = {
     value: Boolean(merged) && !blocked && actions.length === 0 && !stall,
+    // The rule this row scored a workflow hand-over by (HANDOVER_SCORING).
+    handover,
     since,
     sinceBasis,
     // The longest idle span after Factory's first act, to the merge (idleStall); a stall when over the threshold.
@@ -816,7 +905,7 @@ export function scoreObjective(collected, opts = {}) {
   walkAway.blocks = blockStops(collected, since, { bots });
   walkAway.bucket = walkAwayBucket({ value: walkAway.value, blocks: walkAway.blocks, question, actions: split, stall, unseen });
   walkAway.reason = walkAway.value
-    ? "merged with no human action after the label"
+    ? `merged with no human action after the label${ownerNote}`
     : !merged
       ? `not merged (${exit}${blocked?.reason ? `: ${blocked.reason}` : ""})`
       : blocked
@@ -838,7 +927,7 @@ export function scoreObjective(collected, opts = {}) {
           ? `first asked-for action: ${asked[0].kind} on ${asked[0].where} by ${asked[0].by} at ${asked[0].at}, answering a ${asked[0].asked}`
           : unprompted.length
             ? `merged; ${unprompted.length} unprompted human action(s), none asked for`
-            : "merged with no human action after the label",
+            : `merged with no human action after the label${ownerNote}`,
   };
 
   // No usage artifact (local mode uploads none): the dollars are Factory's spend lines in its own progress comments.
@@ -861,7 +950,7 @@ export function scoreObjective(collected, opts = {}) {
 
   let operator;
   if (typeof given === "number" && Number.isFinite(given)) operator = { minutes: given, basis: "--minutes (stopwatch)" };
-  else if (walkAway.value) operator = { minutes: 0, basis: "clean merge" };
+  else if (walkAway.value) operator = { minutes: 0, basis: ownerStep ? "clean merge; the owner step's minutes are apart (ownerStep)" : "clean merge" };
   else if (merged && !blocked && !actions.length) operator = { minutes: 0, basis: "no human action (stalled)" };
   else operator = { minutes: "unknown", basis: actions.some((a) => a.kind === "workflow hand-over") ? "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" : "give --minutes <issue>=<n> from a stopwatch" };
 
@@ -903,6 +992,7 @@ export function scoreObjective(collected, opts = {}) {
     walkAway,
     quality,
     operator,
+    ownerStep,
     cost,
     phases,
     dispatch,
@@ -938,10 +1028,10 @@ const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|")
 export const externalWhy = (r) => `Blocked: ${[...new Set((r.walkAway.blocks || []).map((b) => b.cause))].join(", ")}`;
 
 export function markdownTable(rows) {
-  const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Turns", "Runs", "Sessions", "Harness"];
+  const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Owner step min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Turns", "Runs", "Sessions", "Harness"];
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
-    const walk = r.walkAway.value ? "yes" : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
+    const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     const model = r.cost.usd !== null && r.cost.tokens.input !== null ? `${fmtUsd(r.cost.usd)} (${fmtTokens(r.cost.tokens)})` : fmtUsd(r.cost.usd);
     // The spend through a relayed gateway key (#97) is in the dollars: named beside them.
@@ -950,7 +1040,7 @@ export function markdownTable(rows) {
     const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
     const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
-    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), harnessCell(r)];
+    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), ownerCell(r), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), harnessCell(r)];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];
@@ -967,7 +1057,10 @@ export function markdownTable(rows) {
   return `${lines.join("\n")}\n\n${summaryLine(rows)}${notes.length ? `\n\n${notes.join("\n")}` : ""}\n`;
 }
 
-/** The summary under the table: walk-away both ways, and the interventions split, over every row. */
+/** The owner step's cell: none, or its minutes and kind, and whether a person has applied it yet. */
+export const ownerCell = (r) => (r.ownerStep ? `${fmtMin(r.ownerStep.minutes)} (workflow hand-over${r.ownerStep.applied ? "" : ", not applied yet"})` : "none");
+
+/** The summary under the table: walk-away both ways, the interventions split and the owner steps, over every row. */
 export function summaryLine(rows) {
   const n = rows.length;
   const merged = rows.filter((r) => r.exit === "merged").length;
@@ -976,5 +1069,9 @@ export function summaryLine(rows) {
   const stalled = rows.filter((r) => r.walkAway.stall);
   const sum = (k) => rows.reduce((s, r) => s + (r.walkAway.interventions?.[k] ?? 0), 0);
   const stalls = stalled.length ? ` Stalled: ${stalled.map((r) => `#${r.issue} ${r.walkAway.stall.minutes} min`).join(", ")} idle after Factory's last action (threshold ${stalled[0].walkAway.stall.thresholdMinutes} min).` : "";
-  return `Walk-away: ${strict} of ${n} Objective(s) (${merged} merged) with no human input; ${askedOnly} of ${n} counting only input Factory asked for. Interventions: ${sum("asked")} asked for (Question, Blocked notice, review request), ${sum("unprompted")} unprompted.${stalls}`;
+  // A workflow hand-over, by the rule each row was scored by: an owner step apart, or input (HANDOVER_SCORING).
+  const owners = rows.filter((r) => r.ownerStep);
+  const inputs = rows.filter((r) => !r.ownerStep && (r.walkAway.interventions?.requests || []).some((q) => q.kind === "workflow hand-over"));
+  const handovers = `${owners.length ? ` Owner steps (a workflow hand-over, scored as normal work, its minutes apart): ${owners.map((r) => `#${r.issue} ${ownerCell(r)}`).join(", ")}.` : ""}${inputs.length ? ` Workflow hand-overs scored as input: ${inputs.map((r) => `#${r.issue}`).join(", ")}.` : ""}`;
+  return `Walk-away: ${strict} of ${n} Objective(s) (${merged} merged) with no human input; ${askedOnly} of ${n} counting only input Factory asked for. Interventions: ${sum("asked")} asked for (Question, Blocked notice, review request), ${sum("unprompted")} unprompted.${stalls}${handovers}`;
 }

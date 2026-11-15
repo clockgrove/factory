@@ -2,6 +2,8 @@
 // nothing here names a real repository or person), in the shape
 // lib/collect.mjs returns, so lib/objective.mjs can be scored without a
 // token. Each scenario is one Objective.
+import { handoverLine, handoverMarker, handoverText } from "../../../plugin/scripts/lib/handover.mjs";
+
 const APP = { login: "acme-factory[bot]", type: "Bot" };
 const OWNER = { login: "maintainer", type: "User" };
 const WRITER = { login: "writer", type: "User" };
@@ -212,4 +214,21 @@ export function localMerge(number = 60) {
     bodyEdits: [],
     workflowRuns: [],
   };
+}
+
+/** The workflow change the hand-over fixtures carry: git's own diff of one workflow file. */
+export const HANDOVER_PATCH = "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1 +1,2 @@\n on: push\n+  workflow_dispatch:\n";
+
+/**
+ * A merged Objective with a workflow hand-over, from a scenario above (`collected`): its merged PR's body carries
+ * Factory's hand-over line, and Factory's comment holding the patch is on the issue (posted by `by`, Factory's login on
+ * that route; `posted: false` leaves it out), as handoff.mjs publishPr leaves them.
+ */
+export function withHandover(collected, { posted = true, by = APP } = {}) {
+  const n = collected.issue.number;
+  const pr = collected.pulls.find((p) => p.merged_at);
+  const files = [".github/workflows/ci.yml"];
+  pr.body = `${handoverLine({ issue: n, url: `https://github.test/${REPO}/issues/${n}`, files })}\n\n## Undone\n- the manual trigger: handed over\n\nCloses #${n}\n`;
+  if (posted) collected.issueComments.push({ user: by, created_at: pr.created_at, updated_at: pr.created_at, body: `${handoverMarker(n)}\n${handoverText({ issue: n, pr: pr.number, patch: HANDOVER_PATCH, files })}` });
+  return collected;
 }

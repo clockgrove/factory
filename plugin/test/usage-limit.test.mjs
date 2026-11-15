@@ -265,6 +265,33 @@ test("codex: the reset is the latest full window's; a workspace's credits or spe
   assert.equal(codexRec(editLimit((rl) => (rl.rate_limit_reached_type = "workspace_owner_usage_limit_reached"))).refusal.resetAt, undefined);
 });
 
+test("codex: a named type on credits is no limit unless it is a workspace's; another limit group's snapshot is not read", () => {
+  const credits = { has_credits: true, unlimited: false, balance: "62494.47" };
+  // The backend names the type while the account runs on credits: an unrelated failure is no limit.
+  assert.equal(codexRec(editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "rate_limit_reached", credits }))).refusal, undefined);
+  // A workspace's credits or spend cap is the limit whatever the credits show.
+  assert.equal(codexRec(editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "workspace_owner_usage_limit_reached", credits }))).refusal.code, "workspace_owner_usage_limit_reached");
+  // A per-model group's snapshot (limit_id other than codex) is not read, the last one stamped or not.
+  assert.equal(codexRec(editLimit((rl) => (rl.limit_id = "codex_other"))).refusal, undefined);
+  const lines = CODEX_ROLLOUT.trim().split("\n");
+  const other = JSON.parse(lines.at(-1));
+  Object.assign(other, { timestamp: "2026-11-14T21:00:09.990Z" });
+  other.payload.rate_limits = { ...other.payload.rate_limits, limit_id: "codex_other", primary: { used_percent: 100, window_minutes: 300, resets_at: RESET_S + 3600 } };
+  const after = codexRec(`${CODEX_ROLLOUT}${JSON.stringify(other)}\n`).refusal;
+  assert.equal(after.resetAt, Date.parse(RESET), "the codex group's snapshot decides, not the later other group's");
+  assert.equal(after.limitType, "codex/primary");
+  // An absent limit_id is the codex group.
+  assert.equal(codexRec(editLimit((rl) => delete rl.limit_id)).refusal.resetAt, Date.parse(RESET));
+});
+
+test("codex: a named type with no full window takes the latest reset of any window, so a local stage can pause", () => {
+  const later = RESET_S + 86_400;
+  const r = codexRec(editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "rate_limit_reached", primary: { used_percent: 97, window_minutes: 300, resets_at: RESET_S }, secondary: { used_percent: 60, window_minutes: 10080, resets_at: later } }))).refusal;
+  assert.equal(r.code, "rate_limit_reached");
+  assert.equal(r.resetAt, later * 1000);
+  assert.equal(r.limitType, "codex/secondary");
+});
+
 /**
  * A fake codex: its first `limited` runs write the usage-limit rollout under CODEX_HOME (stamped now, its reset at
  * `resetS`), print the usage-limit stream and exit 1; later ones print a completed turn. argv and stdin logged.

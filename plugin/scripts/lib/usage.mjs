@@ -185,12 +185,14 @@ const CODEX_WORKSPACE_LIMITS = new Set(["workspace_owner_credits_depleted", "wor
  * the rollout keeps it (rollout/src/policy.rs). The structure read:
  * - the run's stream ended on an error: its last `turn.failed`, `error` or `turn.completed` event is no completed turn;
  * - the last `token_count` line of the rollout stamped at or after `since` (the pass's start: a resumed thread's older
- *   lines are an earlier pass's) whose `payload.rate_limits` is an object;
- * - that snapshot names a `rate_limit_reached_type`, or a window (`primary`, `secondary`) at `used_percent` 100 or more
- *   with no credits to go on (`credits.has_credits` and `credits.unlimited` both not true): on credits Codex runs on
- *   past a full window, so a full window alone is no limit.
- * The reset is the latest `resets_at` (epoch seconds) of the full windows; a workspace's credits or spend cap
- * (CODEX_WORKSPACE_LIMITS) has none. `type` is the backend's error type, `usage_limit_reached` (the only refusal that
+ *   lines are an earlier pass's) whose `payload.rate_limits` is an object of the subscription's own limit group
+ *   (`limit_id` "codex" or absent); another group's snapshot (a per-model limit) is not read;
+ * - that snapshot names a `rate_limit_reached_type`, or a window (`primary`, `secondary`) at `used_percent` 100 or more;
+ * - and it shows no credits to go on (`credits.has_credits` and `credits.unlimited` both not true), unless the type is
+ *   a workspace's credits or spend cap (CODEX_WORKSPACE_LIMITS): on credits Codex runs on past its windows, so an
+ *   unrelated failure then is no limit, and reading it as one would hold every Codex Objective until the reset.
+ * The reset is the latest `resets_at` (epoch seconds) of the full windows, or of any window when a type is named and no
+ * window is full; a workspace's credits or spend cap (CODEX_WORKSPACE_LIMITS) has none. `type` is the backend's error type, `usage_limit_reached` (the only refusal that
  * records a snapshot at the failure); `code` the snapshot's `rate_limit_reached_type`. A limit Codex meets in a
  * compaction records no snapshot, and an API key or the AI Gateway gets no ChatGPT rate-limit headers: those failures
  * stay what the stream says.
@@ -206,14 +208,16 @@ function codexLimit(events, rollout, since) {
     if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
     const at = Date.parse(o.timestamp);
     const rl = o.payload.rate_limits;
-    if (Number.isFinite(at) && at >= from && rl && typeof rl === "object") snap = rl;
+    if (Number.isFinite(at) && at >= from && rl && typeof rl === "object" && (rl.limit_id == null || rl.limit_id === "codex")) snap = rl;
   }
   if (!snap) return null;
   const reached = str(snap.rate_limit_reached_type);
   const onCredits = snap.credits?.has_credits === true || snap.credits?.unlimited === true;
-  const full = ["primary", "secondary"].filter((k) => num(snap[k]?.used_percent) !== null && snap[k].used_percent >= 100);
-  if (!reached && (!full.length || onCredits)) return null;
-  const resets = CODEX_WORKSPACE_LIMITS.has(reached) ? [] : full.map((k) => ({ k, at: epochMs(snap[k].resets_at) })).filter((w) => w.at !== null);
+  const windows = ["primary", "secondary"].filter((k) => num(snap[k]?.used_percent) !== null);
+  const full = windows.filter((k) => snap[k].used_percent >= 100);
+  if (!reached && !full.length) return null;
+  if (onCredits && !CODEX_WORKSPACE_LIMITS.has(reached)) return null;
+  const resets = CODEX_WORKSPACE_LIMITS.has(reached) ? [] : (full.length ? full : windows).map((k) => ({ k, at: epochMs(snap[k].resets_at) })).filter((w) => w.at !== null);
   const latest = resets.reduce((a, w) => (!a || w.at > a.at ? w : a), null);
   const message = str(last.type === "turn.failed" ? last.error?.message : last.message);
   return { status: null, type: "usage_limit_reached", code: reached, message, reset: latest?.at ?? null, ...(latest ? { limitType: `${str(snap.limit_id) ?? "codex"}/${latest.k}` } : {}) };

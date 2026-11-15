@@ -1,3 +1,4 @@
+import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DRIFT_MODEL, DRIFT_QUESTION, EVERY_MS, GOALS, MIN_CONFIDENCE, WINDOW, activityLog, driftInput, driftLine, isDrift, openDrift, planItems } from "../scripts/lib/drift.mjs";

@@ -23,7 +23,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtemp
 import { availableParallelism, constants as osConstants, homedir, hostname, platform, tmpdir, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
@@ -34,7 +34,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -49,16 +49,34 @@ import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
+import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
+import { runningStint, timelineOf } from "./lib/relaunch.mjs";
 import { accountEnv, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
+import { accountHolds, holdsDir } from "./lib/holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
-/** The least a usage-limit hold lasts past now, by how many such pauses on one harness came in a row (Local.limitPaused). */
-export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
+/** An account in a hold's log line and reason: the harness alone for the one named after it (none declared). */
+const limitName = (harness, account) => (account === harness ? harness : `${harness} account ${account}`);
+/** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
+const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+/** A pinned release serve could not fetch or start is tried again after this long (followPin). */
+export const PIN_RETRY_MS = 10 * 60_000;
+/** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
+export const SWITCH_GAP_MS = 30 * 60_000;
+/** The env name a serve that started again on a new release (restartOn) learns when it last switched from. */
+const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
+/** The env name that tells a serve started again on a new release where it came from, for a failure at its start (main). */
+const SWITCHED_FROM_ENV = "FACTORY_SERVE_SWITCHED_FROM";
+const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
+delete process.env[SWITCHED_FROM_ENV];
+/** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
+export const SETTINGS_EVERY_MS = 3 * 60_000;
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
@@ -202,10 +220,13 @@ export function sameMachineHolder(holder, id = machineIdentity()) {
  * A claim left by a loop on this machine whose process is gone (serve stopped, crashed, the machine restarted): its
  * Objective is this machine's to resume at once, fresh heartbeat or not.
  */
-export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid } = {}) {
+export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid, own = null } = {}) {
   if (!sameMachineHolder(holder, id)) return false;
   const { pid, boot } = parseHolder(holder);
-  if (!Number.isInteger(pid) || pid <= 0 || pid === self) return false;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // This process's pid: its own loop (`own`) is alive; any other holder with it was the loop this process ran before it
+  // started again on a new pinned release (Local.restartOn), whose image is gone.
+  if (pid === self) return !!own && holder !== own;
   // Another boot: every process of that one is gone, whatever pid now runs.
   if (boot && boot !== id.boot) return true;
   try {
@@ -214,6 +235,26 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
   } catch (e) {
     return e.code === "ESRCH";
   }
+}
+
+/**
+ * What changed between two sets of workflow settings (workflowSettings's `kept`), one `NAME: old → new` each, in name
+ * order; one this shell also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as
+ * in baseEnv. Values are the workflow's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
+ */
+/**
+ * The workflow settings a running serve takes from the default branch at its next tick (refreshSettings): how many run,
+ * on which models and effort, what validation runs, how a session resumes and its cache. What a stage may reach or
+ * receive, spend, protect or be set up with is taken only when serve starts.
+ */
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
+
+export function settingsChanges(before = {}, after = {}, env = process.env) {
+  const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((k) => before[k] !== after[k])
+    .sort()
+    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${(k.startsWith("FACTORY_LOCAL_") || k === "FACTORY_HARNESS") && env[k] !== undefined ? " (this shell sets it, and its value wins)" : ""}`);
 }
 
 export function repoFromRemote(url) {
@@ -280,6 +321,16 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/**
+ * A thrown error as a Blocked reason may carry it, which this machine's log has whole: a system error (Node's, with its
+ * `syscall`: a file or process call, whose message names the path, an account's folder or token file included) by its
+ * code and call alone; any other by its message, the home directory shortened to `~`.
+ */
+export const postedError = (e, home = homedir()) => {
+  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
+  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
+  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; the local loop's log names the path` : `${code}; the local loop's log names the path`;
+};
 /** The Copilot token a stage on `account` runs on: a declared account's file alone, else copilotToken(). */
 const copilotTokenOf = (account) => (account?.declared ? accountToken(account) : copilotToken());
 /**
@@ -482,6 +533,9 @@ export class Local {
     // The workflow's settings as committed on the default branch (#122), never this working tree's, whatever branch is
     // checked out: as the Action runs the reviewed workflow. A working tree that differs is named (doctor too).
     const committed = committedWorkflowEnv(this.dev);
+    // serve reads the default branch's workflow again at each tick (refreshSettings), and follows its Factory pin (followPin).
+    this.settingsBranch = committed.branch;
+    this.pins = committed.pins || [];
     if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     const plugin = pluginLine(committed);
@@ -510,8 +564,16 @@ export class Local {
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
     this.opts = { token: this.token, notice: this.notice };
-    // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
+    // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
+    // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
+    // was are a dead loop's (deadHereHolder), resumed at once as after any restart.
     this.holder = holderId();
+    // This machine's usage-limit holds, per account (lib/holds.mjs): shared with every serve here and kept across restarts.
+    this.holds = accountHolds({ dir: holdsDir(homedir()), onError: (e) => log(`a usage-limit hold could not be kept in ${holdsDir(homedir())} for the machine's other serves (${String(e?.message || e).slice(0, 160)}); this loop still holds it`) });
+    // When this process last switched releases (restartOn), if it did, within the last day: the next switch waits SWITCH_GAP_MS.
+    const switched = Number(process.env[SWITCHED_ENV]);
+    this.switchedAt = Number.isFinite(switched) && switched <= Date.now() && Date.now() - switched < 24 * 60 * 60_000 ? switched : 0;
+    delete process.env[SWITCHED_ENV];
     this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
@@ -915,15 +977,25 @@ export class Local {
    * and never another stage's.
    */
   async stage(issue, name, script, args) {
+    // A stage is set up with one set of settings: from its harness's choice to its env. A change the workflow brings
+    // meanwhile waits for every set-up under way to end (refreshSettings).
+    this.settingUp = (this.settingUp || 0) + 1;
+    let settingUp = true;
+    const setUp = () => {
+      if (settingUp) this.settingUp -= 1;
+      settingUp = false;
+    };
     try {
-      return await this.startStage(issue, name, script, args);
+      return await this.startStage(issue, name, script, args, setUp);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       throw err.stageStarted ? err : Object.assign(err, { stageSetup: name });
+    } finally {
+      setUp();
     }
   }
 
-  async startStage(issue, name, script, args) {
+  async startStage(issue, name, script, args, setUp = () => {}) {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
@@ -950,13 +1022,15 @@ export class Local {
       await this.block(issue, name, runs.reason, { fix: runs.fix });
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
-    // That harness's usage limit is spent (a stage here met it, limitPaused): no stage starts on it until the reset. The
-    // Objective pauses as that stage did, and pausedHere resumes it after the reset.
-    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(runs.harness) : null;
+    // The account it runs on has its usage limit spent (a stage on this machine met it, limitPaused, in any serve): no
+    // stage starts on it until the reset. The Objective pauses as that stage did, and pausedHere resumes it after the reset.
+    const account = runs.account?.name ?? runs.harness;
+    const hold = this.holdOf(runs.account ?? implicitAccount(runs.harness));
+    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(hold) : null;
     if (until !== null) {
       rmSync(usageDir, { recursive: true, force: true });
-      this.saidLimit(runs.harness, until);
-      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+      this.saidLimit(runs.harness, account, hold, until);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
     }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
@@ -994,6 +1068,8 @@ export class Local {
       await this.block(issue, name, reason);
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // Its env is made: the settings may change from here on.
+    setUp();
     if (this.stopping) {
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
@@ -1013,6 +1089,7 @@ export class Local {
       const values = script === "worker.mjs" || script === "review.mjs" ? localSecretValues(input("worker_secrets", { env }), process.env) : "";
       // This process posts what the stage leaves too: none of those values.
       holdSecrets([...parseSecretValues(values).values()]);
+      const started = (this.clock ?? Date.now)();
       const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", script), "--repo", this.repoFull, ...args, "--checkout", clone, "--usage-dir", usageDir, "--token-fd", "3", ...notice], { env: values ? { ...env, FACTORY_INPUT_WORKER_SECRET_VALUES: values } : env, stdio: ["ignore", "pipe", "pipe", "pipe", ...(this.notice ? ["ipc"] : [])] });
       // Its process started: a failure from here on is no failure of its set-up (stage(): `stageStarted`).
       try {
@@ -1043,7 +1120,10 @@ export class Local {
             // no record: the child failed before writing one
           }
           dropStage();
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          // A pass on its account completed (the provider served it, and no usage limit ended it): its back-off streak ends,
+          // when the stage started after the newest limit met there (holds.mjs served).
+          if (runs.account && result && servedPass(result)) this.holdStore(hold).served({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), started });
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1074,8 +1154,9 @@ export class Local {
   /**
    * SIGINT, SIGTERM or SIGHUP to `run`, `review` or `serve`: stop. Nothing new starts, every stage process gets SIGTERM
    * (it stops its harness's process group before it exits: proc.mjs stopGroups), and the claims stay, so the Objectives
-   * pause and this machine's next `factory run` or `factory serve` takes them up again. Exits once `whenSettled()` resolves
-   * (the work in flight, wound down) or 30 s pass.
+   * pause and this machine's next `factory run` or `factory serve` takes them up again. A start that has written no claim
+   * yet writes none and puts its Objective back to Queued (withClaim's `onStop`, serve's unpick), so none is left Running
+   * with no claim. Exits once `whenSettled()` resolves (the work in flight, wound down) or 30 s pass.
    */
   stopOnSignals(whenSettled) {
     let stoppedAt = 0;
@@ -1089,7 +1170,7 @@ export class Local {
       stoppedAt = Date.now();
       this.stopping = true;
       for (const wake of this.wakers || []) wake();
-      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); signal again to exit at once`);
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); a start with no claim yet goes back to Queued; signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.resolve(whenSettled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(code);
@@ -1140,8 +1221,22 @@ export class Local {
    * that ends with an exit record drops it. One that ends without (killed, crashed, threw) keeps it and this loop
    * resumes it once (pausedHere); a second such end in a row Blocks it here with the stage's exit and log (lapse). A
    * claim that cannot be read or written is a failed start (`startFailed`, runObjective's unstart).
+   *
+   * `stint` (a work start): the Objective's Running stint (relaunch.mjs runningStint) is read first, and again before and
+   * after the claim is written. A start that waited long enough for another loop to put the Objective back to Queued, or
+   * to pick it again (serve's sweep of a Running one with no claim, the dispatcher's), sees the stint change and steps
+   * aside: it writes no claim, or takes back the one it wrote.
    */
-  async withClaim(issue, fn) {
+  async withClaim(issue, fn, { onStop = null, stint = false } = {}) {
+    const stintNow = async () => {
+      try {
+        // Conditional reads: a timeline page unchanged since this loop last read it is a 304, which the rate limit does not count.
+        return runningStint(await timelineOf(this.repo, issue, { ...this.opts, cache: (this.timelines ??= new Map()) })).key;
+      } catch (e) {
+        throw Object.assign(e, { startFailed: "claim-read" });
+      }
+    };
+    const picked = stint ? await stintNow() : null;
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
@@ -1154,13 +1249,24 @@ export class Local {
       // Who holds it is unknown: nothing about the Objective may change on this (unstart).
       throw Object.assign(e, { startFailed: "claim-read" });
     }
-    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder);
+    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder, { own: this.holder });
     if (others && held.fresh) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
       return { exit: "skipped" };
     }
+    // Told to stop before the claim: none is written. With no claim on the issue at all, `onStop` settles it (a work
+    // start puts a Running Objective back to Queued); a claim already there stays, for the loop that resumes it.
+    if (this.stopping) {
+      if (!held && onStop) await onStop().catch((e) => log(`#${issue}: stopping before its claim, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`));
+      return { exit: "skipped" };
+    }
+    if (stint && (await stintNow()) !== picked) {
+      log(`#${issue}: its Running stint changed while this start waited (another loop queued or picked it again); leaving it alone, no claim written`);
+      return { exit: "skipped" };
+    }
+    let wrote;
     try {
-      await writeClaim(this.repo, issue, this.holder, this.opts);
+      wrote = await writeClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       throw Object.assign(e, { startFailed: "claim", othersClaim: others });
     }
@@ -1175,10 +1281,20 @@ export class Local {
       log(`#${issue}: the claim could not be read back (${String(e.message).slice(0, 160)}); it stays, and this loop resumes the Objective once it is stale`);
       return { exit: "skipped" };
     }
-    if (mine?.holder !== this.holder) {
-      log(`#${issue}: another local loop claimed it first; leaving it alone`);
+    const after = mine?.holder === this.holder && stint ? await stintNow().catch(() => undefined) : picked;
+    if (after === undefined) {
+      // Unread is no answer, as a failed read-back: the claim stays, goes stale, and pausedHere resumes it.
+      log(`#${issue}: its Running stint could not be read back; the claim stays, and this loop resumes the Objective once it is stale`);
       return { exit: "skipped" };
     }
+    const aside = mine?.holder !== this.holder ? "another local loop claimed it first" : after !== picked ? "its Running stint changed while this start claimed it (another loop queued or picked it again)" : null;
+    if (aside) {
+      log(`#${issue}: ${aside}; leaving it alone`);
+      // The comment this write updated was this machine's own claim (a resume): no other loop's name to wait for.
+      await this.cede(issue, wrote, { own: !!held && (held.holder === this.holder || deadHereHolder(held.holder)) });
+      return { exit: "skipped" };
+    }
+    this.ceded?.delete(issue);
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it.
     let beating = null;
@@ -1221,16 +1337,35 @@ export class Local {
   }
 
   /**
+   * Take back a claim this loop wrote and then stepped aside from (withClaim). A comment its write created that still names
+   * this loop goes (with different logins, each loop's claim is a comment of its own, never left beside the live one). A
+   * comment it updated was another loop's under the same login: it stays for that loop's next heartbeat to write its own
+   * name back, and this loop never resumes the Objective from it (pausedHere). One that was this machine's own claim
+   * (`own`: a resume's) stays as any paused claim does, for pausedHere to resume once stale, unless another loop's
+   * heartbeat names that loop first.
+   */
+  async cede(issue, wrote, { own = false } = {}) {
+    // GitHub gives a comment it creates the same created and updated time; an update moves the updated one on.
+    if (!own) (this.ceded ??= new Set()).add(issue);
+    if (!wrote?.id || wrote.created_at !== wrote.updated_at) return;
+    const now = await listComments(this.repo, issue, this.opts).catch(() => null);
+    const c = now?.find((x) => x.id === wrote.id);
+    if (c && parseClaim(c.body)?.holder === this.holder) await rest(`repos/${this.repo.full}/issues/comments/${c.id}`, { ...this.opts, method: "DELETE" }).catch(() => {});
+  }
+
+  /**
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
    * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
    * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. A throw names
-   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work. The
-   * count is this loop's memory: another serve on the machine resumes the Objective afresh.
+   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work; and
+   * the error as postedError has it. The count is this loop's memory: another serve on the machine resumes the
+   * Objective afresh.
    */
   async lapse(issue, result, failure) {
     const stage = result?.stage || failure?.stageSetup || "local";
-    const error = `(${String(failure?.message || failure).slice(0, 200)})`;
-    const what = !failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed ${error}` : `Factory's local loop threw ${error}`;
+    // This machine's log gets the whole error; GitHub gets it as postedError has it.
+    const said = (error) => (!failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed (${error})` : `Factory's local loop threw (${error})`);
+    const what = said(String(failure?.message || failure).slice(0, 200));
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
     if (!lapsed.has(issue)) {
@@ -1241,7 +1376,7 @@ export class Local {
     lapsed.delete(issue);
     log(`#${issue}: ${what} again; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${what} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -1272,59 +1407,96 @@ export class Local {
   }
 
   /**
-   * A stage that ended `paused` on its harness's usage limit (session.mjs usageLimitExit): the reset it names
-   * (`result.usageLimit`: harness, reset, since) is kept in this loop's memory, for the Objective (pausedHere resumes it
-   * after the reset, with no bound: the reset is known) and for the harness (no stage starts on it until then, stage).
-   * No lapse is counted; the claim stays. A provider that refuses again past the reset it stated (or states one no
-   * more than LIMIT_BACKOFF_MS's last ahead) is not taken at its word every tick: the hold is at least now plus a backoff
-   * that grows with each such pause in a row on that harness (2, 5, 10, then 15 minutes), and a reset further out than
-   * that starts the count again. A stage `stage` held before it ran (`held`) counts nothing.
+   * A stage that ended `paused` on its usage limit (session.mjs usageLimitExit): the reset it names (`result.usageLimit`:
+   * harness, reset, since) holds the account the stage ran on (`result.hold`, holdOf; else its harness's login) in
+   * this machine's holds (lib/holds.mjs), which every serve here reads: no stage starts on that account
+   * until then (startStage, limitHold), in this loop or another, now or after a restart. The Objective is kept in this
+   * loop's memory, and pausedHere resumes it after the reset, with no bound: the reset is known. No lapse is counted; the
+   * claim stays. A provider that refuses again past the reset it stated is held at least 2, 5, 10, then 15 minutes per
+   * such pause in a row on that account (lib/holds.mjs accountHolds.limit). A stage held before it ran (`held`) adds no
+   * hold and counts nothing.
    */
   limitPaused(issue, result) {
     const l = result.usageLimit;
     const now = (this.clock ?? Date.now)();
     const stated = Date.parse(l.reset);
     const since = Date.parse(l.since);
+    const account = result.account || l.harness;
+    const hold = result.hold ?? this.holdOf(implicitAccount(l.harness));
     let reset = Number.isFinite(stated) ? stated : now;
-    if (!l.held && l.harness) {
-      const streak = (this.limitStreak ??= new Map());
-      const n = reset - now > LIMIT_BACKOFF_MS.at(-1) ? 0 : (streak.get(l.harness) ?? 0) + 1;
-      streak.set(l.harness, n);
-      if (n) reset = Math.max(reset, now + LIMIT_BACKOFF_MS[Math.min(n, LIMIT_BACKOFF_MS.length) - 1]);
-    }
+    if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now });
     (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset });
-    if (l.harness && reset > (this.limits?.get(l.harness) ?? 0)) (this.limits ??= new Map()).set(l.harness, reset);
     this.lapsed?.delete(issue);
-    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${l.harness}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
-  }
-
-  /** The reset (ms) of `harness`'s usage limit when a stage here met it and the reset is still ahead, else null. */
-  limitUntil(harness) {
-    const at = this.limits?.get(harness);
-    return at !== undefined && at > (this.clock ?? Date.now)() ? at : null;
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
   }
 
   /**
-   * Why an Objective with these labels starts nothing now, or null: its harness (its harness label, choice.mjs choiceOf,
-   * else the loop's) has its usage limit spent (limitUntil). Read on labels the caller already holds (the dispatcher's
-   * listing, pendingReviews' read), never a read of its own; each harness's hold is said once (saidLimit).
+   * Where `hold`'s record is kept (holdOf): this machine's holds (lib/holds.mjs), else this loop's memory. A loop made
+   * without the constructor (a test's) keeps all of them in its memory.
    */
-  limitHold(labels) {
-    if (!this.limits?.size) return null;
-    const c = choiceOf(labels || []);
-    const harness = (c.ok && c.choice.harness) || this.harness;
-    const until = this.limitUntil(harness);
-    if (until === null) return null;
-    this.saidLimit(harness, until);
-    return `${harness}'s usage limit is spent until ${new Date(until).toISOString()}`;
+  holdStore(hold = { shared: true }) {
+    return hold.shared ? (this.holds ??= accountHolds()) : (this.ownHolds ??= accountHolds());
   }
 
-  /** The log line that no stage starts on `harness` until its usage limit's reset (`until`, ms): once per reset. */
-  saidLimit(harness, until) {
-    const key = `${harness}@${until}`;
+  /**
+   * The hold an account's usage limit is kept under, {key, shared}: a declared account's name; for the one a harness
+   * has with none declared, its login, as `<harness>@<hash>` of the login's real path (CLAUDE_CONFIG_DIR else ~/.claude,
+   * CODEX_HOME else ~/.codex, ~/.config/factory/copilot-token), never of a secret: so two serves on two logins never
+   * hold each other. A Copilot token from serve's environment (COPILOT_GITHUB_TOKEN) names no login: its hold stays in
+   * this loop's memory (`shared` false).
+   */
+  holdOf(account) {
+    if (account.declared) return { key: account.name, shared: true };
+    const home = homedir();
+    if (account.harness === "copilot" && process.env.COPILOT_GITHUB_TOKEN) return { key: "copilot@env", shared: false };
+    const path = account.harness === "copilot" ? copilotTokenFile(home) : stageLogin(account.harness, process.env, home)?.dir;
+    if (!path) return { key: `${account.harness}@env`, shared: false };
+    let at = resolve(path);
+    try {
+      at = realpathSync(at);
+    } catch {
+      // not made yet: its path as named
+    }
+    return { key: `${account.harness}@${createHash("sha256").update(at).digest("hex").slice(0, 12)}`, shared: true };
+  }
+
+  /** The reset (ms) of `hold`'s usage limit (holdOf) when a stage on this machine met it and it is still ahead, else null. */
+  limitUntil(hold) {
+    return this.holdStore(hold).until(hold.key, (this.clock ?? Date.now)());
+  }
+
+  /**
+   * Why an Objective with these labels starts nothing now, or null: the account it runs on (its harness, from its harness
+   * label, choice.mjs choiceOf, else the loop's; that harness's default account, accountFor) has its usage limit spent
+   * (limitUntil). Read on labels the caller already holds (the dispatcher's listing, pendingReviews' read), never a read
+   * of its own; the account declaration is read only while an account of that harness is held. Each hold is said once.
+   */
+  limitHold(labels) {
+    const c = choiceOf(labels || []);
+    const harness = (c.ok && c.choice.harness) || this.harness;
+    const now = (this.clock ?? Date.now)();
+    if (!this.holdStore().held(harness, now) && !this.ownHolds?.held(harness, now)) return null;
+    let account;
+    try {
+      account = this.accountFor(harness);
+    } catch {
+      // A declaration that cannot be used Blocks the stage at its start (harnessFor): not a hold.
+      return null;
+    }
+    const hold = this.holdOf(account);
+    const until = this.limitUntil(hold);
+    if (until === null) return null;
+    this.saidLimit(harness, account.name, hold, until);
+    return `${limitName(harness, account.name)}'s usage limit is spent until ${new Date(until).toISOString()}`;
+  }
+
+  /** The log line that no stage starts on `account` until its usage limit's reset (`until`, ms): once per reset. */
+  saidLimit(harness, account, hold, until) {
+    const key = `${hold.key}@${until}`;
     if ((this.limitSaid ??= new Set()).has(key)) return;
     this.limitSaid.add(key);
-    log(`${harness}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${harness} until then`);
+    const who = limitName(harness, account);
+    log(`${who}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${who} until then`);
   }
 
   /**
@@ -1348,6 +1520,8 @@ export class Local {
       }
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
       if (!c || !sameMachineHolder(c.holder)) continue;
+      // A claim this loop stepped aside from (cede): another loop's under its name until that loop's next heartbeat.
+      if (c.holder === this.holder && this.ceded?.has(issue.number)) continue;
       // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
       // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
       // answers would otherwise leave it Running with no notice). Paused on GitHub's spent rate limit: resumed once its
@@ -1360,7 +1534,7 @@ export class Local {
         if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
-      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
+      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
     }
     return out;
   }
@@ -1457,6 +1631,10 @@ export class Local {
   async review(issue, prNumber, { wait = false, reruns = 0 } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
     log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
+    // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back. `run` and
+    // `review`, which may have no serve behind them, do the same here, so the label is never left off with nothing to
+    // put it back, and then review again.
+    if (!this.serving && review.exit === "waiting") return (await this.thirdPartyWait(issue, prNumber)) ? this.review(issue, prNumber, { wait, reruns }) : review;
     if (wait && review.exit === "delivered") {
       // A maintainer commented during the review: it re-applied the label instead of arming the merge. Run it again,
       // at most twice here; after that the label stays and the next serve tick (or a `review` run) takes it.
@@ -1471,6 +1649,35 @@ export class Local {
     return review;
   }
 
+  /**
+   * `run` or `review` (not serve), a review stage that ended waiting for a third-party reviewer: what serve's dispatcher
+   * does for it (third-party-review.mjs waitState), read once a minute: true once the review label is back on (put back
+   * here, that review of the head existing, the bound passed or the head moved, or by another loop or the Action), false
+   * when there is nothing to wait for (no record, the PR closed, a review asked for since) or this loop is stopping.
+   * `gh` is for tests.
+   */
+  async thirdPartyWait(issue, prNumber, { pollMs = THIRD_PARTY_POLL_MS, gh = { getPr, listComments, addLabels } } = {}) {
+    const reads = new Map();
+    while (!this.stopping) {
+      const pr = await gh.getPr(this.repo, prNumber, this.opts).catch(() => null);
+      const comments = pr ? await gh.listComments(this.repo, prNumber, this.opts).catch(() => null) : null;
+      if (pr && (pr.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL)) return true;
+      if (pr && comments) {
+        const state = await waitState({ repo: this.repo, issue, pr, wait: waitOf(comments, issue), opts: this.opts, now: (this.clock ?? Date.now)(), reads });
+        if (!state || state.stale) return false;
+        if (state.resume) {
+          const back = await gh.addLabels(this.repo, prNumber, [REVIEW_LABEL], this.opts).then(() => true, (e) => log(`#${issue}: the review label could not be put back (${String(e?.message || e).slice(0, 120)}); trying again`));
+          if (back) {
+            log(`#${issue}: PR #${prNumber}: the third-party wait is over (${state.resume}); the review goes on`);
+            return true;
+          }
+        }
+      }
+      await this.pause(pollMs);
+    }
+    return false;
+  }
+
   /** One Objective, start to delivered review (and, with `wait`, to merged). */
   async runObjective(issue, { wait = false } = {}) {
     // A stage of this Objective still running on this machine (an earlier serve's, orphaned): never a second beside it,
@@ -1482,7 +1689,7 @@ export class Local {
       return { exit: "skipped" };
     }
     try {
-      return await this.withClaim(issue, () => this.work(issue, { wait }));
+      return await this.withClaim(issue, () => this.work(issue, { wait }), { onStop: () => this.unpickStopped(issue), stint: true });
     } catch (e) {
       if (!e?.startFailed) throw e;
       return this.unstart(issue, e);
@@ -1504,15 +1711,16 @@ export class Local {
    * logged and the Objective goes back to Queued, its claim dropped, rather than sitting Running for the dispatcher to
    * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS), so a
    * machine-level fault (disk full, a broken sandbox) neither Blocks every queued Objective in turn nor relabels them
-   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error (cause `setup`).
+   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error as postedError has it
+   * (cause `setup`).
    * When the claim could not be read, or was another loop's, who holds it is unknown: nothing changes now, and after the
    * backoff this loop reads the claim again (recheckStarts). Only an Objective still labelled Running is un-marked or
    * Blocked; otherwise, or on a failed read, the claim stays, goes stale and this loop resumes it (pausedHere).
    */
   async unstart(issue, e) {
     const out = { code: null, exit: null, usd: null, usageDir: null, startFailed: e.startFailed };
-    const error = String(e?.message || e).replaceAll(homedir(), "~").slice(0, 300);
-    log(`#${issue}: could not start (${e.startFailed}): ${error}`);
+    log(`#${issue}: could not start (${e.startFailed}): ${String(e?.message || e).slice(0, 300)}`);
+    const error = postedError(e).slice(0, 300);
     const failures = (this.startFailures ??= new Map());
     const count = (failures.get(issue)?.count ?? 0) + 1;
     const unknown = e.startFailed === "claim-read" || !!e.othersClaim;
@@ -1554,6 +1762,24 @@ export class Local {
     await dropClaim(this.repo, issue, this.holder, this.opts);
   }
 
+  /** A pick this loop marked and never started, back to Queued: only factory:running comes off, and the card to Queued. */
+  async unpick(issue) {
+    await removeLabel(this.repo, issue, "factory:running", this.opts);
+    const project = await findProject(this.repo, this.opts).catch(() => null);
+    if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
+  }
+
+  /**
+   * A work start told to stop before it wrote its claim, with no claim on the issue: an Objective labelled Running (serve's
+   * dispatch marked it) goes back to Queued, so it is never left Running with nothing to resume it. Any other state stays.
+   */
+  async unpickStopped(issue) {
+    const data = await getIssue(this.repo, issue, this.opts);
+    if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) return;
+    await this.unpick(issue);
+    log(`#${issue}: stopping before its claim was written; back to Queued`);
+  }
+
   /**
    * Each tick: the Objectives whose start failed on a claim this loop could not read, or another loop's, read again once
    * their backoff ends. No live claim of another loop's: back to Queued, for the next pick. A fresh one: that loop has
@@ -1570,7 +1796,7 @@ export class Local {
         await this.unstart(n, Object.assign(e, { startFailed: "claim-read" }));
         continue;
       }
-      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder)) {
+      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder, { own: this.holder })) {
         this.startFailures.delete(n);
         log(`#${n}: another local loop holds it (${c.holder}); leaving it alone`);
         continue;
@@ -1595,7 +1821,8 @@ export class Local {
    * it still running on this machine, or a GitHub read that keeps failing (retried first): never a work pass on a branch
    * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
    */
-  async runIssue(issue, { wait = false, gh = { findPr, getIssue }, waitMs = 2_000 } = {}) {
+  async runIssue(issue, { wait = false, gh: given = {}, waitMs = 2_000 } = {}) {
+    const gh = { findPr, getIssue, listComments, ...given };
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);
@@ -1609,6 +1836,13 @@ export class Local {
     if (next === "merge") log(`#${issue}: PR #${pr.number} has no review pending (reviewed, or waiting for its rebase); ${wait ? "following it to its merge" : "nothing to run here"}`);
     if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
     if (next === "merge") {
+      // Its review ended waiting for a third-party reviewer (a run stopped meanwhile, or a serve's): taken up here, the
+      // label put back once the wait is over, then the review.
+      if (waitOf(await gh.listComments(this.repo, pr.number, this.opts).catch(() => []), issue)) {
+        log(`#${issue}: PR #${pr.number}'s review waits for a third-party reviewer; waiting here, then reviewing`);
+        const resumed = await this.withClaim(issue, async () => ((await this.thirdPartyWait(issue, pr.number)) ? this.review(issue, pr.number, { wait }) : null));
+        if (resumed) return resumed;
+      }
       if (!wait) return { exit: "delivered" };
       return this.withClaim(issue, async () => {
         const merged = await this.followMerge(issue, pr.number);
@@ -1775,8 +2009,153 @@ export class Local {
     return false;
   }
 
+  /**
+   * The workflow's settings as the default branch has them now, read at each serve tick (#276). Only HOT_SETTINGS (caps,
+   * models and effort, validation, resume policy, cache TTL) apply while serve runs: from that tick, to this loop's limit,
+   * the dispatcher's caps and every stage that starts from then on, never to a stage in flight or being set up, and said
+   * once, by name. Every other setting (what a stage may reach or receive, budgets, maintainers, protected paths, the
+   * harness, setup) keeps its value from serve's start until serve starts again, said once. The read also brings the
+   * workflow's Factory pin (followPin).
+   */
+  async refreshSettings() {
+    if (!this.settingsBranch) return;
+    // Fetched every SETTINGS_EVERY_MS; each tick between takes what the last read brought.
+    if (Date.now() - (this.settingsReadAt ?? 0) >= (this.settingsEveryMs ?? SETTINGS_EVERY_MS)) {
+      this.settingsReadAt = Date.now();
+      const read = await committedWorkflowNow(this.dev, this.settingsBranch, { token: this.token });
+      // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
+      if (!read.unfetched) this.settingsRead = read;
+    }
+    const now = this.settingsRead;
+    if (!now) return;
+    if (now.error) {
+      if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
+      this.settingsError = now.error;
+      return;
+    }
+    this.settingsError = null;
+    this.pins = now.pins;
+    // A stage being set up keeps the settings it started with (stage()): the change is taken at a later tick.
+    if (this.settingUp > 0) return;
+    const next = workflowSettings(now.wf).kept;
+    const hot = { ...this.wf };
+    for (const k of HOT_SETTINGS) if (next[k] === undefined) delete hot[k];
+    else hot[k] = next[k];
+    const changes = settingsChanges(this.wf, hot);
+    // The rest, against what serve started with: said once for each set of differences.
+    const held = settingsChanges(this.wf, { ...next, ...Object.fromEntries(HOT_SETTINGS.map((k) => [k, this.wf[k]])) });
+    const heldKey = held.join("\n");
+    if (heldKey !== (this.settingsHeld ?? "")) {
+      if (held.length) log(`the workflow's settings on origin/${this.settingsBranch} changed; these take effect when serve restarts, and until then serve keeps the values it started with: ${held.join("; ")}`);
+      this.settingsHeld = heldKey;
+    }
+    if (!changes.length) return;
+    log(`the workflow's settings on origin/${this.settingsBranch} changed; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
+    this.wf = hot;
+  }
+
+  /**
+   * The workflow's Factory pin against the Factory this serve runs (#276), at each tick. A new release tag or commit
+   * SHA there is taken at a stage boundary: serve fetches it from Factory's own repository (lib/release.mjs), starts no
+   * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), which resumes
+   * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve
+   * fetched): one started from any other checkout, a branch or a change of your own, keeps running what you started, and
+   * says the pin differs. Never an older release (pinDecision, releaseCheckout). A switch starts at most once in
+   * SWITCH_GAP_MS. Said once per pin. Returns true while new stages wait for the switch.
+   */
+  async followPin(inFlight, { once = false } = {}) {
+    this.factory ??= runningFactory();
+    const name = runningName(this.factory);
+    const d = pinDecision(this.pins, this.factory);
+    const ref = d.follow ? d.ref : null;
+    if (this.repin && this.repin.ref !== ref) {
+      log(`clockgrove/factory@${this.repin.ref} is no longer the workflow's pin: serve stays on ${name}`);
+      this.repin = null;
+    }
+    if (d.same) {
+      this.pinNoted = null;
+      return false;
+    }
+    const where = `origin/${this.settingsBranch}`;
+    const note = (line) => {
+      if (this.pinNoted !== d.ref) log(line);
+      this.pinNoted = d.ref;
+      return false;
+    };
+    if (!d.follow) return note(`the workflow on ${where} pins ${d.why}; serve runs no code from it and keeps running ${name}`);
+    if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
+    if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
+    if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
+    // Counted from the last switch this process made (restartOn), never from a try that did not switch.
+    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    if (!this.repin) {
+      log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
+      const r = (this.repin = { ref, state: "fetching" });
+      r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
+        .then(async (c) => {
+          const problem = await startProblem(c.dir);
+          if (problem) throw new Error(problem);
+          r.checkout = c;
+          r.state = "ready";
+        })
+        .catch((e) => {
+          // An older commit than this one, or a SHA not on Factory's main: never tried again until the pin changes.
+          r.state = e?.code === "older" || e?.code === "refused" ? "refused" : "failed";
+          r.retryAt = Date.now() + PIN_RETRY_MS;
+          if (this.repin !== r) return;
+          if (r.state === "refused") log(`${String(e.message).slice(0, 300)}; serve keeps running ${name}`);
+          else log(`clockgrove/factory@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+        });
+    }
+    const r = this.repin;
+    if (r.state === "fetching") return true;
+    if (r.state !== "ready") return false;
+    if (inFlight) return true;
+    if (this.stopping) return false;
+    return this.restartOn(r);
+  }
+
+  /**
+   * Start serve again on the release `r` names, in this same process (process.execve): its pid, its terminal and its
+   * front end stay. The new loop takes up the claims this one leaves (paused work, a stage that lapsed) at once, as a
+   * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. The checkout is checked
+   * once more first, without git (checkoutProblem: every file's SHA-256 against the manifest taken at its fetch): one
+   * changed since is not run, and is fetched afresh later. If the new release fails at its start, it says it switched
+   * from here (main). Where the
+   * process cannot be replaced, says how to restart instead and goes on with the release it runs. Returns false when it
+   * did not restart.
+   */
+  restartOn(r) {
+    const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
+    if (typeof process.execve !== "function") {
+      r.state = "manual";
+      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
+      return false;
+    }
+    const problem = checkoutProblem(r.checkout);
+    if (problem) {
+      r.state = "failed";
+      r.retryAt = Date.now() + PIN_RETRY_MS;
+      log(`the checkout of clockgrove/factory@${r.ref} at ${r.checkout.dir} changed since serve fetched it (${problem}); serve does not run it, goes on with ${runningName(this.factory)} and fetches it afresh in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+      return false;
+    }
+    log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
+    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()), [SWITCHED_FROM_ENV]: this.factory?.root || "" };
+    // The new release's skills and agents, from beside its own scripts.
+    delete env.FACTORY_PLUGIN_ROOT;
+    try {
+      (this.execve ?? process.execve)(process.execPath, [process.execPath, ...process.execArgv, script, ...process.argv.slice(2)], env);
+    } catch (e) {
+      r.state = "manual";
+      log(`serve could not start again on clockgrove/factory@${r.ref} (${String(e?.message || e).slice(0, 200)}): it goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve`);
+    }
+    return false;
+  }
+
   /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, up to this box's limit. */
   async serve({ once = false, intervalMs = 30_000 } = {}) {
+    // A review that ends waiting for a third-party reviewer is resumed by this loop's dispatcher ticks, not in its slot.
+    this.serving = true;
     const running = new Map();
     // Objectives whose stage here ended with a Question or a Block: held until a trusted answer re-queues one or a
     // fresh read shows it Queued (dispatch.mjs localStopped), so a read from before the exit landed never re-claims one.
@@ -1787,14 +2166,29 @@ export class Local {
         const why = stopHold(r);
         if (why) stopped.set(n, { why });
       });
-    const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
-    log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+    // This box's limit, read again at each tick from the settings as they are then (refreshSettings), said when it changes.
+    let limit = 0;
+    const takeLimit = () => {
+      const now = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
+      if (now !== limit) log(`at most ${now} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+      limit = now;
+    };
+    takeLimit();
+    this.factory ??= runningFactory();
+    log(`serve runs Factory ${runningName(this.factory)} from ${this.factory.root}`);
+    // A release checkout serve fetched stays while this process runs from it: no serve on this machine prunes it.
+    markInUse(this.factory.root, this.releaseOpts);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
     // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
     // then, said once.
     waitOutages();
-    this.stopOnSignals(() => Promise.allSettled(running.values()));
+    // The stop waits for the dispatch under way (it may be marking picks Running), then for every start and stage,
+    // those started after the signal included.
+    this.stopOnSignals(async () => {
+      await this.dispatching;
+      while (running.size) await Promise.allSettled(running.values());
+    });
     let cleaned = 0;
     // The token GitHub refused (401: expired or revoked), or null. While set, nothing new starts; each tick reads the
     // token's source again and takes a new token once it passes the start's own check (checkToken), and once a minute
@@ -1822,6 +2216,14 @@ export class Local {
         this.opts.token = now;
         refused = null;
       }
+      // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
+      await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
+      takeLimit();
+      // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
+      const switching = await this.followPin(running.size, { once }).catch((e) => {
+        log(`pin: ${e.message.slice(0, 160)}`);
+        return false;
+      });
       // Every 10 minutes, and at start: closed Objectives' directories go.
       if (Date.now() - cleaned > 10 * 60_000) {
         cleaned = Date.now();
@@ -1831,22 +2233,30 @@ export class Local {
       // Failed starts whose holder was unknown: read their claims again once their backoff ends.
       await this.recheckStarts(running).catch((e) => log(`start recheck: ${e.message.slice(0, 160)}`));
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
-      const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
+      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : null;
+      const resumes = switching ? [] : (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
       for (const n of resumes) {
         log(`#${n}: resuming (this machine held it when it went away)`);
         running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
-      // A harness whose usage limit is spent (limitPaused): no review and no new work on it starts until its reset, said
-      // once; work on any other harness goes on. Each Objective's harness is its harness label, else the loop's.
+      // An account whose usage limit is spent (limitPaused, in any serve on this machine): no review and no new work on
+      // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
       const free = pending.filter((r) => !this.limitHold(r.labels));
-      const reviews = free.slice(0, Math.max(0, limit - running.size));
+      const reviews = switching ? [] : free.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
+      // Stopping: no dispatch starts (it would mark picks Running).
+      if (this.stopping) break;
+      // localLive: a stage of the Objective runs on this machine (an earlier serve's), so the dispatcher never takes a
+      // Running one with no claim for a start that never wrote it. localStopping: a stop mid-dispatch marks no more picks.
+      // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
+      // dispatch that threw midway.
+      const marked = [];
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : Math.max(0, limit - running.size - reviews.length), localFull: waitLine, localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1856,7 +2266,25 @@ export class Local {
         }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
+      }).then(async (r) => {
+        // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit,
+        // unless a claim is on the issue now (another loop picked it too and holds it) or cannot be read: those stay.
+        if (!this.stopping) return r;
+        for (const n of [...new Set(marked)].filter((x) => !running.has(x))) {
+          const c = await localClaim(this.repo, n, this.opts).then((x) => ({ x }), () => null);
+          if (!c || c.x) {
+            log(`#${n}: stopping before it started; ${c ? `a claim is on it (${c.x.holder}), so it stays as it is` : "its claim could not be read, so it stays as it is; the next serve's tick settles it"}`);
+            continue;
+          }
+          await this.unpick(n).then(
+            () => log(`#${n}: stopping before it started; back to Queued`),
+            (e) => log(`#${n}: stopping before it started, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`),
+          );
+        }
+        return { ...r, ready: [], halted: true };
       });
+      const result = await this.dispatching;
+      if (result.halted) break;
       if (result.refused) {
         if (once) return void (await Promise.all(running.values()));
         await new Promise((r) => setTimeout(r, intervalMs));
@@ -1871,8 +2299,8 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
+      if (free.length > reviews.length && !switching) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       for (const r of reviews) running.set(r.issue, track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));
       if (once) {
@@ -2416,6 +2844,8 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] local: ${e.message}\n`);
+    // Right after a switch to a new pinned release (restartOn): say so, and how to go back.
+    if (SWITCHED_FROM) process.stderr.write(`[factory] local: serve stopped at the start of the release it switched to, ${PLUGIN_ROOT}, from ${SWITCHED_FROM}; start serve from ${join(SWITCHED_FROM, "plugin", "bin", "factory")} to run that one again\n`);
     process.exit(1);
   });
 }

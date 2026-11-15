@@ -53,6 +53,20 @@ export function lastRunningAt(events) {
   return last;
 }
 
+/**
+ * The issue's Running stint as its timeline shows it: the newest `labeled` or `unlabeled` factory:running event (the later
+ * in the timeline's order on a tie). `key` names that event, so any label change since gives another key (`none`
+ * without one); `at` is its time; `running` is whether it applied the label.
+ */
+export function runningStint(events) {
+  let last = null;
+  for (const e of events || []) {
+    if ((e?.event !== "labeled" && e?.event !== "unlabeled") || e.label?.name !== "factory:running" || !Number.isFinite(Date.parse(e.created_at))) continue;
+    if (!last || Date.parse(e.created_at) >= Date.parse(last.created_at)) last = e;
+  }
+  return last ? { key: `${last.event}:${last.id ?? ""}@${last.created_at}`, at: last.created_at, running: last.event === "labeled" } : { key: "none", at: null, running: false };
+}
+
 /** The key of an outage Block notice: its comment and the time it was last written (a stage may rewrite one in place). */
 export const blockKey = (c) => `block:${c.id}@${c.updated_at ?? c.created_at ?? ""}`;
 /** The key of a vanished Running stint: when it became Running. */

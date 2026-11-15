@@ -884,8 +884,8 @@ export async function runHarness(opts) {
     }
     if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
     // Another account of the harness is free (automatic account choice on GitHub Actions and the cloud sandbox, #268): a
-    // wait longer than local mode's in-place bound ends the stage instead, and the Objective goes on there.
-    if (end - now > OUTAGE.stageWaitMs && LIMIT.elsewhere && (await LIMIT.elsewhere(r))) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
+    // wait longer than LIMIT.movePastMs ends the stage instead, and the Objective goes on there, starting afresh.
+    if (end - now > LIMIT.movePastMs && LIMIT.elsewhere && (await LIMIT.elsewhere(r))) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
     log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${new Date(r.resetAt).toISOString()}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
     while (OUTAGE.now() < end) {
       await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
@@ -903,10 +903,11 @@ export async function runHarness(opts) {
  * How runHarness waits out a subscription's usage limit: `slackMs` past the reported reset (the provider's clock), at
  * most `waits` waits for one pass, and at least `minRunMs` of the pass's wall clock left after the wait. `elsewhere`:
  * null, or, set by a stage on GitHub Actions or the cloud sandbox with automatic account choice on (route-holds.mjs
- * routeLimits), an async check whether another account is free now, so a wait past local mode's in-place bound
- * (OUTAGE.stageWaitMs) ends the stage rather than holding its runner.
+ * routeLimits), an async check whether another account is free now, so a wait longer than `movePastMs` ends the stage
+ * rather than holding its runner. An hour, not local mode's fifteen minutes: a stage moved on these routes starts
+ * afresh on the branch (its session does not continue on another account there), so a nearer reset is worth its wait.
  */
-export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null };
+export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, movePastMs: 60 * 60_000 };
 
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";

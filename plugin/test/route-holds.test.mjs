@@ -13,7 +13,7 @@ const { RETRY } = await import("../scripts/lib/github.mjs");
 const { NO_SECRET, routeAutoAccounts, routeAutoSetting } = await import("../scripts/lib/accounts.mjs");
 const { accountStep } = await import("../scripts/objective-account.mjs");
 const { routeAccountCheck } = await import("../scripts/lib/objective-trust.mjs");
-const { HOLDS_TITLE, holdLine, readHolds, routeLimits, writeHold } = await import("../scripts/lib/route-holds.mjs");
+const { HOLDS_TITLE, holdLine, pickRouteAccount, readHolds, routeLimits, routeTurn, writeHold } = await import("../scripts/lib/route-holds.mjs");
 const { usageLimitExit } = await import("../scripts/lib/session.mjs");
 const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
 const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
@@ -30,14 +30,14 @@ const H = 60 * 60_000;
 const iso = (ms) => new Date(ms).toISOString();
 
 /** A hold record as Factory's App writes it (holds.mjs's fields), as a comment on the holds issue by `by`. */
-const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `${holdLine({ harness: "claude", streak: 0, ...r })}\nFactory: held`, created_at: iso(r.at) });
+const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `${holdLine({ harness: "claude", streak: 0, ...r })}\nFactory: held`, created_at: iso(r.at), updated_at: iso(r.at) });
 
 /**
  * A GitHub for Objective #8 (labels `labels`, each applied by kirk, who can push), its PR #9 (labels `prLabels`, comments
  * on it kept), the App's token mint, and its record issues: `issues` (title, creator, locked, comments), made, closed,
  * locked and commented on by the App's writes. Every request is in `reads` (method and path, with the query).
  */
-async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null } = {}, fn) {
+async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false } = {}, fn) {
   const reads = [];
   const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [], ...i })), labelMade: false };
   let id = 900;
@@ -60,10 +60,12 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/repos/acme/app/issues" && method === "GET") {
       const creator = u.searchParams.get("creator");
       const label = u.searchParams.get("labels");
-      return json(state.issues.filter((i) => i.user.login === creator && (!label || i.labels.some((l) => l.name === label))).map(({ comments, ...i }) => i));
+      return json(state.issues.filter((i) => (!creator || i.user.login === creator) && (!label || i.labels.some((l) => l.name === label))).map(({ comments, ...i }) => i));
     }
     if (p === "/repos/acme/app/issues" && method === "POST") {
       const made = { number: ++number, title: body.title, user: { login: BOT, type: "Bot" }, state: "open", locked: false, labels: (body.labels || []).map((name) => ({ name })), comments: [] };
+      // Another job's first limit at the same moment: its issue, opened just before this one, closed and locked.
+      if (raceOlder) state.issues.push({ number: 50, title: body.title, user: { login: BOT, type: "Bot" }, state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [] });
       state.issues.push(made);
       return json(made, 201);
     }
@@ -72,16 +74,29 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     const rec = /^\/repos\/acme\/app\/issues\/(\d+)(\/lock|\/comments)?$/.exec(p);
     const own = rec && state.issues.find((i) => i.number === Number(rec[1]));
     if (own && !rec[2] && method === "PATCH") return Object.assign(own, body), json(own);
-    if (own && rec[2] === "/lock" && method === "PUT") return (own.locked = true), new Response(null, { status: 204 });
+    if (own && rec[2] === "/lock" && method === "PUT") return lockFails ? json({ message: "Forbidden" }, 403) : ((own.locked = true), new Response(null, { status: 204 }));
     if (own && rec[2] === "/comments" && method === "GET") return own.comments ? json(own.comments) : json({ message: "Forbidden" }, 403);
-    if (own && rec[2] === "/comments" && method === "POST") return own.comments.push({ id: ++id, user: { login: BOT, type: "Bot" }, body: body.body, created_at: iso(Date.now()) }), json(own.comments.at(-1), 201);
+    if (own && rec[2] === "/comments" && method === "POST") {
+      const at = iso(Date.now());
+      return own.comments.push({ id: ++id, user: { login: BOT, type: "Bot" }, body: body.body, created_at: at, updated_at: at }), json(own.comments.at(-1), 201);
+    }
     const one = /^\/repos\/acme\/app\/issues\/comments\/(\d+)$/.exec(p);
+    // An edit (by anyone who can edit comments) moves the comment's updated_at past its created_at, as GitHub does.
+    if (one && method === "PATCH") {
+      const c = state.issues.flatMap((i) => i.comments || []).find((x) => x.id === Number(one[1]));
+      return Object.assign(c, { body: body.body, updated_at: iso(Date.parse(c.created_at) + 60_000) }), json(c);
+    }
     if (one && method === "DELETE") {
       for (const i of state.issues) i.comments = i.comments.filter((c) => c.id !== Number(one[1]));
       state.prComments = state.prComments.filter((c) => c.id !== Number(one[1]));
       return new Response(null, { status: 204 });
     }
+    const recLab = /^\/repos\/acme\/app\/issues\/(\d+)\/labels(?:\/(.+))?$/.exec(p);
+    const recIssue = recLab && state.issues.find((i) => i.number === Number(recLab[1]));
+    if (recIssue && method === "DELETE") return (recIssue.labels = recIssue.labels.filter((l) => l.name !== decodeURIComponent(recLab[2]))), json([]);
+    if (recIssue && method === "POST") return (recIssue.labels = [...recIssue.labels, ...body.labels.map((name) => ({ name }))]), json(recIssue.labels);
     const lab = /^\/repos\/acme\/app\/issues\/(8|9)\/labels(?:\/(.+))?$/.exec(p);
+    if (lab && labelWritesFail && method !== "GET") return json({ message: "Forbidden" }, 403);
     if (lab) {
       const set = lab[1] === "8" ? state.issue : state.pr;
       if (method === "DELETE") return set.delete(decodeURIComponent(lab[2])) ? json([]) : json({ message: "Label does not exist" }, 404);
@@ -198,34 +213,48 @@ test("only Factory's own comments on its own locked holds issue count: a pasted 
 test("the account step: with the setting on, a stage with no pin starts on a free account, the least recently limited, else its Objective's turn; all held, the one that resets first; a pin wins (#268)", async () => {
   setSelf(null);
   const now = Date.now();
-  // Nothing held: Objective #8's turn of three accounts (8 mod 3 = 2), claude-3, with its own suffix. Read-only token.
+  // Nothing held: Objective #8's turn of three accounts (routeTurn, a hash of its number: 0 here), claude, read with one
+  // labelled query (no holds issue yet: no other read) and the read-only token.
+  assert.equal(routeTurn(8, 3), 0);
   const free = await runStep();
-  assert.deepEqual(free.outputs, { account: "claude-3", suffix_claude: "_CLAUDE_3", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
-  assert.match(free.log, /automatic account choice: account claude-3/);
-  // claude-3 held: of the free ones, the next in the turn.
-  const held3 = holdComment(1, { account: "claude-3", until: now + 2 * H, at: now - 60_000 });
-  const one = await runStep({ issues: [holdsIssue([held3])] });
-  assert.equal(one.outputs.account, "claude");
-  assert.match(one.log, /claude-3 held until/);
-  // claude limited an hour ago, its hold over: never-limited claude-2 goes first.
-  const old = holdComment(2, { account: "claude", until: now - 10 * 60_000, at: now - H });
-  assert.equal((await runStep({ issues: [holdsIssue([held3, old])] })).outputs.account, "claude-2");
+  assert.deepEqual(free.outputs, { account: "claude", suffix_claude: "", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
+  assert.match(free.log, /automatic account choice: account claude/);
+  assert.deepEqual(holdReads(free.reads).map((x) => x.replace(/\?.*/, "")), ["GET /repos/acme/app/issues"]);
+  assert.match(holdReads(free.reads)[0], /labels=factory%3Aholds/);
+  // claude held: of the free ones, the next in the turn.
+  const held1 = holdComment(1, { account: "claude", until: now + 2 * H, at: now - 60_000 });
+  const one = await runStep({ issues: [holdsIssue([held1])] });
+  assert.equal(one.outputs.account, "claude-2");
+  assert.equal(one.outputs.suffix_claude, "_CLAUDE_2");
+  assert.match(one.log, /claude held until/);
+  // claude-2 limited an hour ago, its hold over: never-limited claude-3 goes first, ahead of the turn.
+  const old = holdComment(2, { account: "claude-2", until: now - 10 * 60_000, at: now - H });
+  assert.equal((await runStep({ issues: [holdsIssue([held1, old])] })).outputs.account, "claude-3");
   // A no-reset limit's guess is passed over as a hold is.
-  const guess = holdComment(3, { account: "claude-2", until: now + H, at: now - 60_000, guess: true, streak: 1 });
-  assert.equal((await runStep({ issues: [holdsIssue([held3, old, guess])] })).outputs.account, "claude");
+  const guess = holdComment(3, { account: "claude-3", until: now + H, at: now - 60_000, guess: true, streak: 1 });
+  assert.equal((await runStep({ issues: [holdsIssue([held1, old, guess])] })).outputs.account, "claude-2");
   // Every one held: the one whose hold ends first; the stage runs there as with one account.
-  const all = [held3, holdComment(4, { account: "claude", until: now + 3 * H, at: now - 60_000 }), holdComment(5, { account: "claude-2", until: now + H, at: now - 60_000 })];
+  const all = [held1, holdComment(4, { account: "claude-2", until: now + 3 * H, at: now - 60_000 }), holdComment(5, { account: "claude-3", until: now + H, at: now - 60_000 })];
   const allHeld = await runStep({ issues: [holdsIssue(all)] });
-  assert.equal(allHeld.outputs.account, "claude-2");
-  assert.match(allHeld.log, /every account of this harness is held, so this stage runs on account claude-2, whose hold ends first/);
+  assert.equal(allHeld.outputs.account, "claude-3");
+  assert.match(allHeld.log, /every account of this harness is held, so this stage runs on account claude-3, whose hold ends first/);
   // A trusted pin wins, held or not: no holds read for it.
-  const pinned = await runStep({ labels: ["factory:objective", "factory:account:claude-3"], issues: [holdsIssue([held3])] });
-  assert.equal(pinned.outputs.account, "claude-3");
+  const pinned = await runStep({ labels: ["factory:objective", "factory:account:claude"], issues: [holdsIssue([held1])] });
+  assert.equal(pinned.outputs.account, "claude");
   assert.deepEqual(holdReads(pinned.reads), []);
   // The holds unreadable: it picks as if none is held, and says so.
   const unread = await runStep({ issues: [holdsIssue(null)] });
-  assert.equal(unread.outputs.account, "claude-3");
-  assert.match(unread.log, /could not read the account holds .*picks as if none is held: account claude-3/);
+  assert.equal(unread.outputs.account, "claude");
+  assert.match(unread.log, /could not read the account holds .*picks as if none is held: account claude/);
+});
+
+test("an Objective's turn is a hash of its number, so Objectives of one parity spread over two accounts, and each keeps its own (#268)", () => {
+  const empty = { avoidUntil: () => null, limitedAt: () => null };
+  const odd = Array.from({ length: 10 }, (_, i) => 2 * i + 1);
+  const picks = odd.map((issue) => pickRouteAccount({ names: ["claude", "claude-2"], store: empty, issue }).name);
+  assert.ok(picks.includes("claude") && picks.includes("claude-2"), `odd numbers 1..19 use both accounts: ${picks.join(", ")}`);
+  for (const issue of odd) assert.equal(pickRouteAccount({ names: ["claude", "claude-2"], store: empty, issue }).name, picks[odd.indexOf(issue)], "the same Objective, the same account");
+  assert.equal(pickRouteAccount({ names: ["a", "b", "c"], store: empty, issue: 41 }).name, ["a", "b", "c"][routeTurn(41, 3)]);
 });
 
 test("with the setting off, or one account, the account step is exactly today's: the default, and no holds read (#268)", async () => {
@@ -242,7 +271,7 @@ test("with the setting off, or one account, the account step is exactly today's:
 test("the stage accepts the step's automatic pick of any declared account when nothing pins it; a pin still has to match, and with the setting off the default only (#268)", async () => {
   const check = (labels, env) => withGitHub({ labels }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels, env, opts: { token: "t" } }));
   const on = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
-  assert.deepEqual(await check(["factory:objective"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-3" }), { account: "claude-3", note: "" });
+  assert.deepEqual(await check(["factory:objective"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-3" }), { account: "claude-3", note: "", pinned: false });
   assert.match((await check(["factory:objective"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-9" })).refusal.reason, /prepared with account `claude-9`/);
   assert.match((await check(["factory:objective", "factory:account:claude-2"], { ...on, FACTORY_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude-2`/);
   assert.match((await check(["factory:objective"], { FACTORY_ACCOUNTS: THREE, FACTORY_STAGE_ACCOUNT: "claude-3" })).refusal.reason, /labels now pick `claude`/);
@@ -330,15 +359,15 @@ test("a usage limit with no reset reported still Blocks, and its account is a gu
   const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
   let issues;
   await withGitHub({}, async (_reads, st) => {
-    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude-3", env, opts: { token: "t" } });
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
     await limits.spent({ harness: "claude" });
     issues = st.issues;
   });
-  // Objective #8's turn is claude-3; its guess passes it over.
+  // Objective #8's turn is claude; its guess passes it over.
   setSelf(null);
   const r = await runStep({ issues });
-  assert.equal(r.outputs.account, "claude");
-  assert.match(r.log, /claude-3 held until/);
+  assert.equal(r.outputs.account, "claude-2");
+  assert.match(r.log, /claude held until/);
   // The stages wire it: a Blocked stage's limitRefused writes the guess, a usage limit goes through routeLimits.
   for (const script of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
@@ -346,5 +375,124 @@ test("a usage limit with no reset reported still Blocks, and its account is a gu
     assert.match(src, /goOn: limits\?\.limit/, script);
     assert.match(src, /limits = local \|\| !acct\.account \? null : routeLimits\(/, script);
     assert.match(src, /if \(limits\) LIMIT\.elsewhere = limits\.elsewhere;/, script);
+    assert.match(src, /account: acct\.account, pinned: acct\.pinned,/, `${script}: a pinned stage never moves`);
   }
+});
+
+test("a pinned stage never moves off its account: its limit is held for others, but it waits in place or Blocks as today, work and review alike (#268)", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const reset = Date.now() + 3 * H;
+  for (const stage of ["work", "review"]) {
+    await withGitHub({ labels: ["factory:objective", "factory:account:claude-2", stage === "work" ? "factory:running" : "factory:in-review"] }, async (_reads, st) => {
+      const limits = routeLimits({ repo: REPO, issue: 8, stage, pr: stage === "review" ? 9 : null, harness: "claude", account: "claude-2", pinned: true, env, opts: { token: "t" } });
+      assert.equal(await limits.elsewhere(), false, `${stage}: claude is free, but a pinned stage waits in place`);
+      const ends = [];
+      const blocks = [];
+      await usageLimitExit(limitError(reset), { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a), goOn: limits.limit });
+      assert.equal(ends[0][0], "blocked", stage);
+      assert.equal(blocks[0][1], "provider-quota");
+      assert.doesNotMatch(blocks[0][0], /Every other/);
+      assert.equal((await readHolds(REPO, { token: "t" })).store.until("claude-2", Date.now()), reset, `${stage}: the hold is still recorded`);
+      assert.ok(stage === "work" ? st.issue.has("factory:running") : st.pr.has("factory:review"), `${stage}: not sent on`);
+      assert.deepEqual(st.prComments, []);
+    });
+  }
+  // The stage learns it is pinned from its account check: a label (or a standing pin) is a pin, the step's pick is not.
+  const check = (labels, prepared) => withGitHub({ labels }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels, env: { ...env, FACTORY_STAGE_ACCOUNT: prepared }, opts: { token: "t" } }));
+  assert.equal((await check(["factory:objective", "factory:account:claude-2"], "claude-2")).pinned, true);
+  assert.equal((await check(["factory:objective"], "claude-2")).pinned, false);
+});
+
+test("a hold written but the move refused: the stage Blocks as today and the log says the hold stands (#268)", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  await withGitHub({ labels: ["factory:objective", "factory:running"], labelWritesFail: true }, async () => {
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
+    const lines = [];
+    const write = process.stdout.write;
+    process.stdout.write = (x) => (lines.push(String(x)), true);
+    const blocks = [];
+    try {
+      await usageLimitExit(limitError(Date.now() + 3 * H), { local: false, records: [], finish: async () => {}, block: async (...a) => blocks.push(a), goOn: limits.limit });
+    } finally {
+      process.stdout.write = write;
+    }
+    assert.equal(blocks[0][1], "provider-quota");
+    assert.match(lines.join(""), /the hold on account claude is written, but the Objective could not be sent on to another account/);
+    assert.doesNotMatch(lines.join(""), /hold could not be written/);
+  });
+});
+
+test("records are append-only: an edited one holds nothing; a writer finds an issue whose label was taken off and puts it back (#268)", async () => {
+  setSelf(BOT);
+  const now = Date.now();
+  await withGitHub({ issues: [holdsIssue([holdComment(1, { account: "claude", until: now + H, at: now - 60_000 })])] }, async (reads, st) => {
+    assert.equal((await readHolds(REPO, { token: "t" }, { now })).store.until("claude", now), now + H);
+    // Someone who can edit comments lengthens it: it no longer counts at all.
+    const c = st.issues[0].comments[0];
+    await globalThis.fetch(`https://github.test/repos/acme/app/issues/comments/${c.id}`, { method: "PATCH", body: JSON.stringify({ body: c.body.replace(String(now + H), String(now + 99 * H)) }) });
+    assert.equal((await readHolds(REPO, { token: "t" }, { now })).store.until("claude", now), null);
+    // The label off: a reader sees no holds (one labelled query); the writer finds the issue by creator and relabels it.
+    st.issues[0].labels = [];
+    reads.length = 0;
+    assert.equal((await readHolds(REPO, { token: "t" }, { now })).issue, null);
+    assert.equal(reads.filter((x) => x.startsWith("GET /repos/acme/app/issues?")).length, 1);
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: now + 2 * H, now }, { token: "t" }, { actions: true });
+    assert.equal(st.issues.length, 1, "no new issue");
+    assert.deepEqual(st.issues[0].labels.map((l) => l.name), ["factory:holds"]);
+    assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).store.until("claude-2", now), now + 2 * H);
+  });
+});
+
+test("first-limit races: of two locked holds issues the writer uses the oldest and retires the other; an unlocked stray Factory made is retired; a failed lock retires its own (#268)", async () => {
+  setSelf(BOT);
+  const now = Date.now();
+  const stray = { number: 55, locked: false };
+  const newer = { number: 60 };
+  await withGitHub({ issues: [holdsIssue([]), holdsIssue([], stray), holdsIssue([], newer)] }, async (_reads, st) => {
+    // Every label gone: the writer searches by creator, keeps the oldest locked one (#50, its label put back), retires
+    // the unlocked #55 and the newer #60.
+    for (const i of st.issues) i.labels = [];
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + H, now }, { token: "t" }, { actions: true });
+    const by = (n) => st.issues.find((i) => i.number === n);
+    assert.equal(by(50).comments.length, 1, "written to the oldest locked one");
+    for (const n of [55, 60]) {
+      assert.equal(by(n).title, `${HOLDS_TITLE} (unused)`, `#${n} retitled`);
+      assert.equal(by(n).state, "closed");
+    }
+    assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).issue, 50);
+  });
+  // Two jobs open one each at once: this one finds the other's older issue after opening its own, writes there, and
+  // retires its own.
+  await withGitHub({ raceOlder: true }, async (_reads, st) => {
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + H, now }, { token: "t" }, { actions: true });
+    const by = (n) => st.issues.find((i) => i.number === n);
+    assert.equal(by(50).comments.length, 1);
+    assert.equal(by(101).comments.length, 0);
+    assert.equal(by(101).title, `${HOLDS_TITLE} (unused)`);
+    assert.deepEqual(by(101).labels, []);
+    assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).issue, 50);
+  });
+  // The first write's lock refused: its issue is retired and the write fails, so the stage Blocks as with the setting off.
+  await withGitHub({ lockFails: true }, async (_reads, st) => {
+    await assert.rejects(writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + H, now }, { token: "t" }, { actions: true }));
+    assert.equal(st.issues.length, 1);
+    assert.equal(st.issues[0].title, `${HOLDS_TITLE} (unused)`);
+    assert.deepEqual(st.issues[0].labels, []);
+  });
+});
+
+test("doctor names more than one holds issue, or an unlocked one, with the setting on; nothing with it off (#268)", async () => {
+  const { holdsIssueChecks } = await import("../scripts/doctor.mjs");
+  const run = (issues, auto = "1") => withGitHub({ issues }, () => holdsIssueChecks({ repo: REPO, opts: { token: "t" }, accounts: TWO, auto, self: BOT }));
+  assert.deepEqual(await run([], ""), []);
+  assert.match((await run([]))[0].detail, /no holds issue yet/);
+  assert.deepEqual((await run([holdsIssue()])).map((c) => c.status), ["PASS"]);
+  const two = await run([holdsIssue(), holdsIssue([], { number: 60 })]);
+  assert.deepEqual(two.map((c) => c.status), ["WARN"]);
+  assert.match(two[0].detail, /2 holds issues \(#50, #60\): only the oldest locked one is read/);
+  const open = await run([holdsIssue([], { locked: false })]);
+  assert.match(open[0].detail, /#50 is not locked, so on GitHub Actions its holds count for nothing/);
+  assert.match(open[0].fix, /gh issue lock 50/);
 });

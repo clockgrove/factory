@@ -180,7 +180,7 @@ test("runHarness, real, fake claude: off the local route the in-place bound is t
   });
 });
 
-test("runHarness, real, fake claude: with another account free (automatic account choice on Actions, #268), a reset past fifteen minutes ends the stage instead of the in-place wait; a nearer one, or none free, is waited for", async () => {
+test("runHarness, real, fake claude: with another account free (automatic account choice on Actions, #268), a reset past an hour ends the stage instead of the in-place wait; a nearer one, or none free, is waited for", async () => {
   const start = Date.parse(RESET) - 2 * 60 * 60_000;
   const asked = [];
   try {
@@ -194,9 +194,9 @@ test("runHarness, real, fake claude: with another account free (automatic accoun
       assert.deepEqual(waits, []);
     });
     assert.deepEqual(asked, ["usage_limit_reached"]);
-    // Ten minutes to the reset: waited for in place, as local mode would, without asking.
+    // Fifty minutes to the reset: waited for in place without asking, since a move starts afresh on these routes.
     const near = fakeClaude();
-    await inStage(near.bin, Date.parse(RESET) - 10 * 60_000, async () => {
+    await inStage(near.bin, Date.parse(RESET) - 50 * 60_000, async () => {
       waitOutages({ until: (since) => since + 3 * 60 * 60_000 });
       assert.equal((await runHarness(pass(near.bin))).ok, true);
       assert.equal(near.calls().length, 2);

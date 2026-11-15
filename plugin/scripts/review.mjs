@@ -684,7 +684,7 @@ async function main() {
     return;
   }
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
-  limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, opts: token });
+  limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
   if (acct.note) await progress(acct.note);

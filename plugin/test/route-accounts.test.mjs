@@ -209,7 +209,7 @@ test("the stage runs only on the account it was prepared with: a changed or unus
   };
   const pin = ["factory:objective", "factory:account:claude-2"];
   const ok = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude-2" });
-  assert.deepEqual(ok.r, { ok: true, account: "claude-2", note: "" });
+  assert.deepEqual(ok.r, { ok: true, account: "claude-2", note: "", pinned: true });
   assert.deepEqual(ok.applied, []);
   const moved = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude" });
   assert.equal(moved.r.ok, false);

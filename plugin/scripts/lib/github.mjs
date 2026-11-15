@@ -537,15 +537,16 @@ export async function ensureLabel(repo, name, color, description, opts) {
 /**
  * One of Factory's own record issues (the sandbox image's, image.mjs; the account holds', route-holds.mjs), or null: the
  * oldest issue Factory's own login opened with the exact `title`. The `label` is only a hint (the first, cheap query);
- * without it, Factory's own issues are searched by creator. On Actions the issue must be locked, as Factory leaves it, so
- * an unlocked one (Factory's, but not the record's) is not trusted.
+ * without it, Factory's own issues are searched by creator (every page of them), unless `fallback` is false: then the
+ * label's one query alone. On Actions the issue must be locked, as Factory leaves it, so an unlocked one (Factory's, but
+ * not the record's) is not trusted.
  */
-export async function findRecordIssue(repo, { label, title }, opts, { actions = process.env.GITHUB_ACTIONS === "true" } = {}) {
+export async function findRecordIssue(repo, { label, title }, opts, { actions = process.env.GITHUB_ACTIONS === "true", fallback = true } = {}) {
   const self = selfLogin();
   if (!self) return null;
   const ok = (i) => !i.pull_request && isSelf(i) && i.title === title && (!actions || i.locked === true);
   const query = (extra) => rest(`repos/${repo.full}/issues?creator=${encodeURIComponent(self)}&state=all&sort=created&direction=asc&per_page=100${extra}`, { ...opts, paginate: !extra });
-  for (const extra of [`&labels=${encodeURIComponent(label)}`, ""]) {
+  for (const extra of [`&labels=${encodeURIComponent(label)}`, ...(fallback ? [""] : [])]) {
     const found = ((await query(extra)) || []).filter(ok).sort((a, b) => a.number - b.number)[0];
     if (found) return found;
   }
@@ -555,13 +556,18 @@ export async function findRecordIssue(repo, { label, title }, opts, { actions = 
 /**
  * Open one of Factory's own record issues (findRecordIssue): `label` made when absent, the issue opened with `title` and
  * `body`, then closed and locked, so it neither shows among open issues nor takes comments. Returns its number. Locked
- * is part of what makes it Factory's record on Actions: a failed lock throws.
+ * is part of what makes it Factory's record on Actions: a failed close or lock throws, its error carrying the issue
+ * opened (`issue`) for the caller to clean up.
  */
 export async function openRecordIssue(repo, { label, color, description, title, body }, opts) {
   await ensureLabel(repo, label, color, description, opts);
   const issue = (await rest(`repos/${repo.full}/issues`, { ...opts, method: "POST", body: { title, body, labels: [label] } })).number;
-  await rest(`repos/${repo.full}/issues/${issue}`, { ...opts, method: "PATCH", body: { state: "closed", state_reason: "completed" } });
-  await rest(`repos/${repo.full}/issues/${issue}/lock`, { ...opts, method: "PUT", body: { lock_reason: "resolved" } });
+  try {
+    await rest(`repos/${repo.full}/issues/${issue}`, { ...opts, method: "PATCH", body: { state: "closed", state_reason: "completed" } });
+    await rest(`repos/${repo.full}/issues/${issue}/lock`, { ...opts, method: "PUT", body: { lock_reason: "resolved" } });
+  } catch (e) {
+    throw Object.assign(e, { issue });
+  }
   return issue;
 }
 

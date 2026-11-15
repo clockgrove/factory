@@ -297,7 +297,7 @@ export async function objectiveInputs({ repo, issue, args = {}, env = process.en
  * the workflow's account step, whose account's credential is the only one the stage holds; with automatic account choice
  * on and no pin, any declared account of the harness, the one the step picked, #268). {refusal: {reason, fix}} for a
  * declaration or label that cannot be used, two account labels, or an account other than the prepared one; else
- * {account, note: ""}. With none declared, the repository's one credential as ever: {account: null, note}, `note`
+ * {account, note: "", pinned} (`pinned`: a label, or one a removal left standing, chose it). With none declared, the repository's one credential as ever: {account: null, note}, `note`
  * accountLabelNote's line for an account label, which does nothing then. `gh` (labelers, permission) is a test's own.
  */
 export async function routeAccountCheck({ repo, issue, harness, labels = [], env = process.env, opts, gh = {} }) {
@@ -316,9 +316,9 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   // The account step ran and could pick none (its labels then could not be used), so it passed no credential.
   if (prepared === NO_SECRET) return { refusal: { reason: `the job's account step picked no account, so this stage holds no account's credential; the labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
   // Automatic account choice (#268): with no pin, the step picks any declared account of the harness (route-holds.mjs).
-  if (prepared !== r.account.name && !r.label && routeAutoAccounts(env, harness)?.includes(prepared)) return { account: prepared, note: "" };
+  if (prepared !== r.account.name && !r.label && routeAutoAccounts(env, harness)?.includes(prepared)) return { account: prepared, note: "", pinned: false };
   if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
-  return { account: r.account.name, note: "" };
+  return { account: r.account.name, note: "", pinned: !!r.label };
 }
 
 /**
@@ -370,7 +370,7 @@ export async function accountGate({ repo, issue, harness, labels = [], env = pro
   const c = await routeAccountCheck({ repo, issue, harness, labels, env, opts, gh });
   // Two account labels: the stage waits (account-wait.mjs), never Blocks.
   if (c.wait) return { ok: false, wait: await waitOnAccounts({ repo, issue, stage, pr, two: c.wait, opts }) };
-  if (!c.refusal) return { ok: true, account: c.account, note: c.note };
+  if (!c.refusal) return { ok: true, account: c.account, note: c.note, pinned: !!c.pinned };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);
   return { ok: false, reason: c.refusal.reason };

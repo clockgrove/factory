@@ -9,6 +9,9 @@
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md). This runs in Factory's
 // own process, never in a harness: the key stays here, and scrubbedEnv (harness.mjs) keeps it out of every child.
 import { createHash } from "node:crypto";
+import { Evaluator, Lexer, Parser, data as exprData } from "../../vendor/@actions/expressions/dist/index.js";
+import { Binary, ContextAccess, Grouping, IndexAccess, Literal, Logical, Unary } from "../../vendor/@actions/expressions/dist/ast.js";
+import { falsy } from "../../vendor/@actions/expressions/dist/result.js";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
@@ -517,6 +520,171 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
+
+// ------------------------------------------------------------------ what a workflow file says about its failing jobs
+
+/** A matrix value GitHub shows in a leg's name: a string, a number or a boolean (the YAML reader keeps each as its text). */
+const shownValue = (v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * A job's matrix legs as GitHub makes them: the product of its keys' lists, less each `exclude`, then each `include`
+ * added to every leg of that product whose own values it does not change (a value an earlier include added may be
+ * overwritten), or as a leg of its own when it fits none; a leg an include made never takes a later include. Each leg
+ * is {values, own}: `own` the keys the product gave it. Null when the matrix is not lists (an expression, a non-list value).
+ */
+export function matrixLegs(matrix) {
+  if (!matrix || typeof matrix !== "object" || Array.isArray(matrix)) return null;
+  const keys = Object.keys(matrix).filter((k) => k !== "include" && k !== "exclude");
+  if (keys.some((k) => !Array.isArray(matrix[k]))) return null;
+  let legs = keys.length ? [{}] : [];
+  for (const k of keys) legs = legs.flatMap((l) => matrix[k].map((v) => ({ ...l, [k]: v })));
+  const exclude = Array.isArray(matrix.exclude) ? matrix.exclude.filter((e) => e && typeof e === "object") : [];
+  const product = legs.filter((l) => !exclude.some((e) => Object.entries(e).every(([k, v]) => sameValue(l[k], v)))).map((values) => ({ values, own: Object.keys(values) }));
+  const added = [];
+  for (const inc of Array.isArray(matrix.include) ? matrix.include : []) {
+    if (!inc || typeof inc !== "object" || Array.isArray(inc)) return null;
+    const fits = product.filter((l) => Object.entries(inc).every(([k, v]) => !l.own.includes(k) || sameValue(l.values[k], v)));
+    for (const l of fits) Object.assign(l.values, inc);
+    if (!fits.length) added.push({ values: { ...inc }, own: Object.keys(inc) });
+  }
+  return [...product, ...added];
+}
+
+/**
+ * The matrix values of the leg a check run named `name` reports, for the job whose check name is `own`. A plain name
+ * gets ` (<the leg's values, comma separated>)` added; a name with `${{ }}` in it is each leg's name with them
+ * evaluated over its values (matrixExpression), as GitHub shows it, with or without that suffix. Null unless exactly
+ * one leg matches (its values shown all, or the ones the product gave it), or the job has no matrix and the name is
+ * `own` ({}).
+ */
+export function legValues(job, own, name) {
+  const matrix = job?.strategy?.matrix;
+  const templated = /\$\{\{[\s\S]*?\}\}/.test(own);
+  if ((matrix === undefined || matrix === null) && !templated) return name === own ? {} : null;
+  const legs = matrix === undefined || matrix === null ? [{ values: {}, own: [] }] : matrixLegs(matrix) || [];
+  const shown = (vals) => (vals.every(shownValue) ? vals.map(String).join(", ") : null);
+  const suffixes = (l) => [shown(Object.values(l.values)), shown(l.own.map((k) => l.values[k]))].filter((x) => x !== null).map((x) => ` (${x})`);
+  const hits = legs.filter((l) => {
+    const base = templated ? expandName(own, l.values) : own;
+    return base !== null && [...(templated ? [""] : []), ...suffixes(l)].some((x) => `${base}${x}` === name);
+  });
+  return hits.length === 1 ? hits[0].values : null;
+}
+
+/** A job name template with each `${{ }}` evaluated over one leg's `matrix` (matrixExpression); null when any cannot be. */
+function expandName(template, matrix) {
+  let ok = true;
+  const out = template.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, src) => {
+    const v = matrixExpression(src, matrix);
+    if (v === null) ok = false;
+    return v === null ? "" : v.coerceString();
+  });
+  return ok ? out : null;
+}
+
+/**
+ * One `${{ }}` expression's value over a leg's `matrix` context, with GitHub's own expression library: only one of at
+ * most EXPRESSION_CAP characters made of literals, `matrix` lookups, comparisons and logic (plainExpression). Null
+ * when it is anything else or does not evaluate.
+ */
+function matrixExpression(src, matrix) {
+  if (!matrix || src.length > EXPRESSION_CAP) return null;
+  try {
+    const expr = new Parser(new Lexer(src).lex().tokens, ["matrix"], []).parse();
+    if (!plainExpression(expr)) return null;
+    return new Evaluator(expr, JSON.parse(JSON.stringify({ matrix }), exprData.reviver)).evaluate();
+  } catch {
+    return null;
+  }
+}
+
+export function continueOnError(job, matrix) {
+  const v = job?.["continue-on-error"];
+  if (v === undefined || v === null) return false;
+  if (typeof v === "boolean") return v;
+  const s = String(v).trim();
+  if (/^(?:true|True|TRUE)$/.test(s)) return true;
+  if (/^(?:false|False|FALSE)$/.test(s)) return false;
+  const m = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
+  const value = m ? matrixExpression(m[1], matrix) : null;
+  return value === null ? null : !falsy(value);
+}
+
+/** The longest `continue-on-error` expression evaluated; a longer one is unknown. */
+export const EXPRESSION_CAP = 1024;
+
+/**
+ * Whether a parsed expression is only literals, `matrix` lookups, comparisons and logic: the bounded part of the
+ * language a leg's `continue-on-error` needs. A function call (`format`, `fromJSON`…), whose cost has no bound, or
+ * anything else is not evaluated.
+ */
+function plainExpression(n) {
+  if (n instanceof Literal || n instanceof ContextAccess) return true;
+  if (n instanceof Unary) return plainExpression(n.expr);
+  if (n instanceof Binary) return plainExpression(n.left) && plainExpression(n.right);
+  if (n instanceof Logical) return n.args.every(plainExpression);
+  if (n instanceof Grouping) return plainExpression(n.group);
+  if (n instanceof IndexAccess) return plainExpression(n.expr) && plainExpression(n.index);
+  return false;
+}
+
+/**
+ * What a workflow file (`text`, the one a run of failing jobs came from) says about those jobs, on structure only:
+ * `coe` (by check-run id) whether each run's job may fail without failing the run (continueOnError: true, false or
+ * null), and `needs` (by check-run id) the names of the failing runs whose jobs each run's job `needs`, directly or
+ * through jobs it needs (a job between them may have been skipped), or null when its job is not found. A run's job is
+ * the one job whose check name reports it (reports); a run `<caller> / …` is the job that calls a reusable workflow,
+ * whose own `continue-on-error` is not read here (null). Nothing (empty maps) when the file does not parse.
+ */
+export function workflowJobs(text, runs) {
+  const coe = new Map();
+  const needs = new Map();
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""), { typed: true });
+  } catch {
+    return { coe, needs };
+  }
+  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object");
+  const own = (id, j) => (typeof j.name === "string" || typeof j.name === "number" ? String(j.name) : id);
+  const called = (j) => typeof j.uses === "string" && !!j.uses.trim();
+  // A caller's runs are named `<caller> / <the called workflow's job>` (workflowChecks).
+  const jobOf = (name) => {
+    const hits = jobs.filter(([id, j]) => reports(called(j) ? `${own(id, j)} / \${{ callee }}` : own(id, j), name));
+    return hits.length === 1 ? hits[0] : null;
+  };
+  const needsOf = (j) => (Array.isArray(j?.needs) ? j.needs : j?.needs ? [j.needs] : []).map(String);
+  const byId = new Map(jobs);
+  // Every job a job needs, directly or through others: a roll-up red because a job it needs was skipped after its own
+  // need failed is red because of that failure.
+  const closure = (id) => {
+    const seen = new Set();
+    const stack = needsOf(byId.get(id));
+    while (stack.length) {
+      const n = stack.pop();
+      if (seen.has(n) || !byId.has(n)) continue;
+      seen.add(n);
+      stack.push(...needsOf(byId.get(n)));
+    }
+    return seen;
+  };
+  const found = new Map((runs || []).map((r) => [r.id, jobOf(r.name)]));
+  for (const r of runs || []) {
+    const hit = found.get(r.id);
+    if (!hit) {
+      coe.set(r.id, null);
+      needs.set(r.id, null);
+      continue;
+    }
+    const [id, job] = hit;
+    coe.set(r.id, called(job) ? null : continueOnError(job, legValues(job, own(id, job), r.name)));
+    const wants = closure(id);
+    needs.set(r.id, (runs || []).filter((o) => o !== r && wants.has(found.get(o.id)?.[0])).map((o) => o.name));
+  }
+  return { coe, needs };
+}
+
 /** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
 const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
 /**

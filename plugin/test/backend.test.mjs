@@ -609,7 +609,7 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const tools = ["slirp4netns", "nsenter", "unshare", "ip", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore"];
   const stub = (t, body) => write(join(bin, t), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   for (const t of tools) stub(t, t === "slirp4netns" ? "echo 'open(\"/dev/net/tun\"): Permission denied' >&2\nexit 1" : t === "unshare" ? "exit 0" : "exit 1");
-  const run = () => spawnSync("/bin/sh", ["-c", COPILOT_OUTER_PROBE], { env: { PATH: bin, TMPDIR: dir }, encoding: "utf8", timeout: 30_000 });
+  const run = () => spawnSync("/bin/sh", ["-c", COPILOT_OUTER_PROBE], { env: { HOME: process.env.HOME, PATH: bin, TMPDIR: dir }, encoding: "utf8", timeout: 30_000 });
   const r = run();
   assert.equal(r.status, 4);
   assert.equal(r.stderr.trim(), 'slirp4netns did not configure its interface: open("/dev/net/tun"): Permission denied', "one line, with the cause, for outerProbe's reason");
@@ -789,7 +789,7 @@ test("outerProbe keeps only a yes: a no is probed again, and an old no in the ca
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(cacheFile, "utf8"))), ["other"], "no `on: false` entry is kept");
   const on = { ...opts, probe: () => (probes++, { on: true, why: "" }) };
   assert.equal(outerProbe("copilot", on).on, true);
-  assert.equal(JSON.parse(readFileSync(cacheFile, "utf8")).k.on, true);
+  assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["k|copilot"].on, true);
   const again = outerProbe("copilot", { ...opts, probe: () => assert.fail("a yes is read from the cache") });
   assert.equal(again.on, true);
   assert.equal(again.cached, true);
@@ -808,12 +808,32 @@ test("a Copilot outer probe that answers off once then on is on: one slow probe 
   const r = outerProbe("copilot", { cacheFile, home: t, keyOf: () => "k", probe: () => answers[probes++] });
   assert.equal(r.on, true, "the stage runs (stageEnv refuses Copilot only on an off answer)");
   assert.equal(probes, 2);
-  assert.equal(JSON.parse(readFileSync(cacheFile, "utf8")).k.on, true, "the yes is kept");
+  assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["k|copilot"].on, true, "the yes is kept");
   // Codex runs without it on a no (no Block): probed once, as before.
   let codex = 0;
   assert.equal(outerProbe("codex", { cacheFile, home: t, keyOf: () => "c", probe: () => (codex++, { on: false, why: "x" }) }).on, false);
   assert.equal(codex, 1);
   rmSync(t, { recursive: true, force: true });
+});
+
+test("#318: an outer probe's yes is kept for the account it was made on, never reused for another", { skip: process.platform !== "linux" }, async () => {
+  const { mkdtempSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { outerProbe } = await import("../scripts/lib/local.mjs");
+  const t = mkdtempSync(join(tmpdir(), "op3-"));
+  const cacheFile = join(t, "outer-probe.json");
+  const omega = { name: "omega", harness: "codex", declared: true, home: join(t, "codex-a") };
+  const sigma = { name: "sigma", harness: "codex", declared: true, home: join(t, "codex-b") };
+  const probed = [];
+  const run = (account, on) => outerProbe("codex", { cacheFile, home: t, account, keyOf: () => "c", probe: () => (probed.push(account?.name ?? "implicit"), { on, why: on ? "" : "x" }) });
+  assert.equal(run(omega, true).on, true);
+  assert.equal(run(omega, false).cached, true, "the same account reads its yes");
+  assert.equal(run(sigma, false).on, false, "another account is probed for itself");
+  assert.equal(run(null, false).on, false, "and so is the implicit one");
+  assert.equal(run({ ...omega, home: join(t, "codex-c") }, false).on, false, "and the same name on another login folder");
+  assert.deepEqual(probed, ["omega", "sigma", "implicit", "omega"]);
+  assert.equal(Object.keys(JSON.parse(readFileSync(cacheFile, "utf8"))).length, 1, "one yes, for omega on its folder");
 });
 
 test("serve's Copilot probe never gets the developer's own COPILOT_HOME", async () => {

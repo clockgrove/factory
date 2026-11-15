@@ -10,7 +10,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
-import { isFactorySecret } from "./inputs.mjs";
+import { commandFailed, isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
 import { exec } from "./proc.mjs";
@@ -507,12 +507,14 @@ process.stdout.write(JSON.stringify({ submodules: names, locks: removed }));
  * prepareProtectedPaths and the clone's package-cache directories, in the clone's own sandbox (`run` gives the command).
  * `locks`: the stale git locks to remove first (staleGitLocks), each re-checked there as a regular `.lock` file under
  * `.git` with no symlink on its path. Returns {submodules, locks}: the names .gitmodules gives and the locks removed.
+ * A failure throws with the exit alone (commandFailed): the output's last line is in the log.
  */
 export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, strict = false, locks = [] } = {}) {
   const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? (strict ? "fresh-strict" : "fresh") : "0", JSON.stringify(locks), ...dirs]);
   // `strict` (a fresh work stage, worker.mjs): leftovers that could not all be removed are a failure, code clone-clean.
-  if (r.code === 4) throw Object.assign(new Error(`the clone's leftovers could not all be removed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`), { code: "clone-clean" });
-  if (r.code !== 0) throw new Error(`the clone could not be prepared in its sandbox: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
+  // Its output can name a path on this machine (the clone, wherever it is): it goes to the log, never into the error.
+  if (r.code === 4) throw commandFailed("the clone's leftovers could not all be removed", r, { code: "clone-clean" });
+  if (r.code !== 0) throw commandFailed("the clone could not be prepared in its sandbox", r);
   try {
     return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };
   } catch {
@@ -1537,14 +1539,15 @@ export function sandboxedVersion(harness, settingsDir, { env = process.env, home
  * Linux: whether `harness` runs in the outer sandbox on this host ({on, why, cached, cacheFile}). Claude Code: yes. A
  * probed harness (Codex, Copilot): its own sandbox, or what it needs, is started once inside the outer sandbox's profile
  * on a throwaway directory. Only a yes is kept, in ~/.cache/factory/outer-probe.json by harness, bubblewrap and srt
- * version, so the next stage reads it; a no (which a loaded box or a missing tool installed since can cause) is probed
- * again by the next serve start and the next stage.
+ * version and by the account it was made on (`account`, lib/accounts.mjs: its name and its login folder or token file;
+ * none, the implicit one), so the next stage on that account reads it; a no (which a loaded box or a missing tool
+ * installed since can cause) is probed again by the next serve start and the next stage.
  */
-export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env, home = homedir(), cacheFile = join(home, ".cache", "factory", "outer-probe.json"), keyOf = outerProbeKey, probe = runOuterProbe } = {}) {
+export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env, home = homedir(), account = null, cacheFile = join(home, ".cache", "factory", "outer-probe.json"), keyOf = outerProbeKey, probe = runOuterProbe } = {}) {
   if (osPlatform() !== "linux") return { on: false, why: "not Linux (Seatbelt cannot start inside another sandbox)" };
   if (!OUTER_HARNESSES.includes(harness)) return { on: false, why: "not supported" };
   if (!OUTER_PROBED.includes(harness)) return { on: true, why: "" };
-  const key = keyOf(harness, { env, home });
+  const key = `${keyOf(harness, { env, home })}|${account?.declared ? `${account.name}:${account.home || account.tokenFile || ""}` : harness}`;
   let cache = {};
   try {
     cache = JSON.parse(readFileSync(cacheFile, "utf8"));

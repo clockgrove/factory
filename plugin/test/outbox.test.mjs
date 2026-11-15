@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
-import { gitError, openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
+import { openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
+import { gitError } from "../scripts/lib/inputs.mjs";
 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
@@ -375,7 +376,9 @@ test("outbox: a malformed object in the agent's bundle is refused by Factory's o
   r.run(r.work, "update-ref", "refs/heads/factory/1", bad);
   const box = await open(r);
   assert.equal(await box.push(), false);
-  assert.match(box.error, /failed Factory's object check/);
+  // #318: git's cause, and no path on this machine (index-pack can name the mirror's pack).
+  assert.match(box.error, /^the agent's bundle failed Factory's object check \(exit \d+\): .*fatal: fsck error in packed object; (this machine's|the job) log has its output$/);
+  assert.ok(!box.error.includes(r.root), box.error);
   assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"));
 });
 
@@ -804,6 +807,45 @@ test("gitError: git's first error lines with the paths they list, never its clos
   assert.equal(gitError("Aborting\n"), "Aborting", "no error: line: the first line");
   assert.equal(gitError(""), "");
   assert.ok(gitError(`error: ${"x".repeat(1000)}\n`).length <= 300);
+});
+
+test("#318: a failed git command Blocks with git's cause, every absolute path on this machine replaced; the log has it all", async () => {
+  const { commandFailed, logName, logTo, withoutLocalPaths } = await import("../scripts/lib/inputs.mjs");
+  const { exec } = await import("../scripts/lib/proc.mjs");
+  const { createServer } = await import("node:http");
+  const r = repos();
+  const env = { ...process.env, ...quiet, GIT_TERMINAL_PROMPT: "0" };
+  const lines = [];
+  logTo({ write: (l) => lines.push(l) });
+  // A server that refuses every credential, as GitHub does a revoked token.
+  const server = createServer((_, res) => res.writeHead(401, { "WWW-Authenticate": 'Basic realm="x"' }).end());
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  const outside = join(mkdtempSync(join(tmpdir(), "srv-")), "checkout");
+  let missing, denied, gone;
+  try {
+    missing = commandFailed("git fetch in Factory's mirror failed", await exec("git", ["-C", r.work, "fetch", "-q", "origin", "refs/heads/nope"], { env })).message;
+    denied = commandFailed("the branch on GitHub could not be read", await exec("git", ["-c", "credential.helper=", "ls-remote", `http://x-access-token:not-a-real-token@127.0.0.1:${server.address().port}/acme/app.git`], { env })).message;
+    gone = commandFailed("git status in the checkout failed", await exec("git", ["-C", outside, "status"], { env })).message;
+  } finally {
+    logTo(null);
+    server.close();
+  }
+  const pointer = "; (this machine's|the job) log has its output$";
+  assert.match(missing, new RegExp(`^git fetch in Factory's mirror failed \\(exit 128\\): fatal: couldn't find remote ref refs/heads/nope${pointer}`), "a missing ref keeps its cause");
+  assert.match(denied, new RegExp(`^the branch on GitHub could not be read \\(exit 128\\): fatal: Authentication failed for 'http://127\\.0\\.0\\.1:\\d+/acme/app\\.git/'${pointer}`), "an auth failure keeps its cause");
+  assert.doesNotMatch(denied, /not-a-real-token/);
+  assert.match(gone, new RegExp(`fatal: cannot change to '<path>': No such file or directory${pointer}`), "a path outside the home is replaced");
+  assert.ok(!gone.includes(outside));
+  assert.ok(lines.some((l) => l.includes(outside)), "the log has the path");
+  assert.equal(withoutLocalPaths("error: unable to unlink /srv/app/.git/index.lock; see https://github.com/o/r and gen/a.png"), "error: unable to unlink <path>; see https://github.com/o/r and gen/a.png");
+  // A quoted path whole, its spaces and commas included; a file: URL is a path.
+  assert.equal(withoutLocalPaths("fatal: Unable to create '/srv/my repo/.git/index.lock': File exists."), "fatal: Unable to create '<path>': File exists.");
+  assert.equal(withoutLocalPaths('error: cannot open "/home/Kirk Marple/clone/a, b.txt": denied'), 'error: cannot open "<path>": denied');
+  assert.equal(withoutLocalPaths("error: /srv/a/x.txt, /srv/b/y.txt and gen/a.png"), "error: <path>, <path> and gen/a.png");
+  assert.equal(withoutLocalPaths("fatal: repository 'file:///home/kirk/work/mirror/' not found"), "fatal: repository '<path>' not found");
+  assert.equal(withoutLocalPaths("fetch file:///srv/m.git failed"), "fetch <path> failed");
+  assert.equal(logName({ FACTORY_LOCAL: "1", GITHUB_ACTIONS: "true" }), "this machine's log");
+  assert.equal(logName({ GITHUB_ACTIONS: "true" }), "the job log");
 });
 
 /**

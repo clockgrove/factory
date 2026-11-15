@@ -5,7 +5,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -30,7 +30,7 @@ setTimeout(() => {}, 60000);
 
 /** Run `script` (an ES module body) in its own process; resolves with its last stdout line as JSON. */
 async function stage(script, root, timeoutMs = 90_000) {
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), GITHUB_API_URL: "https://github.test" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), GITHUB_API_URL: "https://github.test" }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let err = "";
   child.stdout.on("data", (c) => (out += c));
@@ -47,6 +47,13 @@ async function stage(script, root, timeoutMs = 90_000) {
   }
   return { code, json, out, err };
 }
+
+test("#318: a stage process the tests start runs on the test's fake home, never the real one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-race-home-"));
+  const r = await stage(`process.stdout.write(JSON.stringify({ home: (await import("node:os")).homedir() }) + "\\n");`, root);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json.home, homedir());
+});
 
 // A fetch fake for a child process: GitHub calls recorded; `issue` the Objective's labels; `hang` paths never answer.
 const FETCH = (issueLabels, hang = "") => `
@@ -73,7 +80,7 @@ test("validation: a fix pass the stop ends is the stage's last step; the validat
     import { passesRunning, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
     import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     const root = process.env.FAKE_STATE;
-    const loop = validationLoop({ checkout: root, commands: ["echo ran >> " + root + "/ran; exit 1"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env: { PATH: process.env.PATH, FAKE_STATE: root }, deadlineAt: Date.now() + 600_000, eventsFile: root + "/events.jsonl", maxPasses: 2 });
+    const loop = validationLoop({ checkout: root, commands: ["echo ran >> " + root + "/ran; exit 1"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, deadlineAt: Date.now() + 600_000, eventsFile: root + "/events.jsonl", maxPasses: 2 });
     let ended = false;
     loop.then(() => (ended = true), () => (ended = true));
     const t0 = Date.now();
@@ -174,7 +181,7 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     const root = process.env.FAKE_STATE;
     const repo = { owner: "acme", name: "app", full: "acme/app" };
     // A pass whose process ignores the stop's SIGTERM: still running when the short settle ends.
-    runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { PATH: process.env.PATH, FAKE_STUBBORN: "1" }, timeoutMs: 120_000, label: "work-1" });
+    runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STUBBORN: "1" }, timeoutMs: 120_000, label: "work-1" });
     const t0 = Date.now();
     while (!((await stageSpendSoFar()).usd > 0) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
     const order = [];
@@ -300,7 +307,7 @@ test("the backstop's spend write: a final figure set but not landed is written a
     process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
     process.exit(0);
   `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
   let err = "";
   child.stderr.on("data", (c) => (err += c));
   assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);

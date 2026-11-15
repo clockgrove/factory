@@ -512,8 +512,15 @@ test("a workflow hand-over scored as an owner step extends the streak and the po
   const strict = streaks([handed, clean].map((c) => scoreObjective(c, { prices, now: NOW, handover: "input" })), { from: "2031-03-01T00:00:00Z" });
   assert.deepEqual(Object.values(strict.harnesses)[0].sequence.map((x) => x.ok), [false, true]);
   assert.match(streakTable(strict, { repository: REPO }), /A workflow hand-over is input here \(--handover input\): it breaks the streak\./);
-  // Rows scored by both rules (a standing scorecard's older rows) say so.
-  assert.match(streakTable(streaks([...rows, { ...rows[1], issue: 44, walkAway: { ...rows[1].walkAway, handover: undefined } }], { from: null }), { repository: REPO }), /scored per row here \(walkAway\.handover\): an owner step on some, input on others\./);
+  // Rows scored by both rules (a standing scorecard's older hand-over row, scored as input) say so.
+  const old = scoreObjective(withHandover(cleanMerge(44)), { prices, now: NOW, handover: "input" });
+  delete old.walkAway.handover;
+  assert.match(streakTable(streaks([...rows, old], { from: null }), { repository: REPO }), /scored per row here \(walkAway\.handover\): an owner step on some, input on others\./);
+  // An older row with no hand-over at all says nothing about the rule: no mix.
+  const plain = { ...rows[1], issue: 45, walkAway: { ...rows[1].walkAway, handover: undefined } };
+  const unmixed = streakTable(streaks([...rows, plain], { from: null }), { repository: REPO });
+  assert.doesNotMatch(unmixed, /scored per row/);
+  assert.match(unmixed, /A workflow hand-over counts as normal work \(--handover owner-step\)/);
 });
 
 test("score.mjs: several --repo values need --streak and --since, and take no issue-keyed option", () => {

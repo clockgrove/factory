@@ -166,8 +166,9 @@ test("workflow hand-over in local mode: Factory's own factory:handover label und
   c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T04:00:00Z" });
   const own = localFactoryActions(c);
   assert.equal(own("2031-03-02T01:20:05Z", OPERATOR, "labeled factory:handover"), true);
-  // Removing it inside a run's window is Factory dropping the hand-over; after the merge, outside any, it is the person's.
-  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
+  // A removal is the person's "applied" mark, inside a run's window too, unless it is Factory's drop; after the merge,
+  // outside any window, it is the person's.
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), false);
   assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled factory:handover"), false);
   const row = scoreObjective(c, { prices, now: NOW });
   assert.equal(row.walkAway.value, true, row.walkAway.reason);
@@ -175,6 +176,58 @@ test("workflow hand-over in local mode: Factory's own factory:handover label und
   // Under the strict rule the first action is the hand-over at the merge, not Factory's own label.
   const strict = scoreObjective(c, { prices, now: NOW, handover: "input" });
   assert.equal(strict.walkAway.firstHumanAction.kind, "workflow hand-over");
+});
+
+test("workflow hand-over in local mode: a removal inside a run is Factory's only when it is Factory's drop; else it is the person's applying it, input before the merge", () => {
+  const removedAt = (c, at) => c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: at });
+  const labeledAt = (c, at) => c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: at });
+  // The operator removes it at 01:30, inside the work run, with Factory's patch posted and no relabel: the plugin reads
+  // that as applied (handoff.mjs handoverApplied), so it is the person's input before the merge, a miss.
+  const person = withHandover(localMerge(60), { by: OPERATOR });
+  labeledAt(person, "2031-03-02T01:20:05Z");
+  removedAt(person, "2031-03-02T01:30:00Z");
+  const miss = scoreObjective(person, { prices, now: NOW });
+  assert.equal(miss.walkAway.value, false);
+  assert.equal(miss.walkAway.humanActions, 1);
+  assert.equal(miss.walkAway.firstHumanAction.kind, "unlabeled factory:handover");
+  // Factory's drop: it applied the label again later in a run...
+  const again = withHandover(localMerge(60), { by: OPERATOR });
+  labeledAt(again, "2031-03-02T01:20:05Z");
+  removedAt(again, "2031-03-02T01:30:00Z");
+  labeledAt(again, "2031-03-02T01:35:00Z");
+  assert.equal(localFactoryActions(again)("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
+  assert.equal(scoreObjective(again, { prices, now: NOW }).walkAway.value, true);
+  // ...or its hand-over comment now carries no patch (the PR carries none). Outside a run it is still the person's.
+  const none = localMerge(60);
+  none.issueComments.push({ user: OPERATOR, created_at: "2031-03-02T01:20:00Z", updated_at: "2031-03-02T01:30:00Z", body: `<!-- factory:60:handover -->\nFactory: PR #200 carries no workflow hand-over.` });
+  const own = localFactoryActions(none);
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
+  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled factory:handover"), false);
+});
+
+test("workflow hand-over in local mode: the operator applying factory:handover by hand is the person's, unless Factory's hand-over comment is there or it falls in a run", () => {
+  const c = localMerge(60);
+  const own = localFactoryActions(c);
+  assert.equal(own("2031-03-02T05:00:00Z", OPERATOR, "labeled factory:handover"), false);
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "labeled factory:handover"), true);
+  assert.equal(localFactoryActions(withHandover(localMerge(60), { by: OPERATOR }))("2031-03-02T05:00:00Z", OPERATOR, "labeled factory:handover"), true);
+  c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T05:00:00Z" });
+  assert.equal(scoreObjective(c, { prices, now: NOW }).walkAway.firstHumanAction.kind, "labeled factory:handover");
+});
+
+test("workflow hand-over in local mode, split: the operator applying part one's hand-over during part two's run is the owner step's applied mark", () => {
+  const c = withHandover(localMerge(60), { by: OPERATOR });
+  const first = c.pulls[0];
+  const line = first.body.split("\n\n")[0];
+  first.body = `${line}\n\npart 1\n\nRefs #60\n`;
+  c.pulls.push({ ...first, number: 201, created_at: "2031-03-02T03:30:00Z", merged_at: "2031-03-02T04:30:00Z", body: `${line}\n\npart 2\n\nCloses #60\n` });
+  c.pullDetails[201] = { commits: [], timeline: [], comments: [], reviews: [], reviewComments: [] };
+  c.issueComments.push({ id: 1700000003, user: OPERATOR, created_at: "2031-03-02T02:40:00Z", updated_at: "2031-03-02T04:00:00Z", body: "<!-- factory:60:progress:work:1700000003 -->\nFactory work run 1700000003\n- 02:40Z harness codex (gpt-test) attempt 1\n- 04:00Z exit: delivered; usd 1" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T03:00:00Z" });
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.walkAway.value, true, row.walkAway.reason);
+  assert.deepEqual(row.ownerStep.steps.map((x) => x.where), ["PR #200", "PR #201"]);
+  assert.deepEqual(row.ownerStep.applied, { at: "2031-03-02T03:00:00Z", by: "dev" });
 });
 
 test("human push: the bot's own commits and comments never count, nor the label that starts the clock", () => {

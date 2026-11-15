@@ -45,8 +45,16 @@ export function verdict(row) {
   return { ok: true, why: "walk-away merge" };
 }
 
-/** The hand-over rules the rows were scored by (walkAway.handover; a row from before it was recorded scored it as input). */
-const handoverRules = (rows) => [...new Set(rows.map((r) => r.walkAway?.handover ?? "input"))].sort();
+/**
+ * The hand-over rules the rows were scored by (walkAway.handover). Only rows with a hand-over decide the mix (an owner
+ * step, or Factory's `workflow hand-over` request; such a row from before the rule was recorded scored it as input);
+ * with none, the one rule the rows record, if they record exactly one.
+ */
+const handoverRules = (rows) => {
+  const handed = rows.filter((r) => r.ownerStep || (r.walkAway?.interventions?.requests || []).some((q) => q.kind === "workflow hand-over"));
+  const rules = new Set(handed.length ? handed.map((r) => r.walkAway?.handover ?? "input") : rows.map((r) => r.walkAway?.handover).filter(Boolean));
+  return handed.length || rules.size === 1 ? [...rules].sort() : [];
+};
 
 /** The streak header's sentence on the workflow hand-over, by the rules its rows were scored by. */
 export function handoverSentence(rules = []) {

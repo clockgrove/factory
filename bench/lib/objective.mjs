@@ -151,8 +151,11 @@ export function decisionsOf(actions) {
  *   - comments: Factory's comments all carry a `<!-- factory:... -->` marker. One without a marker is a person's, even
  *     inside a run (an answer to a Question typed while the stage was running).
  *   - the merge, which the merge queue records as whoever armed auto-merge, is Factory's.
- *   - the workflow hand-over's label: applying factory:handover is Factory's (a person never applies it); removing it
- *     is Factory's inside a run's window (it dropped the hand-over), else the person's mark that they applied it.
+ *   - the workflow hand-over's label, read as plugin handoff.mjs handoverApplied reads it: applying factory:handover is
+ *     Factory's when its hand-over comment (`<!-- factory:N:handover -->`, the login's) is on the issue or inside a
+ *     run's window. Removing it is Factory's only when it is Factory's drop: inside a run's window, and either that
+ *     comment carries no patch (Factory replaced it with "carries none") or Factory applied the label again later.
+ *     Any other removal is the person's mark that they applied it, which Factory takes as applied.
  *   - anything else (a push, a review, a draft toggle) is Factory's inside a run's window: the login's progress
  *     comment's creation to its last edit, with two minutes' slack.
  * On any route, a Done pass that runs under a person's login (a local loop's dispatcher) posts its `done` record before
@@ -176,6 +179,13 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
   const slack = 2 * 60_000;
   const windows = progress.map((c) => [ms(c.created_at) - slack, ms(c.updated_at || c.created_at) + slack]);
   const labels = (collected.issueTimeline || []).filter((e) => e.event === "labeled").sort((a, b) => ms(a.created_at) - ms(b.created_at));
+  const inRun = (at) => windows.some(([a, b]) => ms(at) >= a && ms(at) <= b);
+  // The workflow hand-over: the login's hand-over comment, and whether it still carries a patch (handoverOf).
+  const mark = `${handoverMarker(collected.issue?.number)}\n`;
+  const handoverBodies = (collected.issueComments || []).filter((c) => c.user?.login === login).map((c) => String(c.body || "").replace(/\r\n?/g, "\n")).filter((b) => b.startsWith(mark));
+  const handoverLabel = (at) => handoverBodies.length > 0 || inRun(at);
+  const dropped = handoverBodies.some((b) => handoverOf(b.slice(mark.length)) === null);
+  const relabeled = (at) => labels.some((e) => e.label?.name === HANDOVER_LABEL && (e.actor?.login ?? e.actor?.name) === login && ms(e.created_at) > ms(at) && handoverLabel(e.created_at));
   // Factory lifts its own Blocked only on recovery: the Objective label re-applied after the latest block.
   const recovered = (at) => {
     const block = labels.filter((e) => e.label?.name === BLOCKED_LABEL && ms(e.created_at) <= ms(at)).at(-1);
@@ -184,8 +194,8 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
   return (at, actor, kind) => {
     if (tidied(at, actor, kind)) return true;
     if ((actor?.login ?? actor?.name) !== login) return false;
-    if (kind === `labeled ${HANDOVER_LABEL}`) return true;
-    if (kind === `unlabeled ${HANDOVER_LABEL}`) return windows.some(([a, b]) => ms(at) >= a && ms(at) <= b);
+    if (kind === `labeled ${HANDOVER_LABEL}`) return handoverLabel(at);
+    if (kind === `unlabeled ${HANDOVER_LABEL}`) return inRun(at) && (dropped || relabeled(at));
     if (/^(un)?labeled /.test(kind)) return LOCAL_STATE_KIND.test(kind) && (kind !== `unlabeled ${BLOCKED_LABEL}` || recovered(at));
     if (kind === "comment") return false;
     if (kind === "marker comment" || kind === "merged") return true;

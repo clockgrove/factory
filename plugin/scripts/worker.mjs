@@ -20,8 +20,8 @@ import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, restartedAt, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -142,6 +142,8 @@ async function main() {
   let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
+  // A send-back's rebase stage ({conflict}): its end writes the rebase line and this Objective's rebases so far (#277).
+  let rebaseStage = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
@@ -175,7 +177,18 @@ async function main() {
       const line = stageSpendLine(usage, { records, known });
       progress.spend(line.usd, line.parts);
     }
-    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
+    // A rebase's dollars on every route, with the spend line's bound marks: 0 when no harness pass ran, else its passes'
+    // (a conflict pass, fix passes).
+    let rebaseText = "";
+    if (rebaseStage) {
+      const cost = rebaseCost(usage, { records, known });
+      // The earlier rebases are read from the issue, but not through an outage this stage is ending on; unread, the
+      // line names this rebase alone. The rebase line is set before that read, so a stop's write carries it.
+      const read = outage ? null : () => listComments(repo, issue, token);
+      const passesRan = records.filter((r) => r && !r.noRun).length;
+      rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
+    }
+    await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.
     stopWaiting();
     setOutput("exit", exit);
@@ -265,6 +278,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
+    if (rebaseStage) stoppedRebase(progress, rebaseStage.conflict, recs);
     if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
@@ -457,6 +471,7 @@ async function main() {
       rebaseMode = true;
       rebasedTo = await outbox.rebase(botWho);
       rebaseConflict = !rebasedTo;
+      rebaseStage = { conflict: rebaseConflict };
       if (rebasedTo) {
         // Exactly the commit Factory's own rebase made is pushed (with its merge of a default branch that changed a
         // workflow file meanwhile, if any), and the checkout is put on it for validation.

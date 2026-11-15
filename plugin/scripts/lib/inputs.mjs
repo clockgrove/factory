@@ -306,7 +306,12 @@ export function mask(value) {
   if (value && maskable()) process.stdout.write(`::add-mask::${value}\n`);
 }
 /** Log a line with a stable prefix. Never pass a secret; a held one (holdSecrets) is redacted anyway. */
-export const log = (...parts) => process.stdout.write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
+/** Where log lines go: stdout, unless a command whose stdout is its data (`factory wait`) sends them to stderr (logTo). */
+let LOG_STREAM = null;
+export const logTo = (stream) => {
+  LOG_STREAM = stream;
+};
+export const log = (...parts) => (LOG_STREAM ?? process.stdout).write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
 
 /**
  * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its

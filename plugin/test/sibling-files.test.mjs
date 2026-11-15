@@ -2,16 +2,17 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
-import { marker, rebaseCost, rebaseCostOf, rebaseLine, rebaseTally, spendOf, vendorBody } from "../scripts/lib/logic.mjs";
-import { forgetFiles, heavyOverlap, plannedFiles, siblingOrder } from "../scripts/lib/overlap.mjs";
+import { marker, rebaseCost, rebaseCostOf, rebaseLine, rebaseTally, setSelf, spendOf, vendorBody } from "../scripts/lib/logic.mjs";
+import { forgetFiles, heavyOverlap, plannedFiles, reviewHold, siblingOrder, waitReason } from "../scripts/lib/overlap.mjs";
 import { progressReporter, rebaseExitLine, rebaseNotice } from "../scripts/lib/session.mjs";
 import { markdownTable, rebaseCell, rebasesOf, spendRecords } from "../../bench/lib/objective.mjs";
 
 RETRY.sleep = async () => {};
 
 // #277: Objectives that change the same files ran at once and rebased over each other one merge at a time (one spent
-// $18.32 against a median of $8.55, almost all of it rebases). The dispatcher now orders the ones whose files it knows,
-// and every rebase's cost is on the issue and in the scorecard.
+// $18.32 against a median of $8.55, almost all of it rebases). Every rebase's cost is on the issue and in the scorecard.
+// #340: holding the start of such an Objective held its whole work stage (an answered Question's pass, a resumed draft)
+// for a sibling's review and merge, so hot-file Objectives ran one at a time. They start; the hand-off to review waits.
 
 const REPO = "acme/app";
 const SELF = "factory-app[bot]";
@@ -31,7 +32,7 @@ test("#277: heavy is three shared files or half of the smaller list; one shared 
   assert.equal(heavyOverlap([], ["a"], ["a"]), false);
 });
 
-test("#277: siblingOrder holds a heavy overlap, passes its slot on, notes a light one, starts unknowns, and orders two picks of one tick", () => {
+test("#340: siblingOrder starts every pick while slots last, heavy overlap or not, and notes each overlap, heavy ones named", () => {
   const siblings = [{ number: 7, state: "In review", files: ["a", "b", "c", "q"] }];
   const r = siblingOrder({
     candidates: [
@@ -42,22 +43,20 @@ test("#277: siblingOrder holds a heavy overlap, passes its slot on, notes a ligh
       { number: 12, files: ["z"] },
     ],
     siblings,
-    slots: 3,
+    slots: 4,
   });
-  assert.deepEqual(r.ready, [9, 10, 12], "#8 waits on #7; #11 waits on #10, started this tick; #12 takes the slot");
-  assert.deepEqual(
-    r.waits.map((w) => [w.number, w.on, w.shared]),
-    [
-      [8, 7, ["a", "b", "c"]],
-      [11, 10, ["x", "y"]],
-    ],
-  );
-  assert.deepEqual(r.notes, [{ number: 10, with: [{ number: 7, shared: ["a"] }] }]);
+  assert.deepEqual(r.ready, [8, 9, 10, 11], "nothing waits at its start: each has work of its own to write");
+  assert.deepEqual(r.notes, [
+    { number: 8, with: [{ number: 7, shared: ["a", "b", "c"] }], heavy: [7] },
+    { number: 10, with: [{ number: 7, shared: ["a"] }, { number: 8, shared: ["a"] }], heavy: [] },
+    { number: 11, with: [{ number: 10, shared: ["x", "y"] }], heavy: [10] },
+  ]);
+  assert.equal(r.waits, undefined);
 });
 
 /** GitHub as the dispatcher reads it: Objectives, their comments, one open PR per In-review Objective with its files. */
 function world(issues, { comments = {}, prs = {} } = {}) {
-  const state = { issues, comments: { ...comments }, prs, writes: [], reads: [] };
+  const state = { issues, comments: { ...comments }, prs, writes: [], reads: [], timelines: {} };
   let id = 1000;
   const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const fetch = async (url, init = {}) => {
@@ -70,7 +69,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     if (method === "GET") state.reads.push(`${p}${u.search}`);
     else state.writes.push(`${method} ${p}${body?.body ? ` ${body.body}` : ""}`);
     if (method === "GET" && u.pathname === "/user") return json({ login: SELF, type: "Bot" });
-    if (method === "GET" && p === "/issues") return json(u.searchParams.get("state") === "closed" ? [] : u.searchParams.get("labels") === "factory:objective" ? state.issues : []);
+    if (method === "GET" && p === "/issues") return json(u.searchParams.get("state") === "closed" ? [] : state.issues.filter((i) => i.labels.some((l) => l.name === u.searchParams.get("labels"))));
     if (method === "GET" && p === "") return json({ default_branch: "main" });
     if (method === "GET" && p === "/rulesets") return json([]);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
@@ -84,6 +83,23 @@ function world(issues, { comments = {}, prs = {} } = {}) {
       for (const list of Object.values(state.comments)) for (const c of list) if (c.id === Number(m[1])) c.body = body.body;
       return json({ id: Number(m[1]) });
     }
+    if (method === "DELETE" && (m = /^\/issues\/comments\/(\d+)$/.exec(p))) {
+      for (const k of Object.keys(state.comments)) state.comments[k] = state.comments[k].filter((c) => c.id !== Number(m[1]));
+      return new Response(null, { status: 204 });
+    }
+    // Labels on PRs (an issue number that is a PR's): kept on the PR, with the label's time in its timeline.
+    if ((m = /^\/issues\/(\d+)\/labels(?:\/(.+))?$/.exec(p))) {
+      const x = Object.values(state.prs).find((y) => y.pr.number === Number(m[1]));
+      if (x && method === "POST") {
+        x.pr.labels = [...x.pr.labels.filter((l) => !body.labels.includes(l.name)), ...body.labels.map((name) => ({ name }))];
+        (state.timelines[m[1]] ||= []).push(...body.labels.map((name) => ({ event: "labeled", label: { name }, created_at: new Date().toISOString() })));
+        return json(x.pr.labels);
+      }
+      if (x && method === "DELETE") {
+        x.pr.labels = x.pr.labels.filter((l) => l.name !== decodeURIComponent(m[2]));
+        return json(x.pr.labels);
+      }
+    }
     if (method === "GET" && p === "/pulls") {
       const head = u.searchParams.get("head");
       // A fork's PR from a branch of the same name: never one of Factory's.
@@ -95,7 +111,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     if (method === "GET" && (m = /^\/pulls\/(\d+)\/files$/.exec(p))) return json(Number(m[1]) === 99 ? ["src/parse.ts", "a.md", "b.md", "c.md"].map((filename) => ({ filename })) : (Object.values(state.prs).find((x) => x.pr.number === Number(m[1]))?.files || []).map((filename) => ({ filename })));
     if (method === "GET" && (m = /^\/pulls\/(\d+)$/.exec(p))) return json(Object.values(state.prs).find((x) => x.pr.number === Number(m[1]))?.pr ?? {});
     if (method === "GET" && /\/actions\/(workflows\/[^/]+\/)?runs$/.test(p)) return json({ workflow_runs: [] });
-    if (method === "GET" && /\/timeline$/.test(p)) return json([]);
+    if (method === "GET" && (m = /^\/issues\/(\d+)\/timeline$/.exec(p))) return json(state.timelines[m[1]] || []);
     // The merge pass's reads and its merge (session.mjs mergeReadyOne): the Objective, the PR's review, green CI.
     if (method === "GET" && (m = /^\/issues\/(\d+)$/.exec(p))) return json(state.issues.find((i) => i.number === Number(m[1])) ?? { message: "Not Found" }, state.issues.some((i) => i.number === Number(m[1])) ? 200 : 404);
     if (method === "GET" && /^\/pulls\/\d+\/comments$/.test(p)) return json([]);
@@ -139,45 +155,34 @@ const overlap = (w, n) => (w.state.comments[n] || []).filter((c) => c.body.start
 // #7 is In review with PR #12 under review (its label on: no merge this tick) on the fixture, docs and command files.
 const PR7 = () => ({ 7: { pr: { number: 12, state: "open", draft: false, mergeable: true, mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "factory/7", repo: { full_name: REPO } }, base: { ref: "main" }, labels: [{ name: "factory:review" }] }, files: ["test/fixtures/env.ts", "docs/commands.md", "src/commands/run.ts", "README.md"] } });
 const SHARED3 = ["test/fixtures/env.ts", "docs/commands.md", "src/commands/run.ts"];
+// #8 is Running or In review with PR #13 on #7's files and one more.
+const PR8 = (extra = {}) => ({ pr: { number: 13, state: "open", draft: false, mergeable: true, mergeable_state: "clean", head: { sha: "c".repeat(40), ref: "factory/8", repo: { full_name: REPO } }, base: { ref: "main" }, labels: [], ...extra }, files: [...SHARED3, "src/new.ts"] });
+/** Factory's review-wait record on `n`'s PR, waiting for `on` since `sinceMs` (overlap.mjs reviewHold writes it). */
+const holdRecord = (n, on, sinceMs, id = 950 + n) => ({ id, user: { login: SELF, type: "Bot" }, body: `${marker(n, "review-wait").replace(/ -->$/, "")}:${on}-${Math.floor(sinceMs / 1000)} -->\nFactory: its review waits for #${on}.`, created_at: new Date(sinceMs).toISOString(), updated_at: new Date(sinceMs).toISOString() });
+const prLabels = (w, n) => w.state.prs[n].pr.labels.map((l) => l.name);
 const waitsComment = (n, on, sinceMs) => ({ id: 900 + n, user: { login: SELF, type: "Bot" }, body: `${marker(n, "overlap", `waits-${on}-${Math.floor(sinceMs / 1000)}`)}\nFactory: this Objective waits for #${on}.`, created_at: new Date(sinceMs).toISOString() });
 
-test("#277: a real dispatcher tick holds the Objective whose plan overlaps an In-review PR heavily, says so on it, starts the next, and starts it once the sibling is gone", async () => {
+test("#340: a real dispatcher tick starts the Objective whose plan overlaps an In-review PR heavily (an answered Question's work pass), beside the next, and says on it that its review will wait", async () => {
   forgetFiles();
-  // #8 (a rerun: its plan names #7's files) and #9 (fresh: no plan, no comments) are Queued, then #10, whose plan
-  // shares one file with #7's PR.
+  // #8 (a rerun after its Question: its plan names #7's files) and #9 (fresh: no plan, no comments) are Queued, then
+  // #10, whose plan shares one file with #7's PR.
   const w = world([issue(7, ["factory:in-review"], 3), issue(8, [], 1), issue(9), issue(10, [], 1)], {
     comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"])], 10: [PLAN(10, ["README.md", "src/a.ts", "src/b.ts"])] },
     prs: PR7(),
   });
-  const r = await tick(w);
-  assert.deepEqual(r.ready, [9, 10], "#8 waits; its slot goes to #10");
-  assert.match(r.skipped.find((s) => s.number === 8)?.reason ?? "", /^waits for #7 to merge: both change 3 file\(s\)/);
-  const [held] = overlap(w, 8);
-  assert.ok(held?.body.startsWith(marker(8, "overlap", "waits-7").replace(/ -->$/, "-")), held?.body);
-  assert.match(held.body, /waits for #7 \(in review\) to merge before it starts: both change `docs\/commands\.md`, `src\/commands\/run\.ts`, `test\/fixtures\/env\.ts`, 3 of this Objective's 4 known file\(s\).*or after 6 h of waiting at most/);
-  const [beside] = overlap(w, 10);
-  assert.ok(beside?.body.startsWith(marker(10, "overlap", "beside")), "the light overlap starts and says so");
-  assert.match(beside.body, /starts beside #7 \(`README\.md`\)/);
+  const r = await tick(w, { maxConcurrent: 3 });
+  assert.deepEqual(r.ready, [8, 9, 10], "no pick waits at its start");
+  assert.equal(r.skipped.filter((x) => /waits for/.test(x.reason)).length, 0);
+  const [heavy] = overlap(w, 8);
+  assert.ok(heavy?.body.startsWith(marker(8, "overlap", "beside")), heavy?.body);
+  assert.match(heavy.body, /starts beside #7 \(`docs\/commands\.md`, `src\/commands\/run\.ts`, `test\/fixtures\/env\.ts`\).*With #7 it shares many: whichever is handed to review second waits until the other merges, then rebases once before its review\./);
+  const [light] = overlap(w, 10);
+  assert.match(light.body, /starts beside #7 \(`README\.md`\)/);
+  assert.doesNotMatch(light.body, /shares many/);
   assert.equal(overlap(w, 9).length, 0, "a fresh Objective's files are unknown: nothing said");
-
-  // The next tick, #7 still In review (#9 and #10 now Running): #8 still waits, and its comment is not written again.
-  w.state.issues = [issue(7, ["factory:in-review"], 3), issue(8, [], 2), issue(9, ["factory:running"]), issue(10, ["factory:running"], 2)];
-  const writes = w.state.writes.length;
-  const again = await tick(w, { maxConcurrent: 3 });
-  assert.deepEqual(again.ready, []);
-  assert.equal(w.state.writes.slice(writes).filter((x) => x.includes(":overlap:")).length, 0, "an unchanged note is not written again");
-
-  // #7 merged (its issue closed, so no longer listed): #8 starts, and its note says it no longer waits.
-  w.state.issues = [issue(8, [], 2), issue(9, ["factory:running"]), issue(10, ["factory:running"], 2)];
-  delete w.state.prs[7];
-  const after = await tick(w, { maxConcurrent: 3 });
-  assert.deepEqual(after.ready, [8]);
-  assert.equal(overlap(w, 8).length, 1, "the one comment, edited");
-  assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")), overlap(w, 8)[0].body);
-  assert.match(overlap(w, 8)[0].body, /no longer waits for #7/);
 });
 
-test("#277: a sibling whose PR this tick merges is no longer waited for: the overlapping pick starts the same tick", async () => {
+test("#277: a sibling whose PR this tick merges is no sibling: the overlapping pick starts with no note", async () => {
   forgetFiles();
   const prs = PR7();
   // Reviewed (its review label off), validated and recorded mergeable, CI green: the merge pass merges it this tick.
@@ -188,40 +193,8 @@ test("#277: a sibling whose PR this tick merges is no longer waited for: the ove
   const r = await tick(w, { ciChecks: ["ci"] });
   assert.deepEqual(w.state.mergedPrs, [12], `the merge pass merged #7's PR: ${JSON.stringify(r.merged)}`);
   assert.deepEqual(r.merged, [7]);
-  assert.deepEqual(r.ready, [8], "not held for a sibling that merged this tick");
-  assert.equal(overlap(w, 8).length, 0);
-});
-
-test("#277: an unchanged queue costs no comment or PR-file reads on the next tick; PRs come from one listing and the review pass's own reads; a fork's branch is no Factory PR", async () => {
-  forgetFiles();
-  // A fork's PR from `factory/8` (in the fake's listing) would make #8 overlap #11 heavily if it counted.
-  const w = world([issue(7, ["factory:in-review"], 3), issue(8, [], 1), issue(11, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"])], 11: [PLAN(11, ["src/parse.ts", "a.md", "b.md"])] }, prs: PR7() });
-  const first = await tick(w);
-  assert.deepEqual(first.ready, []);
-  assert.match(first.skipped.find((s) => s.number === 8)?.reason ?? "", /^waits for #7/, "the fork's files are not #8's");
-  const tickReads = w.state.reads.slice();
-  assert.equal(tickReads.filter((r) => /^\/pulls\?state=open&head=.*factory%2F7/.test(r)).length, 1, `#7's PR is read once, by the review pass: ${tickReads.join(" ")}`);
-  assert.equal(tickReads.filter((r) => /^\/pulls\?state=open&per_page=100/.test(r)).length, 1, "one listing for the rest");
-  assert.equal(tickReads.filter((r) => /^\/pulls\?state=open&head=.*factory%2F(8|11)/.test(r)).length, 0, "no PR read per issue");
-
-  // The waits comment Factory posted moved #8's comment count: read once more, then not again.
-  w.state.issues = [issue(7, ["factory:in-review"], 3), issue(8, [], 2), issue(11, ["factory:running"], 1)];
-  await tick(w);
-  const from = w.state.reads.length;
-  const second = await tick(w);
-  assert.deepEqual(second.ready, []);
-  const reads = w.state.reads.slice(from);
-  // (#11's comments are still read by the Running pass, which is not this one's.)
-  assert.deepEqual(reads.filter((r) => /^\/issues\/(7|8)\/comments|^\/pulls\/\d+\/files/.test(r)), [], `nothing re-read on an unchanged queue: ${reads.join(" ")}`);
-
-  // A new comment on #8 (its count moves) is read again; #7's PR files only when its head moves.
-  w.state.issues = [issue(7, ["factory:in-review"], 3), issue(8, [], 3), issue(11, ["factory:running"], 1)];
-  w.state.prs[7].pr.head.sha = "b".repeat(40);
-  const mark = w.state.reads.length;
-  await tick(w);
-  const now = w.state.reads.slice(mark);
-  assert.ok(now.some((r) => r.startsWith("/issues/8/comments")), now.join(" "));
-  assert.ok(now.some((r) => r.startsWith("/pulls/12/files")), "a new head is read");
+  assert.deepEqual(r.ready, [8]);
+  assert.equal(overlap(w, 8).length, 0, "a sibling that merged this tick is no sibling: no note");
 });
 
 test("#277: placeholders, globs and directories in Files: lines are no files, so they make no overlap", async () => {
@@ -241,31 +214,6 @@ test("#277: a waits comment is cleared when the pick starts on a quiet tick with
   assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")), overlap(w, 8)[0].body);
 });
 
-test("#277: without auto_merge an In-review sibling waits for a person, so nothing waits for it", async () => {
-  forgetFiles();
-  const w = world([issue(7, ["factory:in-review"], 3), issue(8, [], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs: PR7() });
-  const r = await tick(w, { autoMerge: false });
-  assert.deepEqual(r.ready, [8]);
-  assert.equal(overlap(w, 8).length, 0);
-});
-
-test("#277: a wait is bounded: 6 h after its waits comment began, the pick starts beside the sibling and says why; before that the start time is kept", async () => {
-  forgetFiles();
-  const hourAgo = Date.now() - 3600_000;
-  const w = world([issue(7, ["factory:in-review"], 3), issue(8, [], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, hourAgo)] }, prs: PR7() });
-  const r = await tick(w);
-  assert.deepEqual(r.ready, []);
-  assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", `waits-7-${Math.floor(hourAgo / 1000)}`)), `the wait's start is kept: ${overlap(w, 8)[0].body}`);
-
-  forgetFiles();
-  const v = world([issue(7, ["factory:in-review"], 3), issue(8, [], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, Date.now() - 7 * 3600_000)] }, prs: PR7() });
-  const t = await tick(v);
-  assert.deepEqual(t.ready, [8]);
-  const [note] = overlap(v, 8);
-  assert.ok(note.body.startsWith(marker(8, "overlap", "beside")), note.body);
-  assert.match(note.body, /stopped waiting for #7 after 6 h, the longest Factory holds one for a sibling, and starts beside #7/);
-});
-
 test("#277: notes go only to the tick's final picks: a pick a later hold drops gets none", async () => {
   forgetFiles();
   const w = world([issue(7, ["factory:in-review"], 3), issue(9), issue(10, [], 1)], { comments: { 7: [PLAN(7, SHARED3)], 10: [PLAN(10, ["README.md", "src/a.ts", "src/b.ts"])] }, prs: PR7() });
@@ -274,7 +222,148 @@ test("#277: notes go only to the tick's final picks: a pick a later hold drops g
   assert.equal(overlap(w, 10).length, 0, "#10 did not start this tick");
 });
 
-test("#277: a run named by hand never waits; with no active sibling and one slot, no files are read", async () => {
+/** `fn` with `w` as GitHub (its fetch and URL), Factory's login known. */
+async function withWorld(w, fn) {
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = w.fetch;
+  setSelf(SELF);
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+}
+
+test("#340: the work stage's hand-off waits, unlabelled, while a sibling it overlaps heavily is In review: a record on the PR, a note on the issue; a Running sibling, one that waits itself, or no auto_merge holds nothing", async () => {
+  forgetFiles();
+  const now = Date.now();
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"])] }, prs: { ...PR7(), 8: PR8() } });
+  const held = await withWorld(w, () => reviewHold(repoOf(REPO), { issue: 8, pr: w.state.prs[8].pr, autoMerge: true }, { token: "t" }, { now }));
+  assert.deepEqual(held, { on: 7, shared: [...SHARED3].sort(), of: 4 });
+  assert.equal(waitReason(held), "its review waits for #7 to merge: both change 3 file(s) (`docs/commands.md`, `src/commands/run.ts`, `test/fixtures/env.ts`)");
+  const record = w.state.comments[13].at(-1);
+  assert.ok(record.body.startsWith(`<!-- factory:8:review-wait:7-${Math.floor(now / 1000)} -->`), record.body);
+  assert.deepEqual(prLabels(w, 8), [], "no review label: no review starts");
+  const [note] = overlap(w, 8);
+  assert.ok(note.body.startsWith(marker(8, "overlap", `waits-7-${Math.floor(now / 1000)}`)), note.body);
+  assert.match(note.body, /PR #13 is ready, and its review waits for #7 \(in review\) to merge: both change .*3 of this Objective's 4 known file\(s\).*after 6 h of waiting at most.*sends it back for one rebase when it conflicts/);
+
+  // #7 Running (its work stage, not yet handed off): the first to hand off goes first, so nothing waits for it.
+  forgetFiles();
+  const running = world([issue(7, ["factory:running"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs: { 8: PR8() } });
+  assert.equal(await withWorld(running, () => reviewHold(repoOf(REPO), { issue: 8, pr: running.state.prs[8].pr, autoMerge: true }, { token: "t" })), null);
+  assert.equal(running.state.writes.length, 0);
+
+  // #7's own hand-off waits (for #8, say, after its rebase): it is not waited for, so the two never hold each other.
+  forgetFiles();
+  const both = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [holdRecord(7, 8, now - 60_000)] }, prs: { ...PR7(), 8: PR8() } });
+  assert.equal(await withWorld(both, () => reviewHold(repoOf(REPO), { issue: 8, pr: both.state.prs[8].pr, autoMerge: true }, { token: "t" })), null);
+
+  // Without auto_merge a person merges In-review PRs, as long as they take: nothing waits, nothing is read.
+  forgetFiles();
+  const manual = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs: { ...PR7(), 8: PR8() } });
+  assert.equal(await withWorld(manual, () => reviewHold(repoOf(REPO), { issue: 8, pr: manual.state.prs[8].pr, autoMerge: false }, { token: "t" })), null);
+  assert.deepEqual(manual.state.reads, []);
+});
+
+test("#340: a real dispatcher tick leaves a waiting hand-off alone while its sibling is In review (no send-back, no review), then rebases it once the sibling merged, before its review", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  // #8's PR conflicts already (#7 is not merged: another PR landed): without the wait it would go back for a rebase now.
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], {
+    comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"]), waitsComment(8, 7, since)], 13: [holdRecord(8, 7, since)] },
+    prs: { ...PR7(), 8: PR8({ mergeable_state: "dirty" }) },
+  });
+  const r = await tick(w);
+  assert.deepEqual(r.reviewHeld, [8]);
+  assert.deepEqual(r.sentBack, [], "no rebase while #7 is in review: a second sibling merge would need another");
+  assert.deepEqual(prLabels(w, 8), []);
+  assert.ok(w.state.comments[13].some((c) => c.id === 958), "the record stays");
+
+  // #7 merged (its issue closed, its PR gone): #8's wait is over and it conflicts, so it goes back for its one rebase
+  // this tick (the rebase's hand-off then labels it); the record goes and the note says so.
+  w.state.issues = [issue(8, ["factory:in-review"], 2)];
+  delete w.state.prs[7];
+  const after = await tick(w);
+  assert.deepEqual(after.reviewHeld, []);
+  assert.deepEqual(after.sentBack, [8]);
+  assert.ok(w.state.comments[13].some((c) => c.body.startsWith(marker(8, "rebase", "c".repeat(40)))), "the send-back's notice");
+  assert.ok(!w.state.comments[13].some((c) => c.id === 958), "the record is gone");
+  assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")), overlap(w, 8)[0].body);
+  assert.match(overlap(w, 8)[0].body, /no longer waits for #7: no sibling In review shares its files now/);
+});
+
+test("#340: a waiting hand-off that does not conflict once its sibling merged gets its review label the same tick; a stale record (a label put on since) is dropped and the PR handled as any", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  const w = world([issue(8, ["factory:in-review"], 2)], { comments: { 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 13: [holdRecord(8, 7, since)] }, prs: { 8: PR8() } });
+  const r = await tick(w);
+  assert.deepEqual(r.reviewResumed, [8]);
+  assert.deepEqual(prLabels(w, 8), ["factory:review"]);
+  assert.deepEqual(w.state.comments[13], [], "the record is gone once the label is on");
+
+  // A person put the review label on after the record (and the review took it off): the record is stale.
+  forgetFiles();
+  const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 13: [holdRecord(8, 7, since)] }, prs: { ...PR7(), 8: PR8() } });
+  v.state.timelines[13] = [{ event: "labeled", label: { name: "factory:review" }, created_at: new Date(since + 60_000).toISOString() }];
+  const t = await tick(v);
+  assert.deepEqual([t.reviewHeld, t.reviewResumed], [[], []]);
+  assert.deepEqual(v.state.comments[13], [], "dropped");
+  assert.deepEqual(prLabels(v, 8), [], "no label put on: its review already ran");
+});
+
+test("#340: a hand-off waits 6 h at most from its record, then its review goes on beside the sibling and the note says why; two that wait on each other are never both held", async () => {
+  forgetFiles();
+  const long = Date.now() - 7 * 3600_000;
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, long)], 13: [holdRecord(8, 7, long)] }, prs: { ...PR7(), 8: PR8() } });
+  const r = await tick(w);
+  assert.deepEqual(r.reviewResumed, [8]);
+  assert.deepEqual(prLabels(w, 8), ["factory:review"]);
+  assert.match(overlap(w, 8)[0].body, /stopped waiting for #7 after 6 h, the longest Factory holds a review for a sibling; its review goes on beside it/);
+
+  // #7 and #8 both In review, each recorded waiting for the other (a race of two hand-offs): one tick releases one.
+  forgetFiles();
+  const since = Date.now() - 60_000;
+  const prs = { ...PR7(), 8: PR8() };
+  prs[7].pr.labels = [];
+  const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [holdRecord(7, 8, since)], 13: [holdRecord(8, 7, since)] }, prs });
+  const t = await tick(v);
+  assert.equal(t.reviewHeld.length, 1, JSON.stringify(t));
+  assert.equal(t.reviewResumed.length, 1);
+  assert.notEqual(t.reviewHeld[0], t.reviewResumed[0]);
+  // The next tick, the released one is In review with its label: the other still waits for it.
+  const again = await tick(v);
+  assert.deepEqual(again.reviewHeld, t.reviewHeld);
+  assert.deepEqual(again.reviewResumed, []);
+});
+
+test("#340: \`factory run\` on an Objective whose hand-off waits reviews it now: the label goes on, the record goes", async () => {
+  forgetFiles();
+  const { Local } = await import("../scripts/local.mjs");
+  const since = Date.now() - 60_000;
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 8: [waitsComment(8, 7, since)], 13: [holdRecord(8, 7, since)] }, prs: { ...PR7(), 8: PR8() } });
+  const seen = [];
+  const loop = Object.assign(Object.create(Local.prototype), {
+    repo: repoOf(REPO),
+    opts: { token: "t" },
+    reapHere: () => {},
+    ws: () => "/nonexistent-ws",
+    withClaim: async (_n, fn) => fn(),
+    review: async (n, p) => (seen.push(["review", n, p, prLabels(w, 8)]), { exit: "delivered" }),
+    followMerge: async () => assert.fail("its review comes first"),
+  });
+  const r = await withWorld(w, () => loop.runIssue(8, { waitMs: 1 }));
+  assert.deepEqual(r, { exit: "delivered" });
+  assert.deepEqual(seen, [["review", 8, 13, ["factory:review"]]]);
+  assert.deepEqual(w.state.comments[13], []);
+  assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")));
+});
+
+test("#277: a run named by hand gets no note; with no active sibling and one slot, no files are read", async () => {
   forgetFiles();
   const w = world([issue(7, ["factory:running"], 1), issue(8, [], 1)], { comments: { 7: [PLAN(7, ["a.md", "b.md"])], 8: [PLAN(8, ["a.md", "b.md"])] } });
   const r = await tick(w, { issue: 8 });

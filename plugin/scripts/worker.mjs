@@ -389,7 +389,8 @@ async function main() {
         own: usageDir,
         now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
         holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
-        clean: () => prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true }),
+        // Best effort, as at a stage's start: putOn still discards every tracked change.
+        clean: () => prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true }).catch((e) => log(`warning: the clone's leftovers could not be removed: ${String(e?.message || e).slice(0, 200)}`)),
         restore: (from) => restoreTranscript({ checkout, workDir: join(usageDir, ".."), harness: inputs.harness, only: from }),
       })
     : null;

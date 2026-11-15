@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "420e4e32d6f7",
+  "digest": "c24d49a4b4ae",
   "skills": {
     "factory-deliver-pr": {
       "sha256": "6d9995faec6830393d586cf5fa6f926d91b148ab7e8be5b5a54f495e1fbc4a3f",
@@ -8,9 +8,9 @@
       "words": 633,
       "files": {
         "reference.md": {
-          "sha256": "396838e769fd84d9a69ab5bdd84259b3138cc1264878dc902a420e97204606f6",
-          "lines": 22,
-          "words": 539
+          "sha256": "9d18bb6ca3d907e73c7fb75550f2e94e8d44cc552bccea9f5a25969d545ae1cd",
+          "lines": 24,
+          "words": 602
         }
       }
     },
@@ -25,14 +25,14 @@
       "words": 426
     },
     "factory-file": {
-      "sha256": "a7d2d3b72799d5cd3b922499d22cf2e5d4ac8944144050dc5d75ae9886018aae",
+      "sha256": "0e4107d5bebc20a22bb1cee0edd13d85c9895961e7f1ca7f2168798ca32f49ed",
       "lines": 41,
       "words": 699,
       "files": {
         "reference.md": {
-          "sha256": "dae33d1d83bc6f016b50b4a94d70d2e5b390d2ea83e13ccb5e6ae87083b08f36",
-          "lines": 8,
-          "words": 97
+          "sha256": "b92aed521332f594e3b76c71e78d4fe09478d8bd2f2a43dbee946453c309a054",
+          "lines": 12,
+          "words": 227
         }
       }
     },
@@ -99,9 +99,9 @@
       "words": 696,
       "files": {
         "reference.md": {
-          "sha256": "552d566bd632ee4fda2811539e5c3ef7ef5880ffd1f45c6142f71c483d547c2e",
+          "sha256": "8251a78cf9993c871e5bf99aee5a0a86d04c68aa19aae5ea25f551dd7a1022bb",
           "lines": 52,
-          "words": 1241
+          "words": 1258
         }
       }
     },
@@ -133,5 +133,5 @@
       "words": 361
     }
   },
-  "recordedAt": "2026-11-15T07:24:10.826Z"
+  "recordedAt": "2026-11-15T08:09:37.516Z"
 }

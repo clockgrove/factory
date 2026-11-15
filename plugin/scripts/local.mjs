@@ -74,9 +74,9 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
   // The window as the harness named it, only in its own form: harness output never reaches the issue as it is.
   const named = windowOf(window);
   const moves = free.length
-    ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: its stage starts there now, and every later stage runs there while the label stays.`
+    ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
     : `No other ${h} account on this machine is free now.`;
-  return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; this Objective resumes on its own after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
+  return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
 /** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */

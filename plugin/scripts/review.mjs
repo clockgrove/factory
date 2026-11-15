@@ -32,7 +32,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -123,6 +123,70 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     // The workflow change the PR leaves for a person (handover.mjs), as Factory published it: part of the change.
     ...(handover ? ["", "## Workflow hand-over", "Factory's comment on the issue hands this change to a person to apply after the merge; review it as part of the change (the factory-review-pr reference, \"Workflow hand-over\").", "```diff", handover.trimEnd(), "```"] : []),
   ].join("\n");
+}
+
+/**
+ * The foundation pass's prompt (#275): a second reviewer call, only on an Objective labelled `factory:foundation` (choice.mjs
+ * FOUNDATION_LABEL), that checks the shared contracts the diff adds or changes against their callers in the repository,
+ * and shared test fixtures against isolation (factory-review-pr reference.md, "Foundation review"). It returns comments
+ * only: the first pass judges the acceptance entries.
+ */
+export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
+  const agentFile = `${AGENT_DIRS[harness]}/${FOUNDATION_AGENT}${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
+  return [
+    `You are the Factory reviewer's foundation pass for the pull request on issue #${issue}: ${issueTitle}. The Objective is labelled \`factory:foundation\`: later work builds on what it adds.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the factory-review-pr skill (in .claude/skills/factory-review-pr and .agents/skills/factory-review-pr), its reference.md section "Foundation review", exactly. Another pass reviews the rest of the PR and judges the acceptance entries; this pass does neither.`,
+    "Read the repository as you need to: the callers are in the checkout, on the PR's head. Do NOT post anything to GitHub yourself: the job posts your findings with the other pass's. Your final message must be only a JSON object of this shape, with no prose around it:",
+    '```json\n{"comments": [{"path": "src/errors.ts", "line": 12, "entry": "foundation", "body": "foundation review: ..."}]}\n```',
+    "`comments` may be empty. `line` is a line number on the new side of the diff, on the contract or fixture the finding concerns; a caller outside the diff is named in the body as `path:line`. `entry` is the acceptance entry the finding falls under, else `foundation`.",
+    "",
+    "## Issue",
+    issueBody || "(no body)",
+    "",
+    "## PR body",
+    prBody || "(no body)",
+    "",
+    "## Diff",
+    "```diff",
+    promptDiff(diff),
+    "```",
+  ].join("\n");
+}
+
+/** The agent definition the foundation pass runs as (plugin/agents/source.json): its own, never the first pass's reviewer. */
+export const FOUNDATION_AGENT = "foundation-reviewer";
+
+/**
+ * One foundation call's runHarness arguments: as the foundation-reviewer agent (Claude and Copilot by --agent; Codex has no
+ * such flag, so foundationPrompt names its definition file), marked a reviewer call (no worker secrets).
+ */
+export function foundationCall({ harness, model, effort, label, timeoutMs, prompt, maxUsd, cwd, env, eventsFile, onLine }) {
+  return { harness, model, effort, prompt, maxUsd, agent: harness === "codex" ? undefined : FOUNDATION_AGENT, reviewer: true, cwd, env, timeoutMs, eventsFile, label, onLine };
+}
+
+/**
+ * The foundation pass (foundationPrompt): one reviewer call, rerun once like the first pass when it misses (no answer,
+ * or no JSON: handoff.mjs reviewMissed, with no entries to judge; on the fallback reviewer where the harness has one),
+ * never after a provider's refusal. Each call starts only with budget and time left: `over()` true (max_usd spent) ends
+ * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"` before the first call (before the
+ * rerun, `missed`: the first call's end is the reason). `run` makes one call ({model, effort,
+ * label, timeoutMs}) and books it, so `over()` counts it. Returns {review, recs, stop}: `review` the parsed answer
+ * (parseReview) when a call produced one, else null with `stop` saying why (`missed` when every call ran and none did).
+ */
+export async function foundationReview({ run, model, effort, fallback = null, over, timeout }) {
+  const recs = [];
+  const again = reviewRetry({ model, effort, fallback });
+  for (const call of [{ model, effort, label: "review-foundation" }, { model: again.model, effort: again.effort, label: again.label.replace(/^review-/, "review-foundation-") }]) {
+    if (over()) return { review: null, recs, stop: "cap" };
+    const timeoutMs = timeout();
+    // No time for the rerun: the pass ends on how its first call ended, not on the time cap.
+    if (timeoutMs === null) return { review: null, recs, stop: recs.length ? "missed" : "time" };
+    const rec = await run({ ...call, timeoutMs });
+    recs.push(rec);
+    const review = parseReview(rec.finalText || "");
+    if (!reviewMissed({ ok: rec.ok, review })) return { review, recs, stop: null };
+    if (rec.refusal) break;
+  }
+  return { review: null, recs, stop: "missed" };
 }
 
 /** The reviewer's brief for a split part that is not the last (factory-review-pr reference.md, "Split parts"). */
@@ -484,6 +548,8 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // A foundation Objective (`factory:foundation`, trusted as the choice labels are): its review gets the foundation pass too.
+  const foundation = !!chosen.foundation;
   // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
   openStageHosts(chosen.hosts);
   if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
@@ -499,8 +565,12 @@ async function main() {
     await finish("blocked", reason);
     return;
   }
-  const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
-  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
+  // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. A PR
+  // reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
+  const covered = reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }), issue);
+  const alreadyReviewed = covered.reviewed;
+  const foundationDue = foundation && !covered.foundation;
+  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; ${foundationDue ? "the foundation pass runs alone, then " : ""}validating and merging without a second pass`);
 
   // Factory's git runs only in its own mirror (lib/outbox.mjs): the branch reaches the agent's checkout as a bundle, and
   // every git command there runs in the agent's sandbox (on Actions, as the agent uid). What this stage answers for
@@ -790,7 +860,59 @@ async function main() {
     return;
   }
   if (retryRec && answer === reviewRec) log(`the reviewer's rerun ended in ${reviewCallEnd(retryRec, reviewOf(retryRec))}; posting the first pass's answer`);
-  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart });
+  // A foundation Objective's second pass (foundationReview): its comments go up in the same review as the first pass's.
+  // Without an answer from it nothing is posted, as for the first pass, so a later run reviews the PR again whole.
+  let found = null;
+  if (foundationDue) {
+    log("foundation Objective: the foundation pass checks the shared contracts the diff changes against their callers");
+    await progress("reviewer foundation pass");
+    const foundationLive = liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
+    found = await foundationReview({
+      model: inputs.reviewerModel,
+      effort: inputs.reviewerEffort,
+      fallback: inputs.reviewerFallback,
+      over: () => over() || overBudget,
+      timeout: () => reviewCallTimeout(remainingMs(deadlineAt)),
+      run: async ({ model, effort, label, timeoutMs }) => {
+        const rec = await runHarness(
+          foundationCall({
+            harness: inputs.harness,
+            model,
+            effort,
+            label,
+            timeoutMs,
+            prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+            maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+            cwd: checkout,
+            env: harnessEnv,
+            eventsFile,
+            onLine: foundationLive.onLine,
+          }),
+        );
+        mark(rec, rec);
+        records.push(rec);
+        return rec;
+      },
+    });
+    foundationLive.finish();
+    if (found.stop === "cap") return blockedAtCap("the foundation pass");
+    if (found.stop === "time") return blockedAtTime("the foundation pass");
+    if (found.stop) {
+      const last = found.recs.at(-1);
+      const reason = last.refusal ? refusalReason(last.refusal) : `the foundation pass produced no review (${found.recs.map((r) => reviewCallEnd(r, reviewOf(r))).join(", then ")}), so nothing was posted and the PR does not merge`;
+      log(reason);
+      await dropLabel();
+      await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: last.refusal ? refusalCause(last.refusal) : "factory", notify: inputs.notify, stage: "review" }, token);
+      await finish("blocked", reason);
+      return;
+    }
+    log(`foundation pass: ${found.review.comments.length} comment(s)`);
+  }
+  const post = !alreadyReviewed
+    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })
+    : found
+      ? reviewPost({ issue, review: null, diff, foundation: found.review })
+      : null;
   if (post?.unjudged.length) log(`reviewer left ${post.unjudged.length} of ${entries.length} acceptance entr${entries.length === 1 ? "y" : "ies"} unjudged: ${post.unjudged.join(", ")}`);
   const comments = post ? post.comments : [];
   const placeholder = !!post?.placeholder;
@@ -813,8 +935,10 @@ async function main() {
   // read is waited for, within a bound and never past half the stage's time left, before the answer pass; without one
   // in time the stage goes on and the progress says so. Not when the cap is spent: no answer pass runs then.
   const thirdParty = await thirdPartyStep({ repo, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, leftMs: remainingMs(deadlineAt), progress, ...token, signal: stageStopSignal() });
-  // Factory's placeholder (no finding of its own) still leaves a named reviewer's comments to answer.
-  const toAnswer = placeholder && !thirdParty.length ? [] : (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !placeholder || c.from);
+  // Factory's placeholder (no finding of its own) still leaves a named reviewer's comments to answer. The foundation pass
+  // posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open comments too.
+  const noneOwn = placeholder && !alreadyReviewed;
+  const toAnswer = noneOwn && !thirdParty.length ? [] : (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !noneOwn || c.from);
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   let answering = toAnswer.length > 0 || answerQuestion;

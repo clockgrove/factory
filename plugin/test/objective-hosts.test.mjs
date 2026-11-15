@@ -58,7 +58,7 @@ test("a host label counts only when the person who last applied it can push or i
   assert.match((await choiceTrusted(repo, 7, labels, {}, timeline({}))).reason, /who applied `factory:host:huggingface\.co` could not be read/);
   const bad = await choiceTrusted(repo, 7, ["factory:host:10.0.0.1"], {}, { labelers: async () => assert.fail("refused on the name first") });
   assert.equal(bad.ok, false);
-  assert.deepEqual(await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no label, no read") }), { ok: true, choice: {}, labels: [], hosts: [] });
+  assert.deepEqual(await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no label, no read") }), { ok: true, choice: {}, labels: [], hosts: [], foundation: false });
   const both = await objectiveInputs({ repo, issue: 7, env: ENV, opts: {}, gh: { issue: async () => ({ labels: [{ name: "factory:harness:codex" }, { name: HF }] }), ...timeline({ "factory:harness:codex": person("kirk"), [HF]: person("dev") }) } });
   assert.deepEqual([both.ok, both.inputs.harness, both.hosts], [true, "codex", ["huggingface.co"]]);
 });

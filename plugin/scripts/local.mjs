@@ -2065,7 +2065,8 @@ export class Local {
    * The start's read of the repository's variables (#284), which fails closed: a variable may lower a cap, so nothing
    * starts on the workflow's values alone after a failed read. `serve` waits outages out (lib/network.mjs) and tries
    * again, every START_VARIABLES_MS doubling to five minutes, until a read gets through or GitHub says the token may not
-   * read them (403, 404: the workflow's values, as readVariables says); `run` and `review` try three times, then stop
+   * read them (403, 404: the workflow's values, as readVariables says); a refused token (401) is named every third wait,
+ * and one replaced in its source is taken at the next try; `run` and `review` try three times, then stop
    * with nothing started. A read that gets through also names the organization FACTORY_* variables shared with the
    * repository, which Factory does not take (inputs.mjs organizationVariablesLine).
    */
@@ -2074,8 +2075,13 @@ export class Local {
     let state = await this.readVariables();
     for (let i = 0; state === "failed"; i += 1) {
       if (!serve && i >= 2) throw new Error(`reading the repository's variables failed 3 times (${String(this.variablesError?.message || this.variablesError).slice(0, 160)}); nothing was started, run it again`);
-      if (i === 0) log(serve ? "serve starts no stage until it reads the repository's variables, or GitHub says the token may not" : "trying again before anything starts");
+      // A refused token never falls back to the workflow's values: said again every third wait, so the log shows it.
+      if (this.variablesError?.status === 401) {
+        if (i % 3 === 0) log(`the local token was refused (401): replace it in ${tokenSource(this.repoFull)}; no stage starts until a read gets through`);
+      } else if (i === 0) log(serve ? "serve starts no stage until it reads the repository's variables, or GitHub says the token may not" : "trying again before anything starts");
       await new Promise((r) => setTimeout(r, Math.min((this.startVariablesMs ?? START_VARIABLES_MS) * 2 ** i, 5 * 60_000)));
+      // A token replaced in its source meanwhile is the one read with.
+      this.token = localToken(this.repoFull) || this.token;
       state = await this.readVariables();
     }
     if (state !== "read") return;

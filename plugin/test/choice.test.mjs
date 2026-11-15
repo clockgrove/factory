@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CHOICE_PREFIXES, LABEL_MAX, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
-import { MODEL_DEFAULTS, resolveInputs } from "../scripts/lib/inputs.mjs";
+import { MODEL_DEFAULTS, resolveInputs, variableSettings } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { harnessMarker, setMaintainers, setSelf } from "../scripts/lib/logic.mjs";
@@ -209,6 +209,9 @@ test("the Action installs the harness the label names: read before the install, 
   assert.equal(installs({ FACTORY_HARNESS: " Codex ", FACTORY_HARNESS_VERSION: "1.2.3" }), "codex 1.2.3");
   assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_HARNESS_VERSION: "1.2.3", FACTORY_VARIABLE_HARNESS: " Copilot" }), "copilot latest", "a variable's harness: its latest, never the workflow harness's pin");
   assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_VARIABLE_HARNESS: "Claude" }), "claude 2.1.140", "the same harness keeps it");
+  // A variable that names no harness is ignored, as inputs.mjs ignores it: the workflow's harness and its pin, no failed job.
+  for (const v of ["gemini", "co dex", "  "]) assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_HARNESS_VERSION: "1.2.3", FACTORY_VARIABLE_HARNESS: v }), "codex 1.2.3", JSON.stringify(v));
+  assert.equal(variableSettings({ FACTORY_HARNESS: "co dex" }).invalid.length, 1, "and the scripts agree");
   assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude", FACTORY_HARNESS_VERSION: "1.2.3" }), "claude latest", "a run's override: its latest");
   assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_CHOSEN_HARNESS: "claude" }), "claude 2.1.140", "a label back to the workflow's harness: its pin");
   assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_CHOSEN_HARNESS: "codex" }), "codex latest");

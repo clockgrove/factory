@@ -267,7 +267,7 @@ runs:
     - name: Node
       uses: actions/setup-node@v7
       with:
-        node-version: ${{ inputs.node_version || fromJSON(inputs.vars || '{}').FACTORY_NODE_VERSION || env.FACTORY_NODE_VERSION || '22' }}
+        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
 
     # The harness an Objective's `factory:harness:<name>` label names (scripts/objective-harness.mjs), read with the job's
     # own token: the job installs that CLI. The stage checks who applied the label, and Blocks when the harness it runs on
@@ -296,9 +296,13 @@ runs:
         FACTORY_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}
         FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
-        name() { printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+        # A harness name as lib/inputs.mjs reads it: the outer whitespace trimmed, lower case. A variable's is taken only
+        # when it names a harness, as inputs.mjs takes it (valueProblem); anything else falls through to the workflow's.
+        name() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v" | tr '[:upper:]' '[:lower:]'; }
         WORKFLOW_HARNESS="$(name "${FACTORY_HARNESS:-}")"; WORKFLOW_HARNESS="${WORKFLOW_HARNESS:-claude}"
-        DEFAULT_HARNESS="$(name "${FACTORY_INPUT_HARNESS:-${FACTORY_VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
+        VARIABLE_HARNESS="$(name "${FACTORY_VARIABLE_HARNESS:-}")"
+        case "$VARIABLE_HARNESS" in claude|codex|copilot) ;; *) VARIABLE_HARNESS="" ;; esac
+        DEFAULT_HARNESS="$(name "${FACTORY_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
         HARNESS="$(name "${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
         VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
         # harness_version pins the workflow env block's harness only: another one (an Objective's label's, a run's override's, a repository variable's) installs its latest.

@@ -154,7 +154,7 @@ export function workflowSettings(wf = {}) {
 }
 /**
  * Settings that steer trust or money's route, whom Factory answers and what gates a merge, what a stage may reach or
- * receive, or how it is set up and installed (the binaries it runs included), and the ids of the App, the sandbox vendor
+ * receive, or how it is set up and installed (the binaries it runs and the Node.js it runs on included), and the ids of the App, the sandbox vendor
  * and the federation endpoint the credentials go with, and the dispatcher's own per-run `image_owed`: only the reviewed
  * workflow file sets them, never a repository variable (#284), since anyone with write access can set one. One set as a
  * variable is named and ignored.
@@ -162,7 +162,7 @@ export function workflowSettings(wf = {}) {
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
-    ...["THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN"],
+    ...["THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
   ].map((n) => `FACTORY_${n}`),
 );
@@ -194,7 +194,7 @@ export function variableSettings(vars = {}) {
       if (v === null || v === undefined || String(v) === "") continue;
       const why = valueProblem(name, String(v));
       if (why) invalid.push({ name, value: String(v), why });
-      else kept[name] = String(v);
+      else kept[name] = name === "FACTORY_HARNESS" ? harnessName(v) : String(v);
     } else if (WORKFLOW_ONLY_SETTINGS.has(name)) excluded.push(name);
     else unknown.push(name);
   }

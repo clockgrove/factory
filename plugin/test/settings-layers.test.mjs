@@ -15,7 +15,7 @@ const INPUTS = fileURLToPath(new URL("../scripts/lib/inputs.mjs", import.meta.ur
 const CHOICE = fileURLToPath(new URL("../scripts/lib/choice.mjs", import.meta.url));
 
 test("settingLayers: each layer over the one below; a variable never sets a setting only the workflow file sets; another harness drops the models below it", () => {
-  for (const n of ["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB", "THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN"]) {
+  for (const n of ["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB", "THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN", "NODE_VERSION"]) {
     assert.ok(WORKFLOW_ONLY_SETTINGS.has(`FACTORY_${n}`) && !VARIABLE_SETTINGS.has(`FACTORY_${n}`), n);
   }
   for (const n of ["MAX_CONCURRENT", "LOCAL_MAX_CONCURRENT", "DAILY_USD", "MAX_USD", "HARNESS", "MODEL", "EFFORT", "VALIDATION", "LOCAL_VALIDATION", "LOCAL_DB_INIT", "SWEEP_MAX_DESTROYS"]) assert.ok(VARIABLE_SETTINGS.has(`FACTORY_${n}`), n);
@@ -29,7 +29,8 @@ test("settingLayers: each layer over the one below; a variable never sets a sett
   });
   // A value the env block's parsing would not take as given is named and ignored, never applied.
   const bad = variableSettings({ FACTORY_MAX_CONCURRENT: "2.5", FACTORY_MAX_USD: "lots", FACTORY_DAILY_USD: "-1", FACTORY_HARNESS: " Codex ", FACTORY_RESUME_POLICY: "always", FACTORY_PROMPT_CACHE_TTL: "1H", FACTORY_LOCAL_MAX_CONCURRENT: "0", FACTORY_VALIDATION: "anything goes" });
-  assert.deepEqual(bad.kept, { FACTORY_HARNESS: " Codex ", FACTORY_PROMPT_CACHE_TTL: "1H", FACTORY_VALIDATION: "anything goes" });
+  assert.deepEqual(bad.kept, { FACTORY_HARNESS: "codex", FACTORY_PROMPT_CACHE_TTL: "1H", FACTORY_VALIDATION: "anything goes" }, "a harness as resolveInputs reads it");
+  assert.deepEqual(variableSettings({ FACTORY_HARNESS: "co dex" }).invalid.map((x) => x.why), ["not claude, codex, copilot"]);
   assert.deepEqual(bad.invalid.map((x) => `${x.name} ${x.why}`), [
     "FACTORY_DAILY_USD not a number, 0 or more",
     "FACTORY_LOCAL_MAX_CONCURRENT not a whole number above 0",
@@ -208,13 +209,13 @@ test("serve's start fails closed: no stage starts on the workflow's values alone
     if (refused) return { status: 404 };
     return failing-- > 0 ? { status: 401 } : { vars: { FACTORY_MAX_CONCURRENT: "1" } };
   });
-  const start = () => Object.assign(Object.create(Local.prototype), { repo: { owner: "o", name: "r", full: "o/r" }, token: "t", startVariablesMs: 1, workflowWf: { FACTORY_MAX_CONCURRENT: "4" } });
+  const start = () => Object.assign(Object.create(Local.prototype), { repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", startVariablesMs: 1, workflowWf: { FACTORY_MAX_CONCURRENT: "4" } });
   try {
     let loop = start();
     const text = await withApi(host.url, () => loop.startVariables({ serve: true }));
     assert.deepEqual(host.asked, ["/repos/o/r/actions/variables", "/repos/o/r/actions/variables", "/repos/o/r/actions/variables", "/repos/o/r/actions/organization-variables"]);
     assert.deepEqual(loop.variables, { FACTORY_MAX_CONCURRENT: "1" }, "the cap the variable lowered holds from the first stage");
-    assert.equal(text.split("serve starts no stage until it reads the repository's variables, or GitHub says the token may not").length - 1, 1);
+    assert.match(text, /the local token was refused \(401\): replace it in \S+tokens\/o\/r; no stage starts until a read gets through/);
     assert.equal(text.split("the repository's variables could not be read").length - 1, 1, "the failure is said once");
     assert.match(text, /organization variable FACTORY_DAILY_USD is not supported: Factory's settings take the repository's own variables only, so local mode ignores it, while on Actions it reaches the jobs unless the repository sets the same name/);
     loop.startSettings();
@@ -237,5 +238,42 @@ test("serve's start fails closed: no stage starts on the workflow's values alone
   } finally {
     resetNetwork();
     await host.close();
+  }
+});
+
+test("serve's start on a refused token (401): named, with where to replace it, every third wait; never the workflow's values; a token replaced there is taken (#284)", async () => {
+  const { resetNetwork } = await import("../scripts/lib/network.mjs");
+  let refusals = 7;
+  const auth = [];
+  const server = createServer((req, res) => {
+    const path = new URL(req.url, "http://x").pathname;
+    if (path.endsWith("/actions/variables")) auth.push(req.headers.authorization);
+    const ok = path.endsWith("/organization-variables") || req.headers.authorization === "Bearer fresh" || refusals-- <= 0;
+    if (!ok) return res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ message: "Bad credentials" }));
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 1, variables: path.endsWith("/organization-variables") ? [] : [{ name: "FACTORY_MAX_USD", value: "3" }] }));
+  });
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const start = () => Object.assign(Object.create(Local.prototype), { repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", startVariablesMs: 1, workflowWf: { FACTORY_MAX_USD: "25" } });
+  try {
+    let loop = start();
+    const text = await withApi(url, () => loop.startVariables({ serve: true }));
+    const line = /the local token was refused \(401\): replace it in [^;]+; no stage starts until a read gets through/g;
+    assert.equal(text.match(line).length, 3, "seven refusals: said at the first, fourth and seventh wait");
+    assert.doesNotMatch(text, /\[factory\] the local token cannot read this repository's variables/, "no fallback to the workflow's values");
+    assert.deepEqual(loop.variables, { FACTORY_MAX_USD: "3" });
+
+    // A token replaced in its source meanwhile is the one the next try reads with.
+    refusals = 100;
+    auth.length = 0;
+    process.env.FACTORY_LOCAL_TOKEN = "fresh";
+    loop = start();
+    await withApi(url, () => loop.startVariables({ serve: true }));
+    assert.deepEqual(auth, ["Bearer t", "Bearer fresh"]);
+    assert.equal(loop.token, "fresh");
+  } finally {
+    delete process.env.FACTORY_LOCAL_TOKEN;
+    resetNetwork();
+    await new Promise((ok) => server.close(ok));
   }
 });

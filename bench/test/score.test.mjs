@@ -533,7 +533,7 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   assert.equal(f.modelMinutes, 10);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
-  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
 });
 
 test("dispatchLatency: each run's pickup against the latest trigger since the previous run; skipped duplicates and Running are not triggers", () => {
@@ -582,7 +582,7 @@ test("activity: turns, harness calls, sessions and run counts come from the arti
   assert.equal(row.activity.workRuns, 1);
   assert.equal(row.activity.reviewRuns, 1);
   assert.equal(row.activity.turns, 87 + (usage("review")[0].turns ?? 0));
-  assert.match(markdownTable([row]), /\| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
   assert.match(markdownTable([row]), /\| 1\+1 \|/);
 });
 

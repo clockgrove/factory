@@ -4,7 +4,9 @@
 // phase: `- HH:MMZ <phase>`. The minutes between consecutive lines belong to the earlier line's
 // phase. Categories: firstSetup (a local Objective's first stage on a machine: the clone, whose seconds its line
 // carries, and the cold install), setup (setup, install), model (harness, fix runs, reviewer, answer passes,
-// rebase), ciWait (waiting for required checks), other. The exit line ends a run.
+// rebase), ciWait (waiting for required checks), overlap (the reviewer running while the required checks it runs beside
+// are still going: review.mjs reviewOverlap's lines), other. The exit line ends a run. Each minute counts once, in the
+// phase of the line before it, so the overlap's minutes are in neither model nor ciWait.
 import { sandboxRecord } from "../../plugin/scripts/lib/logic.mjs";
 
 const MARK = (issue) => `<!-- factory:${issue}:progress`;
@@ -14,15 +16,16 @@ export function phaseOf(text) {
   if (/^first-time setup\b|^install \(first time/.test(text)) return "firstSetup";
   if (/^(setup|install)\b/.test(text)) return "setup";
   if (/^waiting for required checks/.test(text)) return "ciWait";
+  if (/^during the reviewer: /.test(text) || /^reviewer .* beside the required checks on [0-9a-f]+$/.test(text)) return "overlap";
   if (/^exit:/.test(text)) return "exit";
   if (/harness|fix run|answer pass|reviewer|rebase/.test(text)) return "model";
   return "other";
 }
 
-/** `{runs, setupMinutes, modelMinutes, ciWaitMinutes, otherMinutes, basis}`; minutes null without a progress comment. */
+/** `{runs, setupMinutes, modelMinutes, ciWaitMinutes, overlapMinutes, otherMinutes, basis}`; minutes null without a progress comment. */
 export function phaseMinutes(comments, issue) {
   const runs = (comments || []).filter((c) => (c.body || "").startsWith(MARK(issue)));
-  const sums = { firstSetup: 0, setup: 0, model: 0, ciWait: 0, other: 0 };
+  const sums = { firstSetup: 0, setup: 0, model: 0, ciWait: 0, overlap: 0, other: 0 };
   for (const c of runs) {
     const lines = [...c.body.matchAll(LINE)].map((m) => ({ t: Number(m[1]) * 60 + Number(m[2]), phase: phaseOf(m[3]) }));
     // The clone happened before the run's first line: its seconds ride the line.
@@ -33,8 +36,8 @@ export function phaseMinutes(comments, issue) {
       if (lines[i].phase !== "exit") sums[lines[i].phase] += d;
     }
   }
-  if (!runs.length) return { runs: 0, firstSetupMinutes: null, setupMinutes: null, modelMinutes: null, ciWaitMinutes: null, otherMinutes: null, basis: "no progress comment" };
-  return { runs: runs.length, firstSetupMinutes: Math.round(sums.firstSetup * 10) / 10, setupMinutes: sums.setup, modelMinutes: sums.model, ciWaitMinutes: sums.ciWait, otherMinutes: sums.other, basis: `${runs.length} progress comment(s)` };
+  if (!runs.length) return { runs: 0, firstSetupMinutes: null, setupMinutes: null, modelMinutes: null, ciWaitMinutes: null, overlapMinutes: null, otherMinutes: null, basis: "no progress comment" };
+  return { runs: runs.length, firstSetupMinutes: Math.round(sums.firstSetup * 10) / 10, setupMinutes: sums.setup, modelMinutes: sums.model, ciWaitMinutes: sums.ciWait, overlapMinutes: sums.overlap, otherMinutes: sums.other, basis: `${runs.length} progress comment(s)` };
 }
 
 // Dispatch latency: for each run, the seconds from the GitHub event that started it to the run picking it up (its

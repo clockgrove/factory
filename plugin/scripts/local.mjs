@@ -910,10 +910,12 @@ export class Local {
     try {
       env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness, runs.hosts || []);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
-      // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
+      // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone
+      // (prepareClone). Not for a work stage: it may continue the pass its usage limit paused on this clone, and decides
+      // that itself, cleaning when it starts fresh (lib/continue.mjs enterStage).
       const locks = staleGitLocks(clone);
       for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
-      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true, locks: locks.stale });
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: script !== "worker.mjs", locks: locks.stale });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();

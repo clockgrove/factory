@@ -334,12 +334,13 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
- * alone: locally the live session is the newer copy. Returns `{id, from, reason}`: `id` is the session to resume,
- * or null with the reason it is not.
+ * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
+ * stage continuing its pause, continue.mjs). Returns `{id, from, reason}`: `id` is the session to resume, or null with
+ * the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness }) {
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
-  const sources = fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
+  const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
   // newest first, to the most recent one that did.
@@ -1792,14 +1793,15 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
  * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
  * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
  * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
- * (`usageLimit`: harness, reset, since) and nothing written to GitHub: serve keeps the claim, starts no stage on that
- * harness until the reset and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
+ * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
+ * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
+ * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
  * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
  */
-export async function usageLimitExit(e, { local, records, finish, block }) {
+export async function usageLimitExit(e, { local, records, finish, block, pause = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}) };
+  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
     const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
     log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);

@@ -294,9 +294,13 @@ test("a Block over a delivered PR whose stop was outside the work says to resume
     const api = fakeApi({ labels: ["factory:objective", "factory:running"] });
     try {
       const pr = { number: 70, draft: false, node_id: "PR_70" };
+      // Each Block's body is read as soon as it is posted: two Blocks of one stage in one Actions run (one
+      // GITHUB_RUN_ID) are one comment, the second updating the first.
+      const posted = () => api.state.comments.filter((c) => c.body.startsWith("<!-- factory:7:blocked")).at(-1).body;
       await applyExit(REPO, { issue: 7, pr, exit: "blocked", reason: "the harness home could not be set up", cause: "setup", stage: "work" }, { token: "t" });
+      const setup = posted();
       await applyExit(REPO, { issue: 7, pr: { ...pr, draft: true }, exit: "blocked", reason: "validation red after Factory's second pass", cause: "work", stage: "work" }, { token: "t" });
-      const [setup, work] = api.state.comments.filter((c) => c.body.startsWith("<!-- factory:7:blocked")).map((c) => c.body);
+      const work = posted();
       assert.match(setup, /\n\nResume, don't restart: the stop is outside the work\. Once its cause is fixed or has passed, re-apply `factory:objective` to go on from `factory\/7` and PR #70\. `factory:restart` would discard the delivered PR #70 with its review, the commits on `factory\/7` and the spend on them, and gain nothing\.\n/);
       assert.match(work, /\n\nResume once the cause is fixed: re-apply `factory:objective` to go on from `factory\/7` and PR #70\. Restart \(`factory:restart`\) only when the work itself must be redone from the issue's text: a restart discards PR #70 with its review, the commits on `factory\/7` and the spend on them\.\n/);
       for (const body of [setup, work]) assert.match(body, /\n<!-- factory:block \{"cause":"(setup|work)"\} -->$/, "the cause line stays the notice's last");

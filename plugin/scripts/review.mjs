@@ -22,7 +22,7 @@ import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runH
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, parseArgs, postedError, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
@@ -85,7 +85,7 @@ import {
   redLines,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
-import { clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -303,6 +303,19 @@ export async function validatedOn({ repo, issue, prNumber, sha, token }) {
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
 export function workerRun(inputs) {
   return { harness: inputs.harness, model: inputs.model, effort: inputs.effort };
+}
+
+/**
+ * What the comments an answer pass is given add to its fix-pass scope (outbox.mjs fence): each comment's file and text,
+ * but of code scanning's alert only its file, and never a protected or toolchain one: an alert there is fixed by no
+ * answer pass, and the scope's refusal Blocks it.
+ */
+export function answerScope(comments, protectedList) {
+  return comments.flatMap((c) => {
+    if (c.from !== CODE_SCANNING) return [`${c.path || ""}\n${c.body || ""}`];
+    const path = String(c.path || "");
+    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path) ? [path] : [];
+  });
 }
 
 /** The worker's prompt for the one pass that answers the review. */
@@ -1178,11 +1191,13 @@ async function main() {
     await clearWait({ repo, issue, prNumber: pr.number, ...token });
     await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
   }
-  const thirdParty = third.logins;
-  // Factory's placeholder (no finding of its own) still leaves a named reviewer's comments to answer. The foundation pass
-  // posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open comments too.
+  // The reviewers outside Factory the answer pass handles: the named ones, and code scanning on every repository (#331).
+  const thirdParty = answeredReviewers(third.logins);
+  // Factory's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
+  // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
+  // comments too.
   const noneOwn = placeholder && !alreadyReviewed;
-  const toAnswer = noneOwn && !thirdParty.length ? [] : (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !noneOwn || c.from);
+  const toAnswer = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !noneOwn || c.from);
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   // A red required check the stage held (heldRed: the checks the reviewer ran beside, or the merge queue's run) is the
@@ -1240,7 +1255,7 @@ async function main() {
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
-    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     // The checkout's HEAD before the pass: a queue fix counts once the pass itself committed and that went up
     // (recordQueueFix), never for a merge commit Factory makes at the push.
     const checkoutHead = async () => {
@@ -1443,8 +1458,8 @@ async function main() {
         await recordMergeable(repo, pr.number, issue, outbox.expected() || pr.head.sha, token);
         recorded = true;
         const report = {};
-        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
+        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, thirdParty }, token);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
         // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.

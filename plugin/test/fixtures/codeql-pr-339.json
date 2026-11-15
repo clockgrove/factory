@@ -1,0 +1,46 @@
+{
+  "source": "clockgrove/clockgrove PR #339 (public), read 2026-11-15: code scanning's line comment as REST returns it and its review thread as GraphQL returns it, trimmed to the fields Factory reads",
+  "comment": {
+    "id": 4580153891,
+    "pull_request_review_id": 5912832433,
+    "path": "packages/application/src/wake-triage-cases.ts",
+    "line": 239,
+    "original_line": 238,
+    "side": "RIGHT",
+    "subject_type": "line",
+    "author_association": "NONE",
+    "user": {
+      "login": "github-advanced-security[bot]",
+      "type": "Bot"
+    },
+    "performed_via_github_app": null,
+    "body": "## CodeQL / Prototype-polluting assignment\n\nThis assignment may alter Object.prototype if a malicious '__proto__' string is injected from [library input](1).\n\n[Show more details](https://github.com/clockgrove/clockgrove/security/code-scanning/12)"
+  },
+  "thread": {
+    "id": "PRRT_kwDOVl6bpM63trJH",
+    "isResolved": false,
+    "path": "packages/application/src/wake-triage-cases.ts",
+    "line": 239,
+    "originalLine": 238,
+    "comments": {
+      "nodes": [
+        {
+          "body": "## CodeQL / Prototype-polluting assignment\n\nThis assignment may alter Object.prototype if a malicious '__proto__' string is injected from [library input](1).\n\n[Show more details](https://github.com/clockgrove/clockgrove/security/code-scanning/12)",
+          "authorAssociation": "NONE",
+          "author": {
+            "__typename": "Bot",
+            "login": "github-advanced-security"
+          },
+          "pullRequestReview": {
+            "body": "",
+            "authorAssociation": "NONE",
+            "author": {
+              "__typename": "Bot",
+              "login": "github-advanced-security"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

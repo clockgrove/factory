@@ -2000,6 +2000,22 @@ export const isSelf = (item) => !!SELF && loginKey(item?.user?.login) === SELF;
 export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
 
 /**
+ * GitHub's code scanning App: its alerts on a PR's lines (CodeQL's, say) are review comments by this login. A `[bot]`
+ * login is an App's, which no person can hold.
+ */
+export const CODE_SCANNING = "github-advanced-security[bot]";
+// Factory's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
+const REPLY_AT_START = /^<!-- factory:\d+:reply:\S+ -->/;
+
+/**
+ * Whether `reply` answers the line comment that `rootLogin` opened, the same on every side (the answer pass's list, the
+ * threads Factory resolves, the merge pass): a reply by Factory or someone who can push (trustedAuthor). On code
+ * scanning's comment only Factory's own answer counts (its reply marker, by such an author): a person's "looking into
+ * it" leaves a security finding to the answer pass, and never lets Factory resolve it.
+ */
+export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && (loginKey(rootLogin) !== CODE_SCANNING || REPLY_AT_START.test(String(reply?.body ?? "")));
+
+/**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker
  * comment), oldest first. Who may decide is not read from author_association: an App's token sees an organization
  * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.

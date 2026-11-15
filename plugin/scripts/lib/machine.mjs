@@ -82,16 +82,24 @@ const holderGone = (rec) => {
 const SLOT = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.json$/;
 const slotName = (slot, gen) => `${slot}.${gen}.json`;
 
+/** A dot file older than this is a killed writer's leftover: far longer than any take stalls (a stopped or suspended loop). */
+const STALE_DOT_MS = 10 * 60_000;
+/** A slot file that does not parse counts as held this long after it was written, then as free. */
+const UNPARSED_HELD_MS = 5 * 60_000;
+/** A slot file of the one-file-per-holder layout, <pid>-<nonce>.json: removed once its pid has ended, never counted. */
+const OLD_SLOT = /^(\d+)-[0-9a-f]+\.json$/;
+
 /**
- * The slot files in `dir`: a Map of slot number to its generations, highest first. A dot file (one being written) older
- * than a minute is a leftover of a killed writer and is removed when `reap`.
+ * The slot files in `dir`: a Map of slot number to its generations, highest first. When `reap`, a dot file older than
+ * STALE_DOT_MS and an OLD_SLOT file whose pid has ended are removed.
  */
 function slotFiles(dir, reap) {
   const by = new Map();
   for (const name of readdirSync(dir)) {
-    if (name.startsWith(".")) {
+    const old = OLD_SLOT.exec(name);
+    if (name.startsWith(".") || old) {
       try {
-        if (reap && Date.now() - statSync(join(dir, name)).mtimeMs > 60_000) rmSync(join(dir, name), { force: true });
+        if (reap && (old ? !alive(Number(old[1])) : Date.now() - statSync(join(dir, name)).mtimeMs > STALE_DOT_MS)) rmSync(join(dir, name), { force: true });
       } catch {
         // gone already, or this process may not remove it
       }
@@ -106,27 +114,36 @@ function slotFiles(dir, reap) {
   return by;
 }
 
+/** A slot that counts as held without a record of its holder: its file cannot be read, or does not parse yet. */
+const UNKNOWN = Object.freeze({ unknown: true });
+
 /**
  * A slot file's content: its record or `{free: true}`; undefined when the file is gone (a higher generation replaced
- * it), null when it cannot be read (it names no holder, and no loop takes the slot over it).
+ * it). UNKNOWN when it cannot be read, or does not parse and is younger than UNPARSED_HELD_MS: every slot file is
+ * written whole, so such a file is no loop's and frees once it is older; until then no loop takes the slot over it.
  */
 const readSlot = (file) => {
   let raw;
   try {
     raw = readFileSync(file, "utf8");
   } catch (e) {
-    return e?.code === "ENOENT" ? undefined : null;
+    return e?.code === "ENOENT" ? undefined : UNKNOWN;
   }
   try {
-    return JSON.parse(raw);
+    const rec = JSON.parse(raw);
+    if (rec && typeof rec === "object") return rec;
   } catch {
-    // every slot file is written whole (writeSlot, linkSlot): one that does not parse names no holder
-    return { free: true };
+    // judged by its age below
+  }
+  try {
+    return Date.now() - statSync(file).mtimeMs < UNPARSED_HELD_MS ? UNKNOWN : { free: true };
+  } catch (e) {
+    return e?.code === "ENOENT" ? undefined : UNKNOWN;
   }
 };
 
-/** Whether a slot's content holds it: a record whose holder still runs. */
-const holds = (rec) => !!rec && !rec.free && !holderGone(rec);
+/** Whether a slot's content holds it: UNKNOWN, or a record whose holder still runs. */
+const holds = (rec) => rec === UNKNOWN || (!!rec && !rec.free && !holderGone(rec));
 
 /** Remove a slot's generations below its highest: none of them says anything any more. */
 const dropBelow = (dir, slot, gens) => {
@@ -140,33 +157,34 @@ const dropBelow = (dir, slot, gens) => {
 };
 
 /**
- * The slots held on this machine now, by slot number: each live holder's record with its `file` and `slot`. A slot whose
- * holder is gone holds nothing; when `reap`, the generations below each slot's highest are removed, as are dot files a
- * killed writer left. Doctor reads with `reap` false and removes nothing.
+ * The slots held on this machine now, by slot number: each live holder's record with its `file` and `slot` (a slot held
+ * without a readable record has only those two). A slot whose holder is gone holds nothing; when `reap`, the
+ * generations below each slot's highest are removed, as are a killed writer's dot files. A slot whose highest
+ * generation keeps moving while it is read counts as held. Doctor reads with `reap` false and removes nothing.
  */
 export function slotHolders(dir = slotsDir(), { reap = true } = {}) {
-  let out = [];
-  for (let look = 0; look < 5; look += 1) {
-    let by;
-    try {
-      by = slotFiles(dir, reap);
-    } catch {
-      return [];
+  let by;
+  try {
+    by = slotFiles(dir, reap);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const [slot, listed] of [...by].sort((a, b) => a[0] - b[0])) {
+    let gens = listed;
+    let file = null;
+    let rec;
+    for (let look = 0; look < 5 && gens?.length; look += 1) {
+      file = join(dir, slotName(slot, gens[0]));
+      rec = readSlot(file);
+      if (rec !== undefined) break;
+      // a loop took this slot's next generation since the listing: list it again
+      gens = slotFiles(dir, false).get(slot);
     }
-    out = [];
-    let moved = false;
-    for (const [slot, gens] of [...by].sort((a, b) => a[0] - b[0])) {
-      const file = join(dir, slotName(slot, gens[0]));
-      const rec = readSlot(file);
-      if (rec === undefined) {
-        // a loop took this slot's next generation since the listing: list again
-        moved = true;
-        break;
-      }
-      if (reap) dropBelow(dir, slot, gens);
-      if (holds(rec)) out.push({ ...rec, file, slot });
-    }
-    if (!moved) break;
+    if (!gens?.length) continue;
+    if (rec === undefined) rec = UNKNOWN;
+    if (reap) dropBelow(dir, slot, gens);
+    if (holds(rec)) out.push(rec === UNKNOWN ? { file, slot } : { ...rec, file, slot });
   }
   return out;
 }
@@ -178,27 +196,38 @@ const selfRecord = () => (self ??= processRecord(process.pid));
 /** A dot file beside slot file `file` to write it whole in: readers skip dot files. */
 const tempFor = (file) => join(dirname(file), `.${basename(file)}.${randomBytes(4).toString("hex")}`);
 
-/** Replace a slot file whole: a dot file first, renamed into place, so a reader never sees half of one. */
-const writeSlot = (file, rec) => {
-  const tmp = tempFor(file);
-  writeNew(tmp, JSON.stringify(rec));
-  renameSync(tmp, file);
-};
-
-/** Create slot file `file` whole, only if no file has that name: true when this call created it. */
-const linkSlot = (file, rec) => {
-  const tmp = tempFor(file);
-  writeNew(tmp, JSON.stringify(rec));
-  try {
-    linkSync(tmp, file);
-    return true;
-  } catch (e) {
-    if (e?.code === "EEXIST") return false;
-    throw e;
-  } finally {
-    rmSync(tmp, { force: true });
+/**
+ * Write `rec` whole to a dot file beside `file` and `place` it (rename or link). A take stalled past STALE_DOT_MS finds
+ * its dot file removed (ENOENT): it writes it again and places it once more.
+ */
+const viaDot = (file, rec, place) => {
+  for (let tries = 0; ; tries += 1) {
+    const tmp = tempFor(file);
+    writeNew(tmp, JSON.stringify(rec));
+    try {
+      return place(tmp);
+    } catch (e) {
+      if (e?.code !== "ENOENT" || tries > 0) throw e;
+    } finally {
+      rmSync(tmp, { force: true });
+    }
   }
 };
+
+/** Replace a slot file whole: a dot file first, renamed into place, so a reader never sees half of one. */
+const writeSlot = (file, rec) => viaDot(file, rec, (tmp) => renameSync(tmp, file));
+
+/** Create slot file `file` whole, only if no file has that name: true when this call created it. */
+const linkSlot = (file, rec) =>
+  viaDot(file, rec, (tmp) => {
+    try {
+      linkSync(tmp, file);
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  });
 
 /**
  * Take slot `slot` for `rec` when nobody holds it: its file, or null when a live holder has it. The slot's next
@@ -212,7 +241,7 @@ function claimSlot(dir, slot, rec) {
     if (gens.length) {
       const cur = readSlot(join(dir, slotName(slot, gens[0])));
       if (cur === undefined) continue;
-      if (cur === null || holds(cur)) return null;
+      if (holds(cur)) return null;
     }
     const gen = gens.length ? gens[0] + 1 : 0;
     const file = join(dir, slotName(slot, gen));
@@ -232,16 +261,28 @@ function claimSlot(dir, slot, rec) {
  * Take one slot of the machine's budget for this process: a slot handle, or null when the budget is full. When the
  * live slots already reach the budget, none is taken; otherwise the first free slot of 0 .. budget-1 is, and loops
  * taking the last one at once cannot both have it (claimSlot), so one keeps it and the others find the budget full.
- * `force`: taken whatever the count, as the first free slot of any number (a loop holding no slot always runs one
- * stage). `holder`: what it runs, {repo, issue, stage, cmd}.
+ * The live slots are counted again once it is taken: a forced slot at or above the budget counts too, and loops that
+ * took two free slots below it at once may together be over the budget, so a loop that finds it over lets its slot go
+ * (both may, and then neither runs this tick). `force`: taken whatever the count, as the first free slot of any number
+ * (a loop holding no slot always runs one stage). `holder`: what it runs, {repo, issue, stage, cmd}. `afterCount`: a
+ * test's hook, run between the first count and the take.
  */
-export function takeSlot({ dir = slotsDir(), budget, force = false, holder = {} }) {
+export function takeSlot({ dir = slotsDir(), budget, force = false, holder = {}, afterCount = null }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   let rec = { ...selfRecord(), ...holder, since: new Date().toISOString() };
   if (!force && slotHolders(dir).length >= budget) return null;
+  afterCount?.();
   let file = null;
   for (let slot = 0; !file && (force || slot < budget); slot += 1) file = claimSlot(dir, slot, rec);
   if (!file) return null;
+  if (!force && slotHolders(dir).length > budget) {
+    try {
+      writeSlot(file, { free: true });
+    } catch {
+      // the record still names this process: the slot frees when it ends
+    }
+    return null;
+  }
   let held = true;
   return {
     file,

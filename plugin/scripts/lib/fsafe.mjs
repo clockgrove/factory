@@ -8,7 +8,13 @@ import { join } from "node:path";
 const write = (file, data, flags) => {
   const fd = openSync(file, flags | C.O_WRONLY | C.O_NOFOLLOW, 0o600);
   try {
-    writeSync(fd, typeof data === "string" ? data : Buffer.from(data));
+    // writeSync may write fewer bytes than asked: write the rest until all of it is out
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    for (let at = 0; at < buf.length; ) {
+      const n = writeSync(fd, buf, at, buf.length - at);
+      if (n <= 0) throw Object.assign(new Error(`${file}: wrote ${at} of ${buf.length} bytes`), { code: "EIO" });
+      at += n;
+    }
   } finally {
     closeSync(fd);
   }

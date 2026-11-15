@@ -63,6 +63,7 @@ export const DEFAULTS = {
   mode: "",
   issue: "",
   pr: "",
+  account: "", // the account the job's account step picked (action.yml FACTORY_STAGE_ACCOUNT, lib/accounts.mjs, #267); a run's own
   vars: "", // the workflow's `${{ toJSON(vars) }}`: the repository's variables (applyVariables)
   repo: "",
   app_id: "",
@@ -103,7 +104,7 @@ const NOT_INPUTS = ["action", "objective_label", "repo"];
  * Inputs each run gives (a dispatch's or a stage's own), never a setting: `vars` is the workflow's `vars` context, the
  * repository's variables (applyVariables).
  */
-export const PER_RUN_INPUTS = ["mode", "issue", "pr", "vars"];
+export const PER_RUN_INPUTS = ["mode", "issue", "pr", "vars", "account"];
 /**
  * The FACTORY_* names a workflow's env block may set (#119): the Action's inputs (DEFAULTS, which test/inputs checks
  * against action.yml) under their env names, but secrets and a run's own, and local mode's settings. Local mode takes
@@ -133,10 +134,12 @@ export function workflowDriftLines(working, committed) {
 }
 
 /**
- * Settings another route reads from the workflow's env block and setup writes there itself (plugin/workflow-template.yml):
- * local mode leaves them out of every stage, as any name it does not take, but does not warn about them (#179).
+ * Settings another route reads from the workflow's env block (plugin/workflow-template.yml): the cloud sandbox's size,
+ * which setup writes, and the accounts GitHub Actions and the cloud sandbox run on (lib/accounts.mjs routeAccounts; local
+ * mode's are this machine's own). Local mode leaves them out of every stage, as any name it does not take, but does not
+ * warn about them (#179).
  */
-export const OTHER_ROUTE_SETTINGS = new Set(["FACTORY_SANDBOX_VCPUS"]);
+export const OTHER_ROUTE_SETTINGS = new Set(["FACTORY_SANDBOX_VCPUS", "FACTORY_ACCOUNTS"]);
 
 /**
  * A workflow env block (local.mjs workflowEnv) split into the settings Factory takes, the names it drops and warns

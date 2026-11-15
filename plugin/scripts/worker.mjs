@@ -26,9 +26,9 @@ import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, con
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
-import { authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { routeInputs } from "./lib/accounts.mjs";
+import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
-import { accountLabelNote } from "./lib/accounts.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, prepareClone, refusalExit } from "./lib/local.mjs";
@@ -83,7 +83,8 @@ async function main() {
   // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
-  const inputs = resolveInputs({ args });
+  // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
+  const inputs = routeInputs(resolveInputs({ args }));
   if (!inputs.repo) throw new Error("--repo OWNER/NAME (or GITHUB_REPOSITORY) is required");
   if (!inputs.issue) throw new Error("--issue N is required");
   const repo = repoOf(inputs.repo);
@@ -340,10 +341,22 @@ async function main() {
   // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
   openStageHosts(chosen.hosts);
   if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
+  // The account it runs on off local mode (objective-trust.mjs accountGate, #267): the one its labels pick, when the
+  // repository declares accounts, must be the one whose credential this stage was given, or it Blocks before any harness.
+  const acct = await accountGate({ repo, issue, harness: inputs.harness, labels: trusted.labels, local, pr: prNow, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
+  if (acct.wait) {
+    log(acct.wait);
+    await finish("skipped", acct.wait);
+    return;
+  }
+  if (!acct.ok) {
+    log(acct.reason);
+    await finish("blocked", acct.reason);
+    return;
+  }
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
-  // An account label (#265) moves a stage only in local mode: elsewhere the progress says so, once.
-  const accountNote = accountLabelNote(trusted.labels, local);
-  if (accountNote) await progress(accountNote);
+  // An account label with no accounts declared for this route does nothing: the progress says so, once.
+  if (acct.note) await progress(acct.note);
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
   // 2. Doctor's job checks, for the harness this Objective runs on: a misconfigured repository Blocks with one line, not a run.

@@ -1,0 +1,65 @@
+// Two account labels on GitHub Actions and the cloud sandbox (#267): no stage of the Objective starts until one is left,
+// and nothing Blocks for it, as in local mode (#259). The dispatcher leaves a Queued one unpicked (dispatch.mjs). A stage
+// that meets two anyway waits, holding nothing:
+// - a work stage (a second label went on while it started) puts its Objective back to Queued, where the dispatcher holds
+//   it until one label or none is left, or, sent back with an open PR, to In review, where the dispatcher sends nothing
+//   back while two are on (dispatch.mjs);
+// - a review stage (its review label starts it with no pick) takes `factory:review` off the PR and records the wait on
+//   the PR (Factory's own comment, accountWaitMark). The dispatcher's tick puts the label back once one account label or
+//   none is left (accountWaitResume), as after a third-party reviewer's wait (third-party-review.mjs), and the label
+//   starts the review stage again on its route.
+import { addLabels, findPr, findProject, moveCard, removeLabel, rest, setStateLabel, upsertComment } from "./github.mjs";
+import { REVIEW_LABEL, isSelf, marker } from "./logic.mjs";
+import { accountPin, routeTwoLine } from "./accounts.mjs";
+
+/** The wait record's marker, the first line of Factory's own comment on the PR. */
+export const accountWaitMark = (issue) => marker(issue, "account-wait");
+
+/**
+ * Make a stage that met two account labels (`two`) wait, as above: `stage` "review" with its PR (`pr`, the PR or its
+ * number), else a work stage, whose Objective goes back to In review when it has an open PR that is no draft (a
+ * send-back: the dispatcher sends it again once one label is left, and the stage then goes on with that PR and branch),
+ * else to Queued. Returns the line the stage ends with. A failed write throws: the stage then fails as on any write.
+ */
+export async function waitOnAccounts({ repo, issue, stage, pr = null, two, opts }) {
+  const line = routeTwoLine(two);
+  const prNumber = typeof pr === "object" && pr ? pr.number : pr;
+  if (stage === "review" && prNumber) {
+    // The record first: a label taken off with no record would wait for nothing.
+    await upsertComment(repo, prNumber, accountWaitMark(issue), `Factory: ${line}. The review waits; once one account label or none is left, Factory puts \`${REVIEW_LABEL}\` back on this PR and the review goes on.`, opts);
+    await removeLabel(repo, prNumber, REVIEW_LABEL, opts);
+    return `${line}; the review waits for one to be left`;
+  }
+  const open = typeof pr === "object" && pr ? pr : await findPr(repo, `factory/${issue}`, opts).catch(() => null);
+  const back = open && open.state !== "closed" && !open.draft ? "In review" : "Queued";
+  await setStateLabel(repo, issue, back === "In review" ? "in-review" : null, opts);
+  await moveCard(await findProject(repo, opts).catch(() => null), repo, issue, back, opts).catch(() => {});
+  return `${line}; back to ${back} until one is left`;
+}
+
+/** The PR's account-wait record (accountWaitMark, Factory's own comment): {id, at} (its last write), or null. */
+export const accountWaitOf = (comments, issue) => {
+  const c = [...(comments || [])].reverse().find((x) => isSelf(x) && String(x.body || "").startsWith(accountWaitMark(issue)));
+  return c ? { id: c.id, at: c.updated_at || c.created_at || null } : null;
+};
+
+/**
+ * The dispatcher's half: a PR whose review waits on account labels (`wait`, accountWaitOf) gets its review label back
+ * once the issue's `labels` hold one account label or none, and the record goes. A record older than the PR's latest
+ * review label (`labelledAt`, its time: a label put back since, by the dispatcher or a person) is stale: the wait it
+ * recorded is over, so it is deleted and resumes nothing. Returns "resumed", "stale" or "waiting"; a failed write
+ * throws (the next tick tries again).
+ */
+export async function accountWaitResume({ repo, pr, wait, labels, labelledAt = null, opts }) {
+  if (!wait) return "waiting";
+  const drop = () => rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" });
+  if (labelledAt && wait.at && Date.parse(labelledAt) > Date.parse(wait.at)) {
+    await drop();
+    return "stale";
+  }
+  if (accountPin(labels).two) return "waiting";
+  await addLabels(repo, pr, [REVIEW_LABEL], opts);
+  // The record goes after the label is back; one left behind is stale from then on (the label's time is later).
+  await drop();
+  return "resumed";
+}

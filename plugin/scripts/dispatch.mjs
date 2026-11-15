@@ -24,6 +24,8 @@ import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
+import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
+import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -92,7 +94,9 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+/** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
+const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
   const repo = repoOf(inputs.repo);
@@ -735,6 +739,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const queueWatch = [];
   // PRs whose third-party wait ended this tick: their review label went back on.
   const thirdPartyResumed = [];
+  // PRs whose account-label wait ended this tick: their review label went back on.
+  const accountResumed = [];
   // Each In-review Objective's open PR (null for none) as this pass read it.
   const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
@@ -780,7 +786,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread, wait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread, wait, accountWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
       // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
@@ -808,6 +814,31 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         due(issue.number, "third-party", waiting.until + WAKE_SLACK_MS);
         if (waiting.unread) retry(`PR #${open.number}'s review label time`);
         continue;
+      }
+      // A review waiting on two account labels (lib/account-wait.mjs, #267): its label goes back once one account label or
+      // none is left; meanwhile nothing else runs on the PR.
+      if (!reviewing && accountWait && !dryRun) {
+        let how = "waiting";
+        try {
+          // The review label's latest time on the PR: a record older than it is stale (account-wait.mjs).
+          const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts);
+          how = await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, labelledAt, opts });
+        } catch (e) {
+          log(`  #${issue.number}: the account wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
+          retry(`#${issue.number}'s review label`);
+          continue;
+        }
+        if (how === "resumed") {
+          accountResumed.push(issue.number);
+          log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
+          continue;
+        }
+        if (how === "waiting") {
+          log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
+          continue;
+        }
+        // Stale: removed, and the PR is handled as any In-review PR below.
+        log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
       }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -848,6 +879,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
+      // Two account labels on these routes (#267): no work stage could start on it, so nothing is sent back to one (a
+      // GitHub update of the branch runs no stage and goes ahead); it waits In review until one label or none is left.
+      if (decision === "rebase" && twoAccounts(issue)) {
+        log(`  #${issue.number}: PR #${open.number} needs a rebase, but ${routeTwoLine(accountPin(issue.labels).two)}`);
+        continue;
+      }
       // The send-backs could not be counted (session.mjs rebaseMarkers `unread`): no update, send-back or Block this tick.
       if (unread && decision !== "ignore") {
         retry(`#${issue.number}'s send-backs`);
@@ -933,6 +970,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const why = localHold(issue);
     if (why) held[issue.number] ??= why;
   }
+  // Two account labels on GitHub Actions and the cloud sandbox, with accounts declared there (lib/accounts.mjs, #267): no
+  // stage starts until one is left; the Objective waits Queued, never Blocked for it, as in local mode.
+  for (const issue of wanted) if (twoAccounts(issue)) held[issue.number] ??= routeTwoLine(accountPin(issue.labels).two);
   for (const [key, reason] of Object.entries(localStopped || {})) {
     const n = Number(key);
     const issue = wanted.find((i) => i.number === n);
@@ -1138,7 +1178,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

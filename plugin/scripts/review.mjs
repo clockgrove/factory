@@ -29,9 +29,9 @@ import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
-import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
+import { routeInputs } from "./lib/accounts.mjs";
+import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
-import { accountLabelNote } from "./lib/accounts.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
@@ -356,7 +356,8 @@ async function main() {
   // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
-  const inputs = resolveInputs({ args });
+  // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
+  const inputs = routeInputs(resolveInputs({ args }));
   if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
   if (!inputs.pr) throw new Error("--pr N is required");
   const repo = repoOf(inputs.repo);
@@ -662,10 +663,22 @@ async function main() {
   // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
   openStageHosts(chosen.hosts);
   if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
+  // The account it runs on off local mode (objective-trust.mjs accountGate, #267): the one its labels pick, when the
+  // repository declares accounts, must be the one whose credential this stage was given, or it Blocks before any harness.
+  const acct = await accountGate({ repo, issue, harness: inputs.harness, labels: trusted.labels, local, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
+  if (acct.wait) {
+    log(acct.wait);
+    await finish("waiting", acct.wait);
+    return;
+  }
+  if (!acct.ok) {
+    log(acct.reason);
+    await finish("blocked", acct.reason);
+    return;
+  }
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
-  // An account label (#265) moves a stage only in local mode: elsewhere the progress says so, once.
-  const accountNote = accountLabelNote(trusted.labels, local);
-  if (accountNote) await progress(accountNote);
+  // An account label with no accounts declared for this route does nothing: the progress says so, once.
+  if (acct.note) await progress(acct.note);
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.
   const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");

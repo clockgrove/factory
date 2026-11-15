@@ -186,16 +186,17 @@ test("#265: the label is no edit to the Objective: the plan's record and the cho
   assert.equal(reads, 0, "no timeline read for it");
 });
 
-test("#265: off local mode the label does nothing, and the stage's progress says so once", () => {
-  assert.match(accountLabelNote(["factory:objective", "factory:account:beta"], false), /^`factory:account:beta` does nothing on this route: accounts are a local-mode setting/);
+test("#265/#267: off local mode, with no accounts declared there, the label does nothing, and the stage's progress says so once", () => {
+  assert.match(accountLabelNote(["factory:objective", "factory:account:beta"], false), /^`factory:account:beta` does nothing on this route: this repository declares no accounts for GitHub Actions and the cloud sandbox/);
   assert.equal(accountLabelNote(["factory:objective", "factory:account:beta"], true), "", "local mode acts on it");
   assert.equal(accountLabelNote(["factory:objective"], false), "");
   for (const script of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
     const gate = src.indexOf("await choiceGate(");
-    const note = src.indexOf("accountLabelNote(trusted.labels, local)");
+    // accountGate (objective-trust.mjs) gives the note: route-accounts.test.mjs runs it.
+    const note = src.indexOf("await accountGate(");
     assert.ok(gate > 0 && note > gate, `${script}: once, after the labels are read and checked`);
-    assert.equal(src.split("accountLabelNote(").length, 2, `${script}: one call`);
+    assert.equal(src.split("await accountGate(").length, 2, `${script}: one call`);
   }
 });
 
@@ -546,7 +547,8 @@ test("#266: the setting is FACTORY_LOCAL_AUTO_ACCOUNT=1, off unset, empty or 0; 
 
 test("#266: the machine's holds say when an account last met its limit (a served pass is none) and when a stage last started on it, for every serve; a start file another could have planted is not read", () => {
   const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
-  const t = Date.now();
+  // In the past, so t + 1 is never after the reader's own clock (a later time counts as long ago).
+  const t = Date.now() - 10 * MIN;
   const one = accountHolds({ dir });
   const two = accountHolds({ dir });
   one.limit({ harness: "claude", account: "alpha", reset: t + 3 * MIN, now: t });

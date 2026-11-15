@@ -60,6 +60,7 @@ import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
+import { accountWaitOf } from "./account-wait.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -2239,7 +2240,8 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
     if (tip?.head === record.base) stuck = record;
   }
   // The PR's third-party wait record (third-party-review.mjs waitOf), read from the same comments.
-  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue) };
+  // Its account-wait record (account-wait.mjs): a review waiting on two account labels.
+  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue), accountWait: accountWaitOf(listed, issue) };
 }
 
 /**

@@ -138,6 +138,8 @@ export async function mintInstallationToken({ appId, privateKey, owner, repo, pe
         .filter(([k]) => granted[k] && granted[k] !== "none")
         .map(([k, v]) => [k, (rank[v] ?? 0) > (rank[granted[k]] ?? 0) ? granted[k] : v]),
     );
+    // None of them granted: GitHub reads an empty set as "all the installation's", so no token is asked for.
+    if (!Object.keys(permissions).length) throw new Error(`the App's installation grants none of ${Object.keys(narrowTo).join(", ")}, so no narrowed token is minted`);
   }
   // `permissions`: a subset of the installation's, for a narrower token (the agent's read-only one, token-keeper.mjs).
   const tok = await api(`app/installations/${inst.id}/access_tokens`, { token: jwt, method: "POST", body: { repositories: [repo], ...(permissions ? { permissions } : {}) } });

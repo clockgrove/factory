@@ -259,6 +259,29 @@ test("a wait whose kinds leave drained out (#285 review) carries no queue state 
   assert.deepEqual(drained.lines.map((l) => l.event), ["drained"]);
 });
 
+test("a timeout during the start's read of the open Objectives (#285 review) prints the start's cursor, and a restart from it misses nothing", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.event(5, "labeled", "factory:running");
+  const start = String(gh.s.events.at(-1).id);
+  const stop = new AbortController();
+  const answer = gh.answer;
+  gh.answer = (method, url, h) => {
+    if (/\/issues\?state=open/.test(url) && !stop.signal.aborted) {
+      // #5 Blocks just after the first events read; the deadline comes during the open read.
+      gh.state(5, "factory:blocked");
+      stop.abort();
+      throw new DOMException("This operation was aborted", "AbortError");
+    }
+    return answer(method, url, h);
+  };
+  const r = await waiting(gh, [], { opts: { token: "t", signal: stop.signal } });
+  assert.equal(r.code, WAIT_TIMEOUT_EXIT);
+  assert.deepEqual(r.lines.map((l) => [l.event, l.cursor]), [["timeout", start]], "the start's cursor, its queue state unknown");
+  const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor), kinds: ["blocked"] });
+  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 5]]);
+});
+
 test("a read cut off at --timeout (#285 review) leaves the cursor where it was: the timeout line carries it, and a restart from it tells the batch", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:in-review"]);

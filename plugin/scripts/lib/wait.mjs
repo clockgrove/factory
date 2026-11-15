@@ -188,17 +188,17 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     if (!cursor) {
       const page = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || [];
       const start = { id: page.reduce((m, e) => Math.max(m, e.id), 0) };
-      let state = null;
+      // The cursor to go on from as soon as it is read, so a timeout or failure in the checks below still prints it.
+      cursor = start;
+      wasDrained = null;
+      remember(page.map((e) => e.id));
       // The queue's state at the cursor, when no event came between the two event reads (the second then a 304); else
       // it stays unknown, so a drain the events after the cursor make is told, never taken as the state at the start.
       if (kinds.includes("drained")) {
         const d = (await openRead()).drained;
         const again = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || [];
-        if (again.reduce((m, e) => Math.max(m, e.id), 0) === start.id) state = d;
+        if (again.reduce((m, e) => Math.max(m, e.id), 0) === start.id) wasDrained = d;
       }
-      cursor = start;
-      wasDrained = state;
-      remember(page.map((e) => e.id));
     }
   } catch (e) {
     return failed(e);

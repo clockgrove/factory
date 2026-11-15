@@ -58,6 +58,7 @@ import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
+import { namedReviewer, thirdPartyComment } from "./third-party-review.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -651,14 +652,19 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * where reviewer and developer are one login. Findings GitHub took in no line (postReview set them out in the body of
  * Factory's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one counts until Factory
  * answers it in a PR comment under its reply marker (handoff.mjs postReplies). Factory's own reviews and reply markers
- * are those by Factory or someone who can push (trustedAuthor).
+ * are those by Factory or someone who can push (trustedAuthor). `thirdParty` (third-party-review.mjs logins): a named
+ * reviewer's root comments are listed too, shaped and sanitised for the answer pass with `from` set (thirdPartyComment);
+ * one counts until Factory or someone who can push replies in its thread.
  */
-export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null }) {
+export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
-  const ours = (c) => (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
+  // A named reviewer's comment is never Factory's own, even where the author filter stands in for the review ids.
+  const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const open = roots.filter((c) => !replies.has(c.id));
+  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && trustedAuthor(c)).map((c) => c.in_reply_to_id));
+  const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty) && !answeredByUs.has(c.id)).map((c) => thirdPartyComment(c, namedReviewer(c, thirdParty))) : [];
+  const open = [...roots.filter((c) => !replies.has(c.id)), ...theirs];
   // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));

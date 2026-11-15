@@ -635,28 +635,33 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
 /**
  * Resolve the review threads Factory itself opened (the root comment belongs to the review
  * carrying marker(issue, "review")) once they are answered: a reply exists, or the root is
- * Factory's placeholder. Identified by Factory's own marker and a trusted author (trustedAuthor). GraphQL names a Bot
- * without the "[bot]" suffix REST adds.
+ * Factory's placeholder. Identified by Factory's own marker and a trusted author (trustedAuthor). A thread a named
+ * third-party reviewer opened (`thirdParty`, third-party-review.mjs logins, matched on its review's author) is resolved
+ * once Factory or someone who can push replied in it. GraphQL names a Bot without the "[bot]" suffix REST adds.
  * Returns the number resolved.
  */
-export async function resolveFactoryThreads(repo, number, issue, opts) {
+export async function resolveFactoryThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
   const data = await graphql(
-    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
     { owner: repo.owner, name: repo.name, n: Number(number) },
     opts,
   );
   const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
   const mark = marker(issue, "review");
+  // An author as REST shows it (GraphQL names a Bot without "[bot]"), for trustedAuthor.
+  const asRest = (author, association) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login }, author_association: association });
+  const named = new Set(thirdParty.map((l) => String(l).toLowerCase()));
   let resolved = 0;
   for (const t of threads) {
     if (t.isResolved) continue;
     const comments = t.comments?.nodes || [];
     const root = comments[0];
     const review = root?.pullRequestReview;
-    // GraphQL names a Bot without REST's "[bot]" suffix.
-    const login = review?.author?.__typename === "Bot" ? `${review.author.login}[bot]` : review?.author?.login;
-    if (!root || !String(review?.body || "").includes(mark) || !trustedAuthor({ user: { type: review?.author?.__typename, login }, author_association: review?.authorAssociation })) continue;
-    const answered = comments.length > 1 || isPlaceholder(root.body);
+    const by = asRest(review?.author, review?.authorAssociation);
+    const ours = !!root && String(review?.body || "").includes(mark) && trustedAuthor(by);
+    const theirs = !!root && !ours && named.has(String(by.user.login || "").toLowerCase());
+    if (!ours && !theirs) continue;
+    const answered = ours ? comments.length > 1 || isPlaceholder(root.body) : comments.slice(1).some((c) => trustedAuthor(asRest(c.author, c.authorAssociation)));
     if (!answered) continue;
     await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);
     resolved += 1;

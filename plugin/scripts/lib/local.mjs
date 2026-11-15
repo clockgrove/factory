@@ -13,6 +13,7 @@ import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor
 import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
+import { exec } from "./proc.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -1964,12 +1965,43 @@ export function readWorkflowEnv(dir) {
 export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }) } = {}) {
   const ok = (r) => (r.status === 0 ? String(r.stdout) : null);
   // No clone here (doctor run with --repo only): nothing to read the default branch from, which says nothing about serve.
-  if (ok(git(["rev-parse", "--git-dir"])) === null) return { wf: {}, branch: null, error: "no git clone here", noClone: true };
+  if (ok(git(["rev-parse", "--git-dir"])) === null) return { wf: {}, pins: [], branch: null, error: "no git clone here", noClone: true };
   const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(ok(git(["ls-remote", "--symref", "origin", "HEAD"])) || "")?.[1] || (ok(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) || "").trim().replace(/^origin\//, "") || null;
-  if (!branch) return { wf: {}, branch: null, error: "origin's default branch could not be read" };
+  if (!branch) return { wf: {}, pins: [], branch: null, error: "origin's default branch could not be read" };
   git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  const text = ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`]));
-  return text === null ? { wf: {}, branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), branch, error: null };
+  return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`])), branch);
+}
+
+/** committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file). */
+const committedWorkflow = (text, branch) => (text === null ? { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null });
+
+/**
+ * The same read for a running `serve`, at each tick (#276): the default branch serve found at its start, fetched (offline,
+ * the last fetched commit), without blocking the loop's event loop while git talks to GitHub. The developer works in
+ * this clone meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git
+ * from moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and
+ * their `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
+ */
+export async function committedWorkflowNow(dir, branch, { git = (args) => exec("git", ["-C", dir, ...args], { timeoutMs: 60_000 }) } = {}) {
+  const own = `refs/factory/serve/${branch}`;
+  await git(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
+  const show = (ref) => git(["show", `${ref}:.github/workflows/factory.yml`]).catch(() => null);
+  const has = (await git(["rev-parse", "--verify", "-q", own]).catch(() => null))?.code === 0;
+  const r = await show(has ? own : `refs/remotes/origin/${branch}`);
+  return committedWorkflow(r?.code === 0 ? String(r.stdout) : null, branch);
+}
+
+/**
+ * The Factory refs a workflow's steps call (`uses: clockgrove/factory@<ref>`), each once, in order of first use: the
+ * release a repository pins. Commented-out lines are not steps.
+ */
+export function workflowPins(text) {
+  const refs = [];
+  for (const raw of String(text || "").split("\n")) {
+    const m = /^\s*(?:-\s+)?uses:\s*["']?clockgrove\/factory@([^\s"'#]+)["']?\s*(?:#.*)?$/.exec(raw);
+    if (m && !refs.includes(m[1])) refs.push(m[1]);
+  }
+  return refs;
 }
 
 /**

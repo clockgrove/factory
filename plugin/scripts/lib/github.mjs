@@ -70,7 +70,7 @@ function env(token) {
   return e;
 }
 
-async function call(url, { method = "GET", body, token, accept = "application/vnd.github+json", maxBytes = 0, etag = null }) {
+async function call(url, { method = "GET", body, token, accept = "application/vnd.github+json", maxBytes = 0, etag = null, signal = null }) {
   const t = tokenOf(token);
   const r = await fetch(url, {
     method,
@@ -84,6 +84,7 @@ async function call(url, { method = "GET", body, token, accept = "application/vn
     },
     // Every request body: no held secret (a worker secret's value, inputs.mjs holdSecrets) is ever posted.
     body: requestBody(body),
+    ...(signal ? { signal } : {}),
   });
   if (!maxBytes || !r.ok || !r.body) return { r, text: await r.text() };
   return { r, text: await tailOf(r.body, maxBytes) };
@@ -298,8 +299,9 @@ const createAgain = (landed) => {
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
+ * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed);
@@ -309,7 +311,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const kept = conditional ? cache.get(url) : undefined;
     let res;
     try {
-      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag });
+      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
     } catch (e) {
       throw transportError(`${method} ${path}`, e);
     }

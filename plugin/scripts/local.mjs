@@ -2244,7 +2244,8 @@ async function waitForQueue(flags) {
   waitOutages({ until: () => deadline });
   const { objectiveLabel } = resolveInputs({ args: { repo: repoFull }, env: process.env });
   const r = await waitQueue(repoOf(repoFull), {
-    opts: { token: sessionToken(repoFull), deadlineAt: deadline },
+    // At --timeout a read in flight is ended, not waited for (lib/wait.mjs: the timeout line, exit 3).
+    opts: { token: sessionToken(repoFull), deadlineAt: deadline, ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) },
     objectiveLabel,
     issues: flags._.slice(1).map(Number),
     kinds: parseKinds(flags.on),

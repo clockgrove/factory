@@ -20,20 +20,22 @@ const STATE_LABELS = new Set(["factory:running", ...Object.keys(STATE_KINDS)]);
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
 /**
- * A `--since` cursor: an event id (the `cursor` of a line `factory wait` printed) as {id}, or a time GitHub's events
- * are compared with as {at} (ms). Null for anything else.
+ * A `--since` cursor: the `cursor` of a line `factory wait` printed, an event id with the watched queue's state there
+ * when it was known (`d` drained, `a` not), as {id, drained}; or a time GitHub's events are compared with as {at} (ms),
+ * the state unknown. Null for anything else.
  */
 export function parseCursor(text) {
   const s = String(text ?? "").trim();
-  if (/^\d+$/.test(s)) return Number.isSafeInteger(Number(s)) ? { id: Number(s) } : null;
+  const m = /^(\d+)([ad]?)$/.exec(s);
+  if (m) return Number.isSafeInteger(Number(m[1])) ? { id: Number(m[1]), drained: m[2] ? m[2] === "d" : null } : null;
   // A time with its zone, so the cursor means the same on every machine.
   if (!/^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:?\d\d)$/.test(s)) return null;
   const at = Date.parse(s);
   return Number.isFinite(at) ? { at } : null;
 }
 
-/** A cursor as a line prints it, which --since takes back. */
-export const cursorText = (c) => (c.id !== undefined ? String(c.id) : new Date(c.at).toISOString());
+/** A cursor as a line prints it, which --since takes back: with the queue's state at it, when known. */
+export const cursorText = (c, drained = null) => (c.id !== undefined ? `${c.id}${drained === true ? "d" : drained === false ? "a" : ""}` : new Date(c.at).toISOString());
 
 /** `--on`'s kinds, checked: the list, or null when one is not a kind. Empty means every kind. */
 export function parseKinds(text) {
@@ -113,9 +115,10 @@ export async function closedAs(repo, issue, opts) {
  * read carries the same `cursor`, the newest event read: `--since` it to go on with nothing missed or told twice.
  * Without `since` it starts from now. `issues` (numbers) narrows it to those Objectives, drained included; `kinds` to
  * those kinds. Drained is told when an event moves the queue and leaves it drained, once until it is no longer so; a
- * wait that starts from now reads whether it already is, so a queue already drained is not told. Returns {code,
- * cursor}: 0 after the first read that told something (with `follow`, it never returns so), WAIT_TIMEOUT_EXIT once
- * `timeoutMs` passed with nothing told, after a `timeout` line with the cursor.
+ * wait that starts from now reads whether it already is, and the cursor carries that state on, so neither a queue
+ * already drained nor one still drained after a restart is told again. Returns {code, cursor}: 0 after the first read
+ * that told something (with `follow`, it never returns so), WAIT_TIMEOUT_EXIT once `timeoutMs` passed with nothing
+ * told, or `opts.signal` aborted a read (the command's deadline), after a `timeout` line with the cursor.
  */
 export async function waitQueue(repo, { opts, objectiveLabel = "factory:objective", issues = null, kinds = WAIT_KINDS, since = null, follow = false, intervalMs = WAIT_POLL_MS, timeoutMs = null, emit, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() }) {
   const cache = new Map();
@@ -123,14 +126,44 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
   const deadline = timeoutMs ? now() + timeoutMs : Infinity;
   const openRead = async () => drainedOf((await rest(`repos/${repo.full}/issues?state=open&labels=${encodeURIComponent(objectiveLabel)}&per_page=100`, { ...opts, paginate: true, cache })) || [], watched);
   let cursor = since;
-  let wasDrained = null;
-  if (!cursor) {
-    // The cursor first: an event between the two reads is then told on the first poll, never lost.
-    const page = (await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || [];
-    cursor = { id: page.reduce((m, e) => Math.max(m, e.id), 0) };
-    if (kinds.includes("drained")) wasDrained = (await openRead()).drained;
+  let wasDrained = since?.drained ?? null;
+  const newest = async () => ({ id: ((await rest(`repos/${repo.full}/issues/events?per_page=${WAIT_PAGE}`, { ...opts, cache })) || []).reduce((m, e) => Math.max(m, e.id), 0) });
+  const timedOut = (c) => {
+    emit({ event: "timeout", issue: null, at: new Date(now()).toISOString(), cursor: c });
+    return { code: WAIT_TIMEOUT_EXIT, cursor: c };
+  };
+  try {
+    if (!cursor) {
+      cursor = await newest();
+      // The queue's state at the cursor, when no event came between the two event reads (the second then a 304); else
+      // it stays unknown, so a drain the events after the cursor make is told, never taken as the state at the start.
+      if (kinds.includes("drained")) {
+        const d = (await openRead()).drained;
+        if ((await newest()).id === cursor.id) wasDrained = d;
+      }
+    }
+  } catch (e) {
+    if (opts?.signal?.aborted) return timedOut(cursor ? cursorText(cursor) : null);
+    throw e;
   }
   for (;;) {
+    let lines;
+    try {
+      lines = await poll();
+    } catch (e) {
+      if (opts?.signal?.aborted) return timedOut(cursorText(cursor, wasDrained));
+      throw e;
+    }
+    const c = cursorText(cursor, wasDrained);
+    for (const line of lines) emit({ ...line, cursor: c });
+    if (lines.length && !follow) return { code: 0, cursor: c };
+    const left = deadline - now();
+    if (left <= 0) return timedOut(c);
+    await sleep(Math.min(intervalMs, left));
+  }
+
+  /** One read: the lines it tells, with `cursor` and `wasDrained` moved on. */
+  async function poll() {
     const events = await eventsAfter(repo, cursor, { opts, cache });
     if (events.length) cursor = { id: events.at(-1).id };
     const lines = [];
@@ -153,14 +186,6 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
       if (d.drained && wasDrained !== true) lines.push({ event: "drained", issue: null, at: new Date(now()).toISOString(), blocked: d.blocked, question: d.question });
       wasDrained = d.drained;
     }
-    const c = cursorText(cursor);
-    for (const line of lines) emit({ ...line, cursor: c });
-    if (lines.length && !follow) return { code: 0, cursor: c };
-    const left = deadline - now();
-    if (left <= 0) {
-      emit({ event: "timeout", issue: null, at: new Date(now()).toISOString(), cursor: c });
-      return { code: WAIT_TIMEOUT_EXIT, cursor: c };
-    }
-    await sleep(Math.min(intervalMs, left));
+    return lines;
   }
 }

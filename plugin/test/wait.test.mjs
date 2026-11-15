@@ -193,19 +193,67 @@ test("named issues: only their events are told, and drained means each of them i
   assert.deepEqual(one.lines.map((l) => [l.event, l.issue]), [["blocked", 7]]);
 });
 
+test("drained at the start (#272 review): a drain between the start's reads is told, not taken as the state at the start", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:in-review"]);
+  gh.issue(6, [OBJ, "factory:blocked"]);
+  gh.s.prs["factory/5"] = [{ number: 71, merged_at: "2026-11-14T14:00:30Z" }];
+  // #5 merges after the start's first events read, before its read of the open Objectives.
+  const answer = gh.answer;
+  let opened = false;
+  gh.answer = (method, url, h) => {
+    if (!opened && /\/issues\?state=open/.test(url)) {
+      opened = true;
+      gh.state(5, null);
+      gh.event(5, "closed");
+    }
+    return answer(method, url, h);
+  };
+  const r = await waiting(gh, []);
+  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
+  assert.match(r.lines[1].cursor, /^\d+d$/, "the cursor says the queue is drained there");
+});
+
+test("drained after a restart (#272 review): the cursor carries the queue's state, so a wait started --since it does not tell the same drain again", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:blocked"]);
+  const first = await waiting(gh, [() => gh.state(5, "factory:question")]);
+  assert.deepEqual(first.lines.map((l) => [l.event, l.issue]), [["question", 5], ["drained", null]]);
+  const cursor = first.lines.at(-1).cursor;
+  assert.match(cursor, /^\d+d$/);
+  // Still drained: a Blocked one closed is told, the drain is not.
+  const again = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["closed", "drained"], timeoutMs: 1 });
+  assert.deepEqual(again.lines.map((l) => l.event), ["timeout"]);
+  const closed = await waiting(gh, [() => gh.event(6, "closed")], { since: parseCursor(again.lines[0].cursor) });
+  assert.deepEqual(closed.lines.map((l) => [l.event, l.issue]), [["closed", 6]]);
+  assert.match(closed.lines[0].cursor, /^\d+d$/);
+  // Active again (a new Objective queued) then drained: told, and a cursor from before the queue moved says so.
+  gh.issue(8, []);
+  const active = await waiting(gh, [() => gh.event(8, "labeled", OBJ), () => gh.state(8, "factory:blocked")], { since: parseCursor(closed.lines[0].cursor) });
+  assert.deepEqual(active.lines.map((l) => [l.event, l.issue]), [["blocked", 8], ["drained", null]]);
+});
+
 test("factory wait's command line: issue numbers, a cursor or a time, kinds, --follow; anything else is a usage error", () => {
   assert.deepEqual(parseArgs(["wait", "166", "169", "--since", "36176470266", "--on", "blocked,question", "--timeout", "600"]), { cmd: "wait", flags: { _: ["wait", "166", "169"], since: "36176470266", on: "blocked,question", timeout: 600 } });
   assert.deepEqual(parseArgs(["wait", "--follow", "--since=2026-11-14T14:00:00Z"]), { cmd: "wait", flags: { _: ["wait"], follow: true, since: "2026-11-14T14:00:00Z" } });
   for (const a of ["wait x", "wait --on blocked,done", "wait --since yesterday", "wait --since 2026-11-14T14:00:00", "wait --timeout 0", "wait --follow=1"]) assert.throws(() => parseArgs(a.split(" ")), (e) => e.usage === true, a);
   assert.deepEqual(parseCursor("2026-11-14T14:00:00-08:00"), { at: Date.parse("2026-11-14T22:00:00Z") });
+  assert.deepEqual(parseCursor("36176470266d"), { id: 36176470266, drained: true });
+  assert.deepEqual(parseCursor("36176470266a"), { id: 36176470266, drained: false });
+  assert.deepEqual(parseCursor("36176470266"), { id: 36176470266, drained: null });
+  assert.equal(parseCursor("36176470266x"), null);
 });
 
-test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited out as serve does; the Block after it is one JSON line and exit 0; with nothing by --timeout, a timeout line and exit 3", async () => {
+test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited out as serve does; the Block after it is one JSON line and exit 0; with nothing by --timeout, or a read still in flight at it, a timeout line and exit 3", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:running"]);
   gh.event(5, "labeled", "factory:running");
   let reads = 0;
+  let hang = false;
   const server = createServer((req, res) => {
+    // A read GitHub never answers: --timeout must end it.
+    if (hang) return;
     reads += /issues\/events/.test(req.url) ? 1 : 0;
     // The third events read meets the REST quota spent for 20 minutes; the fifth finds the Block.
     if (reads === 3) {
@@ -247,7 +295,14 @@ test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited o
     const last = JSON.parse(quiet.out.trim().split("\n").at(-1));
     assert.equal(last.event, "timeout");
     assert.equal(last.cursor, String(gh.s.events.at(-1).id));
+    hang = true;
+    const started = Date.now();
+    const hung = await run("--since", String(gh.s.events.at(-1).id), "--timeout", "0.5");
+    assert.equal(hung.code, WAIT_TIMEOUT_EXIT, hung.out + hung.err);
+    assert.ok(Date.now() - started < 5_000, `ended at its timeout, not when the read would (${Date.now() - started} ms)`);
+    assert.deepEqual(JSON.parse(hung.out.trim()), { event: "timeout", issue: null, at: JSON.parse(hung.out.trim()).at, cursor: String(gh.s.events.at(-1).id) });
   } finally {
+    server.closeAllConnections();
     server.close();
   }
 });

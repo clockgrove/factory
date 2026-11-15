@@ -65,7 +65,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (values.check) {
     const prev = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : null;
     if (!prev || prev.digest !== rec.digest) {
-      process.stderr.write(`skills changed since ${out} (${prev?.digest ?? "none"} → ${rec.digest}); record them with node bench/skills.mjs after a scored Objective\n`);
+      process.stderr.write(`skills changed without a new record in ${out} (recorded ${prev?.digest ?? "none"}, tree ${rec.digest}): run node bench/skills.mjs and commit bench/skills.json with the skill change\n`);
       process.exit(3);
     }
     process.stdout.write(`skills unchanged: ${rec.digest}\n`);

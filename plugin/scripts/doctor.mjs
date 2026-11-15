@@ -26,11 +26,11 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { accountEnv, accountToken, defaultAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
-import { CHOICE_PREFIXES } from "./lib/choice.mjs";
+import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { dropOwned } from "./lib/fsafe.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
@@ -1305,7 +1305,34 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
   if (exposed.length || linked.length) return [...linked.map((l) => WARN("harness logins", `${l.path}: a login file of the ${h} login stages run on, which leads into another login (${l.real}), so its harness would read that login; serve refuses each stage (login-link)`, "make that login's files its own (no link into another login folder)")), ...exposed.map((e) => WARN("harness logins", `${e.path}: a harness login inside the ${h} harness's home ${e.home}, which its outer sandbox can write, so that sandbox can read it`, "move that login out of the harness's home, or point CLAUDE_CONFIG_DIR or CODEX_HOME at a folder of its own"))];
   const found = harnessLogins(home, env).filter((l) => l.files.some((p) => existsSync(p))).map((l) => l.dir);
   const own = h === "copilot" ? [] : ownLogin(h, env, home);
-  return [PASS("harness logins", `${found.length ? found.join(", ") : "none found"}: hidden from every sandbox${own.length ? `; the ${h} stage's own login (${own.join(", ")}) is readable to its harness process only` : ""}`)];
+  const wrapper = h === "codex" ? codexWrapper(env, home) : null;
+  return [...(wrapper ? [WARN("codex on PATH", `${wrapper.bin} is a script (${wrapper.real}), not Codex's own binary: if it runs the release in ${join(home, ".codex")}, Codex's sandbox cannot start on CODEX_HOME ${env.CODEX_HOME}, since that folder is hidden from it whole`, `put the link to Codex's release (${join(home, ".local", "bin", "codex")} from its installer) first on PATH`)] : []), PASS("harness logins", `${found.length ? found.join(", ") : "none found"}: hidden from every sandbox${own.length ? `; the ${h} stage's own login (${own.join(", ")}) is readable to its harness process only` : ""}`)];
+}
+
+/**
+ * The hosts the open Objectives' host labels open to their own sandboxes (choice.mjs hostsOf), beyond the hosts every
+ * Objective reaches: one PASS naming each Objective with its hosts, or that none has one; a WARN for an Objective whose
+ * host label names no host a sandbox can allow (each of its stages Blocks on it). Who applied each label is every
+ * stage's own check (objective-trust.mjs choiceTrusted), not read here. `list` (the open Objectives) is a test's own.
+ */
+export async function objectiveHostChecks({ inputs, repo, token, list = () => rest(`repos/${repo.full}/issues?state=open&labels=${encodeURIComponent(inputs.objectiveLabel)}&per_page=100`, { token, paginate: true }) }) {
+  let issues;
+  try {
+    issues = await list();
+  } catch (e) {
+    return [WARN("objective hosts", `the open Objectives could not be read (${String(e?.message || e).slice(0, 160)}), so the hosts their ${HOST_PREFIX} labels open are not shown`, "run doctor again once GitHub answers")];
+  }
+  const shown = [];
+  const out = [];
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    if (issue?.pull_request) continue;
+    const h = hostsOf(issue?.labels || []);
+    if (!h.labels.length) continue;
+    if (h.ok) shown.push(`#${issue.number}: ${h.hosts.join(", ")}`);
+    else out.push(WARN("objective hosts", `#${issue.number}: ${h.reason}, so each of its stages Blocks`, h.fix));
+  }
+  const detail = shown.length ? `${shown.join("; ")}; each opened to that Objective's own sandboxes alone, and only when a person who can push applied the label` : `no open Objective has a ${HOST_PREFIX} label: every Objective's sandboxes reach the repository's hosts alone`;
+  return [PASS("objective hosts", detail), ...out];
 }
 
 /**
@@ -1440,6 +1467,7 @@ async function main() {
   if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));
+  results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local, wf })));
   results.push(...(await runnerChecks({ inputs })));

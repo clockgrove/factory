@@ -24,7 +24,7 @@ import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, g
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
-import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
+import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -59,7 +59,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -254,7 +254,7 @@ export function promptCacheTtl(harness, env = {}) {
 /**
  * A runner's Claude Code run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/claude-runner.mjs: Factory's HOME for Claude Code, its per-start state, the caches) and the hosts its commands
- * may reach (`allowed_domains`). Null for any other harness, in local mode and before the agent uid exists.
+ * may reach (`allowed_domains`, and the Objective's own host labels: local.mjs openedStageHosts). Null for any other harness, in local mode and before the agent uid exists.
  */
 export function claudeRunner({ harness, agent, clone, env = process.env, claudeHome, services = null }) {
   if (harness !== "claude" || !agent || !clone || backend(env).name === "local") return null;
@@ -263,7 +263,7 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
   if (!layout.editDiffs) throw new Error(`no uid for ${agent.user}: refusing to start Claude Code without its sandbox's full write list`);
   // The services the repository's setup started: their loopback ports through the sandbox's proxy (claude-runner.mjs).
   const offered = services ?? agentServicePorts(agent);
-  return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env })), ...offered.map((p) => `127.0.0.1:${p}`)] };
+  return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env }), openedStageHosts()), ...offered.map((p) => `127.0.0.1:${p}`)] };
 }
 
 /** The Vercel AI Gateway's host, which a runner's Codex commands may reach when the gateway is Codex's provider. */
@@ -272,24 +272,24 @@ export const GATEWAY_HOST = new URL(GATEWAY_CODEX_URL).hostname;
 /**
  * A runner's Codex run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/codex-runner.mjs: Factory's HOME for Codex, its fresh CODEX_HOME, the caches) and the hosts its commands may reach
- * (`allowed_domains`, and the gateway's host when it is the provider). `present` is filled before each start: the
+ * (`allowed_domains`, the Objective's own host labels, and the gateway's host when it is the provider). `present` is filled before each start: the
  * checkout's read-only paths that exist. Null for any other harness, in local mode and before the agent uid exists.
  */
 export function codexRunner({ harness, agent, clone, env = process.env, codexHome }) {
   if (harness !== "codex" || !agent || !clone || backend(env).name === "local") return null;
   const gateway = env[CODEX_GATEWAY_ENV] ? [GATEWAY_HOST] : [];
-  return { clone, ...codexRunnerLayout(agent, codexHome), domains: [...new Set([...runnerDomains(input("allowed_domains", { env })), ...gateway])], present: null };
+  return { clone, ...codexRunnerLayout(agent, codexHome), domains: [...new Set([...runnerDomains(input("allowed_domains", { env }), openedStageHosts()), ...gateway])], present: null };
 }
 
 /**
  * A runner's Copilot run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/copilot-runner.mjs: Factory's HOME for Copilot with its bwrap and release, its fresh COPILOT_HOME, the caches,
- * the agent's GitHub login) and the hosts its commands may reach (`allowed_domains`). Null for any other harness, in
+ * the agent's GitHub login) and the hosts its commands may reach (`allowed_domains`, and the Objective's own host labels). Null for any other harness, in
  * local mode and before the agent uid exists.
  */
 export function copilotRunner({ harness, agent, clone, env = process.env, copilotHome }) {
   if (harness !== "copilot" || !agent || !clone || backend(env).name === "local") return null;
-  return { clone, ...copilotRunnerLayout(agent, copilotHome), domains: runnerDomains(input("allowed_domains", { env })) };
+  return { clone, ...copilotRunnerLayout(agent, copilotHome), domains: runnerDomains(input("allowed_domains", { env }), openedStageHosts()) };
 }
 
 /**
@@ -1164,8 +1164,12 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
   // stage's saved transcript use this copy, never what the agent's home holds by then.
-  const ranSession = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId : null;
+  const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
+  const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
+  // A failed Codex run's usage limit is in its rollout only (usage.mjs providerRefusal): read when the stream names no
+  // refusal of its own, from the copy just captured on a runner.
+  const rollout = harness === "codex" && ranSession && !ran.ok && !ran.refusal ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
   const found = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : { threads: [], missed: [] };
@@ -1176,7 +1180,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd });
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout, since: started });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
   const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
@@ -1288,6 +1292,40 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
     return { threads: [], missed: [{ id: null, why: "the read failed" }] };
   }
 }
+/**
+ * A Codex run's own rollout, its `token_count` lines only, for its usage limit (usage.mjs providerRefusal): on a runner
+ * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from the
+ * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
+ * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
+ */
+export async function codexPassRollout(threadId, runner, env, { label = "run" } = {}) {
+  try {
+    if (!plainThread(threadId)) return null;
+    const counts = (text) => String(text).split("\n").filter((l) => l.includes('"token_count"')).join("\n") || null;
+    if (runner) {
+      const a = capturedSession(threadId);
+      if (!a) return null;
+      if (a.truncated || a.tar.length > MAX_ROLLOUT_BYTES + 1024 * 1024) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
+      const t = await exec("tar", ["-xOf", "-"], { env, input: a.tar, timeoutMs: THREAD_READ_MS });
+      if (t.code !== 0 || t.timedOut) throw new Error(t.timedOut ? "unpacking timed out" : "unpacking failed");
+      return counts(t.stdout);
+    }
+    // The newest rollout of the thread, the one this pass wrote (codexRolloutReader reads the same): one file, so the
+    // read is bounded by MAX_ROLLOUT_BYTES.
+    const root = codexSessionRoot(env);
+    const newest = codexRolloutFiles(root, threadId)
+      .map((f) => ({ f, st: lstatSync(join(root, f), { throwIfNoEntry: false }) }))
+      .filter((x) => x.st?.isFile())
+      .sort((a, b) => b.st.mtimeMs - a.st.mtimeMs)[0];
+    if (!newest) return null;
+    if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
+    return counts(readFileSync(join(root, newest.f), "utf8"));
+  } catch (e) {
+    log(`${label}: Codex's rollout could not be read for a usage limit (${String(e?.message || e).slice(0, 160)})`);
+    return null;
+  }
+}
+
 /**
  * A Codex thread's rollout lines that carry its usage (live-spend.mjs rolloutTotal: `token_usage_record` lines and the last
  * `token_count` one), read as the run's Codex wrote it: on a runner as the agent from its CODEX_HOME, locally from the

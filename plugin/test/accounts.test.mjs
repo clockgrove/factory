@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { ACCOUNT_NAME_MAX, accountEnv, accountReason, accountsFile, declaredLogins, defaultAccount, loadAccounts, sandboxRoots } from "../scripts/lib/accounts.mjs";
-import { credentialPaths, gatewayKeyFile, gitPinFile, harnessLogins, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
+import { codexLocalConfig, credentialPaths, gatewayKeyFile, gitPinFile, harnessLogins, harnessOuterSettings, homePlaces, pinGitDir, stageLogin } from "../scripts/lib/local.mjs";
 import { FACTORY_CONTROL_KEYS, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { ranWith } from "../scripts/lib/choice.mjs";
 import { harnessMarker } from "../scripts/lib/logic.mjs";
@@ -246,11 +246,11 @@ test("#263, the real path: a stage runs on its harness's default account, set ex
     for (const p of [join(h, "work", "claude-b"), join(h, "work", "codex-a"), join(h, ".config", "factory")]) assert.ok(covered(credentials, p), p);
     assert.ok(!credentials.includes(join(h, "work", "claude-a")) && covered(credentials, join(h, "work", "claude-a", ".credentials.json")));
     // A Copilot stage's token comes from its account's file, never serve's environment.
-    const extra = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", local.accountFor("copilot"));
+    const extra = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", undefined, local.accountFor("copilot"));
     assert.equal(extra.COPILOT_GITHUB_TOKEN, "copilot-token-a");
     // The declaration gone after a start on it: the implicit account's token, never the one kept from that start.
     local.copilotToken = "copilot-token-a";
-    const implicit = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", { name: "copilot", harness: "copilot", declared: false });
+    const implicit = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", undefined, { name: "copilot", harness: "copilot", declared: false });
     assert.equal(implicit.COPILOT_GITHUB_TOKEN, "from-serve-env");
     delete local.copilotToken;
   });
@@ -428,7 +428,7 @@ test("#263, the real path: Factory's git on the clone before a stage gets no sec
   local.harnessFor = async () => ({ ok: true, harness: "copilot", account: local.accountFor("copilot") });
   local.limitUntil = () => null;
   // The stage's env: the real Copilot part (its account's token), with the git sandbox's settings.
-  local.stageEnv = (issue, usageDir, c, stageTmp, script, harness, account) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(h, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], ...local.harnessEnv(issue, [stageTmp], c, usage, null, harness, account) });
+  local.stageEnv = (issue, usageDir, c, stageTmp, script, harness, hosts, account) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(h, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], ...local.harnessEnv(issue, [stageTmp], c, usage, null, harness, undefined, account) });
   local.children = {
     add(child) {
       child.kill("SIGKILL");
@@ -439,4 +439,27 @@ test("#263, the real path: Factory's git on the clone before a stage gets no sec
   const env = readFileSync(seen, "utf8");
   assert.ok(env.includes("FACTORY_LOCAL_SRT_GIT="), "srt ran Factory's git with its sandbox settings");
   assert.ok(!env.includes("copilot-token-a") && !env.includes("COPILOT_GITHUB_TOKEN="), "no Copilot token");
+});
+
+test("#263 with #287: a Codex stage on a declared account, with Codex's release in ~/.codex, reads no other login in any sandbox", () => {
+  const h = fakeHome();
+  declare(h, good(h));
+  // Codex's installer layout: its release in ~/.codex/packages, a login beside it. Every file is a dummy.
+  const release = join(h, ".codex", "packages", "standalone");
+  mkdirSync(join(release, "bin"), { recursive: true });
+  writeFileSync(join(release, "bin", "codex"), "\x7fELF", { mode: 0o755 });
+  writeFileSync(join(h, ".codex", "auth.json"), "{}");
+  const omega = defaultAccount(loadAccounts({ home: h, env: {} }), "codex");
+  const host = accountEnv({ PATH: join(release, "bin") }, omega, h);
+  const own = stageLogin("codex", host, h);
+  assert.equal(own.dir, join(h, "work", "codex-a"));
+  const credentials = credentialPaths(h, host, { own });
+  const codex = codexLocalConfig({ home: h, env: host, credentials }).find((a) => a.startsWith("permissions.factory="));
+  const denies = (p) => codex.includes(`${JSON.stringify(p)}="deny"`);
+  for (const p of [join(h, "work", "claude-a"), join(h, "work", "claude-b"), join(h, ".codex", "auth.json"), join(h, "work", "codex-a", "auth.json*"), join(h, ".config", "factory")]) assert.ok(denies(p), `codex's sandbox: ${p}`);
+  assert.ok(!codex.includes(JSON.stringify(release)), "the release Codex's sandbox execs stays readable");
+  // The harness's outer sandbox: its own account's login readable to it alone, every other login denied.
+  const outer = harnessOuterSettings({ harness: "codex", writable: ["/c"], home: h, env: host, credentials }).filesystem.denyRead;
+  for (const p of [join(h, "work", "claude-a"), join(h, "work", "claude-b"), join(h, ".codex")]) assert.ok(covered(outer, p), `outer: ${p}`);
+  assert.ok(!covered(outer, join(h, "work", "codex-a", "auth.json")), "its own login, for the harness process");
 });

@@ -115,7 +115,7 @@ test("choiceTrusted: a label counts only when the person who last applied it can
     setMaintainers("other/repo", []);
   }
   const none = await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no choice label: no timeline read") });
-  assert.deepEqual(none, { ok: true, choice: {}, labels: [] });
+  assert.deepEqual(none, { ok: true, choice: {}, labels: [], hosts: [] });
   assert.equal((await choiceTrusted(repo, 7, ["factory:model:a", "factory:model:b"], {}, { labelers: async () => assert.fail("refused on the names first") })).ok, false);
 });
 
@@ -331,7 +331,7 @@ test("the usage record names the models the stage ran on and the labels that cho
   const inputs = chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-6.1-terra" } }).inputs;
   const r = writeUsage(dir, { harness: inputs.harness, model: inputs.model, records: [], passes: 0, exit: "blocked", reason: "x", credentialBasis: null, ran: ranWith(inputs, ["factory:harness:codex", "factory:model:gpt-6.1-terra"]) });
   const stored = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
-  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"] });
+  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"], hosts: [] });
   assert.deepEqual(r.ran, stored.ran);
 });
 
@@ -369,6 +369,8 @@ test("local mode, the real path: stageEnv sets the stage up for the harness it i
 
 test("local mode, the real path: harnessFor reads the issue's labels and their appliers from GitHub, and refuses a stranger's label", async () => {
   const { Local } = await import("../scripts/local.mjs");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
   const loop = Object.assign(Object.create(Local.prototype), { dev: "/nonexistent", harness: "claude", repoFull: "acme/app", repo, wf: {}, opts: { token: "t" } });
   const labels = ["factory:objective", "factory:model:claude-sonnet-5-5"];
   const real = globalThis.fetch;
@@ -383,13 +385,17 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
       if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: labels.map((name) => ({ name })) });
       throw new Error(`unexpected ${u}`);
     };
+    // A home of its own: harnessFor reads this machine's account declaration (lib/accounts.mjs), none here.
+    const home = process.env.HOME;
+    process.env.HOME = mkdtempSync(join(tmpdir(), "choice-home-"));
     try {
       return await loop.harnessFor(8);
     } finally {
+      process.env.HOME = home;
       globalThis.fetch = real;
     }
   };
-  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", account: { name: "claude", harness: "claude", declared: false } }, "nothing declared here: the account named after the harness");
+  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", hosts: [], account: { name: "claude", harness: "claude", declared: false } }, "nothing declared here: the account named after the harness");
   const refused = await run("reader");
   assert.equal(refused.ok, false);
   assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);

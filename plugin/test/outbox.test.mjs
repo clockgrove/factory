@@ -1228,3 +1228,60 @@ test("outbox: rebaseLeft checks the base the rebase was onto, not one the defaul
   assert.ok((await done.box.behind()) > 0, "counted against the moved base, the branch reads behind");
   assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto }), "", "yet it is rebased onto the base it was sent for");
 });
+
+test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch is in the head, and an empty commit as no counterpart (#243)", async () => {
+  // c1 changes app.txt, c2 changes doc.txt (which main changed too: the conflict), c3 undoes c1. The pass resolves c2
+  // and then drops the undo: whole-file, app.txt is main's again in c3, yet the head still carries c1's change.
+  const r = repos();
+  r.put(r.work, "doc.txt", "d1\n");
+  r.run(r.work, "commit", "-q", "-m", "doc");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  r.run(r.other, "pull", "-q", "origin", "main");
+  r.put(r.work, "app.txt", "ours\n");
+  r.run(r.work, "commit", "-q", "-m", "c1");
+  r.put(r.work, "doc.txt", "ours-doc\n");
+  r.run(r.work, "commit", "-q", "-m", "c2");
+  r.put(r.work, "app.txt", "v1\n");
+  r.run(r.work, "commit", "-q", "-m", "c3 undoes c1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.put(r.other, "doc.txt", "theirs-doc\n");
+  r.run(r.other, "commit", "-q", "-m", "sibling");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r);
+  const from = box.expected();
+  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null);
+  const onto = box.base;
+  const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
+  go("fetch", "-q", "origin", "main");
+  assert.throws(() => go("rebase", "-q", "origin/main"));
+  writeFileSync(join(r.work, "doc.txt"), "ours and theirs\n");
+  go("add", "doc.txt");
+  go("rebase", "--continue");
+  go("reset", "-q", "--hard", "HEAD~1");
+  assert.equal(readFileSync(join(r.work, "app.txt"), "utf8"), "ours\n", "the head carries c1's change without its undo");
+  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+
+  // A forged empty commit with c3's author, time and subject (`commit --allow-empty -C`) is no counterpart for it.
+  go("commit", "-q", "--allow-empty", "-C", from);
+  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+  // The undo kept: the branch is whole.
+  go("reset", "-q", "--hard", "HEAD~1");
+  go("cherry-pick", from);
+  assert.equal(await box.rebaseLeft({ from, onto }), "");
+});
+
+test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothing; the cap stays the Block's reason (#243)", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  const { decideExit } = await import("../scripts/lib/logic.mjs");
+  // The time cap stopped the pass on its first conflict: HEAD is main itself, with the rebase in progress.
+  const { box, r, from, onto } = await conflictPass(async () => {});
+  const unresolved = await sendBackGuard({ outbox: box, onto: { from, base: onto, files: ["app.txt"] }, defaultBranch: "main" });
+  assert.match(unresolved, /in `app\.txt`: the conflict pass left a rebase in progress; nothing of it was pushed$/);
+  assert.equal(await box.push(), false, "nothing goes out");
+  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), from, "the branch on GitHub is as it was");
+  const pr = { exists: true, draft: false, body: "Closes #1" };
+  assert.equal(decideExit({ harness: { ok: false, timedOut: true }, pr, commits: 0, unresolved, pushRejected: box.error !== unresolved ? box.error : "" }).reason, "time cap reached");
+  // The worker calls the guard for every send-back conflict, caps or not.
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
+  assert.match(src, /\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch \}\);\n {2}let pushed = await outbox\.push\(\);/);
+});

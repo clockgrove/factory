@@ -20,7 +20,7 @@ import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -48,6 +48,21 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos
 export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "after a sibling merged" }) {
   const here = `Your branch ${branch} fell behind ${defaultBranch} ${cause}, and \`git rebase origin/${defaultBranch}\` conflicts. Rebase it onto origin/${defaultBranch} (Factory has fetched it; never fetch or pull), resolve each conflict keeping both the default branch's change and this Objective's intent.`;
   return `${prompt.trimEnd()}\n\n---\n\n${here} Run the validation commands, commit, and stop: Factory pushes the branch. Do not ask questions.`;
+}
+
+/**
+ * Before a send-back's conflict pass is pushed, whatever ended it (a cap, a death, a refusal included): why what it left
+ * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
+ * or "" (no send-back conflict, `onto` null, or a good rebase).
+ */
+export async function sendBackGuard({ outbox, onto, defaultBranch }) {
+  if (!onto) return "";
+  const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base });
+  if (!left) return "";
+  const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed`;
+  outbox.block(why);
+  log(why);
+  return why;
 }
 
 /** Every exit this stage applies waits while a stop of its Objective is under way: the stop's own exit stands (stop.mjs). */
@@ -376,7 +391,9 @@ async function main() {
   let rebaseOnto = null;
   // Only the dispatcher's send-back (its rebase marker on the PR) means "rebase and nothing else";
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
-  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => trustedAuthor(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
+  // Factory's own marker only (isSelf): a writer's pasted one is no send-back.
+  if (openPr) await progress.self();
+  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => isSelf(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
   // A plan made again needs the harness: no rebase-only stage for it.
   if (openPr && sentBack && planned.state !== "replan") {
     const behind = await outbox.behind();
@@ -621,19 +638,11 @@ async function main() {
   const needs = needsOf(io.plan()).reason || !stoppedPlan ? needsOf(io.plan()) : needsOf(stoppedPlan);
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
-  // A send-back's conflict pass that ended (no cap, death or refusal) with the checkout not the branch rebased onto the
-  // base Factory's rebase conflicted on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a commit
-  // dropped): the worker could not resolve the conflict. Nothing of it is pushed; Blocked naming the files, with no
-  // validation run.
-  let unresolved = "";
-  if (rebaseOnto && !rec.timedOut && !rec.budgetExceeded && !rec.refusal && died < 2) {
-    const left = await outbox.rebaseLeft({ from: rebaseOnto.from, onto: rebaseOnto.base });
-    if (left) {
-      unresolved = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${rebaseOnto.base.slice(0, 7)} in ${conflictFiles(rebaseOnto.files)}: ${left}; nothing of it was pushed`;
-      outbox.block(unresolved);
-      log(unresolved);
-    }
-  }
+  // A send-back's conflict pass that left the checkout not the branch rebased onto the base Factory's rebase conflicted
+  // on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a commit dropped): nothing of it is pushed,
+  // whatever ended the pass. Blocked naming the files, with no validation run; a cap, death or refusal that ended it
+  // stays the reason (decideExit puts those first).
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a

@@ -457,8 +457,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
    * a head that does not contain `onto` (the conflict pass gave up); or one of the branch's own commits missing from it.
    * A rebase keeps each commit's author, author time and subject while its patch changes to resolve the conflict, so a
-   * commit is found by those; one missing (a `rebase --skip`) is lost unless `onto` already has its change, file for
-   * file, as git rebase drops a commit that became empty. Read on git's exit codes and fields, never its messages.
+   * commit is found by those, and only a commit that changes something counts as one. One missing (a `rebase --skip`)
+   * is lost unless its patch is already in the head (it reverse-applies there), as git rebase drops a commit whose
+   * change the base already has. Read on git's exit codes and fields, never its messages.
    */
   box.rebaseLeft = async ({ from, onto }) => {
     const busy = await box.inProgress();
@@ -480,18 +481,34 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         return { id, key: key.join("\x01") };
       });
     };
+    // Whether commit `id` changes nothing (`git diff-tree --quiet` against its parent exits 0).
+    const empty = async (id) => (await git(["diff-tree", "--quiet", id])).code === 0;
+    // Whether the head already has commit `id`'s patch: it reverse-applies to the head's tree, in a scratch index.
+    const inHead = async (id) => {
+      const patch = await git(["diff", "--binary", "--no-ext-diff", "--no-textconv", `${id}^`, id]);
+      if (patch.code !== 0) throw new Error(`git diff exited ${patch.code}`);
+      const env = { ...gitEnv(), GIT_INDEX_FILE: join(scratch, `onto-${process.pid}-${Date.now()}.index`) };
+      try {
+        if ((await git(["read-tree", head], { env })).code !== 0) throw new Error("git read-tree failed");
+        return (await git(["apply", "--cached", "--check", "-R", "-"], { env, input: patch.stdout })).code === 0;
+      } finally {
+        rmSync(env.GIT_INDEX_FILE, { force: true });
+      }
+    };
     try {
       if (!SHA.test(old)) throw new Error("no merge base");
+      // A commit that changes nothing keeps no work, whatever its author, time and subject: it is no counterpart.
       const kept = new Map();
-      for (const c of await commits(`${onto}..${head}`)) kept.set(c.key, (kept.get(c.key) || 0) + 1);
+      for (const c of await commits(`${onto}..${head}`)) if (!(await empty(c.id))) kept.set(c.key, (kept.get(c.key) || 0) + 1);
       const lost = [];
       for (const c of (await commits(`${old}..${from}`)).reverse()) {
+        if (await empty(c.id)) continue;
         if (kept.get(c.key)) {
           kept.set(c.key, kept.get(c.key) - 1);
           continue;
         }
-        const files = (await git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", c.id])).stdout.split("\0").filter(Boolean);
-        if (files.length && (await git(["diff", "--quiet", c.id, onto, "--", ...files])).code === 0) continue;
+        // Dropped by git as already upstream only when its patch is already in the head.
+        if (await inHead(c.id)) continue;
         lost.push(c.id);
       }
       if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")})`;

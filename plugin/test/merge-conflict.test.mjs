@@ -241,6 +241,21 @@ test("#243: a PR the merge queue took out for a conflict with a PR ahead of it w
   });
 });
 
+test("#243: a queue-conflict wait whose issue comments cannot be read writes no new record (its clock is not restarted)", async () => {
+  const { queueConflictWait } = await import("../scripts/lib/session.mjs");
+  await withGitHub(async (g, gh) => {
+    gh.state.waiting = 1;
+    const removal = new Date().toISOString();
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, base: "main", removal }, { token: "t" }), "queue-wait");
+    const before = gh.comments[2].map((c) => c.body);
+    const real = gh.fetch;
+    globalThis.fetch = async (url, init = {}) => (/\/issues\/2\/comments/.test(String(url)) ? new Response(JSON.stringify({ message: "Server Error" }), { status: 502 }) : real(url, init));
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, base: "main", removal }, { token: "t" }, Date.now() + 60_000), "pending");
+    globalThis.fetch = real;
+    assert.deepEqual(gh.comments[2].map((c) => c.body), before, "the record as it was");
+  });
+});
+
 test("#2647: a conflict GitHub had not worked out when the PR was read is read again after its refusal: conflict, not a thrown error", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();

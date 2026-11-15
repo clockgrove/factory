@@ -1883,7 +1883,7 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
   const record = comments.map((c) => parseOnto(issue, c.body)).filter((r) => r && r.from !== pr.head?.sha).at(-1) ?? null;
   let stuck = null;
   if (record && ["behind", "dirty"].includes(pr.mergeable_state)) {
-    const tip = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); the send-back goes ahead`));
+    const tip = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => (log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); the send-back goes ahead`), null));
     if (tip?.head === record.base) stuck = record;
   }
   return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck };
@@ -1944,9 +1944,12 @@ export function queueConflictRecord(comments, issue) {
  * now, else "queue-wait", or "pending" when GitHub could not be read.
  */
 export async function queueConflictWait(repo, { issue, prNumber, base, removal }, opts, now = Date.now()) {
-  const branch = await branchState(repo, base, opts).catch((e) => log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`));
+  const branch = await branchState(repo, base, opts).catch((e) => (log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`), null));
   if (!branch) return "pending";
-  let rec = queueConflictRecord(await listComments(repo, issue, opts).catch(() => []), issue);
+  // Unread comments say nothing of the record: no new one (its `seen` would restart the wait), the next tick reads again.
+  const comments = await listComments(repo, issue, opts).catch((e) => (log(`#${issue}: the queue-conflict record could not be read (${errCode(e)}); next tick`), null));
+  if (!comments) return "pending";
+  let rec = queueConflictRecord(comments, issue);
   if (rec?.removal !== removal) {
     rec = { removal, main: branch.head, seen: new Date(now).toISOString() };
     const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it. It goes back in once \`${base}\` moves past ${branch.head.slice(0, 7)}, the queue empties, or ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h pass.`;

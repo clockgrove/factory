@@ -80,10 +80,34 @@ export function movesQueue(e, objectiveLabel) {
 }
 
 /**
+ * Each event's issue as it was right after the event: GitHub gives every event its issue as it is now, so walking one
+ * issue's events (oldest first, as eventsAfter gives them) back from its newest takes each later close, reopen and label
+ * change off again. Keyed by event id.
+ */
+export function issuesAsOf(events) {
+  const now = new Map();
+  const out = new Map();
+  for (let k = events.length - 1; k >= 0; k -= 1) {
+    const e = events[k];
+    if (!e?.issue) continue;
+    const n = e.issue.number;
+    if (!now.has(n)) now.set(n, { ...e.issue, labels: names(e.issue) });
+    const i = now.get(n);
+    out.set(e.id, { ...i, labels: [...i.labels] });
+    const label = e.label?.name;
+    if (e.event === "closed") i.state = "open";
+    else if (e.event === "reopened") i.state = "closed";
+    else if (e.event === "labeled") i.labels = i.labels.filter((l) => l !== label);
+    else if (e.event === "unlabeled" && label && !i.labels.includes(label)) i.labels = [...i.labels, label];
+  }
+  return out;
+}
+
+/**
  * Whether an event puts an Objective back to work (Queued, Running or In review), on an issue open, no draft and
- * carrying the Objective label as read: its Objective label on, a Blocked or Question label off, the Running or In
- * review label on, the draft label off, or a reopen. A drain told before it can
- * then be told again, even when the read after it finds the queue drained once more.
+ * carrying the Objective label right after it (issuesAsOf): its Objective label on, a Blocked or Question label off, the
+ * Running or In review label on, the draft label off, or a reopen. A drain told before it can then be told again, even
+ * when the read after it finds the queue drained once more, and even when the Objective has closed again since.
  */
 export function activates(e, objectiveLabel) {
   // Only on an Objective that can run: a closed, draft or stopped one's labels coming off (the Done pass's tidy) resume nothing.
@@ -233,10 +257,11 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     const lines = gap ? [{ event: "gap", issue: null, at: at() }] : [];
     let moved = false;
     let active = false;
+    const asOf = issuesAsOf(events);
     for (const e of events) {
       if (watched && !watched.has(e.issue?.number)) continue;
       if (movesQueue(e, objectiveLabel)) moved = true;
-      if (activates(e, objectiveLabel)) active = true;
+      if (activates({ ...e, issue: asOf.get(e.id) ?? e.issue }, objectiveLabel)) active = true;
       let kind = eventKind(e, objectiveLabel);
       if (!kind) continue;
       let pr;

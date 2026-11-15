@@ -3,7 +3,7 @@
 // one serve follows, and a verified checkout of that release to run from.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,12 +120,54 @@ export function checkoutProblem({ dir, commit, ref }, { home = homedir() } = {})
   return null;
 }
 
-/** Entries of releasesDir serve keeps besides the one it runs: the newest few. */
+/** Where each live serve on this machine names the release checkout it runs from (markInUse), one file per process. */
+const inUseDir = (home) => join(releasesDir(home), ".in-use");
+
+/**
+ * Name `root` as the checkout this process runs from, when it is one of releasesDir's, so that no serve on this machine
+ * prunes it (pruneReleases) while this process lives. Another root is not named.
+ */
+export function markInUse(root, { home = homedir(), pid = process.pid } = {}) {
+  try {
+    if (!existsSync(releasesDir(home)) || dirname(realpathSync(root)) !== realpathSync(releasesDir(home))) return;
+    mkdirSync(inUseDir(home), { recursive: true, mode: 0o700 });
+    writeFileSync(join(inUseDir(home), String(pid)), realpathSync(root));
+  } catch {
+    // Not named: the newest checkouts are kept all the same.
+  }
+}
+
+/** The checkouts live serves on this machine run from (markInUse); a dead process's name goes. */
+function inUse(home) {
+  const roots = [];
+  let names = [];
+  try {
+    names = readdirSync(inUseDir(home));
+  } catch {
+    return roots;
+  }
+  for (const n of names) {
+    const file = join(inUseDir(home), n);
+    let alive = false;
+    try {
+      process.kill(Number(n), 0);
+      alive = /^\d+$/.test(n);
+    } catch (e) {
+      alive = e.code === "EPERM";
+    }
+    if (alive) roots.push(readFileSync(file, "utf8").trim());
+    else rmSync(file, { force: true });
+  }
+  return roots;
+}
+
+/** Entries of releasesDir serve keeps besides the ones live serves run: the newest few. */
 export const RELEASES_KEPT = 3;
 
 /**
  * Remove the release checkouts in releasesDir past the newest RELEASES_KEPT, never `keep` (the one serve runs, and the one
- * it switches to), nor a fetch under way (a `.part` less than an hour old).
+ * it switches to), one any live serve on this machine runs (markInUse), nor a fetch under way (a `.part` less than an
+ * hour old).
  */
 export function pruneReleases(home = homedir(), keep = []) {
   const root = releasesDir(home);
@@ -135,7 +177,7 @@ export function pruneReleases(home = homedir(), keep = []) {
   } catch {
     return;
   }
-  const kept = new Set(keep.map((d) => resolve(d)));
+  const kept = new Set([...keep, ...inUse(home)].map((d) => resolve(d)));
   const entries = names.map((n) => ({ dir: join(root, n), part: n.endsWith(".part"), at: statSync(join(root, n), { throwIfNoEntry: false })?.mtimeMs ?? 0 }));
   const done = entries.filter((e) => !e.part).sort((a, b) => b.at - a.at);
   const gone = [...done.slice(RELEASES_KEPT), ...entries.filter((e) => e.part && Date.now() - e.at > 60 * 60_000)];

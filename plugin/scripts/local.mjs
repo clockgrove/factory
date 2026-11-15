@@ -47,7 +47,7 @@ import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
-import { RELEASES_URL, checkoutProblem, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
+import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
@@ -1766,6 +1766,8 @@ export class Local {
   async refreshSettings() {
     if (!this.settingsBranch) return;
     const now = await committedWorkflowNow(this.dev, this.settingsBranch);
+    // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
+    if (now.unfetched) return;
     if (now.error) {
       if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
       this.settingsError = now.error;
@@ -1824,9 +1826,11 @@ export class Local {
     if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
     if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
     if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
-    if (!this.repin && Date.now() - this.switchedAt < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    // The gap holds back a switch to another pin than the last one tried; that one is tried again after PIN_RETRY_MS.
+    if (!this.repin && ref !== this.switchedRef && Date.now() - this.switchedAt < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
     if (!this.repin) {
       this.switchedAt = Date.now();
+      this.switchedRef = ref;
       log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
       const r = (this.repin = { ref, state: "fetching" });
       r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
@@ -1910,6 +1914,8 @@ export class Local {
     takeLimit();
     this.factory ??= runningFactory();
     log(`serve runs Factory ${runningName(this.factory)} from ${this.factory.root}`);
+    // A release checkout serve fetched stays while this process runs from it: no serve on this machine prunes it.
+    markInUse(this.factory.root, this.releaseOpts);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
     // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until

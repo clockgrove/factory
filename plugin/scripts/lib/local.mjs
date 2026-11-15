@@ -2102,18 +2102,18 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
 const committedWorkflow = (text, branch) => (text === null ? { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null });
 
 /**
- * The same read for a running `serve`, at each tick (#276): the default branch serve found at its start, fetched (offline,
- * the last fetched commit), without blocking the loop's event loop while git talks to GitHub. The developer works in
- * this clone meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git
- * from moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and
- * their `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
+ * The same read for a running `serve`, at each tick (#276): the default branch serve found at its start, fetched now,
+ * without blocking the loop's event loop while git talks to GitHub. A fetch that fails (offline) reads nothing:
+ * `unfetched`, and serve keeps the settings it has, never an older commit's. The developer works in this clone
+ * meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git from
+ * moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and their
+ * `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
  */
 export async function committedWorkflowNow(dir, branch, { git = (args) => exec("git", ["-C", dir, ...args], { timeoutMs: 60_000 }) } = {}) {
   const own = `refs/factory/serve/${branch}`;
-  await git(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
-  const show = (ref) => git(["show", `${ref}:.github/workflows/factory.yml`]).catch(() => null);
-  const has = (await git(["rev-parse", "--verify", "-q", own]).catch(() => null))?.code === 0;
-  const r = await show(has ? own : `refs/remotes/origin/${branch}`);
+  const fetched = await git(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
+  if (fetched?.code !== 0) return { wf: {}, pins: [], branch, error: `origin/${branch} could not be fetched`, unfetched: true };
+  const r = await git(["show", `${own}:.github/workflows/factory.yml`]).catch(() => null);
   return committedWorkflow(r?.code === 0 ? String(r.stdout) : null, branch);
 }
 

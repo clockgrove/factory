@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
 import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
-import { DOWNGRADE_LINE, checkoutProblem, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningFactory, startProblem } from "../scripts/lib/release.mjs";
+import { DOWNGRADE_LINE, checkoutProblem, markInUse, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningFactory, startProblem } from "../scripts/lib/release.mjs";
 import { claudeLocalSettings, codexLocalConfig, copilotLocalSettings, harnessOuterSettings, srtSettings, versionSettings } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -175,18 +175,27 @@ test("checkoutProblem: a checkout changed after its fetch is caught however the 
   assert.equal(existsSync(marker), false);
 });
 
-test("pruneReleases: the newest three checkouts stay, and the one serve runs whatever its age; a fetch under way stays", () => {
+test("pruneReleases: the newest three checkouts stay, and the one serve runs or any live serve runs whatever its age; a fetch under way stays", () => {
   const home = mkdtempSync(join(tmpdir(), "home-"));
   const root = releasesDir(home);
-  const names = ["v1.0.0-a", "v1.0.1-b", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f.part"];
+  const names = ["v1.0.0-a", "v1.0.1-b", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"];
   names.forEach((n, i) => {
     mkdirSync(join(root, n), { recursive: true });
     const at = new Date(Date.now() - (names.length - i) * 60_000);
     utimesSync(join(root, n), at, at);
   });
   mkdirSync(join(root, ".home"));
-  pruneReleases(home, [join(root, "v1.0.0-a")]);
-  assert.deepEqual(readdirSync(root).sort(), [".home", "v1.0.0-a", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f.part"]);
+  // Another live serve on this machine runs from the oldest but one; a dead one's name keeps nothing.
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  try {
+    markInUse(join(root, "v1.0.1-b"), { home, pid: other.pid });
+    markInUse(join(root, "v1.0.2-c"), { home, pid: 2 ** 22 + 7 });
+    pruneReleases(home, [join(root, "v1.0.0-a")]);
+  } finally {
+    other.kill();
+  }
+  assert.deepEqual(readdirSync(root).sort(), [".home", ".in-use", "v1.0.0-a", "v1.0.1-b", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"]);
+  assert.deepEqual(readdirSync(join(root, ".in-use")), [String(other.pid)], "a dead process's name goes");
 });
 
 test("startProblem: the new release's loop is tried with nothing of this shell's env", async () => {
@@ -462,9 +471,12 @@ test("committedWorkflowNow: a running serve reads the default branch's workflow 
   assert.deepEqual(await committedWorkflowNow(ad.dev, "main"), { wf: { FACTORY_MODEL: "m2" }, pins: ["v0.9.31"], branch: "main", error: null });
   assert.equal(git(ad.dev, "rev-parse", "refs/remotes/origin/main"), theirs, "origin's ref moves only on the developer's own fetch");
   assert.equal(existsSync(join(ad.dev, ".git", "FETCH_HEAD")), false, "no FETCH_HEAD for a `git pull` to merge");
-  // Offline: the last fetched commit.
+  // Offline: nothing read, never an older commit's settings (refreshSettings keeps what it has).
   git(ad.dev, "remote", "set-url", "origin", join(ad.dev, "gone.git"));
-  assert.deepEqual((await committedWorkflowNow(ad.dev, "main")).wf, { FACTORY_MODEL: "m2" });
+  assert.deepEqual(await committedWorkflowNow(ad.dev, "main"), { wf: {}, pins: [], branch: "main", error: "origin/main could not be fetched", unfetched: true });
+  const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", wf: { FACTORY_MODEL: "m3" }, pins: ["v0.9.32"] });
+  await loop.refreshSettings();
+  assert.deepEqual({ wf: loop.wf, pins: loop.pins }, { wf: { FACTORY_MODEL: "m3" }, pins: ["v0.9.32"] });
 });
 
 test("refreshSettings: a change waits while a stage is being set up, so one stage never mixes two harnesses' settings", async () => {
@@ -508,6 +520,11 @@ test("followPin: a new switch waits until 30 minutes after the last, and a SHA b
     assert.equal(await loop.followPin(1), true, "past the gap: the switch starts and holds new stages");
     await loop.repin.fetch;
     assert.equal(loop.repin.state, "ready");
+    // A failed try of the same pin is tried again after ten minutes, not held back by the gap.
+    loop.repin = { ref: "v9.9.9", state: "failed", retryAt: Date.now() - 1 };
+    loop.switchedAt = Date.now() - 11 * 60_000;
+    assert.equal(await loop.followPin(1), true, "the same pin is tried again");
+    await loop.repin.fetch;
     // A SHA before the commit serve runs: refused, said once, and no stage waits for it.
     loop.factory = { version: "9.9.9", commit: newer, root: "/f", release: true };
     loop.pins = [older];

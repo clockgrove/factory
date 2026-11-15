@@ -155,6 +155,8 @@ test("restartObjective: the record first; the earlier PR out of the queue, comme
         const record = api.state.comments.find((c) => c.body.startsWith(restartMarker(7, AT)));
         assert.match(record.body, new RegExp(`"by":"maintainer","pr":70,"head":"${HEAD7}"`));
         assert.match(record.body, new RegExp(`git push origin ${HEAD7}:refs/heads/factory/7`));
+        // It says first, before anything is discarded, what the restart discards (#274).
+        assert.match(record.body, new RegExp(`This restart discards the earlier work and the spend on it: pull request #70, closed with its review \\(its commits and review stay readable there\\), and the commits on \`factory/7\`, whose branch is deleted \\(its last commit is ${HEAD7}; \`git push origin ${HEAD7}:refs/heads/factory/7\` restores it\\)\\.`));
         // The restarted run reads no plan and no split, and the old texts are still there to read.
         assert.equal(await currentPlan(REPO, 7, { token: "t" }), null);
         assert.equal(await partsRecord(REPO, 7, { token: "t" }), null);
@@ -280,6 +282,33 @@ test("a branch a ruleset keeps: the restart Blocks with the fix, its label off, 
   assert.ok(t.writes.some((w) => w.startsWith("POST /issues/7/comments <!-- factory:7:blocked")), t.writes.join("\n"));
   assert.ok(t.state.labels.has("factory:blocked") && !t.state.labels.has(RESTART_LABEL));
   assert.deepEqual(t.r.ready, []);
+  // The Block says how to keep the work instead of finishing the restart (#274).
+  const block = t.state.comments.find((c) => c.body.startsWith("<!-- factory:7:blocked"));
+  assert.match(block.body, /apply `factory:restart` again\n\nTo keep the work instead of restarting, re-apply `factory:objective`: that resumes from `factory\/7` and PR #70\./);
+});
+
+test("a Block over a delivered PR whose stop was outside the work says to resume, not restart, and what a restart would discard (#274)", async () => {
+  const { applyExit } = await import("../scripts/lib/session.mjs");
+  await withEnv({}, async () => {
+    setSelf(BOT.login);
+    const api = fakeApi({ labels: ["factory:objective", "factory:running"] });
+    try {
+      const pr = { number: 70, draft: false, node_id: "PR_70" };
+      // Each Block's body is read as soon as it is posted: two Blocks of one stage in one Actions run (one
+      // GITHUB_RUN_ID) are one comment, the second updating the first.
+      const posted = () => api.state.comments.filter((c) => c.body.startsWith("<!-- factory:7:blocked")).at(-1).body;
+      await applyExit(REPO, { issue: 7, pr, exit: "blocked", reason: "the harness home could not be set up", cause: "setup", stage: "work" }, { token: "t" });
+      const setup = posted();
+      await applyExit(REPO, { issue: 7, pr: { ...pr, draft: true }, exit: "blocked", reason: "validation red after Factory's second pass", cause: "work", stage: "work" }, { token: "t" });
+      const work = posted();
+      assert.match(setup, /\n\nResume, don't restart: the stop is outside the work\. Once its cause is fixed or has passed, re-apply `factory:objective` to go on from `factory\/7` and PR #70\. `factory:restart` would discard the delivered PR #70 with its review, the commits on `factory\/7` and the spend on them, and gain nothing\.\n/);
+      assert.match(work, /\n\nResume once the cause is fixed: re-apply `factory:objective` to go on from `factory\/7` and PR #70\. Restart \(`factory:restart`\) only when the work itself must be redone from the issue's text: a restart discards PR #70 with its review, the commits on `factory\/7` and the spend on them\.\n/);
+      for (const body of [setup, work]) assert.match(body, /\n<!-- factory:block \{"cause":"(setup|work)"\} -->$/, "the cause line stays the notice's last");
+    } finally {
+      api.restore();
+      setSelf(null);
+    }
+  });
 });
 
 test("a restart label applied by someone who cannot push is taken off with a comment, and nothing restarts", async () => {
@@ -342,7 +371,8 @@ test("readers after a restart: a plan comment or a split record from before it i
     setSelf(null);
   }
   const { EDITED_FIX } = await import("../scripts/lib/objective-trust.mjs");
-  assert.match(EDITED_FIX, /factory:restart/);
+  const { blockedLine } = await import("../scripts/lib/session.mjs");
+  assert.match(blockedLine({ issue: 7, pr: { number: 9 }, stage: "work", reason: "edited", fix: EDITED_FIX, cause: "work" }), /Restart \(`factory:restart`\) only when the work itself must be redone/);
 });
 
 test("a stage that missed the restart's label learns of it from a record newer than the ones it started with, whatever its clock", async () => {

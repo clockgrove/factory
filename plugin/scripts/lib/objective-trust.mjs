@@ -81,7 +81,8 @@ export const AUTHOR_FIX = {
  */
 export async function trustedIssue(repo, issue, issueData, opts, gh) {
   const t = await objectiveTrusted(repo, issue, opts, { what: "Factory acts on none of its text", ...(gh ? { gh } : {}) });
-  if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role] };
+  // An untrusted author is checked again on a resume and on a restart alike: the notice says neither gets past it.
+  if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role], ...(t.role === "author" ? { next: "none" } : {}) };
   return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, labels: t.labels, sha: t.sha, editedAt: t.editedAt, people: t.people };
 }
 
@@ -94,13 +95,13 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
   const t = await trustedIssue(repo, issue, issueData, opts, gh);
   if (t.ok) return t;
   if (before) await before();
-  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", notify, stage: "author" }, opts);
+  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", ...(t.next ? { next: t.next } : {}), notify, stage: "author" }, opts);
   return t;
 }
 
 /** The Blocked reason and fix when the Objective's text changed after its plan was made (planGate). */
 export const EDITED_REASON = "the Objective's title, body or harness, model and host labels (`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`, `factory:host:`) changed after its plan was made, and its plan and code follow the earlier ones, so Factory does not go on with the two mixed";
-export const EDITED_FIX = "Re-apply `factory:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it, on the same branch and PR. To start over from it instead (the earlier PR closed, a new branch from the default one), apply `factory:restart`.";
+export const EDITED_FIX = "Re-apply `factory:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it, on the same branch and PR.";
 
 /** Factory's own login, read once (logic.mjs selfLogin): unknown, no plan comment could be told apart, so a stage stops. */
 export async function knowSelf(opts) {

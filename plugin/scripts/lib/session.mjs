@@ -1567,18 +1567,22 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
   if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
 }
 
-/** The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` for a rate limit). */
-const outageRecord = (lost) => ({ host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}), ...(Number.isFinite(lost.resetAt) ? { reset: new Date(lost.resetAt).toISOString() } : {}) });
+/**
+ * The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` and `quota`
+ * for a rate limit).
+ */
+const outageRecord = (lost) => ({ host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}), ...(Number.isFinite(lost.resetAt) ? { reset: new Date(lost.resetAt).toISOString(), quota: lost.quota } : {}) });
 
 /**
  * Off the local route, a stage that ended on GitHub's spent rate limit: its Block is a GitHub write too, so it waits for the
- * reset when that comes within OUTAGE.exitWaitMs (inside the job's reserve after its deadline); a later reset leaves the
- * Block's one try to fail, logged.
+ * reset when that comes before the stage's `deadlineAt` plus OUTAGE.exitWaitMs (the part of the job's reserve after its
+ * deadline it may spend); a later reset leaves the Block's one try to fail, logged.
  */
-async function afterReset(lost) {
-  const left = lost.resetAt - OUTAGE.now();
+async function afterReset(lost, deadlineAt) {
+  const now = OUTAGE.now();
+  const left = lost.resetAt - now;
   if (!(left > 0)) return;
-  if (left > OUTAGE.exitWaitMs) return void log(`the rate limit resets at ${new Date(lost.resetAt).toISOString()}, past this job's time: its Block cannot be written before then`);
+  if (lost.resetAt > Math.max(Number.isFinite(deadlineAt) ? deadlineAt : now, now) + OUTAGE.exitWaitMs) return void log(`the rate limit resets at ${new Date(lost.resetAt).toISOString()}, past this job's time: its Block cannot be written before then`);
   log(`waiting for the rate limit's reset at ${new Date(lost.resetAt).toISOString()} to write the Block`);
   await OUTAGE.sleep(left + 1000);
 }
@@ -1598,9 +1602,10 @@ const outageBlock = (lost) =>
  * (a rate limit's `reset` in it) and nothing written to GitHub: serve keeps the claim and resumes the Objective once the
  * host answers, or once the reset has passed (local.mjs). On any other route nothing resumes a stage, so it Blocks
  * through `block(reason, cause)` (one try, which lands only if GitHub answers again by then) with an External cause:
- * `outage`, or `provider-quota` naming the reset, written after the reset when that is near (afterReset).
+ * `outage`, or `provider-quota` naming the reset, written after the reset when that comes before the job's end (afterReset,
+ * from `deadlineAt`).
  */
-export async function outageExit(e, { local, records, finish, block }) {
+export async function outageExit(e, { local, records, finish, block, deadlineAt = Infinity }) {
   stopWaiting();
   const lost = outageOf(e);
   const reason = outageReason(lost);
@@ -1614,7 +1619,7 @@ export async function outageExit(e, { local, records, finish, block }) {
   }
   const end = outageBlock(lost);
   log(`blocked: ${end.reason}`);
-  if (Number.isFinite(lost.resetAt)) await afterReset(lost);
+  if (Number.isFinite(lost.resetAt)) await afterReset(lost, deadlineAt);
   await block(end.reason, end.cause).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", end.reason, outage);
 }
@@ -1625,7 +1630,7 @@ export async function outageExit(e, { local, records, finish, block }) {
  * no progress comment. On the local route `paused`, for serve's resume; elsewhere `blocked`, through `block(reason,
  * cause)` when the stage knows its issue and holds a token (one try), and its record says so either way.
  */
-export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null }) {
+export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null, deadlineAt = Infinity }) {
   stopWaiting();
   const lost = outageOf(e);
   const end = local ? { reason: outageReason(lost) } : outageBlock(lost);
@@ -1633,7 +1638,7 @@ export async function earlyOutageEnd(e, { local, usageDir = null, harness, model
   const exit = local ? "paused" : "blocked";
   log(`${exit} before the stage began: ${end.reason}`);
   if (!local && block) {
-    if (Number.isFinite(lost.resetAt)) await afterReset(lost);
+    if (Number.isFinite(lost.resetAt)) await afterReset(lost, deadlineAt);
     await block(end.reason, end.cause).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   }
   if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason: end.reason, outage, credentialBasis: "none" });

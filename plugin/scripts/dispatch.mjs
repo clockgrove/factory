@@ -22,7 +22,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
-import { RATE_LIMIT_SPENT, githubOrigin, spentUntil } from "./lib/network.mjs";
+import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -740,9 +740,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     picked.ready = [];
     picked.reason = why;
   }
-  // GitHub's primary rate limit spent (a read above met it and went on without its answer): nothing new starts until its
-  // reset, since the new stages' first reads would meet it too. Said once.
-  const spent = spentUntil(githubOrigin());
+  // GitHub's REST quota for this token spent (a read above met it and went on without its answer): nothing new starts
+  // until its reset, since the new stages' first reads would meet it too. Said once. Its GraphQL quota alone holds nothing.
+  const spent = spentUntil(quotaKey(`${githubOrigin()}/repos`, token));
   if (spent && picked.ready.length) {
     const why = rateLimitLine(spent);
     log(why);
@@ -1046,6 +1046,9 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   return summary;
 }
 
+// Whether main() has written this tick's picks (the `issues` output): a later failure never overwrites them.
+let picksWritten = false;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = resolveInputs({ args });
@@ -1082,6 +1085,7 @@ async function main() {
   const named = [...result.ready, ...(result.relaunch || [])];
   for (const n of result.relaunch || []) log(`  #${n}: its launch was lost; launching again`);
   setOutput("issues", named);
+  picksWritten = true;
   setOutput("count", String(named.length));
   setOutput("reason", result.reason || "");
   setOutput("queue_watch", watchOutput(result.queueWatch));
@@ -1121,10 +1125,12 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     // GitHub's primary rate limit spent (lib/github.mjs, this process does not wait for it): no failure, the tick starts
-    // nothing, said once; the first tick after the reset dispatches.
+    // nothing, said once, and a wake at the reset dispatches again. Picks already written stand (dispatch() marked them
+    // Running): only the wake is added.
     if (e?.code === RATE_LIMIT_SPENT && Number.isFinite(e.resetAt)) {
       log(rateLimitLine(e.resetAt));
-      for (const [k, v] of [["issues", []], ["count", "0"], ["reason", rateLimitLine(e.resetAt)], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""], ["image_owed", ""]]) setOutput(k, v);
+      const wake = [["wake_at", new Date(e.resetAt + WAKE_SLACK_MS).toISOString()], ["wake_kind", "retry"]];
+      for (const [k, v] of picksWritten ? wake : [["issues", []], ["count", "0"], ["reason", rateLimitLine(e.resetAt)], ["queue_watch", ""], ...wake, ["image_owed", ""]]) setOutput(k, v);
       return;
     }
     process.stderr.write(`[factory] dispatch failed: ${e.message}\n`);

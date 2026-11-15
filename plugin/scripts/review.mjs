@@ -272,7 +272,7 @@ async function main() {
   } catch (e) {
     if (!unreachable(e)) throw e;
     const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
-    await earlyOutageEnd(e, { local, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) : null });
+    await earlyOutageEnd(e, { local, deadlineAt, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) : null });
     if (issue) setOutput("issue", String(issue));
     return;
   }
@@ -359,6 +359,7 @@ async function main() {
         local,
         records,
         finish,
+        deadlineAt,
         block: async (reason, cause) => {
           await dropLabel();
           await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token);

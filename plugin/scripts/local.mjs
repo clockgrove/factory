@@ -1131,7 +1131,7 @@ export class Local {
     const reset = Date.parse(o.reset);
     (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(Number.isFinite(reset) ? { reset } : {}) });
     this.lapsed?.delete(issue);
-    const what = Number.isFinite(reset) ? `GitHub's API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
+    const what = Number.isFinite(reset) ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
 

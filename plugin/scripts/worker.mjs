@@ -104,7 +104,7 @@ async function main() {
   } catch (e) {
     // Its token's mint could not reach GitHub (lib/app-token.mjs): the outage's end, before any other.
     if (!unreachable(e)) throw e;
-    await earlyOutageEnd(e, { local, usageDir, harness: inputs.harness, model: inputs.model });
+    await earlyOutageEnd(e, { local, usageDir, harness: inputs.harness, model: inputs.model, deadlineAt });
     return;
   }
   const { keeper } = access;
@@ -184,7 +184,7 @@ async function main() {
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
     // (`outage`, or `provider-quota` for the rate limit: session.mjs outageExit).
     if (unreachable(e)) {
-      await outageExit(e, { local, records, finish, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) });
+      await outageExit(e, { local, records, finish, deadlineAt, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) });
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);

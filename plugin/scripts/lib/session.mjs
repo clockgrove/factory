@@ -2264,7 +2264,9 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
 export const QUEUE_RED_CODE = "failed_checks";
 /** The most queue fix passes (red queue runs in the PR's own change) per re-entry of the Objective, as maxPasses bounds a stage's. */
 export const QUEUE_FIX_PASSES = 2;
-/** How far back from a drop the PR's failed merge-group runs are listed (one page of runs, newest first). */
+/** How many review stages look for a red drop's merge-group run before it counts as unread (`none`). */
+export const QUEUE_RED_READS = 2;
+/** How far back from a drop the PR's merge-group runs are listed at most (one page of runs, newest first). */
 export const QUEUE_RED_LOOKBACK_MS = 6 * 3600_000;
 
 const QUEUE_RED_RECORD = (issue) => `<!-- factory:${issue}:queue-red-record `;
@@ -2275,8 +2277,9 @@ const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocke
 
 /**
  * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, head, kind, sigs}` as JSON, read back
- * by queueRedRecords) and one line for a person. `head`: the PR head the drop was of; `tries`: the review stages that
- * started its fix pass. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
+ * by queueRedRecords) and one line for a person. `head`: the PR head the drop was of; `after`: no merge-group run created
+ * before it is the drop's (the removal before it, or the drop count's bound); `tries`: the review stages that started its
+ * fix pass; `reads`: the stages that found no run of it yet. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
  * decided it, or its fix pass has committed), `fixed` (the PR's own change, and its fix pass
  * committed: `sigs` its failure classes), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
  * as any drop), `blocked` (the PR's own change past its bound) or `superseded` (the PR's head moved on before a stage read it).
@@ -2290,7 +2293,7 @@ export function queueRedBody(issue, prNumber, rec) {
     blocked: "the PR's own change, past its fix passes: Blocked",
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
-  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.tries ? { tries: rec.tries } : {}) };
+  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
   return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
@@ -2307,10 +2310,11 @@ export function queueRedRecords(comments, issue) {
     try {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
       if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
-      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], tries: Number.isInteger(v.tries) && v.tries > 0 ? v.tries : 0 };
+      const count = (x) => (Number.isInteger(x) && x > 0 ? x : 0);
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], tries: count(v.tries), reads: count(v.reads) };
       const key = new Date(Date.parse(v.at)).toISOString();
       const had = byAt.get(key);
-      const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 100 + r.tries;
+      const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 10_000 + r.tries * 100 + r.reads;
       if (!had || rank(rec) >= rank(had)) byAt.set(key, rec);
     } catch {
       // not a record
@@ -2330,8 +2334,10 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
 
 /**
  * What a red queue drop the merge pass handed to the review stage is, decided as a red PR check is (validationLoop): the
- * PR's failed merge-group run at or before the drop (github.mjs mergeGroupRuns, read with `actionsToken`, looking back
- * QUEUE_RED_LOOKBACK_MS), its commit's failed check runs, then in order: a required job GitHub never started
+ * PR's merge-group run of this drop (github.mjs mergeGroupRuns, any status, read with `actionsToken`): the newest
+ * created after `after` (the removal before the drop; at most QUEUE_RED_LOOKBACK_MS back) and by the drop. None listed yet
+ * (or no failed check on it while it still runs) is `unread`: nothing decided, the caller reads it again. Then its
+ * commit's failed check runs, in order: a required job GitHub never started
  * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), triage's flaky verdict (`flaky`,
  * triage.mjs classify), every failing job failing the same way on the default branch (`base`, reds.mjs allOnBase), else
  * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
@@ -2339,20 +2345,24 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
  * reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures, detail, tail, lead, command, queue:
  * true}) and `sigs` (its classes, queueRedClass).
  */
-export async function queueRedOf({ repo, issue, prNumber, base, at, names = [], triage = null, token, actionsToken = token }) {
+export async function queueRedOf({ repo, issue, prNumber, base, at, after = null, names = [], triage = null, token, actionsToken = token }) {
   const opts = { token };
-  const since = new Date(Date.parse(at) - QUEUE_RED_LOOKBACK_MS).toISOString();
-  const runs = await mergeGroupRuns(repo, prNumber, base, since, { token: actionsToken }).catch((e) => {
-    log(`PR #${prNumber}'s merge_group runs are unreadable (${errCode(e)})`);
+  const floor = queueSince([after, new Date(Date.parse(at) - QUEUE_RED_LOOKBACK_MS).toISOString()]);
+  let unreadable = null;
+  const runs = await mergeGroupRuns(repo, prNumber, base, floor, { token: actionsToken }, { any: true }).catch((e) => {
+    unreadable = errCode(e);
+    log(`PR #${prNumber}'s merge_group runs are unreadable (${unreadable})`);
     return [];
   });
-  const run = runs.find((r) => !(Date.parse(r.at) > Date.parse(at) + 60_000));
-  if (!run) return { kind: "none", sha: null, reason: "no failed merge-queue run of the PR could be read" };
+  // This drop's run: created after the removal before it (`after`) and by the drop, finished or still running (the
+  // queue drops a PR at its first failed required job, while the run's other jobs go on). Never an earlier drop's run.
+  const run = runs.find((r) => Date.parse(r.at) > Date.parse(floor) && !(Date.parse(r.at) > Date.parse(at) + 60_000));
+  if (!run) return unreadable ? { kind: "none", sha: null, reason: `the PR's merge-queue runs could not be read (${unreadable})` } : { kind: "unread", sha: null, reason: "no merge-queue run of this drop is listed yet" };
   const sha = run.sha;
   const failedRuns = (await checkRuns(repo, sha, opts).catch(() => []))
     .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
     .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
-  if (!failedRuns.length) return { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
+  if (!failedRuns.length) return run.status && run.status !== "completed" ? { kind: "unread", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)} yet` } : { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
   const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
   if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
@@ -2396,8 +2406,18 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "superseded" }, { token });
     return { state: "superseded", line: `merge queue run red at ${pending.at}: the PR's head moved on since (${pending.head.slice(0, 7)} → ${head.slice(0, 7)}); not read` };
   }
-  const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, names: await names(), triage, token, actionsToken });
+  const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, after: pending.after, names: await names(), triage, token, actionsToken });
   const where = q.sha ? ` on ${q.sha.slice(0, 7)}` : "";
+  // The drop's run is not there to read yet: left handed for the next stage, which the merge pass hands it to; past
+  // QUEUE_RED_READS such stages (a failing check no Actions run carries) it is not known to be the PR's, as any drop.
+  if (q.kind === "unread") {
+    const reads = pending.reads + 1;
+    if (reads < QUEUE_RED_READS) {
+      await writeQueueRed(repo, issue, prNumber, { ...pending, reads }, { token });
+      return { state: "pending", line: `merge queue run red at ${pending.at}: ${q.reason}; read again by the next review stage` };
+    }
+    q.kind = "none";
+  }
   if (q.kind !== "own") {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "requeued", kind: q.kind }, { token });
     return { state: "requeued", line: `merge queue run red${where}: ${q.reason}; not known to be the PR's change (${q.kind}), enqueued again as any drop` };
@@ -2692,7 +2712,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       const mine = queueRedRecords(await listComments(repo, issue, opts), issue).find((r) => sameDrop(r.at, retry.last.at));
       // Handed before and not read yet (the label taken off, a stage that ended first): handed again, one record.
       if (!mine || mine.state === "handed") {
-        if (!mine) await writeQueueRed(repo, issue, prNumber, { at: retry.last.at, state: "handed", head: sha }, opts);
+        // `after`: no merge-group run created before it is this drop's (the removal before it, else the count's bound).
+        const before = removals.map((r) => r.at).filter((t) => Date.parse(t) < Date.parse(retry.last.at) - 60_000).sort().at(-1) ?? null;
+        const after = queueSince([since, before]);
+        if (!mine) await writeQueueRed(repo, issue, prNumber, { at: retry.last.at, state: "handed", head: sha, ...(after ? { after } : {}) }, opts);
         await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
         await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
         delete report.watch;

@@ -2,9 +2,9 @@
   "version": 2,
   "skills": {
     "factory-deliver-pr": {
-      "sha256": "24c1dcf0712b757611a7652d52ca15e95366f8ce45b5d75077031f95d1a0692f",
+      "sha256": "cd417e1c0e8a670193c9960f3a9335fc557b164c9c9c5c402e94eb67eaf40914",
       "lines": 41,
-      "words": 646,
+      "words": 657,
       "files": {
         "reference.md": {
           "sha256": "9d18bb6ca3d907e73c7fb75550f2e94e8d44cc552bccea9f5a25969d545ae1cd",

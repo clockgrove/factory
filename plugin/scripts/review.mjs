@@ -281,6 +281,23 @@ export function reviewOverlap({ run, progress, head, conflicted = async () => fa
   };
 }
 
+/**
+ * The validated marker for `sha`, the head the pre-review pass found green, posted when the PR's head is still that
+ * head. A head that moved since (a person's push) is a new head: no marker, and the review label goes back on (removed,
+ * then added, so the review runs again on it, with its own validation); `moved` says why, and the stage ends there.
+ * Returns {pr, moved} (`moved` "" when the marker went up).
+ */
+export async function validatedOn({ repo, issue, prNumber, sha, token }) {
+  const pr = await getPr(repo, prNumber, token);
+  if (pr.head.sha === sha) {
+    await postValidated(repo, prNumber, issue, sha, token);
+    return { pr, moved: "" };
+  }
+  await removeLabel(repo, prNumber, REVIEW_LABEL, token).catch(() => {});
+  await addLabels(repo, prNumber, [REVIEW_LABEL], token);
+  return { pr, moved: `PR #${prNumber}'s head moved to ${pr.head.sha.slice(0, 7)} while ${sha.slice(0, 7)} was validated; the review runs again on the new head` };
+}
+
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
 export function workerRun(inputs) {
   return { harness: inputs.harness, model: inputs.model, effort: inputs.effort };
@@ -868,19 +885,13 @@ async function main() {
       await finish("blocked", why);
       return false;
     }
-    pr = await getPr(repo, pr.number, token);
-    // The marker goes on the head the checks were green on. A head that moved since (a person's push) is a new head:
-    // it gets the review again, with its own validation, and nothing of this stage goes up for it.
-    const validated = pre.sha || outbox.expected() || pr.head.sha;
-    if (pr.head.sha !== validated) {
-      const reason = `PR #${pr.number}'s head moved to ${pr.head.sha.slice(0, 7)} while ${validated.slice(0, 7)} was validated; the review runs again on the new head`;
-      log(reason);
-      await dropLabel();
-      await addLabels(repo, pr.number, [REVIEW_LABEL], token);
-      await finish("delivered", reason);
+    const v = await validatedOn({ repo, issue, prNumber: pr.number, sha: pre.sha || outbox.expected() || pr.head.sha, token });
+    pr = v.pr;
+    if (v.moved) {
+      log(v.moved);
+      await finish("delivered", v.moved);
       return false;
     }
-    await postValidated(repo, pr.number, issue, validated, token);
     return true;
   };
 
@@ -1184,8 +1195,13 @@ async function main() {
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
     await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
-    // The head before the pass: a queue fix counts once the pass has pushed a commit on it (recordQueueFix).
-    const headBefore = outbox.expected();
+    // The checkout's HEAD before the pass: a queue fix counts once the pass itself committed and that went up
+    // (recordQueueFix), never for a merge commit Factory makes at the push.
+    const checkoutHead = async () => {
+      const r = await outbox.agentGit(["rev-parse", "--verify", "HEAD^{commit}"]).catch(() => null);
+      return r?.code === 0 ? String(r.stdout).trim() : null;
+    };
+    const headBefore = queueFix ? await checkoutHead() : null;
     let rec = await runHarness(answerArgs(resumeAnswer));
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
@@ -1220,12 +1236,13 @@ async function main() {
     }
     // Factory pushes the answer, updates the PR from pr.md, then posts the replies: only to the comments this pass was given.
     // A refused push leaves GitHub without the answer: its pr.md and replies ("fixed") would describe work the branch lacks.
+    const answered = queueFix ? await checkoutHead() : null;
     if (!(await outbox.push())) log(`push refused: ${outbox.error}`);
     const pushed = !outbox.failed;
     if (pushed) pr = await publish(pr);
     // The queue's fix pass committed and is on GitHub: its record counts toward the bound now. One that committed nothing
     // leaves the drop handed, for the next stage.
-    if (queueFix && pushed && outbox.expected() && outbox.expected() !== headBefore) {
+    if (queueFix && pushed && headBefore && answered && answered !== headBefore) {
       await recordQueueFix(repo, issue, pr.number, queueFix, token).catch((e) => log(`queue fix record: ${e.message.slice(0, 120)}`));
       queueFix = null;
     }

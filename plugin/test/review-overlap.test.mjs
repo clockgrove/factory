@@ -12,7 +12,7 @@ import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { handedOffMarker, headMarks, postHandedOff, redLines, validatedMarker, validationLoop } from "../scripts/lib/session.mjs";
 import { openTriage } from "../scripts/lib/triage.mjs";
-import { answerPrompt, reviewOverlap } from "../scripts/review.mjs";
+import { answerPrompt, reviewOverlap, validatedOn } from "../scripts/review.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const SHA = "a".repeat(40);
@@ -303,4 +303,37 @@ test("validationLoop: a green result names the head its checks were green on (th
     const r = await validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 60_000, checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1 }, outbox: { push: async () => true, expected: () => SHA } });
     assert.deepEqual([r.green, r.sha], [true, SHA]);
   });
+});
+
+test("validatedOn: the validated marker goes on the head the checks were green on; a head that moved meanwhile gets no marker and the review again", async () => {
+  setSelf("factory-app[bot]");
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  let head = SHA;
+  const writes = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const p = new URL(url).pathname;
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (method !== "GET") writes.push(`${method} ${decodeURIComponent(p)}${init.body ? ` ${JSON.parse(init.body).body?.split("\n")[0] ?? JSON.stringify(JSON.parse(init.body))}` : ""}`);
+    if (method === "GET" && /\/pulls\/5$/.test(p)) return json({ number: 5, head: { sha: head } });
+    if (method === "POST" && /\/issues\/5\/comments$/.test(p)) return json({ id: 1 }, 201);
+    if (/\/labels/.test(p)) return json([]);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    const same = await validatedOn({ repo, issue: 4, prNumber: 5, sha: SHA, token: { token: "t" } });
+    assert.equal(same.moved, "");
+    assert.deepEqual(writes, [`POST /repos/acme/app/issues/5/comments ${validatedMarker(4, SHA)}`]);
+    writes.length = 0;
+    head = "b".repeat(40);
+    const moved = await validatedOn({ repo, issue: 4, prNumber: 5, sha: SHA, token: { token: "t" } });
+    assert.match(moved.moved, /^PR #5's head moved to bbbbbbb while aaaaaaa was validated; the review runs again on the new head$/);
+    assert.deepEqual(writes, ["DELETE /repos/acme/app/issues/5/labels/factory:review", 'POST /repos/acme/app/issues/5/labels {"labels":["factory:review"]}'], "no marker; the review label off and on again");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
 });

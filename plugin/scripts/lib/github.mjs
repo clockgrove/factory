@@ -874,16 +874,17 @@ export async function mergeQueueEntry(repo, number, opts) {
 
 /**
  * The failed Actions runs the merge queue started for the PR since `since` (event `merge_group`), newest first:
- * `{id, sha, at}`, `sha` the queue's merge_group commit. A run is the PR's when its branch is GitHub's queue ref for it,
- * `gh-readonly-queue/<base>/pr-<number>-<base sha>`. Read with a token that reads Actions.
+ * `{id, sha, at, status, conclusion}`, `sha` the queue's merge_group commit. A run is the PR's when its branch is GitHub's
+ * queue ref for it, `gh-readonly-queue/<base>/pr-<number>-<base sha>`. With `any`, runs of every status (one still
+ * running when the queue dropped the PR on its first failed required job). Read with a token that reads Actions.
  */
-export async function mergeGroupRuns(repo, number, base, since, opts) {
+export async function mergeGroupRuns(repo, number, base, since, opts, { any = false } = {}) {
   const created = since ? `&created=${encodeURIComponent(`>=${since}`)}` : "";
-  const runs = (await rest(`repos/${repo.full}/actions/runs?event=merge_group&status=failure&exclude_pull_requests=true&per_page=100${created}`, { ...opts, paginate: true })) || [];
+  const runs = (await rest(`repos/${repo.full}/actions/runs?event=merge_group${any ? "" : "&status=failure"}&exclude_pull_requests=true&per_page=100${created}`, { ...opts, paginate: true })) || [];
   const prefix = `gh-readonly-queue/${base}/pr-${Number(number)}-`;
   return runs
     .filter((r) => typeof r?.head_branch === "string" && r.head_branch.startsWith(prefix) && /^[0-9a-f]{40,64}$/.test(r.head_branch.slice(prefix.length)) && r.head_sha)
-    .map((r) => ({ id: r.id, sha: r.head_sha, at: r.created_at ?? null }))
+    .map((r) => ({ id: r.id, sha: r.head_sha, at: r.created_at ?? null, status: r.status ?? null, conclusion: r.conclusion ?? null }))
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
 }
 

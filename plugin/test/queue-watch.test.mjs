@@ -92,7 +92,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     if (method === "GET" && /\/actions\/runs\?/.test(u)) {
       const q = new URL(u).searchParams;
       const from = Date.parse((q.get("created") || "").replace(/^>=/, ""));
-      return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from)) });
+      // `status=failure`: finished runs that failed only, as GitHub lists them.
+      return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from) && (!q.get("status") || r.conclusion === q.get("status"))) });
     }
     if (method === "GET" && (m = /\/check-runs\/(\d+)\/annotations/.exec(u))) return json(200, s.annotations[m[1]] || []);
     if (method === "GET" && (m = /\/commits\/([0-9a-z]+)$/.exec(u))) return json(200, { sha: m[1], commit: { committer: { date: s.headAt } }, parents: [] });
@@ -641,11 +642,15 @@ test("queue red: a flake, a job GitHub never started or no readable run is enque
     assert.equal((await reviewReads(locked, { verdict: "change_caused", confidence: 0.95 })).state, "requeued");
     assert.equal(records(locked)[0].kind, "not-started");
   });
-  // No failed queue run of the PR can be read: nothing is known, so it is no fix pass.
+  // No queue run of the drop is ever listed (a failing check no Actions run carries): read again by the next stage, then
+  // nothing is known, so it is no fix pass.
   const none = fakeGitHub();
   await withGitHub(none, async () => {
     none.s.removals = [queueDrop(ago(5 * MIN))];
     assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(none)).state, "pending");
+    assert.deepEqual(records(none).map((r) => [r.state, r.reads]), [["handed", 1]]);
+    assert.equal(await merge({}), "queue-red", "handed again");
     const step = await reviewReads(none);
     assert.equal(step.state, "requeued");
     assert.equal(records(none)[0].kind, "none");
@@ -797,5 +802,32 @@ test("queue red: a record another trusted writer wrote is read (the merge pass a
     assert.equal((await reviewReads(fake, own)).state, "fixing");
     for (const c of fake.s.comments[ISSUE]) if (c.body.includes("queue-red")) Object.assign(c, { user: { login: "stranger" }, author_association: "NONE" });
     assert.equal(records(fake).length, 0, "a stranger's pasted record does not");
+  });
+});
+
+test("queue red: a drop is read from its own merge-group run, never an earlier drop's; a run still going counts, and one not listed yet is read later", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    // Drop 1: its run failed on A, and the fix pass committed.
+    queueRed(fake, { sha: "1".repeat(40), id: 690, at: ago(40 * MIN) });
+    fake.s.removals = [queueDrop(ago(38 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(fake, own)).state, "fixing");
+    // Drop 2: the queue dropped the PR at its first failed job while the run goes on, and the finished-failed listing
+    // has not got it yet. Before, the stage read drop 1's run (A, already fixed) and Blocked quoting the old failure.
+    fake.s.removals.push(queueDrop(ago(10 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    const notYet = await reviewReads(fake, own);
+    assert.equal(notYet.state, "pending", "no run of this drop yet: nothing decided");
+    assert.ok(Date.parse(records(fake).at(-1).after) >= Date.parse(fake.s.removals[0].createdAt), "runs before the previous drop are not this drop's");
+    // Its run appears, still in progress, with a new failure B: the PR's own, its own fix pass.
+    const sha = "2".repeat(40);
+    queueRed(fake, { sha, id: 691, at: ago(12 * MIN), log: failureNo(1) });
+    fake.s.queueRuns.at(-1).status = "in_progress";
+    fake.s.queueRuns.at(-1).conclusion = null;
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, own);
+    assert.equal(step.state, "fixing");
+    assert.equal(step.red.sha, sha);
   });
 });

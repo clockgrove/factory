@@ -244,7 +244,7 @@ test("a PR reviewed before the foundation label gets the foundation pass alone a
   assert.match(src, /\n  if \(foundationDue\) \{\n/);
   assert.doesNotMatch(src, /foundation && !alreadyReviewed/);
   assert.match(src, /: found\n\s+\? reviewPost\(\{ issue, review: null, diff, foundation: found\.review \}\)\n\s+: null;/);
-  assert.match(src, /const toAnswer = placeholder && !alreadyReviewed \? \[\] : await unaddressedReviewComments\(/);
+  assert.match(src, /const noneOwn = placeholder && !alreadyReviewed;\n\s+const toAnswer = noneOwn && !thirdParty\.length \? \[\] : \(await unaddressedReviewComments\([^\n]*\)\)\.filter\(\(c\) => !noneOwn \|\| c\.from\);/);
   // The worker's rebase keeps a review only when it covers a foundation Objective's foundation pass.
   const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");
   assert.ok(worker.indexOf("const foundation = !!chosen.foundation;") > worker.indexOf("await choiceGate("));

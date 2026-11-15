@@ -547,7 +547,8 @@ test("#266: the setting is FACTORY_LOCAL_AUTO_ACCOUNT=1, off unset, empty or 0; 
 
 test("#266: the machine's holds say when an account last met its limit (a served pass is none) and when a stage last started on it, for every serve; a start file another could have planted is not read", () => {
   const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
-  const t = Date.now();
+  // In the past, so t + 1 is never after the reader's own clock (a later time counts as long ago).
+  const t = Date.now() - 10 * MIN;
   const one = accountHolds({ dir });
   const two = accountHolds({ dir });
   one.limit({ harness: "claude", account: "alpha", reset: t + 3 * MIN, now: t });

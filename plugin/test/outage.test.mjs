@@ -1,8 +1,8 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -302,16 +302,23 @@ test("the work and review stages wait outages out and end on one through outageE
   assert.match(local.slice(local.indexOf("async serve(")), /^[\s\S]*?\n {4}waitOutages\(\);/, "serve: no bound");
 });
 
-// --- #228 review: the real stage processes, against a GitHub API on a port nothing listens on (ECONNREFUSED). ---
+// --- #228 review: the real stage processes, against a GitHub API whose every connect is refused (ECONNREFUSED). ---
 
-/** A loopback port nothing listens on. */
-async function closedPort() {
-  const srv = createServer();
+/**
+ * A loopback port this file keeps bound for the stage's whole run, to an HTTP server that answers every request: no other
+ * test's server can take it (a port closed and handed over could be), and an answer from it would fail the test. The
+ * stage's preload refuses every connect to it the way undici does (`fetch failed`, cause ECONNREFUSED), so the outage
+ * is the same on every run.
+ */
+async function heldPort() {
+  const srv = createServer((req, res) => res.writeHead(200, { "content-type": "application/json" }).end("{}"));
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
-  const { port } = srv.address();
-  await new Promise((r) => srv.close(r));
-  return port;
+  return { port: srv.address().port, close: () => new Promise((r) => srv.close(r)) };
 }
+
+/** The preload's refusal: every fetch to `origin` fails as a refused connect, before any byte leaves the process. */
+const refuseOrigin = (origin) =>
+  `const dead = ${JSON.stringify(origin)};\nconst real = globalThis.fetch;\nglobalThis.fetch = (input, init) => {\n  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);\n  if (url.origin !== dead) return real(input, init);\n  const cause = Object.assign(new Error(\`connect ECONNREFUSED \${url.host}\`), { code: "ECONNREFUSED", errno: -111, syscall: "connect" });\n  return Promise.reject(new TypeError("fetch failed", { cause }));\n};\n`;
 
 /**
  * Run worker.mjs or review.mjs as its own process, local mode, against an unreachable API, with the stage's wait cut to
@@ -321,15 +328,22 @@ async function stageAgainstNothing(script, args, extraEnv = {}) {
   const root = mkdtempSync(join(tmpdir(), "outage-stage-"));
   mkdirSync(join(root, "co"));
   const pre = join(root, "pre.mjs");
-  writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "network.mjs")).href)};\nOUTAGE.stageWaitMs = 1500;\nOUTAGE.probeMs = [100];\n`);
-  const port = await closedPort();
-  const r = spawnSync(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
-    encoding: "utf8",
-    timeout: 60_000,
-    env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: `http://127.0.0.1:${port}`, ...extraEnv },
-  });
+  const held = await heldPort();
+  const origin = `http://127.0.0.1:${held.port}`;
+  writeFileSync(pre, `import { OUTAGE } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "network.mjs")).href)};\nOUTAGE.stageWaitMs = 1500;\nOUTAGE.probeMs = [100];\n${refuseOrigin(origin)}`);
+  // Run as its own process while this one keeps the port's server answering (so an unrefused request would get an answer).
+  const r = await new Promise((done) => {
+    const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
+      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: origin, ...extraEnv },
+    });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.on("close", (status) => (clearTimeout(timer), done({ status, out })));
+  }).finally(held.close);
   const file = join(root, "u", "result.json");
-  return { code: r.status, out: `${r.stdout}${r.stderr}`, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, origin: `http://127.0.0.1:${port}` };
+  return { code: r.status, out: r.out, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, origin };
 }
 
 test("worker.mjs, run for real: a stage whose first reads swallow the outage still ends paused on it, naming its host and its first loss", async () => {

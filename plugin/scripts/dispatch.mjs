@@ -12,7 +12,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, runningSince, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -22,7 +22,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebasedTwiceBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
-import { RELAUNCH_FALLBACK_MS, RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -464,10 +464,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // `{block, tries}` (relaunchDecision).
   const decideLost = (n, events, { lost, key }) => {
     const comments = commentsOf(events);
-    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString() });
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null });
   };
   // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
-  // Running stint. False when a write failed (next tick tries again).
+  // Running stint. False when a write failed: the next tick tries again, never a Block (that would be a write too).
   const relaunchLost = async (issue, d, lost) => {
     const n = issue.number;
     if (!dryRun) {
@@ -488,11 +488,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     log(`  #${n}: its stage was lost (${lost === "outage" ? "it ended on its network" : "it vanished with no exit"}); relaunched, ${d.tries} of ${RELAUNCH_MAX}`);
     return true;
   };
-  // Past RELAUNCH_FALLBACK_MS from the loss with its relaunch still unrecorded (reads or writes failing), it Blocks.
-  const fallbackDue = (lostAt) => Number.isFinite(Date.parse(lostAt)) && Date.now() - Date.parse(lostAt) > RELAUNCH_FALLBACK_MS;
   // A stage that ended on its network wrote an `outage` Block (session.mjs outageExit): the issue's newest Blocked notice,
-  // written since the Objective last became Running, read from the timeline the recovery pass read above. Used up, the
-  // dispatcher's own notice says so and mentions the person, whatever the caps.
+  // written since the Objective last became Running, read from the timeline the recovery pass read above (one it could not
+  // read leaves the Objective as it is until a read succeeds). Used up, the dispatcher's own notice says so and mentions
+  // the person, whatever the caps.
   if (relaunches) {
     let busy = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
     for (const issue of wanted) {
@@ -506,20 +505,16 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const block = outageBlockOf(commentsOf(events), n, lastRunningAt(events));
       if (!block) continue;
       const d = decideLost(n, events, { lost: "outage", key: block.key });
-      let why = d.block ? `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)` : null;
-      if (!why) {
+      if (!d.block) {
         if (capHold(n)) continue;
         if (busy >= inputs.maxConcurrent) {
           log(`  #${n}: its stage ended on its network; relaunched once a slot frees (max_concurrent reached)`);
           continue;
         }
-        if (await relaunchLost(issue, d, "outage")) {
-          busy += 1;
-          continue;
-        }
-        if (!fallbackDue(block.at)) continue;
-        why = "the stage ended on its network, and Factory could not record its relaunch for over an hour (the outage notice above names the host and since when)";
+        if (await relaunchLost(issue, d, "outage")) busy += 1;
+        continue;
       }
+      const why = `the stage was lost to its network again after Factory relaunched it ${d.tries} times since the Objective was last started (the outage notice above names the host and since when)`;
       relaunchesUsed.push(n);
       if (dryRun) continue;
       const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
@@ -541,6 +536,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (alive) {
       for (const issue of runningIssues) {
         if (alive.has(issue.number) || relaunched.includes(issue.number)) continue;
+        // The issue's timeline, read once for this Objective (its Running time, the relaunch record), and the sandbox
+        // record the sandbox route read for it.
+        let events;
+        const timeline = async () => (events === undefined ? (events = await timelineOf(repo, issue.number, opts).catch(() => null)) : events);
+        let boxRecord = null;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
         // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
         if (!sandbox && inputs.sandbox) {
@@ -552,6 +552,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         if (sandbox && backend().trigger.routes(issue)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          boxRecord = record;
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;
@@ -564,7 +565,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             continue;
           }
           // `since` is GitHub's clock, the record's entries the runners': logic.mjs CLOCK_SKEW_MS.
-          const since = await runningSince(repo, issue.number, opts).catch(() => null);
+          const tl = await timeline();
+          const since = tl ? lastRunningAt(tl) : null;
           if (since && !launchedSince(record, "work", since)) {
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
             // launcher); one that never ran gets the grace for its own launch first.
@@ -586,7 +588,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
         // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day. A read that
         // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
-        const read = await runningSince(repo, issue.number, opts).then((at) => ({ at }), () => null);
+        const read = (await timeline()) ? { at: lastRunningAt(events) } : null;
         const hold = read && (await localWait(issue, read.at));
         if (!read || (hold?.state === "unread" && !(backend().trigger.tends(issue) && (await unreadLapsed(issue.number, hold, read.at))))) {
           log(`  #${issue.number}: ${read ? `local claim unread (${hold.reason})` : "Running time unread"}; left alone this tick`);
@@ -619,23 +621,21 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
         // unless it left a sign its network was not what ended it (a cancelled job, a sandbox stage that recorded its end).
+        // The decision and the day's cap come first, so a held one costs no Actions reads (the job token's hourly budget).
         let note = "";
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
-          const events = await timelineOf(repo, n, opts).catch(() => null);
-          const record = sandbox && events ? sandboxRecord(commentsOf(events), n) : null;
-          const job = !sandbox && events ? await stintWorkJob(repo, n, since, readToken).catch(() => null) : null;
-          const lostAt = since ? new Date(Date.parse(since) + 15 * 60_000).toISOString() : null;
-          if (events && endedNotLost({ record, job })) log(`  #${n}: its ${sandbox ? "sandbox stage recorded its end" : "work job was cancelled"}; not a network loss, so not relaunched`);
-          else if (!events && !fallbackDue(lostAt)) {
-            retry(`#${n}'s relaunch record`);
-            continue;
-          } else if (events) {
-            const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
-            if (d.block) note = `; Factory relaunched its stage ${d.tries} times since the Objective was last started`;
-            else if (capHold(n) || (await relaunchLost(issue, d, "vanished")) || !fallbackDue(lostAt)) continue;
-            else note = "; Factory could not record its relaunch for over an hour";
-          } else note = "; Factory could not record its relaunch for over an hour";
+          const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
+          if (d.block) note = `; Factory relaunched its stage ${d.tries} times since the Objective was last started`;
+          else if (capHold(n)) continue;
+          else {
+            const job = sandbox ? null : await stintWorkJob(repo, n, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), n)) }).catch(() => null);
+            if (endedNotLost({ record: boxRecord, job })) log(`  #${n}: its ${sandbox ? "sandbox stage recorded its end" : "work job was cancelled"}; not a network loss, so not relaunched`);
+            else {
+              await relaunchLost(issue, d, "vanished");
+              continue;
+            }
+          }
         }
         vanished.push(issue.number);
         statuses[issue.number] = "Blocked";

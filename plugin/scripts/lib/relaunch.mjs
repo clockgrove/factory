@@ -12,11 +12,6 @@ import { startTime } from "./objective-trust.mjs";
 export const RELAUNCH_MAX = 2;
 /** How many tries the record keeps, the latest last. */
 const KEEP_TRIES = 10;
-/**
- * How long after a lost stage was found the dispatcher keeps trying to record its relaunch (reads and writes that fail)
- * before it Blocks the Objective with the person mentioned, so none sits uncounted and unannounced.
- */
-export const RELAUNCH_FALLBACK_MS = 60 * 60_000;
 
 const RECORD_LINE = /^<!-- factory:relaunch (\{[^\n]*\}) -->$/m;
 // Factory's own comment (the marker on its first line); before Factory knows its login, one by someone who can push, as
@@ -27,7 +22,8 @@ const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c));
  * The relaunch record among an issue's comments: `{tries: [{at, lost, key, start}], commentId}`, or null. `lost` is
  * `outage` (the stage ended on one) or `vanished` (no exit); `key` names the loss it answered (blockKey, stintKey), so a
  * tick that finds the same loss again does not count it twice; `start` is the person's start it counted against
- * (personStart), so a later start begins a new count with no clock compared.
+ * (personStart), so a later start begins a new count with no clock compared; `run` is the Actions run that relaunched it
+ * (its work job runs there: stintWorkJob).
  */
 export function relaunchRecordOf(comments, issue) {
   const head = `${marker(issue, "relaunch")}\n`;
@@ -95,11 +91,11 @@ export const triesSince = (record, start) => (record?.tries || []).filter((t) =>
  * same loss was counted already and only its relaunch is to finish), or `{block: true, tries}` once RELAUNCH_MAX
  * relaunches since `start` were used.
  */
-export function relaunchDecision({ record, start, key, lost, at, max = RELAUNCH_MAX }) {
+export function relaunchDecision({ record, start, key, lost, at, run = null, max = RELAUNCH_MAX }) {
   const since = triesSince(record, start);
   if (since.some((t) => t.key === key)) return { relaunch: true, tries: since.length, record: null };
   if (since.length >= max) return { block: true, tries: since.length };
-  const tries = [...(record?.tries || []), { at, lost, key, start: start ?? null }].slice(-KEEP_TRIES);
+  const tries = [...(record?.tries || []), { at, lost, key, start: start ?? null, ...(run ? { run: String(run) } : {}) }].slice(-KEEP_TRIES);
   return { relaunch: true, tries: since.length + 1, record: { tries } };
 }
 
@@ -118,22 +114,32 @@ export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
 export const endedNotLost = ({ record = null, job = null }) => record?.state === "ended" || !!record?.endedBy || job?.conclusion === "cancelled";
 
 /**
- * The Running stint's `work (N)` job, newest first, or null: the dispatcher that applied `factory:running` at `since`
- * named it in its own run, created before that label, so the runs created from an hour before it are read (any status:
- * a run's wake job may still sleep), the newest first, at most `maxRuns` of them (one jobs read each), and only a job created in the stint counts.
+ * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that
+ * applied `factory:running` named the job in its own run: `run`, when the record names the relaunch's run, is read
+ * first; else the runs created in the hour up to the label (that run was created before it; any status, since a run's
+ * wake job may still sleep), the newest first, at most `maxRuns` of them, one jobs read each.
  */
-export async function stintWorkJob(repo, n, since, opts, { maxRuns = 10 } = {}) {
+export async function stintWorkJob(repo, n, since, opts, { run = null, maxRuns = 10 } = {}) {
   const at = Date.parse(since);
   if (!Number.isFinite(at)) return null;
-  const window = `${new Date(at - 60 * 60_000).toISOString()}..${new Date(at + CLOCK_SKEW_MS).toISOString()}`;
+  const inStint = (j) => j.name === `work (${n})` && Date.parse(j.created_at ?? j.started_at) >= at - CLOCK_SKEW_MS;
+  const jobsOf = async (id) => (await rest(`repos/${repo.full}/actions/runs/${id}/jobs?per_page=100`, opts))?.jobs || [];
+  if (run) {
+    const job = (await jobsOf(run)).find(inStint);
+    if (job) return job;
+  }
+  const window = `${new Date(at - 60 * 60_000).toISOString()}..${new Date(at).toISOString()}`;
   const runs = (await rest(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?created=${encodeURIComponent(window)}&per_page=${maxRuns}`, opts))?.workflow_runs || [];
-  for (const run of runs.slice(0, maxRuns)) {
-    const jobs = (await rest(`repos/${repo.full}/actions/runs/${run.id}/jobs?per_page=100`, opts))?.jobs || [];
-    const job = jobs.find((j) => j.name === `work (${n})` && Date.parse(j.created_at ?? j.started_at) >= at - CLOCK_SKEW_MS);
+  for (const r of runs.slice(0, maxRuns)) {
+    if (String(r.id) === String(run)) continue;
+    const job = (await jobsOf(r.id)).find(inStint);
     if (job) return job;
   }
   return null;
 }
+
+/** The Actions run that made the latest relaunch the record holds, or null. */
+export const relaunchRun = (record) => record?.tries?.at(-1)?.run ?? null;
 
 /** The issue's timeline (label events and comments), for personStart, the outage notice and the record. */
 export const timelineOf = async (repo, n, opts) => (await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true })) || [];

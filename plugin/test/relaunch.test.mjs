@@ -20,10 +20,11 @@ const MIN = 60_000;
 
 /**
  * One repository on GitHub: issues with labels, their timelines and comments, kept across ticks. `runs` and `jobs`: the
- * workflow's runs (listed by creation time) and each run's jobs; `spend`: the day's spend comments; `failRecord`: the
- * relaunch record's post fails.
+ * workflow's runs (listed newest first within a `created` range, `per_page` at most) and each run's jobs; `spend`: the
+ * day's spend comments; `failRecord`: the relaunch record's post fails. `cfg` is read at each request, so a test may
+ * change it between ticks.
  */
-function fakeGitHub(open, { runs = [], jobs = {}, spend = [], failRecord = false } = {}) {
+function fakeGitHub(open, cfg = {}) {
   let last = 0;
   // Every write's time is GitHub's now, and later than the one before it.
   const stamp = () => new Date((last = Math.max(Date.now(), last + 1))).toISOString();
@@ -51,7 +52,7 @@ function fakeGitHub(open, { runs = [], jobs = {}, spend = [], failRecord = false
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     const path = decodeURIComponent(u.pathname).replace("/repos/acme/app", "");
     if (u.pathname === "/graphql") return json({ data: {} });
-    if (method === "GET") reads.push(path);
+    if (method === "GET") reads.push(`${path}${u.search}`);
     if (method !== "GET") writes.push(`${method} ${path}${body?.body ? ` ${body.body}` : body?.labels ? ` ${body.labels.join(",")}` : ""}`);
     const n = Number(/^\/issues\/(\d+)/.exec(path)?.[1]);
     const one = issues.get(n);
@@ -65,7 +66,7 @@ function fakeGitHub(open, { runs = [], jobs = {}, spend = [], failRecord = false
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(path) && one)
       return json([...one.timeline, ...one.comments.map((c) => ({ event: "commented", actor: c.user, ...c }))].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)));
     if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path) && one) return json(one.comments);
-    if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one && failRecord && body.body.includes(":relaunch -->")) return json({ message: "Bad Gateway" }, 502);
+    if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one && cfg.failRecord && body.body.includes(":relaunch -->")) return json({ message: "Bad Gateway" }, 502);
     if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one) {
       const at = stamp();
       const c = { id: (ids += 1), user: SELF, body: body.body, created_at: at, updated_at: at };
@@ -96,11 +97,17 @@ function fakeGitHub(open, { runs = [], jobs = {}, spend = [], failRecord = false
     }
     if (method === "GET" && path === "/pulls") return json([]);
     if (method === "GET" && path === "/collaborators") return json([{ login: "maintainer" }]);
-    if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) return json({ workflow_runs: u.searchParams.get("created") ? runs : [] });
+    if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) {
+      const range = u.searchParams.get("created");
+      if (!range) return json({ workflow_runs: [] });
+      const [from, to] = range.split("..").map((t) => Date.parse(t));
+      const hits = (cfg.runs || []).filter((r) => Date.parse(r.created_at) >= from && Date.parse(r.created_at) <= to).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      return json({ workflow_runs: hits.slice(0, Number(u.searchParams.get("per_page") || 30)) });
+    }
     const runJobs = /^\/actions\/runs\/(\d+)\/jobs$/.exec(path);
-    if (method === "GET" && runJobs) return json({ jobs: jobs[runJobs[1]] || [] });
+    if (method === "GET" && runJobs) return json({ jobs: cfg.jobs?.[runJobs[1]] || [] });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
-    if (method === "GET" && path === "/issues/comments") return json(spend);
+    if (method === "GET" && path === "/issues/comments") return json(cfg.spend || []);
     return json({ message: "Not Found" }, 404);
   };
   return {
@@ -144,9 +151,14 @@ async function on(gh, fn) {
   }
 }
 
-const tick = async (gh, { maxConcurrent = 5, sandbox = undefined, dailyUsd = 0 } = {}) => {
+const tick = async (gh, { maxConcurrent = 5, sandbox = undefined, dailyUsd = 0, run = null } = {}) => {
   const { dispatch } = await import("../scripts/dispatch.mjs");
-  return on(gh, () => dispatch({ repo: REPO.full, objectiveLabel: OBJ, maxConcurrent, dailyUsd, ciChecks: [], timeoutMinutes: 60, notify: "kirk", ...(sandbox ? { sandbox } : {}) }, { token: "t" }));
+  return on(gh, () => {
+    // The dispatching run (GITHUB_RUN_ID), which a relaunch records.
+    if (run) process.env.GITHUB_RUN_ID = String(run);
+    else delete process.env.GITHUB_RUN_ID;
+    return dispatch({ repo: REPO.full, objectiveLabel: OBJ, maxConcurrent, dailyUsd, ciChecks: [], timeoutMinutes: 60, notify: "kirk", ...(sandbox ? { sandbox } : {}) }, { token: "t" });
+  });
 };
 
 /** A stage's own end on its network off the local route (worker.mjs, review.mjs: session.mjs outageExit's Block). */
@@ -245,7 +257,7 @@ test("a non-network Block is not relaunched: the worker's own, validation, a cra
     assert.equal(recordOf(gh, n), null);
   }
   assert.ok(gh.writes.slice(writes).every((w) => /\/issues\/8\//.test(w)), "only #8 is written to");
-  assert.ok(!gh.reads.slice(reads).some((r) => /^\/issues\/(9|10|11)\/comments$/.test(r)), "a Blocked Objective costs the one timeline read the recovery pass makes, no comments read");
+  assert.ok(!gh.reads.slice(reads).some((r) => /^\/issues\/(9|10|11)\/comments(\?|$)/.test(r)), "a Blocked Objective costs the one timeline read the recovery pass makes, no comments read");
 });
 
 test("a stopped, draft or restarting Objective is never relaunched; a started one beside them is", async () => {
@@ -397,20 +409,48 @@ test("a vanished stage that left a sign it was not the network keeps the vanishe
   assert.deepEqual([s.vanished, s.relaunched], [[7], [9]]);
 });
 
-test("a relaunch Factory cannot record for over an hour Blocks with the person mentioned; a younger one waits", async () => {
+test("a relaunch whose record cannot be written is tried again next tick, never Blocked, however old the loss", async () => {
+  const cfg = { failRecord: true };
   const gh = fakeGitHub(
     [
       { number: 7, labels: [OBJ, "factory:running"], since: 120 * MIN },
       { number: 8, labels: [OBJ, "factory:blocked"], since: 120 * MIN, comments: [outageNotice(8, { created_at: ago(90 * MIN), updated_at: ago(90 * MIN) })] },
-      { number: 11, labels: [OBJ, "factory:blocked"], since: 120 * MIN, comments: [outageNotice(11, { created_at: ago(10 * MIN), updated_at: ago(10 * MIN) })] },
     ],
-    { failRecord: true },
+    cfg,
   );
   const r = await tick(gh);
-  assert.deepEqual([r.relaunched, r.relaunchesUsed, r.vanished], [[], [8], [7]]);
-  assert.match(gh.blocks(8).at(-1).body, /@kirk Blocked \(relaunch\): the stage ended on its network, and Factory could not record its relaunch for over an hour/);
-  assert.equal(blockCauseOf(gh.blocks(8).at(-1).body), "outage");
-  assert.match(gh.blocks(7).at(-1).body, /@kirk Blocked \(dispatch\): worker job vanished: Running with no job in progress; Factory could not record its relaunch for over an hour/);
-  assert.equal(gh.blocks(11).length, 1, "#11's outage is ten minutes old: it waits, and tries again");
+  assert.deepEqual([r.relaunched, r.relaunchesUsed, r.vanished], [[], [], []]);
+  assert.deepEqual([gh.blocks(7).length, gh.blocks(8).length], [0, 1], "no Block: a failed write is no evidence of anything");
   assert.ok(r.deadlines.some((d) => d.kind === "retry"));
+  cfg.failRecord = false;
+  assert.deepEqual((await tick(gh)).relaunched.sort(), [7, 8]);
+});
+
+test("the cancelled-job sign is found on a busy repository: the run that started the stint, not the ticks after it", async () => {
+  const since = 20 * MIN;
+  const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 30_000) };
+  // The dispatching run, created just before the label; ten later ticks within the next minute, none with the job.
+  const later = Array.from({ length: 10 }, (_, i) => ({ id: 100 + i, created_at: ago(since - 5_000 - i * 1000) }));
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since }], { runs: [{ id: 55, created_at: ago(since + 20_000) }, ...later], jobs: { 55: [cancelled] } });
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched], [[7], []]);
+  // A relaunched stint: its run is the one the record names, read directly, whatever the runs listing shows.
+  const cfg = { runs: [], jobs: {} };
+  const re = fakeGitHub([{ number: 9, labels: [OBJ, "factory:running"], since }], cfg);
+  assert.deepEqual((await tick(re, { run: 77 })).relaunched, [9]);
+  assert.equal(recordOf(re, 9).tries[0].run, "77", "the relaunch names its run");
+  // Its work job, in run 77, was cancelled; the runs listing shows nothing of it.
+  re.age(since);
+  const stint = re.issue(9).timeline.filter((e) => e.label?.name === "factory:running").at(-1).created_at;
+  cfg.jobs = { 77: [{ name: "work (9)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stint) + 10_000).toISOString() }] };
+  const second = await tick(re);
+  assert.deepEqual([second.vanished, second.relaunched], [[9], []], "its job was cancelled: the vanished Block");
+});
+
+test("a held vanished stage costs no Actions reads and one timeline read per tick", async () => {
+  const spend = [{ id: 900, user: SELF, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: `<!-- factory:9:progress:x -->\n<!-- factory:spend {"usd":5} -->` }];
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "factory:running"], since: 20 * MIN }], { spend });
+  const r = await tick(gh, { dailyUsd: 1 });
+  assert.deepEqual([r.relaunched, r.vanished], [[], []]);
+  assert.deepEqual(gh.reads.filter((p) => /^\/actions\/runs\/|created=|^\/issues\/7\/timeline/.test(p)).map((p) => p.replace(/\?.*/, "")), ["/issues/7/timeline"]);
 });

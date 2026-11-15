@@ -2,7 +2,8 @@
 // mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so the same
 // records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own holds issue
 // (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
-// findRecordIssue). Only comments by Factory's own login on that issue count (isSelf), and only as written: a record is
+// findRecordIssue; normally one, two only after a race at the first limit until a writer moves the newer one's records
+// over and retires it). Only comments by Factory's own login there count (isSelf), and only as written: a record is
 // never edited, so one edited since (its updated_at is not its created_at: a person who can edit comments did it) holds
 // nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one who
 // unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at once
@@ -21,7 +22,7 @@
 import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
-import { addLabels, findRecordIssue, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
+import { addLabels, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
 import { HOLD_FORGET_MS, accountHolds, heldRecord } from "./holds.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf, selfLogin } from "./logic.mjs";
@@ -47,12 +48,19 @@ const rawRecord = (c) => {
   }
 };
 
-/** The holds recorded on issue `number` at `now`: {records (heldRecord's), forgotten (ids of Factory's own past HOLD_FORGET_MS)}. */
+/**
+ * The holds recorded on issue `number` at `now`: {records (heldRecord's), forgotten (ids of Factory's own record comments
+ * a writer deletes: past HOLD_FORGET_MS, or edited since written, which count for nothing)}.
+ */
 async function recordsOn(repo, number, opts, now) {
   const records = [];
   const forgotten = [];
   if (number) {
     for (const c of await listComments(repo, number, opts)) {
+      if (isSelf(c) && LINE.test(String(c.body || "")) && c.updated_at && c.created_at && c.updated_at !== c.created_at) {
+        forgotten.push(c.id);
+        continue;
+      }
       const v = rawRecord(c);
       if (!v) continue;
       const r = heldRecord(v, now);
@@ -68,16 +76,32 @@ const selfKnown = async (opts) => {
   if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Factory's own login is unknown, so its holds cannot be told from anyone else's");
 };
 
+const hasLabel = (i) => (i.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === HOLDS_LABEL);
+const ownHolds = (i, actions) => !i.pull_request && isSelf(i) && i.title === HOLDS_TITLE && (!actions || i.locked === true);
+
 /**
- * The holds kept on GitHub at `now`, as a reader sees them: {issue (its number, or null), records (heldRecord's),
- * forgotten, store (holds.mjs accountHolds over the records)}. The labelled query alone finds the issue: no issue there
- * is no hold (one with its label taken off holds nothing until the next writer finds it again). A failed read throws.
+ * Factory's holds issues as a reader finds them: one labelled query (no other page), its own with the exact title,
+ * locked on Actions, oldest first. Normally one; two only after a race at the first limit, until a writer retires the
+ * newer, and every one's records count meanwhile, so a hold written to either is read.
+ */
+async function labelledIssues(repo, opts, actions = process.env.GITHUB_ACTIONS === "true") {
+  const self = selfLogin();
+  const list = (await rest(`repos/${repo.full}/issues?creator=${encodeURIComponent(self)}&labels=${encodeURIComponent(HOLDS_LABEL)}&state=all&sort=created&direction=asc&per_page=100`, opts)) || [];
+  return list.filter((i) => ownHolds(i, actions)).sort((a, b) => a.number - b.number);
+}
+
+/**
+ * The holds kept on GitHub at `now`, as a reader sees them: {issue (the oldest's number, or null), records (heldRecord's,
+ * of every holds issue found), store (holds.mjs accountHolds over the records)}. The labelled query alone finds them: none
+ * there is no hold (an issue with its label taken off holds nothing until the next writer finds it again). A failed read
+ * throws.
  */
 export async function readHolds(repo, opts, { now = Date.now(), actions } = {}) {
   await selfKnown(opts);
-  const found = await findRecordIssue(repo, { label: HOLDS_LABEL, title: HOLDS_TITLE }, opts, { actions, fallback: false });
-  const { records, forgotten } = await recordsOn(repo, found?.number, opts, now);
-  return { issue: found?.number ?? null, records, forgotten, store: accountHolds({ seed: records }) };
+  const issues = await labelledIssues(repo, opts, actions);
+  const records = [];
+  for (const i of issues) records.push(...(await recordsOn(repo, i.number, opts, now)).records);
+  return { issue: issues[0]?.number ?? null, records, store: accountHolds({ seed: records }) };
 }
 
 /** An issue of Factory's that is no holds record (a stray from a race or a failed lock): retitled, its label off, closed. */
@@ -86,56 +110,75 @@ async function retire(repo, number, opts) {
   await removeLabel(repo, number, HOLDS_LABEL, opts).catch(() => {});
 }
 
+/** How young an unlocked holds issue of Factory's may be and still be one another job is opening: never retired. */
+export const OPENING_MS = 10 * 60_000;
+
 /**
- * The writer's holds issue: of Factory's own issues with HOLDS_TITLE (every page of them, by creator), the oldest one
- * locked (on Actions; any off it), its label put back when it was taken off. Every other one is retired: a newer
- * locked one a race opened, an unlocked one a failed lock left. Null with none.
+ * The writer's holds issues: {record (the oldest of Factory's own issues with HOLDS_TITLE that is locked, on Actions; any
+ * off it: its number, or null), strays (the others to retire once this writer's own record is written: a newer locked one
+ * a race opened, an unlocked one a failed lock left; never an unlocked one opened within OPENING_MS, which another job may
+ * still be closing and locking), relabel (whether the record's label was taken off)}. `scan`: every page of Factory's own
+ * issues by creator; else the labelled query's alone.
  */
-async function writerIssue(repo, opts, actions = process.env.GITHUB_ACTIONS === "true") {
+async function writerIssues(repo, opts, { actions = process.env.GITHUB_ACTIONS === "true", scan, now }) {
   const self = selfLogin();
-  const mine = ((await rest(`repos/${repo.full}/issues?creator=${encodeURIComponent(self)}&state=all&sort=created&direction=asc&per_page=100`, { ...opts, paginate: true })) || [])
-    .filter((i) => !i.pull_request && isSelf(i) && i.title === HOLDS_TITLE)
-    .sort((a, b) => a.number - b.number);
-  const record = mine.find((i) => !actions || i.locked === true) ?? null;
-  for (const i of mine) if (i !== record) await retire(repo, i.number, opts);
-  // Its label taken off: put back, so readers' one labelled query finds it again.
-  if (record && !(record.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === HOLDS_LABEL)) await addLabels(repo, record.number, [HOLDS_LABEL], opts);
-  return record?.number ?? null;
+  const mine = scan
+    ? ((await rest(`repos/${repo.full}/issues?creator=${encodeURIComponent(self)}&state=all&sort=created&direction=asc&per_page=100`, { ...opts, paginate: true })) || []).filter((i) => ownHolds(i, false)).sort((a, b) => a.number - b.number)
+    : await labelledIssues(repo, opts, actions);
+  const record = mine.find((i) => ownHolds(i, actions)) ?? null;
+  const opening = (i) => i.locked !== true && now - Date.parse(i.created_at || "") < OPENING_MS;
+  return { record: record?.number ?? null, strays: mine.filter((i) => i !== record && !opening(i)).map((i) => i.number), relabel: !!record && !hasLabel(record) };
 }
 
 /**
  * Record that a stage on `account` met its usage limit: `kind` "limit", reset at `reset` (ms, the provider's), or "spent"
- * (no reset reported: a guess). The hold is holds.mjs's (limit, spent) over the records on the holds issue now; it is
- * written as a new comment there. With no issue by its label, Factory's own issues are searched by creator (one whose
- * label was taken off is found again, and strays retired); with none there either, the issue is opened, closed and locked, then looked for again: of two
- * jobs that opened one each at once, both write to the oldest and the other is retired. Then the forgotten records go.
- * Returns {until, store}: the hold's end and the holds with it. A failed read or write throws.
+ * (no reset reported: a guess). The hold is holds.mjs's (limit, spent) over the records on the holds issues now; it is
+ * written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
+ * label was taken off is found again); with none there either, the issue is opened, closed and locked, then looked for
+ * again: of two jobs that opened one each at once, both write to the oldest. Only once this writer's record is written:
+ * its label goes back on, the forgotten and edited records go, and each stray's live records are copied to the record
+ * issue before it is retired, so a hold another job wrote there is kept. Returns {until, store}: the hold's end and the
+ * holds with it. A failed read or write throws.
  */
 export async function writeHold(repo, { kind, harness, account, reset = null, window = null, now = Date.now() }, opts, { actions } = {}) {
   await selfKnown(opts);
-  // The labelled query first, as a reader's; Factory's own issues by creator only when it misses.
-  let issue = (await findRecordIssue(repo, { label: HOLDS_LABEL, title: HOLDS_TITLE }, opts, { actions, fallback: false }))?.number ?? (await writerIssue(repo, opts, actions));
-  if (!issue) {
+  let found = await writerIssues(repo, opts, { actions, scan: false, now });
+  if (!found.record) found = await writerIssues(repo, opts, { actions, scan: true, now });
+  if (!found.record) {
     try {
       await openRecordIssue(repo, { label: HOLDS_LABEL, color: "5319e7", description: "Factory's account holds record", title: HOLDS_TITLE, body: HOLDS_BODY }, opts);
     } catch (e) {
       if (e.issue) await retire(repo, e.issue, opts);
       throw e;
     }
-    issue = await writerIssue(repo, opts, actions);
-    if (!issue) throw new Error("Factory's holds issue was opened but is not found as its own, locked issue");
+    found = await writerIssues(repo, opts, { actions, scan: true, now });
+    if (!found.record) throw new Error("Factory's holds issue was opened but is not found as its own, locked issue");
   }
+  const issue = found.record;
   const read = await recordsOn(repo, issue, opts, now);
+  const strays = [];
+  for (const n of found.strays) strays.push({ n, ...(await recordsOn(repo, n, opts, now)) });
   let made = null;
-  const store = accountHolds({ seed: read.records, onPut: (r) => (made = r) });
+  const store = accountHolds({ seed: [...read.records, ...strays.flatMap((x) => x.records)], onPut: (r) => (made = r) });
   const until = kind === "spent" ? store.spent({ harness, account, now, window }) : store.limit({ harness, account, reset, now, window });
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =
     kind === "spent"
       ? `Factory: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}.`
       : `Factory: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${iso(until)}.`;
-  await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${holdLine(made)}\n${human}` } });
+  const post = (r, text) => rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${holdLine(r)}\n${text}` } });
+  await post(made, human);
+  // Its record is written: the clean-up, each step on its own, none failing the hold.
+  if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
   for (const id of read.forgotten) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
+  for (const x of strays) {
+    try {
+      for (const r of x.records) await post(r, `Factory: a hold on account \`${r.account}\` copied from #${x.n}, which Factory no longer uses.`);
+      await retire(repo, x.n, opts);
+    } catch {
+      // left for the next writer: its records still count (readHolds reads every holds issue found)
+    }
+  }
   return { until, store };
 }
 

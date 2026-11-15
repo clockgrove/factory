@@ -37,7 +37,7 @@ const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.ends
  * on it kept), the App's token mint, and its record issues: `issues` (title, creator, locked, comments), made, closed,
  * locked and commented on by the App's writes. Every request is in `reads` (method and path, with the query).
  */
-async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false } = {}, fn) {
+async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [] } = {}, fn) {
   const reads = [];
   const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [], ...i })), labelMade: false };
   let id = 900;
@@ -54,7 +54,7 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/repos/acme/app/installation") return json({ id: 3, permissions: { issues: "write", metadata: "read", contents: "write", pull_requests: "write" }, account: { type: "Organization" } });
     if (method === "POST" && p === "/app/installations/3/access_tokens") return json({ token: "ghs_fakeminted0000", expires_at: iso(Date.now() + H), permissions: body.permissions, repositories: [{ full_name: "acme/app" }] }, 201);
     if (p === "/repos/acme/app/issues/8" && method === "GET") return json({ number: 8, state: "open", labels: [...state.issue].map((name) => ({ name })) });
-    if (p === "/repos/acme/app/issues/8/timeline") return json(labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: iso(Date.UTC(2026, 10, 15, 0, i)), actor: { login: "kirk", type: "User", id: 7 } })));
+    if (p === "/repos/acme/app/issues/8/timeline") return json([...labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: iso(Date.UTC(2026, 10, 15, 0, i)), actor: { login: "kirk", type: "User", id: 7 } })), ...events]);
     const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(p);
     if (perm) return json({ permission: perm[1] === "kirk" ? "write" : "read" });
     if (p === "/repos/acme/app/issues" && method === "GET") {
@@ -495,4 +495,69 @@ test("doctor names more than one holds issue, or an unlocked one, with the setti
   const open = await run([holdsIssue([], { locked: false })]);
   assert.match(open[0].detail, /#50 is not locked, so on GitHub Actions its holds count for nothing/);
   assert.match(open[0].fix, /gh issue lock 50/);
+});
+
+test("a kept pin on the default account is a pin: a removal by someone who cannot push leaves it, and a limit with another account free does not move the stage (#268)", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1", FACTORY_STAGE_ACCOUNT: "claude" };
+  // kirk (who can push) pinned `claude`, the first declared account; a triage user took the label off.
+  const events = [
+    { event: "labeled", label: { name: "factory:account:claude" }, created_at: "2026-11-15T01:00:00Z", actor: { login: "kirk", type: "User", id: 7 } },
+    { event: "unlabeled", label: { name: "factory:account:claude" }, created_at: "2026-11-15T02:00:00Z", actor: { login: "triager", type: "User", id: 9 } },
+  ];
+  await withGitHub({ labels: ["factory:objective", "factory:running"], events }, async (_reads, st) => {
+    const c = await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: [...st.issue], env, opts: { token: "t" } });
+    assert.deepEqual(c, { account: "claude", note: "", pinned: true }, "the timeline is read with automatic choice on, though the step prepared the default");
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: c.account, pinned: c.pinned, env, opts: { token: "t" } });
+    assert.equal(await limits.elsewhere(), false, "claude-2 is free, but the pin keeps the stage here");
+    const blocks = [];
+    await usageLimitExit(limitError(Date.now() + 3 * H), { local: false, records: [], finish: async () => {}, block: async (...a) => blocks.push(a), goOn: limits.limit });
+    assert.equal(blocks[0][1], "provider-quota");
+    assert.ok(st.issue.has("factory:running"), "not sent back to Queued");
+  });
+  // No pin anywhere: the step's pick of the default is no pin.
+  await withGitHub({ labels: ["factory:objective"] }, async () => {
+    assert.equal((await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env, opts: { token: "t" } })).pinned, false);
+  });
+});
+
+test("an issue another job is still opening is never retired: B writes to its own, and A, once its own is locked, moves B's holds over and retires B's (#268)", async () => {
+  setSelf(BOT);
+  const now = Date.now();
+  // A opened #10 a minute ago and has not locked it yet.
+  const opening = { number: 10, locked: false, state: "open", created_at: iso(now - 60_000) };
+  await withGitHub({ issues: [holdsIssue([], opening)] }, async (_reads, st) => {
+    const by = (n) => st.issues.find((i) => i.number === n);
+    // B's first limit: no locked holds issue, so it opens #101 and writes there; A's #10 is left alone.
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: now + 2 * H, now }, { token: "t" }, { actions: true });
+    assert.equal(by(10).title, HOLDS_TITLE, "A's issue is not retired");
+    assert.deepEqual(by(10).labels.map((l) => l.name), ["factory:holds"]);
+    assert.equal(by(101).comments.length, 1);
+    // Both count meanwhile.
+    assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).store.until("claude-2", now), now + 2 * H);
+    // A locks #10 and writes its own: #10 is the oldest locked, so B's hold is copied over and #101 retired.
+    by(10).locked = true;
+    by(10).state = "closed";
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + 3 * H, now }, { token: "t" }, { actions: true });
+    assert.equal(by(101).title, `${HOLDS_TITLE} (unused)`);
+    const after = await readHolds(REPO, { token: "t" }, { now, actions: true });
+    assert.equal(after.issue, 10);
+    assert.equal(after.store.until("claude", now), now + 3 * H);
+    assert.equal(after.store.until("claude-2", now), now + 2 * H, "B's hold is kept");
+  });
+  // Older than OPENING_MS and still unlocked: a stray, retired once the writer's own record is written.
+  await withGitHub({ issues: [holdsIssue([], { ...opening, created_at: iso(now - 11 * 60_000) })] }, async (_reads, st) => {
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + H, now }, { token: "t" }, { actions: true });
+    assert.equal(st.issues.find((i) => i.number === 10).title, `${HOLDS_TITLE} (unused)`);
+  });
+});
+
+test("a writer deletes records edited since they were written, which count for nothing (#268)", async () => {
+  setSelf(BOT);
+  const now = Date.now();
+  const edited = { ...holdComment(1, { account: "claude", until: now + H, at: now - 60_000 }), updated_at: iso(now) };
+  await withGitHub({ issues: [holdsIssue([edited])] }, async (_reads, st) => {
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: now + H, now }, { token: "t" }, { actions: true });
+    assert.deepEqual(st.issues[0].comments.map((c) => c.id).includes(1), false);
+  });
 });

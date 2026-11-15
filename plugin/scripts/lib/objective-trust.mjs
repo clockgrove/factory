@@ -307,7 +307,9 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   const prepared = String(env.FACTORY_STAGE_ACCOUNT ?? "").trim();
   // A pin an untrusted removal left standing (trustedRoutePin) is read from the timeline only when the job's account
   // step (which read it) prepared another account than the harness's default: it took the step's answer otherwise.
-  const byDefault = prepared === (declared.accounts[harness]?.[0] ?? harness);
+  // With automatic account choice on (#268) it is always read: whether a pin chose the account decides whether a usage
+  // limit may move the stage (route-holds.mjs routeLimits `pinned`), and the default is a pick the step could make either way.
+  const byDefault = prepared === (declared.accounts[harness]?.[0] ?? harness) && !routeAutoAccounts(env, harness);
   const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account"), kept: byDefault ? null : () => trustedRoutePin(repo, issue, opts, gh) });
   // Two account labels: the Objective waits until one is left, never Blocked for it (the caller's wait, account-wait.mjs).
   if (r.two) return { wait: r.two };

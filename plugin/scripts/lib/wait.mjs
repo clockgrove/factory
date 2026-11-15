@@ -80,6 +80,19 @@ export function movesQueue(e, objectiveLabel) {
 }
 
 /**
+ * Whether an event puts an Objective back to work (Queued, Running or In review): its Objective label on, a Blocked or
+ * Question label off, the Running or In review label on, the draft label off, or a reopen. A drain told before it can
+ * then be told again, even when the read after it finds the queue drained once more.
+ */
+export function activates(e, objectiveLabel) {
+  if (!e?.issue || e.issue.pull_request) return false;
+  const label = e.label?.name;
+  if (e.event === "labeled") return label === objectiveLabel || label === "factory:running" || label === "factory:in-review";
+  if (e.event === "unlabeled") return label === "factory:blocked" || label === "factory:question" || label === DRAFT_LABEL;
+  return e.event === "reopened";
+}
+
+/**
  * Whether the watched Objectives are drained: none of them open, not a draft, and neither Blocked nor a Question (so none
  * Queued, Running or In review). `open` is every open issue with the Objective label; `watched` the named issue numbers,
  * or null for the whole queue (a named one no longer open counts as done). With the Blocked and Question ones left.
@@ -134,9 +147,10 @@ export async function closedAs(repo, issue, opts) {
  * cursor} (and `pr` for merged and closed; `blocked` and `question`, the numbers left, for drained). Every line of one
  * read carries the same `cursor`, the newest event read: `--since` it to go on with nothing missed or told twice.
  * Without `since` it starts from now. `issues` (numbers) narrows it to those Objectives, drained included; `kinds` to
- * those kinds. Drained is told when an event moves the queue and leaves it drained, once until it is no longer so; a
- * wait that starts from now reads whether it already is, and the cursor carries that state on, so neither a queue
- * already drained nor one still drained after a restart is told again.
+ * those kinds. Drained is told when an event moves the queue and leaves it drained, once until an Objective goes back to
+ * work (activates, which a read that finds it drained again does not hide); a wait that starts from now reads whether
+ * it already is, and the cursor carries that state on, so neither a queue already drained nor one still drained after
+ * a restart is told again.
  *
  * A read moves the cursor only once all its reads (events, PRs, the open Objectives) have answered, so a read cut off
  * leaves it where it was. Besides the events: a `gap` line when the cursor was more than WAIT_MAX_PAGES pages back
@@ -151,7 +165,8 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
   const deadline = timeoutMs ? now() + timeoutMs : Infinity;
   const openRead = async () => drainedOf((await rest(`repos/${repo.full}/issues?state=open&labels=${encodeURIComponent(objectiveLabel)}&per_page=100`, { ...opts, paginate: true, cache })) || [], watched);
   let cursor = since;
-  let wasDrained = since?.drained ?? null;
+  // Carried on only by a wait that keeps it current: one whose kinds leave drained out never reads it again.
+  let wasDrained = kinds.includes("drained") ? (since?.drained ?? null) : null;
   // The newest event ids read, at most WAIT_SEEN; empty until the first read, so a cursor alone decides it.
   const seen = new Set();
   const remember = (ids) => {
@@ -215,9 +230,11 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     const next = events.length ? { id: Math.max(cursor.id ?? 0, events.at(-1).id) } : cursor;
     const lines = gap ? [{ event: "gap", issue: null, at: at() }] : [];
     let moved = false;
+    let active = false;
     for (const e of events) {
       if (watched && !watched.has(e.issue?.number)) continue;
       if (movesQueue(e, objectiveLabel)) moved = true;
+      if (activates(e, objectiveLabel)) active = true;
       let kind = eventKind(e, objectiveLabel);
       if (!kind) continue;
       let pr;
@@ -231,7 +248,7 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     let drained = wasDrained;
     if (moved && kinds.includes("drained")) {
       const d = await openRead();
-      if (d.drained && wasDrained !== true) lines.push({ event: "drained", issue: null, at: at(), blocked: d.blocked, question: d.question });
+      if (d.drained && (wasDrained !== true || active)) lines.push({ event: "drained", issue: null, at: at(), blocked: d.blocked, question: d.question });
       drained = d.drained;
     }
     return { lines, cursor: next, drained, read };

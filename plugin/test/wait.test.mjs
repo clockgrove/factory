@@ -236,6 +236,29 @@ test("drained after a restart (#272 review): the cursor carries the queue's stat
   assert.deepEqual(active.lines.map((l) => [l.event, l.issue]), [["blocked", 8], ["drained", null]]);
 });
 
+test("drained again within one read (#285 review): an Objective back to work and Blocked again before the next read is a new drain", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:blocked"]);
+  // Both steps happen between two reads: #6 re-queued, run and Blocked again while #5 has Blocked.
+  const r = await waiting(gh, [() => gh.state(5, "factory:blocked"), () => (gh.state(6, null), gh.state(6, "factory:running"), gh.state(6, "factory:blocked")), () => gh.event(5, "closed")], { follow: true, timeoutMs: 125_000, kinds: ["drained"] });
+  assert.deepEqual(r.lines.map((l) => l.event), ["drained", "drained", "timeout"], "the close of a Blocked one is no new drain");
+});
+
+test("a wait whose kinds leave drained out (#285 review) carries no queue state on its cursor, so a later wait tells the drain", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:blocked"]);
+  const first = await waiting(gh, [() => gh.state(5, "factory:question")]);
+  assert.match(first.lines.at(-1).cursor, /^\d+d$/);
+  gh.issue(7, [OBJ, "factory:running"]);
+  const review = await waiting(gh, [() => gh.state(7, "factory:in-review")], { since: parseCursor(first.lines.at(-1).cursor), kinds: ["in-review"] });
+  assert.match(review.lines[0].cursor, /^\d+$/, "no state it did not keep current");
+  gh.s.prs["factory/7"] = [{ number: 77, merged_at: "2026-11-14T14:00:30Z" }];
+  const drained = await waiting(gh, [() => (gh.state(7, null), gh.event(7, "closed"))], { since: parseCursor(review.lines[0].cursor), kinds: ["drained"] });
+  assert.deepEqual(drained.lines.map((l) => l.event), ["drained"]);
+});
+
 test("a read cut off at --timeout (#285 review) leaves the cursor where it was: the timeout line carries it, and a restart from it tells the batch", async () => {
   const gh = repoState();
   gh.issue(5, [OBJ, "factory:in-review"]);

@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { fakeProc } from "./fixtures/machine.mjs";
+import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
 import { Local, STAGE_RECORD, holderId, machineIdentity } from "../scripts/local.mjs";
 import { claimBody, claimMarker } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
@@ -194,7 +194,7 @@ async function serveTicks(fake, { ticks = 1, live = false } = {}) {
   const loop = Object.assign(Object.create(Local.prototype), {
     dev, repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", notice: null, harness: "claude",
     wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2", FACTORY_MAX_CONCURRENT: "2" }, opts: { token: "t" }, holder: holderId(machineIdentity()),
-    machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
+    machine: { home: budgetHome(), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     children: new Set(), firstSetup: new Map(), claimRetryMs: 0, claimSettleMs: 0,
     stopOnSignals: () => {},
     cleanup: async () => {},

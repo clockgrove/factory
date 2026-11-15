@@ -8,7 +8,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fakeProc } from "./fixtures/machine.mjs";
+import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
 import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
 import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
 import { DOWNGRADE_LINE, checkoutProblem, markInUse, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningFactory, startProblem } from "../scripts/lib/release.mjs";
@@ -359,7 +359,7 @@ async function serveOver(ad, { wf, factory, atTick, paused = () => [], stubs = (
   delete process.env.FACTORY_HARNESS;
   let tick = 0;
   const loop = Object.assign(Object.create(Local.prototype), {
-    machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
+    machine: { home: budgetHome(), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     dev: ad.dev,
     settingsBranch: "main",
     // Every tick fetches, so a push between two ticks is seen at the next.

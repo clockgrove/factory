@@ -15,7 +15,7 @@ import { pooledStreak, pooledTable, streaks, streakTable, tagTime, verdict } fro
 import { appendScorecard } from "../score.mjs";
 import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
 import { progressTail } from "../../plugin/scripts/lib/session.mjs";
-import { blocked, cleanMerge, localMerge, OPERATOR, questionAnswered, REPO } from "./fixtures/github.mjs";
+import { blocked, cleanMerge, localMerge, OPERATOR, questionAnswered, REPO, withHandover } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
 const prices = loadPrices();
@@ -487,6 +487,33 @@ test("pooledStreak: two repositories' rows in the order they ended, any harness;
   assert.match(md, /^\| 3 \| 3 \| 5 \/ 6 \| acme\/widgets#4 \|$/m);
   assert.match(md, /^- acme\/widgets#2 \(unknown\) 2031-03-04T00:00:00Z: no: first human action: comment$/m);
   assert.match(md, /Left out \(clock started before v9\.9\.9\): acme\/gadgets#4/);
+});
+
+test("a workflow hand-over scored as an owner step extends the streak and the pooled streak, and each says so; scored as input it breaks them", () => {
+  const handed = withHandover(cleanMerge(42));
+  const clean = cleanMerge(43); // ends at the same time: the issue number orders them
+  const rows = [score(handed), score(clean)];
+  const s = streaks(rows, { from: "2031-03-01T00:00:00Z" });
+  const h = Object.values(s.harnesses)[0];
+  assert.deepEqual([h.current, h.walkAway, h.finished], [2, 2, 2]);
+  assert.deepEqual(h.sequence.map((x) => [x.issue, x.ok, x.ownerStep ?? null]), [[42, true, "workflow hand-over"], [43, true, null]]);
+  assert.equal(h.sequence[0].why, "walk-away merge; owner step: workflow hand-over");
+  assert.deepEqual(s.handover, ["owner-step"]);
+  const md = streakTable(s, { repository: REPO });
+  assert.match(md, /^Streak on .* A workflow hand-over counts as normal work \(--handover owner-step\): applying it is an owner step after the merge, which the entry names, not input\.$/m);
+  assert.match(md, /^- #42 2031-03-02T03:30:00Z: yes, owner step: workflow hand-over$/m);
+  assert.match(md, /^- #43 2031-03-02T03:30:00Z: yes$/m);
+  const p = pooledStreak(rows.map((r) => ({ ...r, repository: REPO })), { from: "2031-03-01T00:00:00Z" });
+  assert.deepEqual([p.current, p.sequence[0].ownerStep], [2, "workflow hand-over"]);
+  const pmd = pooledTable(p, { repositories: [REPO] });
+  assert.match(pmd, /^Pooled streak .* A workflow hand-over counts as normal work \(--handover owner-step\)/);
+  assert.match(pmd, /^- acme\/widgets#42 \(unknown\) 2031-03-02T03:30:00Z: yes, owner step: workflow hand-over$/m);
+
+  const strict = streaks([handed, clean].map((c) => scoreObjective(c, { prices, now: NOW, handover: "input" })), { from: "2031-03-01T00:00:00Z" });
+  assert.deepEqual(Object.values(strict.harnesses)[0].sequence.map((x) => x.ok), [false, true]);
+  assert.match(streakTable(strict, { repository: REPO }), /A workflow hand-over is input here \(--handover input\): it breaks the streak\./);
+  // Rows scored by both rules (a standing scorecard's older rows) say so.
+  assert.match(streakTable(streaks([...rows, { ...rows[1], issue: 44, walkAway: { ...rows[1].walkAway, handover: undefined } }], { from: null }), { repository: REPO }), /scored per row here \(walkAway\.handover\): an owner step on some, input on others\./);
 });
 
 test("score.mjs: several --repo values need --streak and --since, and take no issue-keyed option", () => {

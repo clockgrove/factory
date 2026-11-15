@@ -12,7 +12,7 @@ import { cacheOf, costOf, loadPrices, parseUsageText, priceTokens, sessionsOf } 
 import { factoryRequests, handoverSteps, humanActions, localFactoryActions, markdownTable, scoreObjective, splitInterventions, summaryLine } from "../lib/objective.mjs";
 import { bySelf, dispatchLatency, factoryLogin, failedStartsOf, lastWrite, launchesOf, phaseMinutes, setupSeconds } from "../lib/phases.mjs";
 import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-drill.mjs";
-import { blocked, cleanMerge, humanPush, questionAnswered, REPO, snapshotOf } from "./fixtures/github.mjs";
+import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, questionAnswered, REPO, snapshotOf, withHandover } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
 import { usdText } from "../../plugin/scripts/lib/logic.mjs";
 import { handoverLine } from "../../plugin/scripts/lib/handover.mjs";
@@ -54,20 +54,23 @@ test("human push: a maintainer's commit on the branch after the label breaks wal
   assert.deepEqual(timed.operator, { minutes: 12, basis: "--minutes (stopwatch)" });
 });
 
-test("workflow hand-over: a merged PR carrying Factory's hand-over line leaves a person's step, asked for, counted like any other operator minute", () => {
+test("workflow hand-over, scored as input: a merged PR carrying Factory's hand-over line leaves a person's step, asked for, counted like any other operator minute", () => {
   const c = cleanMerge(45, usage("claude"));
   c.pulls[0].body = `${handoverLine({ issue: 45, url: "https://github.test/c", files: [".github/workflows/ci.yml"] })}\n\n## Undone\n- the CI trigger: handed over\n\nCloses #45\n`;
-  const row = scoreObjective(c, { prices, now: NOW });
+  const input = { prices, now: NOW, handover: "input" };
+  const row = scoreObjective(c, input);
   assert.equal(row.exit, "merged");
   assert.equal(row.walkAway.value, false);
   assert.deepEqual(row.walkAway.firstHumanAction, { at: c.pulls[0].merged_at, where: "PR #100", kind: "workflow hand-over", by: "a person (applies the patch)", detail: "", asked: "workflow hand-over" });
   assert.equal(row.walkAway.askedOnly.value, false);
   assert.equal(row.walkAway.bucket, "miss");
   assert.deepEqual(row.operator, { minutes: "unknown", basis: "a workflow hand-over is a person's step: give --minutes <issue>=<n> from a stopwatch" });
-  assert.deepEqual(scoreObjective(c, { prices, minutes: 4, now: NOW }).operator, { minutes: 4, basis: "--minutes (stopwatch)" });
+  assert.deepEqual(scoreObjective(c, { ...input, minutes: 4 }).operator, { minutes: 4, basis: "--minutes (stopwatch)" });
+  assert.equal(row.ownerStep, null);
+  assert.equal(row.walkAway.handover, "input");
   // The same body without Factory's marker line (a person's copy, or none) is no hand-over.
   c.pulls[0].body = "## Undone\n- nothing\n\nCloses #45\n";
-  assert.equal(scoreObjective(c, { prices, now: NOW }).walkAway.value, true);
+  assert.equal(scoreObjective(c, input).walkAway.value, true);
 });
 
 test("workflow hand-over: on a split Objective each merged part with Factory's line is one step, and the actions and Factory's requests agree", () => {
@@ -80,8 +83,77 @@ test("workflow hand-over: on a split Objective each merged part with Factory's l
   const steps = handoverSteps(c).map((a) => a.at);
   assert.deepEqual(steps, [c.pulls[0].merged_at, second.merged_at]);
   assert.deepEqual(factoryRequests(c, "2031-03-02T01:00:00Z").filter((r) => r.kind === "workflow hand-over").map((r) => r.at), steps);
-  const row = scoreObjective(c, { prices, now: NOW });
+  const row = scoreObjective(c, { prices, now: NOW, handover: "input" });
   assert.equal(row.walkAway.interventions.asked, 2);
+});
+
+test("workflow hand-over, scored as an owner step (the default): the Objective walks away, and the person's step is shown apart with its own minutes", () => {
+  const MAINTAINER = { login: "maintainer", type: "User" };
+  const c = withHandover(cleanMerge(47, usage("claude")));
+  const merged = c.pulls[0].merged_at;
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.walkAway.handover, "owner-step");
+  assert.equal(row.walkAway.value, true);
+  assert.equal(row.walkAway.bucket, "walk-away");
+  assert.equal(row.walkAway.askedOnly.value, true);
+  assert.equal(row.walkAway.humanActions, 0);
+  assert.match(row.walkAway.reason, /^merged with no human action after the label; owner step: workflow hand-over \(PR #100\)$/);
+  // Factory still asked for it: the request is listed, and nothing answered it inside the run.
+  assert.deepEqual(row.walkAway.interventions.requests.filter((r) => r.kind === "workflow hand-over").map((r) => r.at), [merged]);
+  assert.deepEqual(row.operator, { minutes: 0, basis: "clean merge; the owner step's minutes are apart (ownerStep)" });
+  assert.deepEqual(row.ownerStep, { kind: "workflow hand-over", steps: [{ at: merged, where: "PR #100" }], applied: null, minutes: "unknown", basis: "not applied yet (factory:handover still on); give --owner-minutes <issue>=<n> from a stopwatch" });
+  // The person removing factory:handover after the merge marks it applied: part of the owner step, not input. Its
+  // minutes come from --owner-minutes, never from --minutes or the timestamps.
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: MAINTAINER, created_at: "2031-03-02T05:00:00Z" });
+  const done = scoreObjective(c, { prices, ownerMinutes: 7, now: NOW });
+  assert.equal(done.walkAway.value, true);
+  assert.equal(done.walkAway.humanActions, 0);
+  assert.deepEqual(done.ownerStep.applied, { at: "2031-03-02T05:00:00Z", by: "maintainer" });
+  assert.deepEqual([done.ownerStep.minutes, done.ownerStep.basis], [7, "--owner-minutes (stopwatch)"]);
+  assert.equal(done.operator.minutes, 0);
+  const table = markdownTable([done]);
+  assert.match(table, /\| Operator min \| Owner step min \| Cost \|/);
+  assert.match(table, /\| #47 \| merged \| yes, owner step: workflow hand-over \| yes \| 0 \/ 0 \| pending \| 0 \| 7 \(workflow hand-over\) \|/);
+  assert.match(summaryLine([done]), /^Walk-away: 1 of 1 .* Owner steps \(a workflow hand-over, scored as normal work, its minutes apart\): #47 7 \(workflow hand-over\)\.$/);
+  assert.match(markdownTable([row]), /\| 0 \| unknown \(workflow hand-over, not applied yet\) \|/);
+
+  // The same row under the strict rule: one asked-for action at the merge, and the label removal is input too.
+  const strict = scoreObjective(c, { prices, now: NOW, handover: "input" });
+  assert.equal(strict.walkAway.value, false);
+  assert.equal(strict.walkAway.humanActions, 2);
+  assert.equal(strict.ownerStep, null);
+  assert.match(summaryLine([strict]), / Workflow hand-overs scored as input: #47\.$/);
+  assert.throws(() => scoreObjective(c, { prices, now: NOW, handover: "skip" }), /handover: skip is not one of owner-step, input/);
+});
+
+test("workflow hand-over: an owner step only when Factory's comment with the patch is on the issue; else it stays a person's action", () => {
+  const unposted = scoreObjective(withHandover(cleanMerge(47), { posted: false }), { prices, now: NOW });
+  assert.equal(unposted.walkAway.value, false);
+  assert.equal(unposted.ownerStep, null);
+  assert.equal(unposted.walkAway.firstHumanAction.kind, "workflow hand-over");
+  assert.equal(unposted.walkAway.firstHumanAction.detail, "Factory's hand-over comment with the patch is not on the issue");
+  // A person's comment carrying the marker is not Factory's hand-over; nor is Factory's notice with no patch in it.
+  assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "maintainer", type: "User" } }), { prices, now: NOW }).ownerStep, null);
+  const notice = withHandover(cleanMerge(47));
+  notice.issueComments.at(-1).body = notice.issueComments.at(-1).body.replace(/```diff[\s\S]*```/, "");
+  assert.equal(scoreObjective(notice, { prices, now: NOW }).walkAway.value, false);
+});
+
+test("workflow hand-over in local mode: Factory's own factory:handover label under the operator's login is Factory's, the operator's later removal is the owner step's", () => {
+  const c = withHandover(localMerge(60), { by: OPERATOR });
+  c.issueTimeline.push({ event: "labeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T01:20:05Z" });
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: OPERATOR, created_at: "2031-03-02T04:00:00Z" });
+  const own = localFactoryActions(c);
+  assert.equal(own("2031-03-02T01:20:05Z", OPERATOR, "labeled factory:handover"), true);
+  // Removing it inside a run's window is Factory dropping the hand-over; after the merge, outside any, it is the person's.
+  assert.equal(own("2031-03-02T01:30:00Z", OPERATOR, "unlabeled factory:handover"), true);
+  assert.equal(own("2031-03-02T04:00:00Z", OPERATOR, "unlabeled factory:handover"), false);
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.walkAway.value, true, row.walkAway.reason);
+  assert.deepEqual(row.ownerStep.applied, { at: "2031-03-02T04:00:00Z", by: "dev" });
+  // Under the strict rule the first action is the hand-over at the merge, not Factory's own label.
+  const strict = scoreObjective(c, { prices, now: NOW, handover: "input" });
+  assert.equal(strict.walkAway.firstHumanAction.kind, "workflow hand-over");
 });
 
 test("human push: the bot's own commits and comments never count, nor the label that starts the clock", () => {
@@ -269,7 +341,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   const out = execFileSync("node", [join(BENCH, "score.mjs"), "--replay", file, "--usage", join(USAGE, "claude"), "--out", join(dir, "rows.json"), "--append", standing], { encoding: "utf8", cwd: dir });
   assert.match(out, /^\| Issue \| Exit \| Walk-away \|/);
   assert.match(out, /^\| Issue \| Exit \| Walk-away \| Walk-away \(asked only\) \| Asked \/ unprompted \| Quality \|/);
-  assert.match(out, /\| #42 \| merged \| yes \| yes \| 0 \/ 0 \| pending \| 0 \| \$7\.43 \(201k in \/ 2700k cached \/ 0k written \/ 50k out\) \| usd \|/);
+  assert.match(out, /\| #42 \| merged \| yes \| yes \| 0 \/ 0 \| pending \| 0 \| none \| \$7\.43 \(201k in \/ 2700k cached \/ 0k written \/ 50k out\) \| usd \|/);
   assert.match(out, /^Walk-away: 1 of 1 Objective\(s\) \(1 merged\) with no human input; 1 of 1 counting only input Factory asked for\. Interventions: 0 asked for \(Question, Blocked notice, review request\), 0 unprompted\.$/m);
   const rows = JSON.parse(read(join(dir, "rows.json"))).rows;
   assert.equal(rows.length, 1);
@@ -287,6 +359,29 @@ test("score.mjs refuses a bad invocation with exit 64", () => {
   } catch (error) {
     code = error.status;
     assert.match(String(error.stderr), /--issue N/);
+  }
+  assert.equal(code, 64);
+});
+
+test("score.mjs --handover: owner-step by default, input on request, the rule in the JSON; --owner-minutes times the owner step; a bad rule exits 64", () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-bench-test-"));
+  const file = join(dir, "snapshot.json");
+  const c = withHandover(cleanMerge(47));
+  c.issueTimeline.push({ event: "unlabeled", label: { name: "factory:handover" }, actor: { login: "maintainer", type: "User" }, created_at: "2031-03-02T05:00:00Z" });
+  writeFileSync(file, JSON.stringify(snapshotOf(c)));
+  const score = (...args) => execFileSync("node", [join(BENCH, "score.mjs"), "--replay", file, "--usage", join(USAGE, "claude"), ...args], { encoding: "utf8", cwd: dir, stdio: "pipe" });
+  const out = score("--owner-minutes", "47=7", "--out", join(dir, "rows.json"));
+  assert.match(out, /\| #47 \| merged \| yes, owner step: workflow hand-over \| yes \| 0 \/ 0 \| pending \| 0 \| 7 \(workflow hand-over\) \|/);
+  const json = JSON.parse(read(join(dir, "rows.json")));
+  assert.equal(json.handover, "owner-step");
+  assert.deepEqual([json.rows[0].walkAway.handover, json.rows[0].ownerStep.minutes, json.rows[0].ownerStep.applied.by], ["owner-step", 7, "maintainer"]);
+  assert.match(score("--handover", "input"), /\| #47 \| merged \| no: first human action: workflow hand-over on PR #100 /);
+  let code = 0;
+  try {
+    score("--handover", "skip");
+  } catch (error) {
+    code = error.status;
+    assert.match(String(error.stderr), /--handover takes owner-step or input, not skip/);
   }
   assert.equal(code, 64);
 });

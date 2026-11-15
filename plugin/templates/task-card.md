@@ -6,7 +6,7 @@ You never write to GitHub: no push, no PR, no comment, no label, no `gh` or `git
 
 Outputs: commits on {{branch}}, which Factory pushes once you stop, and these files in the directory named by FACTORY_OUT:
 - `plan.md`: the plan (factory-objective-plan). Factory posts it on the issue as the plan comment and keeps it current as you edit the file.
-- `pr.md`: the one PR, its first line the title and the rest the body (factory-deliver-pr). Factory opens or updates the PR from it, keeps it a draft until its own validation is green, then marks it ready and applies the review label; it links the issue itself.
+- `pr.md`: the one PR, its first line the title and the rest the body (factory-deliver-pr). Factory opens or updates the PR from it, keeps it a draft until its own validation is green (with required checks: until it has pushed, the checks then running beside the review), then marks it ready and applies the review label; it links the issue itself.
 - `replies.json`: `[{"id": <review comment id>, "body": "..."}]`, one reply per reviewer comment, once.
 - `note.md`: only when you are blocked beyond recovery, what blocked you; Factory posts it on the issue.
 - `workflow.patch`: only when the Objective needs a change under `.github/workflows/`, which Factory never pushes: that change as `git diff` writes it, kept out of your commits, for a person to apply (factory-deliver-pr). `$FACTORY_IN/workflow.patch` is the one Factory published.

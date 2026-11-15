@@ -79,6 +79,7 @@ import {
   unreadNow,
   headMarks,
   readQueueRed,
+  recordQueueFix,
   redLines,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stageStopSignal, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
@@ -159,10 +160,11 @@ export const FOUNDATION_AGENT = "foundation-reviewer";
 
 /**
  * One foundation call's runHarness arguments: as the foundation-reviewer agent (Claude and Copilot by --agent; Codex has no
- * such flag, so foundationPrompt names its definition file), marked a reviewer call (no worker secrets).
+ * such flag, so foundationPrompt names its definition file), marked a reviewer call (no worker secrets). `signal`: the
+ * pre-review pass beside it ending the stage (reviewOverlap) ends the call.
  */
-export function foundationCall({ harness, model, effort, label, timeoutMs, prompt, maxUsd, cwd, env, eventsFile, onLine }) {
-  return { harness, model, effort, prompt, maxUsd, agent: harness === "codex" ? undefined : FOUNDATION_AGENT, reviewer: true, cwd, env, timeoutMs, eventsFile, label, onLine };
+export function foundationCall({ harness, model, effort, label, timeoutMs, prompt, maxUsd, cwd, env, eventsFile, onLine, signal = null }) {
+  return { harness, model, effort, prompt, maxUsd, agent: harness === "codex" ? undefined : FOUNDATION_AGENT, reviewer: true, cwd, env, timeoutMs, eventsFile, label, onLine, ...(signal ? { signal } : {}) };
 }
 
 /**
@@ -205,41 +207,67 @@ export function answerFed({ fresh, decisions, listed, afterPush }) {
 
 /**
  * The pre-review pass beside the reviewer: `run(more)` starts validationLoop on the head with `more` (its reading hook,
- * held red, phase lines and stop signal). `beside()` waits for the checks' first reading and answers whether the reviewer
- * starts now: not when a required check is red already or the pass ended before any reading (that head gets its fix
- * passes first). From then a red that would get a fix pass is held for the answer pass (`held`), and the pass's phase
- * lines read `during the reviewer: ...` until the reviewer ends. The progress lines say how the two overlap, so each
- * minute is counted once (bench/lib/phases.mjs): the reviewer's line ends `beside the required checks on <sha>` while
- * the wait goes on, the checks' end during the reviewer is `required checks on <sha> <green|red|settled> while the
- * reviewer runs`, and a wait that outlasts the reviewer is `waiting for required checks on <sha> after the reviewer`.
- * `phase(line)` writes another line of the pass's (its triage's) the same way. `reviewerDone()` returns the pass's
- * result; `stop()` ends its wait (the stage ended).
+ * held red, phase lines and stop signal). `beside()` waits for the checks' readings and answers whether the reviewer
+ * starts now: yes at the first reading where a check run exists on the head (CI has started) and no required check is
+ * red, and `conflicted()` (the PR's mergeable state) is not a conflict; no when a reading shows a required check red, the
+ * PR conflicts, or the pass ends first (a conflict, checks that never start, a red that stays: that head gets its fix
+ * passes, or its end, before any reviewer pass). From then a red that would get a fix pass is held for the answer pass
+ * (`held`), and the pass's phase lines read `during the reviewer: ...` until the reviewer ends. A pass that ends the
+ * stage while the reviewer runs (anything but green or a held red, or a pass that threw) aborts `signal`, which the
+ * reviewer's calls carry, and `ends()` says so. The progress lines say how the two overlap, so each minute is counted once
+ * (bench/lib/phases.mjs): the reviewer's line ends `beside the required checks on <sha>` while the wait goes on, the
+ * checks' end during the reviewer is `required checks on <sha> <green|red|settled> while the reviewer runs`, and a wait
+ * that outlasts the reviewer is `waiting for required checks on <sha> after the reviewer`. `phase(line)` writes another
+ * line of the pass's (its triage's) the same way. `reviewerDone()` returns the pass's result; `stop()` ends its wait (the
+ * stage ended).
  */
-export function reviewOverlap({ run, progress, head }) {
+export function reviewOverlap({ run, progress, head, conflicted = async () => false }) {
   const ctl = new AbortController();
+  const reviewer = new AbortController();
   let reviewing = false;
   let reviewerEnded = false;
   let settled = false;
-  let firstRead;
-  const read = new Promise((r) => (firstRead = r));
+  let ending = false;
+  let decide;
+  const decided = new Promise((r) => (decide = r));
   const short = () => String(head() || "").slice(0, 7);
   const phase = (line) => progress(reviewing && !reviewerEnded ? `during the reviewer: ${line}` : line);
+  const end = () => {
+    ending = true;
+    if (reviewing && !reviewerEnded) reviewer.abort();
+  };
   const done = run({
-    onRead: (state) => firstRead(state),
+    // A required check red already: no reviewer yet. A check run on the head: CI has started, the reviewer may.
+    onRead: (state, runs = []) => (state.failed.length ? decide(false) : runs.length ? decide(true) : undefined),
     holdRed: () => reviewing && "handed to the answer pass with the review",
     onPhase: phase,
     signal: ctl.signal,
-  }).then(async (r) => {
-    settled = true;
-    if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`);
-    return r;
-  });
+  }).then(
+    async (r) => {
+      settled = true;
+      decide(false);
+      if (!r.green && !r.held && !r.aborted) end();
+      if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`);
+      return r;
+    },
+    (e) => {
+      settled = true;
+      decide(false);
+      end();
+      throw e;
+    },
+  );
+  // Read when the reviewer is done (reviewerDone); a pass that throws meanwhile is no unhandled rejection.
+  done.catch(() => {});
   return {
     done,
     phase,
+    signal: reviewer.signal,
+    ends: () => ending,
     beside: async () => {
-      const first = await Promise.race([read, done.then(() => null)]);
-      if (!first || settled || first.failed.length) return false;
+      if (!(await decided) || settled) return false;
+      if (await conflicted().catch(() => false)) return false;
+      if (settled) return false;
       reviewing = true;
       return true;
     },
@@ -841,7 +869,18 @@ async function main() {
       return false;
     }
     pr = await getPr(repo, pr.number, token);
-    await postValidated(repo, pr.number, issue, pr.head.sha, token);
+    // The marker goes on the head the checks were green on. A head that moved since (a person's push) is a new head:
+    // it gets the review again, with its own validation, and nothing of this stage goes up for it.
+    const validated = pre.sha || outbox.expected() || pr.head.sha;
+    if (pr.head.sha !== validated) {
+      const reason = `PR #${pr.number}'s head moved to ${pr.head.sha.slice(0, 7)} while ${validated.slice(0, 7)} was validated; the review runs again on the new head`;
+      log(reason);
+      await dropLabel();
+      await addLabels(repo, pr.number, [REVIEW_LABEL], token);
+      await finish("delivered", reason);
+      return false;
+    }
+    await postValidated(repo, pr.number, issue, validated, token);
     return true;
   };
 
@@ -858,7 +897,7 @@ async function main() {
     const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress) }), drift, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
-      overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha });
+      overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
       stopOverlap = overlap.stop;
       // The first reading of the head's checks (or the pass's end, before any): a required check red already, or a pass
       // that ended, is waited for here; else the reviewer starts and the wait goes on beside it.
@@ -877,15 +916,20 @@ async function main() {
   // the merge below enqueues it again as any drop (or Blocks at the queue's bound).
   const queued = heldRed
     ? null
-    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
         // Unread, the drop stays handed: the merge pass hands it to the next review stage.
         log(`the merge queue's red run could not be read: ${String(e?.message || e).slice(0, 160)}`);
         return null;
       });
+  // The drop's record while its fix pass runs: written `fixed` only once that pass has committed (recordQueueFix).
+  let queueFix = null;
   if (queued) {
     log(queued.line);
     await progress(queued.line);
-    if (queued.state === "fixed") heldRed = queued.red;
+    if (queued.state === "fixing") {
+      heldRed = queued.red;
+      queueFix = queued.record;
+    }
     if (queued.state === "blocked") {
       log(queued.reason);
       await dropLabel();
@@ -926,9 +970,20 @@ async function main() {
     eventsFile,
     label: "review",
     onLine: reviewLive?.onLine,
+    // The pass beside it ending the stage (a conflict, checks that never start, a red that stays) ends the reviewer too.
+    ...(overlap ? { signal: overlap.signal } : {}),
   });
   reviewLive?.finish();
   if (!alreadyReviewed) mark(reviewRec, reviewRec);
+  // The pass beside the reviewer ended the stage: its end, with nothing posted (the next stage reviews the head it works on).
+  const overlapEnded = async (...recs) => {
+    records.push(...recs);
+    const pre = await overlap.reviewerDone();
+    overlap = null;
+    stopOverlap = null;
+    await preSettled(pre);
+  };
+  if (overlap?.ends()) return overlapEnded(reviewRec);
   // A pass that missed (handoff.mjs reviewMissed: the call failed, as a crash, a non-zero exit, a cap or an idle kill
   // does; its answer held no JSON; or it judged none of the issue's acceptance entries) reruns once in a fresh session,
   // on every harness: on the fallback reviewer where the harness has one (Claude's Opus 5.5 at xhigh), else on the same
@@ -962,8 +1017,10 @@ async function main() {
       timeoutMs: retryTimeout,
       eventsFile,
       label: again.label,
+      ...(overlap ? { signal: overlap.signal } : {}),
     });
     mark(retryRec, retryRec);
+    if (overlap?.ends()) return overlapEnded(retryRec);
   }
   if (!alreadyReviewed) records.push(retryRec || reviewRec);
   // The call whose answer goes up: the rerun's when it produced a review, else the first pass's when that did (a pass that
@@ -1007,6 +1064,7 @@ async function main() {
             env: harnessEnv,
             eventsFile,
             onLine: foundationLive.onLine,
+            signal: overlap?.signal ?? null,
           }),
         );
         mark(rec, rec);
@@ -1015,6 +1073,7 @@ async function main() {
       },
     });
     foundationLive.finish();
+    if (overlap?.ends()) return overlapEnded();
     if (found.stop === "cap") return blockedAtCap("the foundation pass");
     if (found.stop === "time") return blockedAtTime("the foundation pass");
     if (found.stop) {
@@ -1125,6 +1184,8 @@ async function main() {
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
     await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    // The head before the pass: a queue fix counts once the pass has pushed a commit on it (recordQueueFix).
+    const headBefore = outbox.expected();
     let rec = await runHarness(answerArgs(resumeAnswer));
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
@@ -1162,6 +1223,12 @@ async function main() {
     if (!(await outbox.push())) log(`push refused: ${outbox.error}`);
     const pushed = !outbox.failed;
     if (pushed) pr = await publish(pr);
+    // The queue's fix pass committed and is on GitHub: its record counts toward the bound now. One that committed nothing
+    // leaves the drop handed, for the next stage.
+    if (queueFix && pushed && outbox.expected() && outbox.expected() !== headBefore) {
+      await recordQueueFix(repo, issue, pr.number, queueFix, token).catch((e) => log(`queue fix record: ${e.message.slice(0, 120)}`));
+      queueFix = null;
+    }
     const replied = !pushed
       ? 0
       : await postReplies(repo, pr.number, issue, out["replies.json"], toAnswer.map((c) => c.id), token).catch((e) => {

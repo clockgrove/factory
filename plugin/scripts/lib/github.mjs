@@ -753,7 +753,7 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
  * `ended(runs)` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends
- * the wait unfinished. `onRead(state)` (optional) gets each reading's evaluateChecks state as it is made; `signal` (an
+ * the wait unfinished. `onRead(state, runs)` (optional) gets each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an
  * AbortSignal, optional) ends the wait, unfinished, at its next pause.
  */
 /** `ms` of sleep, cut short when `signal` aborts. */
@@ -791,7 +791,7 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     }
     state = evaluateChecks(names, runs);
     // Each reading as it is made (session.mjs validationLoop's `onRead`: whether the head is known red yet).
-    onRead?.(state);
+    onRead?.(state, runs.map(runShape));
     if (state.done) break;
     if (conflicted && (await conflicted().catch(() => false))) {
       conflict = true;

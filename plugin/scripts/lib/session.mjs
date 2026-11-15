@@ -1168,7 +1168,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         // Passing on a rerun is not proof of a flake, as after a triage rerun: said where a person reads it.
         if (r.green) {
           if (onPhase) await onPhase(`rerun on ${sha.slice(0, 7)} turned green: ${(a.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
-          return { green: true, again: true };
+          return { green: true, again: true, sha };
         }
       }
       // Red again the same way, GitHub's side both times: every failed job, before the rerun and after, failed in its
@@ -1380,7 +1380,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       return { green: false, passes, lastOutput: "", command: v.command, usage, notStarted: v.notStarted };
     }
     last = v;
-    if (v.green) return { green: true, passes, lastOutput: "", usage };
+    // `sha`: the head the required checks were green on (the caller's validated marker goes on it), when they were read.
+    if (v.green) return { green: true, passes, lastOutput: "", usage, sha: v.sha ?? null };
     const failed = v.failed;
     const { detail, failures, lead, tail } = await redOf(v);
     // Every failing job fails the same way on the default branch: not this change's, so no fix pass; handed back.
@@ -2259,42 +2260,61 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
 
 /** The queue's removal code when the required checks failed on its merge_group commit (GitHub's FAILED_CHECKS). */
 export const QUEUE_RED_CODE = "failed_checks";
+/** The most queue fix passes (red queue runs in the PR's own change) per re-entry of the Objective, as maxPasses bounds a stage's. */
+export const QUEUE_FIX_PASSES = 2;
+/** How far back from a drop the PR's failed merge-group runs are listed (one page of runs, newest first). */
+export const QUEUE_RED_LOOKBACK_MS = 6 * 3600_000;
 
 const QUEUE_RED_RECORD = (issue) => `<!-- factory:${issue}:queue-red-record `;
 /** The marker of Factory's record of one red queue drop on the issue, keyed by the drop's time (one comment per drop). */
 export const queueRedMarker = (issue, at) => marker(issue, "queue-red", String(at).replace(/[^0-9TZ:.-]/g, ""));
+/** How far a record's state has come, so of two records of one drop (two writers) the later one counts. */
+const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocked: 1 };
 
 /**
- * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, kind, sigs}` as JSON, read back by
- * queueRedRecords) and one line for a person. `state`: `handed` (the merge pass gave it to the review stage), `fixed`
- * (its failure was the PR's own: one fix pass, `sigs` its failure classes), `requeued` (a flake, GitHub's side or the
- * default branch's: enqueued again as any drop, `kind` which) or `blocked` (the PR's own again, of a class already fixed).
+ * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, head, kind, sigs}` as JSON, read back
+ * by queueRedRecords) and one line for a person. `head`: the PR head the drop was of; `tries`: the review stages that
+ * started its fix pass. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
+ * decided it, or its fix pass has committed), `fixed` (the PR's own change, and its fix pass
+ * committed: `sigs` its failure classes), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
+ * as any drop), `blocked` (the PR's own change past its bound) or `superseded` (the PR's head moved on before a stage read it).
  */
 export function queueRedBody(issue, prNumber, rec) {
   const at = Number.isFinite(Date.parse(rec.at)) ? new Date(Date.parse(rec.at)).toISOString().replace(/\.\d{3}Z$/, "Z") : "an unknown time";
   const said = {
     handed: "the review stage reads whether the failure is the PR's own change",
-    fixed: "the failure is the PR's own change: one fix pass, then the queue again",
-    requeued: `not the PR's change (${rec.kind || "unknown"}): enqueued again as any drop`,
-    blocked: "the PR's own change failed the same way after its fix pass: Blocked",
+    fixed: "the failure is the PR's own change: its fix pass committed, then the queue again",
+    requeued: `not known to be the PR's change (${rec.kind || "unknown"}): enqueued again as any drop`,
+    blocked: "the PR's own change, past its fix passes: Blocked",
+    superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
-  return `${QUEUE_RED_RECORD(issue)}${JSON.stringify({ at: rec.at, state: rec.state, ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}) })} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
+  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.tries ? { tries: rec.tries } : {}) };
+  return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
-/** Factory's records of red queue drops on the issue (queueRedBody), oldest first: `{at, state, kind, sigs}`. Its own comments only. */
+/**
+ * The records of red queue drops on the issue (queueRedBody), oldest first: `{at, state, head, kind, sigs}`. Factory's own
+ * comments or those of someone who can push (trustedAuthor): a merge pass and a review stage of one Objective can run
+ * under different logins (`serve --all` beside the Action's dispatcher). Two records of one drop: the one further on.
+ */
 export function queueRedRecords(comments, issue) {
-  const out = [];
+  const byAt = new Map();
   for (const c of comments || []) {
-    if (!isSelf(c) || !(c.body || "").startsWith(marker(issue, "queue-red").replace(/ -->$/, ":"))) continue;
+    if (!trustedAuthor(c) || !(c.body || "").startsWith(marker(issue, "queue-red").replace(/ -->$/, ":"))) continue;
     const line = (c.body || "").split("\n").find((l) => l.startsWith(QUEUE_RED_RECORD(issue)) && l.endsWith(" -->"));
     try {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
-      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.state === "string") out.push({ at: v.at, state: v.state, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [] });
+      if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], tries: Number.isInteger(v.tries) && v.tries > 0 ? v.tries : 0 };
+      const key = new Date(Date.parse(v.at)).toISOString();
+      const had = byAt.get(key);
+      const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 100 + r.tries;
+      if (!had || rank(rec) >= rank(had)) byAt.set(key, rec);
     } catch {
       // not a record
     }
   }
-  return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return [...byAt.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
 
 /** Whether a record is of the drop at `at` (the timeline's time, to the minute as the requeue records match). */
@@ -2307,19 +2327,19 @@ export const writeQueueRed = (repo, issue, prNumber, rec, opts) => upsertComment
 export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job:${job?.name}`);
 
 /**
- * What the review stage does with a red queue drop the merge pass handed it (pendingQueueRed), decided as a red PR
- * check is (validationLoop): the queue's failed run for the PR at or before the drop (github.mjs mergeGroupRuns, read
- * with `actionsToken`), its commit's failed check runs, then in order: a required job GitHub never started
+ * What a red queue drop the merge pass handed to the review stage is, decided as a red PR check is (validationLoop): the
+ * PR's failed merge-group run at or before the drop (github.mjs mergeGroupRuns, read with `actionsToken`, looking back
+ * QUEUE_RED_LOOKBACK_MS), its commit's failed check runs, then in order: a required job GitHub never started
  * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), triage's flaky verdict (`flaky`,
  * triage.mjs classify), every failing job failing the same way on the default branch (`base`, reds.mjs allOnBase), else
- * the PR's own change (`own`). `fixed`: the failure classes (queueRedClass) earlier queue reds of this Objective had their
- * fix pass for. Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
- * detail, tail, lead, command, queue: true}), `sigs` (its classes) and `repeat` (every class had its fix pass already).
- * `none`: no failed queue run of the PR could be read, so nothing is known (enqueued again as any drop).
+ * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
+ * (`none`), or triage is off and no failure names a file or test the PR changes (`unclassified`). Returns `{kind, sha,
+ * reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures, detail, tail, lead, command, queue:
+ * true}) and `sigs` (its classes, queueRedClass).
  */
-export async function queueRedOf({ repo, issue, prNumber, base, at, names = [], triage = null, token, actionsToken = token, fixed = [] }) {
+export async function queueRedOf({ repo, issue, prNumber, base, at, names = [], triage = null, token, actionsToken = token }) {
   const opts = { token };
-  const since = new Date(Date.parse(at) - 6 * 3600_000).toISOString();
+  const since = new Date(Date.parse(at) - QUEUE_RED_LOOKBACK_MS).toISOString();
   const runs = await mergeGroupRuns(repo, prNumber, base, since, { token: actionsToken }).catch((e) => {
     log(`PR #${prNumber}'s merge_group runs are unreadable (${errCode(e)})`);
     return [];
@@ -2334,44 +2354,76 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, names = [], 
   const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
   if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
-  const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
-    log(`triage failed: ${String(e?.message || e).slice(0, 160)}; the change's`);
-    return { flaky: false };
-  });
-  if (verdict?.flaky) return { kind: "flaky", sha, reason: "triage reads every failing job as a flake" };
   const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false }).catch((e) => {
     log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
     return null;
   });
+  // No failed job's log could be read: nothing says what failed, so no fix pass is spent on it.
+  if (!detail?.jobs?.some((j) => String(j.log || "").trim())) return { kind: "none", sha, reason: `the failed jobs' logs on the queue's commit ${sha.slice(0, 7)} could not be read` };
+  const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
+    log(`triage failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { flaky: false, off: true, named: false };
+  });
+  if (verdict?.flaky) return { kind: "flaky", sha, reason: "triage reads every failing job as a flake" };
   if (allOnBase(detail)) return { kind: "base", sha, reason: baseFailureReason(detail) };
   const command = `required checks ${names.join(", ")} on the merge queue's commit ${sha.slice(0, 7)}`;
-  const output = detail?.jobs?.length ? "" : failedRuns.map((r) => `--- ${r.name}: ${r.conclusion}`).join("\n");
-  const { failures, lead, tail } = redOfDetail(detail, { failed: { command, ok: false, code: 1, output } });
-  const sigs = detail?.jobs?.length ? [...new Set(detail.jobs.map(queueRedClass))] : failedRuns.map((r) => `job:${r.name}`);
-  const done = new Set(fixed);
-  return { kind: "own", sha, reason: String(lead || "").split("\n")[0].replace(/^--- /, "") || command, red: { sha, failures, detail: detail ? { ...detail, queue: true } : null, tail, lead, command, queue: true }, sigs, repeat: sigs.every((x) => done.has(x)) };
+  const { failures, lead, tail } = redOfDetail(detail, { failed: { command, ok: false, code: 1, output: "" } });
+  const first = String(lead || "").split("\n")[0].replace(/^--- /, "") || command;
+  // No model to read it (triage off, or no verdict) and no failure naming what the PR changed: not known to be its own.
+  if (!verdict || verdict.off) {
+    if (!verdict?.named) return { kind: "unclassified", sha, reason: `${first}; triage is off and no failure names a file or test the PR changes` };
+  }
+  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))] };
 }
 
 /**
- * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`,
- * read (queueRedOf, with the classes earlier `fixed` records had their fix pass for) and its record written with what
- * follows: `fixed` (the PR's own change, a class with no fix pass yet: the answer pass gets `red`), `blocked` (the PR's
- * own change, every class fixed once already: the stage Blocks with `reason`) or `requeued` (not the PR's change: the
- * merge enqueues it again as any drop). Null when nothing is pending. `names()` gives the required checks, read only then.
+ * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`.
+ * A record of another head than the PR's `head` now is `superseded` (the head moved on: a fix, a person's push). Else the
+ * drop is read (queueRedOf) and: `requeued` (written now: not known to be the PR's change), `blocked` (the PR's own change,
+ * and every class of it had its fix pass, or QUEUE_FIX_PASSES fix passes ran, since the Objective's last re-entry: its
+ * Objective label, `factory:restart` or a Block; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
+ * answer pass gets `red`; the record stays `handed`, its `tries` counted, until recordQueueFix writes `fixed` once that
+ * pass has committed, so a stage that ends before then leaves it for the next; two tries that committed nothing Block). Null when nothing is pending. `names()` gives the required checks,
+ * read only then.
  */
-export async function readQueueRed({ repo, issue, prNumber, base, names = async () => [], triage = null, token, actionsToken = token }) {
+export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
   const records = queueRedRecords(await listComments(repo, issue, { token }), issue);
   const pending = records.at(-1);
   if (pending?.state !== "handed") return null;
-  const fixed = records.filter((r) => r.state === "fixed").flatMap((r) => r.sigs);
-  const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, names: await names(), triage, token, actionsToken, fixed });
-  const state = q.kind !== "own" ? "requeued" : q.repeat ? "blocked" : "fixed";
-  await writeQueueRed(repo, issue, prNumber, { at: pending.at, state, kind: q.kind, sigs: q.kind === "own" ? q.sigs : [] }, { token });
+  if (pending.head && head && pending.head !== head) {
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "superseded" }, { token });
+    return { state: "superseded", line: `merge queue run red at ${pending.at}: the PR's head moved on since (${pending.head.slice(0, 7)} → ${head.slice(0, 7)}); not read` };
+  }
+  const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, names: await names(), triage, token, actionsToken });
   const where = q.sha ? ` on ${q.sha.slice(0, 7)}` : "";
-  const line = `merge queue run red${where}: ${q.reason}; ${state === "fixed" ? "the PR's own change, one fix pass (the answer pass)" : state === "blocked" ? "the PR's own change again, after its fix pass" : `not the PR's change (${q.kind}), enqueued again as any drop`}`;
-  if (state === "blocked") return { state, line, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed again in this PR's own change (${q.reason}) after Factory's fix pass for the same failure; fix it on the branch, then re-apply the label` };
-  return { state, line, red: state === "fixed" ? q.red : null };
+  if (q.kind !== "own") {
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "requeued", kind: q.kind }, { token });
+    return { state: "requeued", line: `merge queue run red${where}: ${q.reason}; not known to be the PR's change (${q.kind}), enqueued again as any drop` };
+  }
+  // The fix passes since the Objective's last re-entry (an unread timeline counts every one).
+  const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:restart", "factory:blocked"], { token }).catch(() => null);
+  const fixes = records.filter((r) => r.state === "fixed" && !(Date.parse(entered) > Date.parse(r.at)));
+  const done = new Set(fixes.flatMap((r) => r.sigs));
+  const over =
+    fixes.length >= QUEUE_FIX_PASSES
+      ? `${fixes.length} fix passes for the merge queue's runs since the Objective last started`
+      : q.sigs.every((x) => done.has(x))
+        ? "fix pass for the same failure"
+        : pending.tries >= 2
+          ? `${pending.tries} fix passes that committed nothing for it`
+          : "";
+  if (over) {
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs }, { token });
+    return { state: "blocked", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
+  }
+  // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
+  const record = { ...pending, kind: "own", sigs: q.sigs, tries: pending.tries + 1 };
+  await writeQueueRed(repo, issue, prNumber, record, { token });
+  return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; the PR's own change, one fix pass (the answer pass)`, red: q.red, record };
 }
+
+/** The fix pass for a red queue drop committed (readQueueRed `fixing`): its record is `fixed`, which counts toward the bound. */
+export const recordQueueFix = (repo, issue, prNumber, record, opts) => writeQueueRed(repo, issue, prNumber, { ...record, state: "fixed" }, opts);
 
 /**
  * The failed jobs of the PR's newest failed merge-queue run since `since`, each with its first failure line (triage.mjs
@@ -2391,6 +2443,23 @@ export async function queueFailureLines(repo, { prNumber, base, since, actionsTo
     if (out.length >= 3) break;
   }
   return out.join("; ");
+}
+
+/**
+ * The Block's words and cause for drops that reached the queue's bound, from what the review stage recorded of the red
+ * ones (queueRedRecords `kind`, the newest counted one): GitHub's side (`infra`, `not-started`) is an outage, the default
+ * branch's own failure (`base`) and a flake read twice (`flaky`) are named as such, and anything else, with the failed
+ * jobs' first lines (`lines`, queueFailureLines), is the work's. Null when nothing was recorded and no line was read.
+ */
+export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
+  const head = `the merge queue dropped the reviewed PR ${drops} times without merging it (${codes.join(", ")})`;
+  const failed = lines ? `; its run on the queue's commit failed: ${lines}` : "";
+  const kind = kinds.at(-1) ?? null;
+  if (kind === "infra" || kind === "not-started") return { cause: "outage", reason: `${head}${failed}. Triage read the failure as GitHub's side (${kind}); rerun the queue's jobs or wait for GitHub, then re-apply the label` };
+  if (kind === "base") return { cause: "work", reason: `${head}${failed}. The default branch fails the same way: fix it there, then re-apply the label` };
+  if (kind === "flaky") return { cause: "work", reason: `${head}${failed}. Triage read the failure as a flake each time: fix or steady that test on the branch or the default branch, then re-apply the label` };
+  if (!lines) return null;
+  return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
 /** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
@@ -2621,7 +2690,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       const mine = queueRedRecords(await listComments(repo, issue, opts), issue).find((r) => sameDrop(r.at, retry.last.at));
       // Handed before and not read yet (the label taken off, a stage that ended first): handed again, one record.
       if (!mine || mine.state === "handed") {
-        if (!mine) await writeQueueRed(repo, issue, prNumber, { at: retry.last.at, state: "handed" }, opts);
+        if (!mine) await writeQueueRed(repo, issue, prNumber, { at: retry.last.at, state: "handed", head: sha }, opts);
         await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
         await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
         delete report.watch;
@@ -2635,11 +2704,14 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       const stuck = hung ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
       // GitHub never started the queue's jobs, through Factory's re-enqueue: an outage handled by the rules.
       if (!hung && stuck.length) report.cause = "outage";
-      // The queue's jobs ran and failed: the Block names the failed jobs and their first failure lines, the work's.
-      const failed = !hung && !stuck.length && retry.codes.includes(QUEUE_RED_CODE) ? await queueFailureLines(repo, { prNumber, base: pr.base?.ref, since, actionsToken }, opts) : "";
-      if (failed) report.cause = "work";
-      report.reason = failed
-        ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}); its run on the queue's commit failed: ${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label`
+      // The queue's jobs ran and failed: the Block names the failed jobs and their first failure lines, with the cause and
+      // advice the review stage's reading of the red drops recorded (queueDropBlock).
+      const red = !hung && !stuck.length && retry.codes.includes(QUEUE_RED_CODE);
+      const kinds = red ? queueRedRecords(await listComments(repo, issue, opts).catch(() => []), issue).filter((r) => r.state === "requeued" && !(Date.parse(since) > Date.parse(r.at))).map((r) => r.kind) : [];
+      const said = red ? queueDropBlock({ drops: retry.drops, codes: retry.codes, kinds, lines: await queueFailureLines(repo, { prNumber, base: pr.base?.ref, since, actionsToken }, opts) }) : null;
+      if (said) report.cause = said.cause;
+      report.reason = said
+        ? said.reason
         : hung
         ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
         : stuck.length

@@ -9,7 +9,7 @@ description: Last step of working a Clockgrove Factory Objective, after factory-
 
 Rebase `factory/<issue>` onto `origin/<default branch>`: Factory fetched it before this pass, and `$FACTORY_IN/base.txt` names its commit. Never fetch, pull or push. Resolve conflicts in favour of the default branch's structure and your change's intent; re-run the validation commands after any non-trivial conflict (with required checks on the task card, the tests the conflict touches).
 
-Write the one PR to `$FACTORY_OUT/pr.md`: its first line is the title, `#<issue>: <goal in a few words>`; the rest is the body. On a rerun, start from `$FACTORY_IN/pr.md`. Factory opens it as a draft and marks it ready once its own validation is green. Write no `Closes`, `Fixes` or `Resolves` line, no @-mention and no HTML comment: Factory links the issue itself and neutralises them.
+Write the one PR to `$FACTORY_OUT/pr.md`: its first line is the title, `#<issue>: <goal in a few words>`; the rest is the body. On a rerun, start from `$FACTORY_IN/pr.md`. Factory opens it as a draft and marks it ready once its own validation is green, or, with required checks, once it has pushed (the review waits for them). Write no `Closes`, `Fixes` or `Resolves` line, no @-mention and no HTML comment: Factory links the issue itself and neutralises them.
 
 ## The PR body
 

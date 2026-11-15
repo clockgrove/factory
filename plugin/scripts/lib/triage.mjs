@@ -1062,7 +1062,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
 
   // A red on a commit no rerun brings back (the merge queue's, after the queue dropped the PR: session.mjs queueRedOf):
   // each failing job asked as red() asks it, nothing rerun and no rerun recorded. `flaky` when red() would have rerun
-  // it (rerunWanted); the verdicts go to the log and the progress comment.
+  // it (rerunWanted); `named` when a failure names a file or test the PR changes; `off` when no model was asked. The
+  // verdicts go to the log and the progress comment.
   const classify = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return { flaky: false };
     if (failedRuns.length > MAX_JOBS) {
@@ -1077,7 +1078,12 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     const jobs = await askJobs({ sha, failedRuns, required, seen: await known(), actionsJob });
     const flaky = rerunWanted(jobs);
     await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : "the change's: fix pass" }), {});
-    return { flaky, jobs };
+    return { flaky, jobs, off: false, named: await namesChanged(failedRuns) };
+  };
+  // Whether a failing job's failure names a file, file name or test the PR changes (namesChange).
+  const namesChanged = async (failedRuns) => {
+    const { sigs, names } = await readRed(failedRuns);
+    return failedRuns.some((r) => !!namesChange(sigs.get(r.id), names));
   };
 
   // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
@@ -1127,8 +1133,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) if (!(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sigs.get(r.id), names))) return false;
     return true;
   };
-  // Triage off: no model to ask, so a red is no flake (a fix pass), said once as for red().
-  const offClassify = async (r) => ((await offRed(r)), { flaky: false });
+  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure names what the PR changes.
+  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await namesChanged(r.failedRuns) : false });
   if (!decider && !key) return { model, off: code, red: offRed, again, infra, classify: offClassify };
   return { model, red, again, infra, classify };
 }

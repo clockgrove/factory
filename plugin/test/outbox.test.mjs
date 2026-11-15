@@ -838,6 +838,12 @@ test("#318: a failed git command Blocks with git's cause, every absolute path on
   assert.ok(!gone.includes(outside));
   assert.ok(lines.some((l) => l.includes(outside)), "the log has the path");
   assert.equal(withoutLocalPaths("error: unable to unlink /srv/app/.git/index.lock; see https://github.com/o/r and gen/a.png"), "error: unable to unlink <path>; see https://github.com/o/r and gen/a.png");
+  // A quoted path whole, its spaces and commas included; a file: URL is a path.
+  assert.equal(withoutLocalPaths("fatal: Unable to create '/srv/my repo/.git/index.lock': File exists."), "fatal: Unable to create '<path>': File exists.");
+  assert.equal(withoutLocalPaths('error: cannot open "/home/Kirk Marple/clone/a, b.txt": denied'), 'error: cannot open "<path>": denied');
+  assert.equal(withoutLocalPaths("error: /srv/a/x.txt, /srv/b/y.txt and gen/a.png"), "error: <path>, <path> and gen/a.png");
+  assert.equal(withoutLocalPaths("fatal: repository 'file:///home/kirk/work/mirror/' not found"), "fatal: repository '<path>' not found");
+  assert.equal(withoutLocalPaths("fetch file:///srv/m.git failed"), "fetch <path> failed");
   assert.equal(logName({ FACTORY_LOCAL: "1", GITHUB_ACTIONS: "true" }), "this machine's log");
   assert.equal(logName({ GITHUB_ACTIONS: "true" }), "the job log");
 });

@@ -518,6 +518,21 @@ test("#318: a token Factory reads through a folder link under tokens/ is still o
   assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "store", "acme", "app") }] }), [["gh", "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
 });
 
+test("#318: a link out of ~/.config/factory listed before a real folder of tokens cannot crowd them out", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  // A tree past the listing's cap, outside ~/.config/factory, linked as the first name under tokens/.
+  const big = join(h, "big");
+  mkdirSync(big);
+  for (let i = 0; i < 10_050; i++) writeFileSync(join(big, `f${i}`), "");
+  mkdirSync(join(keys, "tokens"), { mode: 0o700 });
+  symlinkSync(big, join(keys, "tokens", "aaa"));
+  mkdirSync(join(keys, "tokens", "acme"), { mode: 0o700 });
+  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
+  assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] }), [["gh", "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
+});
+
 test("#318: a folder of Factory's tokens that cannot be read costs that folder alone", { skip: process.getuid?.() === 0 }, () => {
   const h = fakeHome();
   const keys = join(h, ".config", "factory");

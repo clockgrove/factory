@@ -348,11 +348,15 @@ export function gitError(stderr) {
 
 /**
  * `text` with every absolute path on this machine replaced by `<path>` (a clone, a temp, home or account folder, inside
- * the home directory or out of it). A path git prints relative to the clone stays, and so does a URL, its credentials
- * masked.
+ * the home directory or out of it), a `file:` URL included. A path in quotes is replaced up to its closing quote, spaces
+ * and commas in it included (`'/srv/my repo/.git/index.lock'`); one outside quotes ends at a space, comma, colon or
+ * bracket. A path git prints relative to the clone stays, and so does any other URL, its credentials masked.
  */
 export const withoutLocalPaths = (text) =>
-  String(text ?? "").replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s'"`]*)|(^|[\s'"`(=:,[])(?:~(?=\/)|\/(?!\/))[^\s'"`)\],;:]*/gi, (m, scheme, rest, lead) => (scheme ? `${scheme}${rest.replace(/^[^\s/@]+@/, "***@")}` : `${lead}<path>`));
+  String(text ?? "").replace(
+    /(['"`])((?:file:\/\/|~(?=\/)|\/(?!\/))(?:(?!\1)[^\n])*)\1|file:\/\/[^\s'"`]*|([a-z][a-z0-9+.-]*:\/\/)([^\s'"`]*)|(^|[\s'"`(=:,[])(?:~(?=\/)|\/(?!\/))[^\s'"`)\],;:]*/gi,
+    (m, quote, _path, scheme, rest, lead) => (quote ? `${quote}<path>${quote}` : scheme ? `${scheme}${rest.replace(/^[^\s/@]+@/, "***@")}` : lead === undefined ? "<path>" : `${lead}<path>`),
+  );
 
 /** The log a Blocked reason points to: this machine's (local mode), or the job's (a runner, a cloud sandbox stage). */
 export const logName = (env = process.env) => (env.FACTORY_LOCAL === "1" || !env.GITHUB_ACTIONS ? "this machine's log" : "the job log");

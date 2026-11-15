@@ -99,7 +99,7 @@ Code lands with no human read. The gate is your CI workflow's checks on the revi
 
 ## Siblings that touch the same files
 
-Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
+Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
 
 ## One repository per Objective
 

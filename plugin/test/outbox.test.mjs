@@ -1140,3 +1140,148 @@ test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's downlo
   assert.deepEqual(await box.lfsHandOver(null), { used: true, warning: "" });
   assert.ok(inStore(r, bytes), "the default branch's media is in the checkout's store");
 });
+
+/**
+ * #243: a send-back whose rebase conflicts. The branch has three commits (app.txt, b.txt, c.txt); main changed app.txt
+ * and b.txt the other way and added the same c.txt, so git drops that commit as already upstream. The worker's
+ * conflict pass then ends in `pass` in the checkout; rebaseLeft says whether that is the branch rebased onto main.
+ */
+async function conflictPass(pass) {
+  const r = repos();
+  r.put(r.work, "app.txt", "ours\n");
+  r.run(r.work, "commit", "-q", "-m", "c1");
+  r.put(r.work, "b.txt", "ours-b\n");
+  r.run(r.work, "commit", "-q", "-m", "c2");
+  r.put(r.work, "c.txt", "same\n");
+  r.run(r.work, "commit", "-q", "-m", "c3");
+  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.put(r.other, "app.txt", "theirs\n");
+  r.put(r.other, "b.txt", "theirs-b\n");
+  r.put(r.other, "c.txt", "same\n");
+  r.run(r.other, "commit", "-q", "-m", "sibling");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r);
+  const from = box.expected();
+  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  const onto = box.base;
+  r.run(r.work, "fetch", "-q", "origin", "main");
+  assert.throws(() => r.run(r.work, "rebase", "-q", "origin/main"), "the conflict pass meets the conflict on c1");
+  const resolve = (file, text) => {
+    writeFileSync(join(r.work, file), text);
+    r.run(r.work, "add", file);
+  };
+  const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
+  await pass({ resolve, go, r });
+  return { box, r, from, onto, left: await box.rebaseLeft({ from, onto }) };
+}
+
+test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, aborted, stopped on the first or second commit, or a commit skipped (#243)", async () => {
+  // Resolved: both conflicts resolved and the rebase finished; c3 dropped by git as already upstream is no loss.
+  const ok = await conflictPass(async ({ resolve, go }) => {
+    resolve("app.txt", "ours and theirs\n");
+    assert.throws(() => go("rebase", "--continue"), "c2 conflicts next");
+    resolve("b.txt", "ours-b and theirs-b\n");
+    go("rebase", "--continue");
+  });
+  assert.equal(ok.left, "", ok.left);
+  assert.equal(await ok.box.push(), true, ok.box.error);
+
+  // Aborted: the branch is as it was, not on main.
+  const aborted = await conflictPass(async ({ go }) => go("rebase", "--abort"));
+  assert.equal(aborted.left, "the branch it left is not rebased onto it");
+
+  // Stopped on the first commit: HEAD is main itself, with the rebase in progress.
+  const first = await conflictPass(async () => {});
+  assert.equal(first.left, "the conflict pass left a rebase in progress");
+
+  // Stopped on the second: HEAD is main plus c1, which a push would have sent as the whole branch.
+  const second = await conflictPass(async ({ resolve, go }) => {
+    resolve("app.txt", "ours and theirs\n");
+    assert.throws(() => go("rebase", "--continue"));
+  });
+  assert.equal(second.left, "the conflict pass left a rebase in progress");
+
+  // Skipped: c1 dropped with `rebase --skip`, c2 resolved, the rebase finished. Contains main, yet c1 is lost.
+  const skipped = await conflictPass(async ({ resolve, go }) => {
+    assert.throws(() => go("rebase", "--skip"));
+    resolve("b.txt", "ours-b and theirs-b\n");
+    go("rebase", "--continue");
+  });
+  assert.match(skipped.left, /^the branch it left drops 1 of the Objective's commit\(s\) \([0-9a-f]{7}\)$/);
+  const c1 = skipped.r.run(skipped.r.work, "rev-parse", "--short=7", `${skipped.from}~2`);
+  assert.ok(skipped.left.includes(c1), "it names the dropped commit");
+});
+
+test("outbox: rebaseLeft checks the base the rebase was onto, not one the default branch moved to since (a catch-up merge) (#243)", async () => {
+  const done = await conflictPass(async ({ resolve, go }) => {
+    resolve("app.txt", "ours and theirs\n");
+    assert.throws(() => go("rebase", "--continue"));
+    resolve("b.txt", "ours-b and theirs-b\n");
+    go("rebase", "--continue");
+  });
+  // main moves again (a workflow change a push would merge in): the outbox's base moves with it.
+  done.r.put(done.r.other, ".github/workflows/ci.yml", "on: push\n");
+  done.r.run(done.r.other, "commit", "-q", "-m", "workflow");
+  done.r.run(done.r.other, "push", "-q", "origin", "HEAD:main");
+  await done.box.refresh();
+  assert.notEqual(done.box.base, done.onto);
+  assert.ok((await done.box.behind()) > 0, "counted against the moved base, the branch reads behind");
+  assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto }), "", "yet it is rebased onto the base it was sent for");
+});
+
+test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch is in the head, and an empty commit as no counterpart (#243)", async () => {
+  // c1 changes app.txt, c2 changes doc.txt (which main changed too: the conflict), c3 undoes c1. The pass resolves c2
+  // and then drops the undo: whole-file, app.txt is main's again in c3, yet the head still carries c1's change.
+  const r = repos();
+  r.put(r.work, "doc.txt", "d1\n");
+  r.run(r.work, "commit", "-q", "-m", "doc");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  r.run(r.other, "pull", "-q", "origin", "main");
+  r.put(r.work, "app.txt", "ours\n");
+  r.run(r.work, "commit", "-q", "-m", "c1");
+  r.put(r.work, "doc.txt", "ours-doc\n");
+  r.run(r.work, "commit", "-q", "-m", "c2");
+  r.put(r.work, "app.txt", "v1\n");
+  r.run(r.work, "commit", "-q", "-m", "c3 undoes c1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.put(r.other, "doc.txt", "theirs-doc\n");
+  r.run(r.other, "commit", "-q", "-m", "sibling");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r);
+  const from = box.expected();
+  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null);
+  const onto = box.base;
+  const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
+  go("fetch", "-q", "origin", "main");
+  assert.throws(() => go("rebase", "-q", "origin/main"));
+  writeFileSync(join(r.work, "doc.txt"), "ours and theirs\n");
+  go("add", "doc.txt");
+  go("rebase", "--continue");
+  go("reset", "-q", "--hard", "HEAD~1");
+  assert.equal(readFileSync(join(r.work, "app.txt"), "utf8"), "ours\n", "the head carries c1's change without its undo");
+  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+
+  // A forged empty commit with c3's author, time and subject (`commit --allow-empty -C`) is no counterpart for it.
+  go("commit", "-q", "--allow-empty", "-C", from);
+  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+  // The undo kept: the branch is whole.
+  go("reset", "-q", "--hard", "HEAD~1");
+  go("cherry-pick", from);
+  assert.equal(await box.rebaseLeft({ from, onto }), "");
+});
+
+test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothing; the cap stays the Block's reason (#243)", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  const { decideExit } = await import("../scripts/lib/logic.mjs");
+  // The time cap stopped the pass on its first conflict: HEAD is main itself, with the rebase in progress.
+  const { box, r, from, onto } = await conflictPass(async () => {});
+  const unresolved = await sendBackGuard({ outbox: box, onto: { from, base: onto, files: ["app.txt"] }, defaultBranch: "main" });
+  assert.match(unresolved, /in `app\.txt`: the conflict pass left a rebase in progress; nothing of it was pushed$/);
+  assert.equal(await box.push(), false, "nothing goes out");
+  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), from, "the branch on GitHub is as it was");
+  const pr = { exists: true, draft: false, body: "Closes #1" };
+  assert.equal(decideExit({ harness: { ok: false, timedOut: true }, pr, commits: 0, unresolved, pushRejected: box.error !== unresolved ? box.error : "" }).reason, "time cap reached");
+  // The worker calls the guard for every send-back conflict, caps or not.
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
+  assert.match(src, /\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch \}\);\n {2}let pushed = await outbox\.push\(\);/);
+});

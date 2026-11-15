@@ -491,22 +491,27 @@ test("the dispatcher's tick puts a waiting review's label back once one account 
   assert.ok(one.writes.includes("DELETE /repos/acme/app/issues/comments/77"), "the wait record goes");
 });
 
-test("removals replay as a set of standing trusted pins: an earlier pin still standing is kept, two standing wait, and the stage reads no timeline when the step prepared the default (#267)", async () => {
+test("with no account label on, the pin is the newest trusted application not trusted-removed since; a non-pusher neither moves nor wedges it, and the stage reads no timeline when the step prepared the default (#267)", async () => {
   const { trustedRoutePin } = await import("../scripts/lib/objective-trust.mjs");
   const ev = (event, name, login, min) => ({ event, label: { name }, created_at: new Date(Date.UTC(2026, 10, 15, 1, min)).toISOString(), actor: { login, type: "User", id: login === "kirk" ? 7 : 9 } });
   // A is not the default account, so a pin kept is told apart from the default.
   const A = "factory:account:claude-2";
   const B = "factory:account:claude";
-  // A pusher applies A, then B, then removes B; a stranger removes A: A stands.
+  const pinOf = (events) => withGitHub({ labels: [], events }, () => trustedRoutePin(REPO, 8, { token: "t" }));
+  // A pusher applies A, then B, then removes B; a stranger removes A: A.
   const kept = [ev("labeled", A, "kirk", 1), ev("labeled", B, "kirk", 2), ev("unlabeled", B, "kirk", 3), ev("unlabeled", A, "stranger", 4)];
-  assert.deepEqual(await withGitHub({ labels: [], events: kept }, () => trustedRoutePin(REPO, 8, { token: "t" })), [A]);
+  assert.equal(await pinOf(kept), A);
   assert.equal((await runStep({ labels: ["factory:objective"], events: kept })).outputs.account, "claude-2");
-  // A stranger removes both: both stand, so the Objective waits on them.
-  const both = [ev("labeled", A, "kirk", 1), ev("labeled", B, "kirk", 2), ev("unlabeled", B, "stranger", 3), ev("unlabeled", A, "stranger", 4)];
-  assert.deepEqual(await withGitHub({ labels: [], events: both }, () => trustedRoutePin(REPO, 8, { token: "t" })), [B, A]);
-  assert.equal((await runStep({ labels: ["factory:objective"], events: both })).outputs.account, NO_SECRET);
-  const c = await withGitHub({ labels: ["factory:objective"], events: both }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET }, opts: { token: "t" } }));
-  assert.deepEqual(c.wait, [B, A]);
+  // A pusher pins A, a stranger removes it, the pusher pins B, the stranger removes B: B, never two (no wedge, no loop).
+  const probed = [ev("labeled", A, "kirk", 1), ev("unlabeled", A, "stranger", 2), ev("labeled", B, "kirk", 3), ev("unlabeled", B, "stranger", 4)];
+  assert.equal(await pinOf(probed), B);
+  assert.equal((await runStep({ labels: ["factory:objective"], events: probed })).outputs.account, "claude");
+  // A stranger's application moves nothing; a pusher's removal of the newest pin leaves the default, with no older pin back.
+  assert.equal(await pinOf([ev("labeled", A, "kirk", 1), ev("labeled", B, "stranger", 2)]), A);
+  assert.equal(await pinOf([ev("labeled", A, "kirk", 1), ev("unlabeled", A, "stranger", 2), ev("labeled", B, "kirk", 3), ev("unlabeled", B, "kirk", 4)]), A, "B's trusted removal: A, applied and never trusted-removed, is the newest still standing");
+  assert.equal(await pinOf([ev("labeled", A, "kirk", 1), ev("unlabeled", A, "kirk", 2)]), null);
+  const c = await withGitHub({ labels: ["factory:objective"], events: probed }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET }, opts: { token: "t" } }));
+  assert.equal(c.wait, undefined, "the history never makes it wait");
   // The step prepared the harness's default: the stage and the launcher take its answer, with no timeline read.
   const reads = await withGitHub({ labels: ["factory:objective"] }, async (r) => {
     const ok = await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude" }, opts: { token: "t" } });

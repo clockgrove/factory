@@ -319,17 +319,18 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
 }
 
 /**
- * The account labels that still stand on an Objective with none on it now (#267): its timeline's account-label events
- * replayed oldest first, each counting only when its actor can push or is a pinned maintainer (vouches): a trusted
- * `labeled` adds that label, a trusted `unlabeled` takes it away, and any other is ignored. So a removal by someone who
- * cannot push leaves that trusted pin standing, beside any other still standing: one left is the pin, two wait
- * (routeAccount). [] when none stands. `gh` (timeline, permission) is a test's own; each actor's permission is read once.
+ * The account label that still pins an Objective with none on it now (#267), or null (its harness's default): its
+ * timeline's account-label events by someone who can push or a pinned maintainer (vouches), walked newest first; the
+ * first `labeled` one with no later such `unlabeled` of the same label is the pin. Events by anyone else are ignored, so
+ * a person who cannot push can neither move the pin nor take it away, and a pusher's newest choice wins. It never yields
+ * two: two account labels wait only while both are on the issue. `gh` (timeline, permission) is a test's own; each
+ * actor's permission is read once.
  */
 export async function trustedRoutePin(repo, issue, opts, gh = {}) {
   const read = { permission: collaboratorPermission, ...gh };
   const events = ((await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [])
     .filter((e) => (e.event === "labeled" || e.event === "unlabeled") && typeof e.label?.name === "string" && e.label.name.toLowerCase().startsWith(ACCOUNT_LABEL_PREFIX))
-    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   const trusted = new Map();
   const vouched = async (a) => {
     if (!a?.login) return false;
@@ -337,13 +338,13 @@ export async function trustedRoutePin(repo, issue, opts, gh = {}) {
     if (!trusted.has(key)) trusted.set(key, await vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, read));
     return trusted.get(key);
   };
-  const standing = new Set();
+  const removed = new Set();
   for (const e of events) {
     if (!(await vouched(e.actor))) continue;
-    if (e.event === "labeled") standing.add(e.label.name);
-    else standing.delete(e.label.name);
+    if (e.event === "unlabeled") removed.add(e.label.name);
+    else if (!removed.has(e.label.name)) return e.label.name;
   }
-  return [...standing].sort();
+  return null;
 }
 
 /**

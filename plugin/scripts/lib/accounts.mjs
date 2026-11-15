@@ -367,12 +367,11 @@ export async function routeAccount({ declared, harness, names = [], vouch, kept 
   if (pin.two) return { two: pin.two };
   const mine = declared?.accounts?.[harness]?.length ? declared.accounts[harness] : [harness];
   if (!pin.label) {
-    // No label now: the pins removals by someone who cannot push left standing (`kept`, objective-trust.mjs
-    // trustedRoutePin): one is the pin, two wait; with none, the harness's default.
-    const left = (kept ? await kept() : null) || [];
-    if (left.length > 1) return { two: left };
-    if (!left.length) return { account: { name: mine[0], harness } };
-    return pinnedRouteAccount(declared, harness, left[0], mine, " (it stays: whoever removed it cannot push)");
+    // No label now: the pin a removal by someone who cannot push left standing (`kept`, objective-trust.mjs
+    // trustedRoutePin), else the harness's default.
+    const left = kept ? await kept() : null;
+    if (!left) return { account: { name: mine[0], harness } };
+    return pinnedRouteAccount(declared, harness, left, mine, " (it stays: whoever removed it cannot push)");
   }
   if (!validAccountName(pin.name)) return { problem: `${pinLabelText(pin.label)} names no account` };
   const refused = await vouch(pin.label);

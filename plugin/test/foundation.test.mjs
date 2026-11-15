@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
-import { CHOICE_FIX, choiceGate, choiceTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
+import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
 import { reviewPost } from "../scripts/lib/handoff.mjs";
 import { parseReview } from "../scripts/lib/logic.mjs";
 import { foundationPrompt, foundationReview } from "../scripts/review.mjs";
@@ -141,4 +141,31 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.match(block, /if \(found\.stop === "cap"\) return blockedAtCap\("the foundation pass"\);\n\s+if \(found\.stop === "time"\) return blockedAtTime\("the foundation pass"\);/);
   assert.match(block, /exit: "blocked", reason, cause: last\.refusal \? refusalCause\(last\.refusal\) : "factory"[\s\S]*await finish\("blocked", reason\);\n\s+return;/, "no answer: nothing posted, Blocked");
   assert.match(block, /agent: inputs\.harness === "codex" \? undefined : "reviewer",\n\s+reviewer: true,/, "the pinned reviewer, no worker secrets");
+});
+
+test("a session's review: post-review takes the foundation pass under `foundation` on a trusted foundation Objective only", async () => {
+  assert.deepEqual(await foundationTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no label: no timeline read") }), { ok: true, foundation: false });
+  assert.deepEqual(await foundationTrusted(repo, 7, [FOUNDATION_LABEL, "factory:model:x"], {}, timeline({ [FOUNDATION_LABEL]: person("kirk") })), { ok: true, foundation: true }, "only the foundation label is vouched for");
+  const refused = await foundationTrusted(repo, 7, [FOUNDATION_LABEL], {}, timeline({ [FOUNDATION_LABEL]: person("reader") }));
+  assert.deepEqual([refused.ok, refused.fix], [false, CHOICE_FIX]);
+  const { reviewPostFor } = await import("../scripts/local.mjs");
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const entries = [{ id: "A", text: "a" }];
+  const first = '"acceptance": [{"entry": "A", "met": true}], "comments": []';
+  const both = reviewPostFor({ issue: 7, text: `{${first}, "foundation": {"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}}`, file: "f.json", diff, entries, foundation: true });
+  assert.deepEqual([both.placeholder, both.comments.map((c) => c.body)], [false, ["foundation review: z"]]);
+  assert.match(both.body, /review of two passes, 1 comment\(s\); the foundation pass [^\n]* raised 1\./);
+  assert.throws(() => reviewPostFor({ issue: 7, text: `{${first}}`, file: "f.json", diff, entries, foundation: true }), /f\.json holds no foundation pass \("foundation": \{"comments": \[\.\.\.\]\}\), which #7's factory:foundation label asks for; nothing posted/);
+  assert.throws(() => reviewPostFor({ issue: 7, text: `{${first}, "foundation": {"comments": []}}`, file: "f.json", diff, entries }), /#7 is not a foundation Objective/);
+  assert.match(reviewPostFor({ issue: 7, text: `{${first}}`, file: "f.json", diff, entries }).body, /one comment-only pass/, "any other Objective: as before");
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "local.mjs"), "utf8");
+  const post = src.indexOf("async function postFindings(");
+  const at = (x) => src.indexOf(x, post);
+  assert.ok(at("const found = await foundationTrusted(repo, issue, trusted.labels, opts);") > at("const trusted = await trustedIssue("), "read with the text it vouches for");
+  assert.ok(at("if (!found.ok) throw new Error(`nothing posted: ${found.reason}. ${found.fix}`);") < at("await postReview("), "refused before anything is posted");
+  assert.ok(at("foundation: found.foundation })") < at("await postReview("));
+});
+
+test("the reviewer agent definitions tell the foundation pass from the first", () => {
+  for (const f of ["claude/reviewer.md", "codex/reviewer.toml", "copilot/reviewer.agent.md"]) assert.match(readFileSync(join(ROOT, "plugin", "agents", f), "utf8"), /When the prompt says it is the foundation pass, follow the skill's reference section \\?"Foundation review\\?" instead: judge no acceptance entry/, f);
 });

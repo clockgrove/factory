@@ -236,6 +236,18 @@ export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
 }
 
 /**
+ * Whether the Objective is a foundation one as Factory may act on it, from its label names (read with its text): no
+ * `factory:foundation` is {ok, foundation: false} with no timeline read; one is vouched for as choiceTrusted vouches for a
+ * choice label. {ok, foundation} or {ok: false, reason, fix}. A session's route (local.mjs `issue`, `post-review`) uses it.
+ */
+export async function foundationTrusted(repo, issue, names, opts, gh = {}) {
+  const label = foundationLabel(names);
+  if (!label) return { ok: true, foundation: false };
+  const t = await choiceTrusted(repo, issue, [label], opts, gh);
+  return t.ok ? { ok: true, foundation: true } : { ok: false, reason: t.reason, fix: t.fix };
+}
+
+/**
  * The inputs an Objective runs on before any stage starts (the launcher, the local loop): its labels read now,
  * choiceTrusted, then choice.mjs chosenInputs over `args` and `env` (`gateway`: whether Codex has the AI Gateway key, when
  * `env` no longer holds it). {ok, inputs, labels} or {ok: false, reason, fix}.

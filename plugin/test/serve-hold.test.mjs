@@ -283,6 +283,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
     if (p === "/user") return json({ login: "maintainer", type: "User" });
     if (p === "/collaborators") return json([{ login: "maintainer" }]);
     if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
+    if (method === "GET" && p === "/issues/7/timeline") return json([]);
     if (method === "GET" && p === "/issues/7/comments") return fail("comments") ? json({ message: "Server Error" }, 502) : json(comments);
     if (method === "POST" && p === "/issues/7/comments") {
       const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };

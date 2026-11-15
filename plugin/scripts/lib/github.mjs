@@ -301,6 +301,11 @@ const createAgain = (landed) => {
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
  * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
  */
+/** GitHub's clock less this machine's (ms), from the newest answer's Date header; 0 before any answer. */
+let clockSkewMs = 0;
+/** Now on GitHub's clock (to its Date header's second): what a time GitHub wrote (a label event's) is compared with. */
+export const githubNow = () => Date.now() + clockSkewMs;
+
 export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
@@ -316,6 +321,8 @@ export async function rest(path, { method = "GET", body, token, paginate = false
       throw transportError(`${method} ${path}`, e);
     }
     const { r, text } = res;
+    const date = Date.parse(r.headers.get("date") || "");
+    if (Number.isFinite(date)) clockSkewMs = date - Date.now();
     if (kept && r.status === 304) return { r, text: kept.text, link: kept.link };
     if (r.ok) {
       const etag = conditional ? r.headers.get("etag") : null;

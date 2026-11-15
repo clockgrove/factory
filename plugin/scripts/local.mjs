@@ -191,10 +191,13 @@ export function sameMachineHolder(holder, id = machineIdentity()) {
  * A claim left by a loop on this machine whose process is gone (serve stopped, crashed, the machine restarted): its
  * Objective is this machine's to resume at once, fresh heartbeat or not.
  */
-export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid } = {}) {
+export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid, own = null } = {}) {
   if (!sameMachineHolder(holder, id)) return false;
   const { pid, boot } = parseHolder(holder);
-  if (!Number.isInteger(pid) || pid <= 0 || pid === self) return false;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // This process's pid: its own loop (`own`) is alive; any other holder with it was the loop this process ran before it
+  // started again on a new pinned release (Local.restartOn), whose image is gone.
+  if (pid === self) return !!own && holder !== own;
   // Another boot: every process of that one is gone, whatever pid now runs.
   if (boot && boot !== id.boot) return true;
   try {
@@ -204,20 +207,6 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
     return e.code === "ESRCH";
   }
 }
-
-/**
- * The claim holder a serve hands on to itself when it starts again in its own process on the release its workflow pins
- * (Local.restartOn, #276): taken only when it is this machine's, this boot's and this very process's, else null. Its
- * claims stay its own, so the Objectives it held paused are resumed as before.
- */
-export function inheritedHolder(holder, { id = machineIdentity(), pid = process.pid } = {}) {
-  if (!holder || !sameMachineHolder(holder, id)) return null;
-  const h = parseHolder(holder);
-  return h.pid === pid && (!h.boot || h.boot === id.boot) ? holder : null;
-}
-
-/** The env name serve hands its claim holder on in (inheritedHolder); no child ever gets it. */
-export const SERVE_HOLDER_ENV = "FACTORY_SERVE_HOLDER";
 
 /** The workflow's FACTORY_* names local mode takes no setting from (inputs.mjs workflowSettings), said at start and on a change. */
 const droppedLine = (dropped) => `.github/workflows/factory.yml: ${dropped.join(", ")} ${dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`;
@@ -523,9 +512,9 @@ export class Local {
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
     this.opts = { token: this.token, notice: this.notice };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
-    // that started again on its workflow's pinned release, in its own process, keeps its own (restartOn).
-    this.holder = inheritedHolder(process.env[SERVE_HOLDER_ENV]) || holderId();
-    delete process.env[SERVE_HOLDER_ENV];
+    // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
+    // was are a dead loop's (deadHereHolder), resumed at once as after any restart.
+    this.holder = holderId();
     this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
@@ -882,15 +871,25 @@ export class Local {
    * and never another stage's.
    */
   async stage(issue, name, script, args) {
+    // A stage is set up with one set of settings: from its harness's choice to its env. A change the workflow brings
+    // meanwhile waits for every set-up under way to end (refreshSettings).
+    this.settingUp = (this.settingUp || 0) + 1;
+    let settingUp = true;
+    const setUp = () => {
+      if (settingUp) this.settingUp -= 1;
+      settingUp = false;
+    };
     try {
-      return await this.startStage(issue, name, script, args);
+      return await this.startStage(issue, name, script, args, setUp);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       throw err.stageStarted ? err : Object.assign(err, { stageSetup: name });
+    } finally {
+      setUp();
     }
   }
 
-  async startStage(issue, name, script, args) {
+  async startStage(issue, name, script, args, setUp = () => {}) {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
@@ -957,6 +956,8 @@ export class Local {
       await this.block(issue, name, reason);
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // Its env is made: the settings may change from here on.
+    setUp();
     if (this.stopping) {
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
@@ -1117,7 +1118,7 @@ export class Local {
       // Who holds it is unknown: nothing about the Objective may change on this (unstart).
       throw Object.assign(e, { startFailed: "claim-read" });
     }
-    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder);
+    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder, { own: this.holder });
     if (others && held.fresh) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
       return { exit: "skipped" };
@@ -1323,7 +1324,7 @@ export class Local {
         if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
-      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
+      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
     }
     return out;
   }
@@ -1533,7 +1534,7 @@ export class Local {
         await this.unstart(n, Object.assign(e, { startFailed: "claim-read" }));
         continue;
       }
-      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder)) {
+      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder, { own: this.holder })) {
         this.startFailures.delete(n);
         log(`#${n}: another local loop holds it (${c.holder}); leaving it alone`);
         continue;
@@ -1755,6 +1756,8 @@ export class Local {
     }
     this.settingsError = null;
     this.pins = now.pins;
+    // A stage being set up keeps the settings it started with (stage()): the change is taken at a later tick.
+    if (this.settingUp > 0) return;
     const next = workflowSettings(now.wf);
     const changes = settingsChanges(this.wf, next.kept);
     if (!changes.length) {
@@ -1787,8 +1790,8 @@ export class Local {
   /**
    * The workflow's Factory pin against the Factory this serve runs (#276), at each tick. A new release tag or commit
    * SHA there is taken at a stage boundary: serve fetches it from Factory's own repository (lib/release.mjs), starts no
-   * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), keeping its
-   * claims. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve fetched): one
+   * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), which resumes
+   * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve fetched): one
    * started from any other checkout, a branch or a change of your own, keeps running what you started, and says the pin
    * differs. Said once per pin. Returns true while new stages wait for the switch.
    */
@@ -1841,8 +1844,8 @@ export class Local {
 
   /**
    * Start serve again on the release `r` names, in this same process (process.execve): its pid, its terminal and its
-   * front end stay, and its claim holder goes with it (inheritedHolder), so the Objectives it held paused stay its own.
-   * Called only when no stage of this loop runs. Where the process cannot be replaced, says how to restart instead and
+   * front end stay. The new loop takes up the claims this one leaves (paused work, a stage that lapsed) at once, as a
+   * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. Where the process cannot be replaced, says how to restart instead and
    * goes on with the release it runs. Returns false when it did not restart.
    */
   restartOn(r) {
@@ -1852,8 +1855,8 @@ export class Local {
       log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
       return false;
     }
-    log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process, keeping its claims`);
-    const env = { ...process.env, [SERVE_HOLDER_ENV]: this.holder };
+    log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
+    const env = { ...process.env };
     // The new release's skills and agents, from beside its own scripts.
     delete env.FACTORY_PLUGIN_ROOT;
     try {

@@ -14,6 +14,7 @@ import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
 import { exec } from "./proc.mjs";
+import { parseYaml } from "./yaml.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -1992,14 +1993,22 @@ export async function committedWorkflowNow(dir, branch, { git = (args) => exec("
 }
 
 /**
- * The Factory refs a workflow's steps call (`uses: clockgrove/factory@<ref>`), each once, in order of first use: the
- * release a repository pins. Commented-out lines are not steps.
+ * The Factory refs a workflow's steps call (`uses: clockgrove/factory@<ref>` in jobs.<job>.steps), each once, in order of
+ * first use: the release a repository pins. A workflow that does not parse pins nothing serve can follow.
  */
 export function workflowPins(text) {
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return [];
+  }
   const refs = [];
-  for (const raw of String(text || "").split("\n")) {
-    const m = /^\s*(?:-\s+)?uses:\s*["']?clockgrove\/factory@([^\s"'#]+)["']?\s*(?:#.*)?$/.exec(raw);
-    if (m && !refs.includes(m[1])) refs.push(m[1]);
+  for (const job of Object.values(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {})) {
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      const ref = typeof step?.uses === "string" ? /^clockgrove\/factory@(\S+)$/.exec(step.uses.trim())?.[1] : null;
+      if (ref && !refs.includes(ref)) refs.push(ref);
+    }
   }
   return refs;
 }

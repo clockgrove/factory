@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Local, SERVE_HOLDER_ENV, holderId, inheritedHolder, machineIdentity, settingsChanges } from "../scripts/local.mjs";
+import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
 import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
 import { pinDecision, releaseCheckout, releasesDir, runningFactory } from "../scripts/lib/release.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
@@ -54,7 +54,7 @@ function factoryRepo() {
     // The loop of this release: its usage on --help; otherwise what it was started with, in the same process or not.
     writeFileSync(
       join(work, "plugin", "scripts", "local.mjs"),
-      `import { inheritedHolder } from ${JSON.stringify(LOCAL_MJS)};\nif (process.argv.includes("--help")) process.exit(0);\nconsole.log(JSON.stringify({ version: ${JSON.stringify(version)}, pid: process.pid, argv: process.argv.slice(2), holder: inheritedHolder(process.env.${SERVE_HOLDER_ENV}), pluginRoot: process.env.FACTORY_PLUGIN_ROOT ?? null }));\n`,
+      `if (process.argv.includes("--help")) process.exit(0);\nconsole.log(JSON.stringify({ version: ${JSON.stringify(version)}, pid: process.pid, argv: process.argv.slice(2), pluginRoot: process.env.FACTORY_PLUGIN_ROOT ?? null }));\n`,
     );
     git(work, "add", "-A");
     git(work, "commit", "-q", "-m", version);
@@ -66,8 +66,9 @@ function factoryRepo() {
 }
 
 test("workflowPins: the Factory refs a workflow's steps call, once each; settingsChanges names each change and a shell value that still wins", () => {
-  const text = "jobs:\n  a:\n    steps:\n      - uses: clockgrove/factory@v0.9.31 # pinned\n      - uses: actions/checkout@v7\n      - uses: 'clockgrove/factory@v0.9.31'\n#     - uses: clockgrove/factory@main\n  b:\n    steps:\n      - uses: clockgrove/factory@0123456789abcdef0123456789abcdef01234567\n";
-  assert.deepEqual(workflowPins(text), ["v0.9.31", "0123456789abcdef0123456789abcdef01234567"]);
+  const text = "jobs:\n  a:\n    steps:\n      - uses: clockgrove/factory@v0.9.31 # pinned\n      - uses: actions/checkout@v7\n      - uses: 'clockgrove/factory@v0.9.31'\n#     - uses: clockgrove/factory@main\n      - run: |\n          echo uses: clockgrove/factory@v0.0.1\n  b:\n    steps:\n      - { uses: clockgrove/factory@0123456789abcdef0123456789abcdef01234567 }\n";
+  assert.deepEqual(workflowPins(text), ["v0.9.31", "0123456789abcdef0123456789abcdef01234567"], "steps only: a flow mapping counts, a script's text does not");
+  assert.deepEqual(workflowPins("jobs: [\n"), [], "a workflow that does not parse pins nothing");
   assert.deepEqual(workflowPins("env:\n  FACTORY_MODEL: m\n"), []);
   assert.deepEqual(settingsChanges({ FACTORY_MAX_CONCURRENT: "2", FACTORY_LOCAL_DOMAINS: "a.com" }, { FACTORY_MAX_CONCURRENT: "3", FACTORY_LOCAL_DOMAINS: "b.com", FACTORY_MODEL: "m" }, { FACTORY_LOCAL_DOMAINS: "c.com" }), [
     'FACTORY_LOCAL_DOMAINS: "a.com" → "b.com" (this shell sets it, and its value wins)',
@@ -129,17 +130,17 @@ test("runningFactory: a release is a checkout at its own release tag and unchang
   assert.equal(runningFactory(mkdtempSync(join(tmpdir(), "nogit-")), "9.9.9", home).release, false, "no git checkout");
 });
 
-test("inheritedHolder: only this process's own holder on this machine and boot is taken", () => {
+test("deadHereHolder: a holder with this process's pid that is not its own loop's is the loop it was before it started again, so dead", () => {
   const id = machineIdentity();
   const own = holderId(id, process.pid);
-  assert.equal(inheritedHolder(own), own);
-  assert.equal(inheritedHolder(holderId(id, process.pid + 1)), null, "another process's");
-  assert.equal(inheritedHolder(holderId({ ...id, host: `${id.host}-other` }, process.pid)), null, "another machine's");
-  assert.equal(inheritedHolder(holderId({ ...id, boot: "another-boot" }, process.pid)), null, "another boot's");
-  assert.equal(inheritedHolder(undefined), null);
+  const before = holderId(id, process.pid);
+  assert.equal(deadHereHolder(before, { id, own }), true, "the loop this process ran before its restart");
+  assert.equal(deadHereHolder(own, { id, own }), false, "its own loop");
+  assert.equal(deadHereHolder(before, { id }), false, "no own loop named: alive, as before");
+  assert.equal(deadHereHolder(holderId({ ...id, host: `${id.host}-other` }, process.pid), { id, own }), false, "another machine's");
 });
 
-test("restartOn: serve starts again on the release in the same process, with its arguments and its claim holder, and without a plugin root override", { skip: typeof process.execve !== "function" && "this Node has no process.execve" }, async () => {
+test("restartOn: serve starts again on the release in the same process, with its arguments, without a plugin root override, and takes up the old loop's claims", { skip: typeof process.execve !== "function" && "this Node has no process.execve" }, async () => {
   const fx = factoryRepo();
   const home = mkdtempSync(join(tmpdir(), "home-"));
   fx.release("9.9.9");
@@ -158,7 +159,7 @@ test("restartOn: serve starts again on the release in the same process, with its
   assert.equal(ran.version, "9.9.9", "the release's own loop runs");
   assert.equal(ran.pid, before.before, "in the same process");
   assert.deepEqual(ran.argv, ["serve", "--all", "--interval", "5"]);
-  assert.equal(ran.holder, before.holder, "its claim holder is its own there");
+  assert.equal(deadHereHolder(before.holder, { self: ran.pid, own: holderId() }), true, "the new loop takes up the claims the old one left at once");
   assert.equal(ran.pluginRoot, null);
   assert.doesNotMatch(r.stdout, /not replaced/);
 });
@@ -300,7 +301,7 @@ test("serve: a new pinned release is announced, holds new stages while one runs,
   const [file, argv, env] = execs[0];
   assert.equal(file, process.execPath);
   assert.equal(argv.at(-1 - (process.argv.length - 2)), join(releasesDir(home), "v9.9.9", "plugin", "scripts", "local.mjs"));
-  assert.equal(env.FACTORY_SERVE_HOLDER, loop.holder);
+  assert.equal(env.FACTORY_PLUGIN_ROOT, undefined);
   assert.match(text, /no stage runs here: serve starts again on clockgrove\/factory@v9\.9\.9/);
   assert.doesNotMatch(text, /could not start again/);
 });
@@ -339,4 +340,27 @@ test("committedWorkflowNow: a running serve reads the default branch's workflow 
   // Offline: the last fetched commit.
   git(ad.dev, "remote", "set-url", "origin", join(ad.dev, "gone.git"));
   assert.deepEqual((await committedWorkflowNow(ad.dev, "main")).wf, { FACTORY_MODEL: "m2" });
+});
+
+test("refreshSettings: a change waits while a stage is being set up, so one stage never mixes two harnesses' settings", async () => {
+  const ad = adopter({ FACTORY_MODEL: "m1" });
+  const harness = process.env.FACTORY_HARNESS;
+  delete process.env.FACTORY_HARNESS;
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  try {
+    const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", harness: "claude", wf: { FACTORY_MODEL: "m1" }, settingUp: 1 });
+    ad.push({ FACTORY_MODEL: "m2" }, "v0.9.31");
+    await loop.refreshSettings();
+    assert.deepEqual(loop.wf, { FACTORY_MODEL: "m1" }, "kept while the set-up runs");
+    assert.deepEqual(loop.pins, ["v0.9.31"], "the pin is read all the same");
+    loop.settingUp = 0;
+    await loop.refreshSettings();
+    assert.deepEqual(loop.wf, { FACTORY_MODEL: "m2" }, "taken once no stage is being set up");
+  } finally {
+    process.stdout.write = write;
+    if (harness !== undefined) process.env.FACTORY_HARNESS = harness;
+  }
+  assert.equal(lines.filter((l) => /settings on origin\/main changed/.test(l)).length, 1);
 });

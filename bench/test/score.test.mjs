@@ -549,7 +549,7 @@ test("phaseMinutes: a reviewer beside the required checks counts its minutes onc
       run: async (more) => {
         await more.onPhase("pre-review-validation pass 1 (required checks)");
         await more.onPhase("waiting for required checks (quality) on abc1234");
-        more.onRead({ done: false, green: true, failed: [], pending: ["quality"], missing: [] });
+        more.onRead({ done: false, green: true, failed: [], pending: ["quality"], missing: [] }, [{ id: 1, name: "quality", status: "in_progress" }]);
         return new Promise((r) => (settle = r));
       },
     });

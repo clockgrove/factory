@@ -211,7 +211,7 @@ test("workflow template: the image job runs on the default branch's pushes, the 
   assert.doesNotMatch(job.if, /^!/, "an if: starting with ! is YAML's tag notation");
   // A manual build's run skips the dispatcher by its own if:, so no pending dispatcher a newer tick cancels can drop it.
   assert.match(doc.jobs.dispatch.if, /\(github\.event_name == 'workflow_dispatch' && github\.event\.inputs\.image != 'true'\)/);
-  assert.match(job.if, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event_name != 'pull_request'/);
+  assert.match(job.if, /needs\.dispatch\.outputs\.image_owed == 'true' && !startsWith\(github\.event_name, 'pull_request'\)/);
   assert.match(job.steps[0].with.ref, /needs\.dispatch\.outputs\.image_owed == 'true' && github\.event\.repository\.default_branch/);
   assert.match(job.steps.find((s) => s.with?.mode === "image").with.image_owed, /needs\.dispatch\.outputs\.image_owed/);
   assert.match(doc.jobs.dispatch.outputs.image_owed, /steps\.f\.outputs\.image_owed/);

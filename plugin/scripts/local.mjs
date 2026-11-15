@@ -1580,7 +1580,7 @@ export class Local {
    * it still running on this machine, or a GitHub read that keeps failing (retried first): never a work pass on a branch
    * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
    */
-  async runIssue(issue, { wait = false, gh = { findPr, getIssue }, waitMs = 2_000 } = {}) {
+  async runIssue(issue, { wait = false, gh = { findPr, getIssue, listComments }, waitMs = 2_000 } = {}) {
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);
@@ -1594,6 +1594,13 @@ export class Local {
     if (next === "merge") log(`#${issue}: PR #${pr.number} has no review pending (reviewed, or waiting for its rebase); ${wait ? "following it to its merge" : "nothing to run here"}`);
     if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number, { wait }));
     if (next === "merge") {
+      // Its review ended waiting for a third-party reviewer (a run stopped meanwhile, or a serve's): taken up here, the
+      // label put back once the wait is over, then the review.
+      if (waitOf(await gh.listComments(this.repo, pr.number, this.opts).catch(() => []), issue)) {
+        log(`#${issue}: PR #${pr.number}'s review waits for a third-party reviewer; waiting here, then reviewing`);
+        const resumed = await this.withClaim(issue, async () => ((await this.thirdPartyWait(issue, pr.number)) ? this.review(issue, pr.number, { wait }) : null));
+        if (resumed) return resumed;
+      }
       if (!wait) return { exit: "delivered" };
       return this.withClaim(issue, async () => {
         const merged = await this.followMerge(issue, pr.number);

@@ -9,10 +9,10 @@
 // dispatcher's tick, on every route (the Action's, a cloud sandbox's, `serve`'s), puts the label back once that review
 // exists or the bound has passed (waitState), and the label starts the review stage again as it always does. That stage
 // finds Factory's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
-import { listComments, objectiveLabeledAt, rest } from "./github.mjs";
+import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL, isSelf, selfLogin } from "./logic.mjs";
+import { REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
 /** How long Factory waits for a named reviewer's review of the head, from its wait record (Greptile takes 10 to 15 minutes). */
 export const THIRD_PARTY_WAIT_MS = 20 * 60_000;
@@ -85,14 +85,16 @@ export function waitBody(issue, { sha, logins, at }) {
 }
 
 /**
- * The PR's wait record, from Factory's own comments only (isSelf), the newest: {id, sha, logins, since, updatedAt}, or
- * null. `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock; `updatedAt` its last write.
+ * The PR's wait record, the newest by Factory itself or by someone who can push (trustedAuthor: a local loop writes as
+ * its developer, so the Action's dispatcher and another developer's loop read its record too): {id, sha, logins, since,
+ * updatedAt, own}, or null. `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock;
+ * `updatedAt` its last write; `own` whether this process wrote it (only its own is rewritten).
  */
 export function waitOf(comments, issue) {
   const mark = WAIT_MARK(issue);
   for (const c of [...(comments || [])].reverse()) {
     const body = String(c?.body || "");
-    if (!isSelf(c) || !body.startsWith(mark)) continue;
+    if (!trustedAuthor(c) || !body.startsWith(mark)) continue;
     const m = /^(\{[^\n]*\}) -->/.exec(body.slice(mark.length));
     let data = null;
     try {
@@ -104,7 +106,7 @@ export function waitOf(comments, issue) {
     if (!data || !/^[0-9a-f]{40,64}$/.test(data.sha || "") || !Array.isArray(data.logins) || !Number.isFinite(since)) continue;
     const logins = thirdPartyReviewers(data.logins.slice(0, LOGINS_MAX)).logins;
     if (!logins.length) continue;
-    return { id: c.id, sha: data.sha, logins, since, updatedAt: Date.parse(c.updated_at || c.created_at) };
+    return { id: c.id, sha: data.sha, logins, since, updatedAt: Date.parse(c.updated_at || c.created_at), own: isSelf(c) };
   }
   return null;
 }
@@ -113,6 +115,33 @@ export function waitOf(comments, issue) {
 export const waitUntil = (wait) => wait.since + THIRD_PARTY_WAIT_MS;
 
 const dropWait = (repo, wait, opts) => (wait ? rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" }).catch((e) => log(`third-party wait record: ${String(e?.message || e).slice(0, 120)}`)) : null);
+
+/**
+ * Before a review stage ends `waiting`: what the dispatcher needs to resume it. The PR's review label comes off (a
+ * label left on would start nothing again), and the Objective is In review, the only state the dispatcher resumes: an
+ * Objective whose Question a person answered by marking its PR ready still carries `factory:question`, which goes now,
+ * as the review's own exit would take it off (`labels`, the issue's as the stage read them). {ok} when the stage may
+ * end; otherwise {ok: false, why}, with the review label back on, and the stage goes on without the wait.
+ */
+export async function waitEnd({ repo, issue, prNumber, labels = [], token }) {
+  const opts = { token };
+  try {
+    await removeLabel(repo, prNumber, REVIEW_LABEL, opts);
+  } catch (e) {
+    log(`review label: ${String(e?.message || e).slice(0, 120)}`);
+    return { ok: false, why: "the review label could not be taken off" };
+  }
+  const states = (labels || []).map((l) => (typeof l === "string" ? l : l?.name)).filter((n) => /^factory:(running|blocked|question|in-review)$/.test(n || ""));
+  if (states.length === 1 && states[0] === "factory:in-review") return { ok: true };
+  try {
+    await setStateLabel(repo, issue, "in-review", opts);
+    return { ok: true };
+  } catch (e) {
+    log(`state label: ${String(e?.message || e).slice(0, 120)}`);
+    await addLabels(repo, prNumber, [REVIEW_LABEL], opts).catch((x) => log(`review label: ${String(x?.message || x).slice(0, 120)}`));
+    return { ok: false, why: "the Objective could not be moved to In review" };
+  }
+}
 
 /** Remove the PR's wait record, if any (a stage that went on after all). Never throws. */
 export async function clearWait({ repo, issue, prNumber, token }) {
@@ -163,8 +192,10 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
     return { logins, wait: null };
   }
   const record = waitOf(comments, issue);
-  const mine = record?.sha === sha ? record : null;
-  const passed = mine && now() >= waitUntil(mine);
+  const current = record?.sha === sha ? record : null;
+  const passed = current && now() >= waitUntil(current);
+  // Only this process's own record is rewritten; another writer's for this head gets a record of ours beside it.
+  const mine = current?.own ? current : null;
   if (!seen.missing.length || passed) {
     await progress(thirdPartyLine(seen, sha, THIRD_PARTY_WAIT_MS));
     await dropWait(repo, record, opts);
@@ -180,7 +211,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
       const made = await rest(`repos/${repo.full}/issues/${prNumber}/comments`, { ...opts, method: "POST", body: { body } });
       since = Date.parse(made?.created_at);
       if (!Number.isFinite(since)) since = now();
-      await dropWait(repo, record, opts);
+      if (record && !current) await dropWait(repo, record, opts);
     }
   } catch (e) {
     await progress(`third-party review: the wait could not be recorded on the PR (${String(e?.message || e).slice(0, 80)}); going on without ${seen.missing.join(", ")}`);

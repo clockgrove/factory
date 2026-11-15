@@ -614,3 +614,80 @@ test("#311: only an App's review ticks the dispatcher; no pull_request* event bu
   assert.equal(by.status, "FAIL", "a tick any person's review fires");
   assert.match(by.detail, /pull_request_review, from an App only/);
 });
+
+// #311, Greptile's review: an answered Question, a run taken up again, and another writer's record.
+
+test("#311: a waiting stage leaves its Objective In review: an answered Question's label goes, so the dispatcher resumes it", async () => {
+  const { waitEnd } = await import("../scripts/lib/third-party-review.mjs");
+  const calls = [];
+  const fetchFor = (fail = null) => async (url, init = {}) => {
+    const u = String(url).replace(/^https?:\/\/[^/]+/, "");
+    const method = init.method || "GET";
+    calls.push(`${method} ${decodeURIComponent(u)}${init.body ? ` ${JSON.parse(init.body).labels}` : ""}`);
+    if (fail && fail(method, u)) return json(422, { message: "nope" });
+    return method === "DELETE" ? json(404, { message: "Label does not exist" }) : json(200, []);
+  };
+  const run = async (labels, fail) => {
+    calls.length = 0;
+    const real = globalThis.fetch;
+    globalThis.fetch = fetchFor(fail);
+    try {
+      return await waitEnd({ repo, issue: 7, prNumber: 12, labels, token: "t" });
+    } finally {
+      globalThis.fetch = real;
+    }
+  };
+  // In review already: only the PR's review label comes off.
+  assert.deepEqual(await run([{ name: "factory:objective" }, { name: "factory:in-review" }]), { ok: true });
+  assert.deepEqual(calls, ["DELETE /repos/o/r/issues/12/labels/factory:review"]);
+  // A person marked the Question's PR ready: factory:question goes and factory:in-review is applied.
+  assert.deepEqual(await run([{ name: "factory:objective" }, { name: "factory:question" }]), { ok: true });
+  assert.ok(calls.includes("DELETE /repos/o/r/issues/7/labels/factory:question"));
+  assert.equal(calls.at(-1), "POST /repos/o/r/issues/7/labels factory:in-review");
+  // The move refused: the review label goes back on and the stage goes on without the wait.
+  const refused = await run([{ name: "factory:question" }], (m, u) => m === "POST" && /issues\/7\/labels$/.test(u));
+  assert.deepEqual(refused, { ok: false, why: "the Objective could not be moved to In review" });
+  assert.equal(calls.at(-1), "POST /repos/o/r/issues/12/labels factory:review");
+});
+
+test("#311: run on an In-review Objective whose review waits takes the wait up, then reviews, rather than following a merge that never comes", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const pr = { number: 12, state: "open", draft: false, head: { sha: HEAD }, labels: [] };
+  const issue = { number: 7, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:in-review" }] };
+  const record = { id: 1, user: { login: "factory[bot]" }, body: waitBody(7, { sha: HEAD, logins: [GREPTILE], at: "x" }), created_at: new Date().toISOString() };
+  const seen = [];
+  const loop = Object.assign(Object.create(Local.prototype), {
+    repo,
+    opts: { token: "t" },
+    reapHere: () => {},
+    ws: () => "/nonexistent-ws",
+    withClaim: async (_n, fn) => fn(),
+    thirdPartyWait: async (n, p) => (seen.push(["wait", n, p]), true),
+    review: async (n, p) => (seen.push(["review", n, p]), { exit: "delivered" }),
+    followMerge: async () => assert.fail("no merge to follow yet"),
+  });
+  const gh = { findPr: async () => pr, getIssue: async () => issue, listComments: async () => [record] };
+  const r = await withGitHub(github(), () => loop.runIssue(7, { gh, waitMs: 1 }));
+  assert.deepEqual(r, { exit: "delivered" });
+  assert.deepEqual(seen, [["wait", 7, 12], ["review", 7, 12]]);
+});
+
+test("#311: a writer's record counts on every route (a local loop writes as its developer); this process writes its own beside it", async () => {
+  const theirs = { id: 41, user: { login: "kirk", type: "User" }, author_association: "MEMBER", body: waitBody(7, { sha: HEAD, logins: [GREPTILE], at: "x" }), created_at: new Date(T0).toISOString(), updated_at: new Date(T0).toISOString() };
+  const stranger = { ...theirs, id: 42, user: { login: "drive-by", type: "User" }, author_association: "NONE" };
+  const clock = { t: T0 + 5 * MIN };
+  const gh = github({ reviews: [], comments: [theirs], clock: () => clock.t });
+  await withGitHub(gh, async () => {
+    assert.deepEqual(waitOf([stranger], 7), null, "anyone else's is no record");
+    const w = waitOf([theirs], 7);
+    assert.deepEqual([w.id, w.own], [41, false]);
+    // The dispatcher (the Action's, say) acts on it.
+    const pr = { number: 7, state: "open", draft: false, head: { sha: HEAD }, labels: [] };
+    assert.deepEqual(await waitState({ repo, issue: 7, pr, wait: w, opts: { token: "t" }, now: T0 + THIRD_PARTY_WAIT_MS }), { resume: "deadline", until: T0 + THIRD_PARTY_WAIT_MS });
+  });
+  // A stage here within its bound: its own record (it cannot rewrite another's), the other left as it is.
+  const r = await step(gh, clock);
+  assert.ok(r.wait);
+  assert.deepEqual(gh.writes(), ["POST /repos/o/r/issues/7/comments"]);
+  assert.equal(gh.comments.length, 2);
+});

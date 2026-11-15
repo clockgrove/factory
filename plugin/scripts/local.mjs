@@ -1003,8 +1003,9 @@ export class Local {
   /**
    * SIGINT, SIGTERM or SIGHUP to `run`, `review` or `serve`: stop. Nothing new starts, every stage process gets SIGTERM
    * (it stops its harness's process group before it exits: proc.mjs stopGroups), and the claims stay, so the Objectives
-   * pause and this machine's next `factory run` or `factory serve` takes them up again. Exits once `whenSettled()` resolves
-   * (the work in flight, wound down) or 30 s pass.
+   * pause and this machine's next `factory run` or `factory serve` takes them up again. A start that has written no claim
+   * yet writes none and puts its Objective back to Queued (withClaim's `onStop`, serve's unpick), so none is left Running
+   * with no claim. Exits once `whenSettled()` resolves (the work in flight, wound down) or 30 s pass.
    */
   stopOnSignals(whenSettled) {
     let stoppedAt = 0;
@@ -1018,7 +1019,7 @@ export class Local {
       stoppedAt = Date.now();
       this.stopping = true;
       for (const wake of this.wakers || []) wake();
-      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); signal again to exit at once`);
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); a start with no claim yet goes back to Queued; signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.resolve(whenSettled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(code);
@@ -1070,7 +1071,7 @@ export class Local {
    * resumes it once (pausedHere); a second such end in a row Blocks it here with the stage's exit and log (lapse). A
    * claim that cannot be read or written is a failed start (`startFailed`, runObjective's unstart).
    */
-  async withClaim(issue, fn) {
+  async withClaim(issue, fn, { onStop = null } = {}) {
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
@@ -1086,6 +1087,12 @@ export class Local {
     const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder);
     if (others && held.fresh) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
+      return { exit: "skipped" };
+    }
+    // Told to stop before the claim: none is written. With no claim on the issue at all, `onStop` settles it (a work
+    // start puts a Running Objective back to Queued); a claim already there stays, for the loop that resumes it.
+    if (this.stopping) {
+      if (!held && onStop) await onStop().catch((e) => log(`#${issue}: stopping before its claim, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`));
       return { exit: "skipped" };
     }
     try {
@@ -1411,7 +1418,7 @@ export class Local {
       return { exit: "skipped" };
     }
     try {
-      return await this.withClaim(issue, () => this.work(issue, { wait }));
+      return await this.withClaim(issue, () => this.work(issue, { wait }), { onStop: () => this.unpickStopped(issue) });
     } catch (e) {
       if (!e?.startFailed) throw e;
       return this.unstart(issue, e);
@@ -1477,10 +1484,26 @@ export class Local {
 
   /** Back to Queued: the Running label off, the card to Queued, this loop's claim dropped. */
   async requeue(issue) {
+    await this.unpick(issue);
+    await dropClaim(this.repo, issue, this.holder, this.opts);
+  }
+
+  /** Back to Queued with no claim to drop: the Running label off and the card to Queued. */
+  async unpick(issue) {
     await setStateLabel(this.repo, issue, null, this.opts);
     const project = await findProject(this.repo, this.opts).catch(() => null);
     if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
-    await dropClaim(this.repo, issue, this.holder, this.opts);
+  }
+
+  /**
+   * A work start told to stop before it wrote its claim, with no claim on the issue: an Objective labelled Running (serve's
+   * dispatch marked it) goes back to Queued, so it is never left Running with nothing to resume it. Any other state stays.
+   */
+  async unpickStopped(issue) {
+    const data = await getIssue(this.repo, issue, this.opts);
+    if (!(data?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:running")) return;
+    await this.unpick(issue);
+    log(`#${issue}: stopping before its claim was written; back to Queued`);
   }
 
   /**
@@ -1723,7 +1746,12 @@ export class Local {
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
     // then, said once.
     waitOutages();
-    this.stopOnSignals(() => Promise.allSettled(running.values()));
+    // The stop waits for the dispatch under way (it may be marking picks Running), then for every start and stage,
+    // those started after the signal included.
+    this.stopOnSignals(async () => {
+      await this.dispatching;
+      while (running.size) await Promise.allSettled(running.values());
+    });
     let cleaned = 0;
     // The token GitHub refused (401: expired or revoked), or null. While set, nothing new starts; each tick reads the
     // token's source again and takes a new token once it passes the start's own check (checkToken), and once a minute
@@ -1775,7 +1803,11 @@ export class Local {
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
+      // Stopping: no dispatch starts (it would mark picks Running).
+      if (this.stopping) break;
+      // localLive: a stage of the Objective runs on this machine (an earlier serve's), so the dispatcher never takes a
+      // Running one with no claim for a start that never wrote it. localStopping: a stop mid-dispatch marks no more picks.
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1785,7 +1817,19 @@ export class Local {
         }
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
+      }).then(async (r) => {
+        // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit.
+        if (!this.stopping) return r;
+        for (const n of (r.ready || []).filter((x) => !running.has(x))) {
+          await this.unpick(n).then(
+            () => log(`#${n}: stopping before it started; back to Queued`),
+            (e) => log(`#${n}: stopping before it started, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`),
+          );
+        }
+        return { ...r, ready: [], halted: true };
       });
+      const result = await this.dispatching;
+      if (result.halted) break;
       if (result.refused) {
         if (once) return void (await Promise.all(running.values()));
         await new Promise((r) => setTimeout(r, intervalMs));

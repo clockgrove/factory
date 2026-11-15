@@ -41,6 +41,12 @@ export async function appToken(inputs) {
 /** At most this many blocked-by relation reads at once (GitHub's secondary rate limit counts concurrent requests). */
 const RELATION_READS = 6;
 
+/**
+ * How long a factory:local Objective may stay Running with no claim comment at all before a local loop puts it back to
+ * Queued: a start writes its claim within seconds of the Running label, and a live stage keeps it (HEARTBEAT_MS).
+ */
+const UNCLAIMED_MS = 5 * 60_000;
+
 /** What a person does about a factory:local Objective no loop came back to for a day. */
 const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
 
@@ -78,9 +84,9 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
 const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new Date(resetAt).toISOString()}; no new stage starts until then`;
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, failedLaunch = null, recordWrites = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -349,15 +355,19 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const readToken = { token: inputs.githubToken || token };
   const vanished = [];
   const paused = [];
+  const unclaimed = [];
   // With a cloud sandbox (FACTORY_SANDBOX) no work job holds an Objective: its sandbox record does (launch.mjs). A
   // Running Objective with no work start since it became Running lost its launch (an event GitHub dropped, a pending
   // launcher a newer one replaced): past a grace for the launch job to start, the sweep names it again.
   const relaunch = [];
+  // `claimed`: the Objectives a claim comment was read on, whatever its time (an unread one counts too).
+  const claimed = new Set();
   // A local loop's hold on an Objective that waits on one (Running, or In review with work owed): "unread" when its
   // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one
   // that a human re-labelled) says nothing now.
   const localWait = async (issue, entered) => {
     const hold = await backend().trigger.localHold(repo, issue.number, opts);
+    if (hold) claimed.add(issue.number);
     return hold && hold.state !== "unread" && entered && Date.parse(hold.heartbeat) < Date.parse(entered) ? null : hold;
   };
   // The Block for an Objective no loop came back to: an expired claim names its holder and goes with the Block, so the
@@ -616,9 +626,30 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
           continue;
         }
-        // No claim: a runner job gets 15 minutes to show up. A factory:local Objective waits for a loop on its
-        // machine (one that starts, or a start that failed before its claim), so it gets the day a claim gets.
         const local = hasLocalLabel(issue);
+        // A local loop's own pass (serve, which says whether a stage of it runs on its machine: localLive): a
+        // factory:local Objective Running for UNCLAIMED_MS with no claim comment at all, no stage of it here and none
+        // this loop is starting (localHeld) is a start that never wrote its claim (its loop stopped or died between the
+        // Running label and the claim). Every stage runs under a claim, so no machine works it: back to Queued for the
+        // next pick, rather than a day's wait. A label that cannot be removed is tried again next tick.
+        if (localLive && local && !hold && !claimed.has(issue.number) && since && Date.now() - Date.parse(since) >= UNCLAIMED_MS && !localHeld?.[issue.number] && !localLive(issue.number)) {
+          const n = issue.number;
+          if (!dryRun) {
+            const off = await setStateLabel(repo, n, null, opts).then(
+              () => true,
+              (e) => (log(`  #${n}: Running with no claim, but its label could not be removed (${String(e?.message || e).slice(0, 120)}); next tick tries again`), retry(`#${n}'s Running label`), false),
+            );
+            if (!off) continue;
+            await moveCard(project, repo, n, "Queued", opts).catch(() => {});
+          }
+          unclaimed.push(n);
+          statuses[n] = "Queued";
+          issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running");
+          log(`  #${n}: Running since ${since} with no claim and no stage on any machine (a start that never wrote its claim); back to Queued`);
+          continue;
+        }
+        // No claim: a runner job gets 15 minutes to show up. Any other factory:local Objective waits for a loop on its
+        // machine, so it gets the day a claim gets.
         if (!hold && since && Date.now() - Date.parse(since) < (local ? CLAIM_PAUSE_MS : 15 * 60_000)) {
           if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
           continue;
@@ -972,8 +1003,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("locks");
   // Mark the picked issues Running now, so the next cron tick does not pick them again
   // before their matrix jobs start; the worker's doctor step re-marks on failure.
+  // A local loop told to stop (localStopping) marks no more: its picks from there on stay Queued, and it returns only
+  // the ones it marked, which it puts back to Queued itself (local.mjs serve).
   if (!dryRun) {
-    for (const n of picked.ready) {
+    for (const [i, n] of picked.ready.entries()) {
+      if (localStopping?.()) {
+        picked.ready = picked.ready.slice(0, i);
+        break;
+      }
       await setStateLabel(repo, n, "running", opts);
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
@@ -996,7 +1033,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, queue, queueWatch, ms: watch.ms };
 }
 
 /**

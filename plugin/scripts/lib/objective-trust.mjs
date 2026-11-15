@@ -12,7 +12,7 @@ import { DRAFT_LABEL } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
-import { ACCOUNT_LABEL_PREFIX, NO_SECRET, accountLabelNote, routeAccount, routeAccounts, routeTwoLine } from "./accounts.mjs";
+import { ACCOUNT_LABEL_PREFIX, NO_SECRET, accountLabelNote, routeAccount, routeAccounts, routeAutoAccounts, routeTwoLine } from "./accounts.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
@@ -294,8 +294,9 @@ export async function objectiveInputs({ repo, issue, args = {}, env = process.en
  * The account a stage on GitHub Actions or the cloud sandbox runs on (#267). With accounts declared (FACTORY_ACCOUNTS,
  * accounts.mjs routeAccounts): the one the labels (`labels`, names) pick for `harness` (routeAccount; an account label's
  * labeler read afresh, labelsVouched), checked against the one the route prepared the stage for (FACTORY_STAGE_ACCOUNT:
- * the workflow's account step, whose account's credential is the only one the stage holds). {refusal: {reason, fix}} for
- * a declaration or label that cannot be used, two account labels, or an account other than the prepared one; else
+ * the workflow's account step, whose account's credential is the only one the stage holds; with automatic account choice
+ * on and no pin, any declared account of the harness, the one the step picked, #268). {refusal: {reason, fix}} for a
+ * declaration or label that cannot be used, two account labels, or an account other than the prepared one; else
  * {account, note: ""}. With none declared, the repository's one credential as ever: {account: null, note}, `note`
  * accountLabelNote's line for an account label, which does nothing then. `gh` (labelers, permission) is a test's own.
  */
@@ -314,6 +315,8 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   if (!prepared) return { refusal: { reason: "this repository declares accounts (FACTORY_ACCOUNTS), but its workflow picked none for this stage, so the stage holds no account's credential: its jobs have no account step", fix: "Re-render the workflow (`/factory:factory-setup`), whose jobs pick each stage's account and pass only that account's secrets, merge it, then re-apply `factory:objective`." } };
   // The account step ran and could pick none (its labels then could not be used), so it passed no credential.
   if (prepared === NO_SECRET) return { refusal: { reason: `the job's account step picked no account, so this stage holds no account's credential; the labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
+  // Automatic account choice (#268): with no pin, the step picks any declared account of the harness (route-holds.mjs).
+  if (prepared !== r.account.name && !r.label && routeAutoAccounts(env, harness)?.includes(prepared)) return { account: prepared, note: "" };
   if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
   return { account: r.account.name, note: "" };
 }

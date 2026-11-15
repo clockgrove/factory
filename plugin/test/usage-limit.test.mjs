@@ -8,7 +8,7 @@ import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
-import { LIMIT_PASS_PROMPT, USAGE_LIMIT, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
+import { LIMIT, LIMIT_PASS_PROMPT, USAGE_LIMIT, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
 import { captureSession, dropSessions } from "../scripts/lib/claude-runner.mjs";
 import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
@@ -178,6 +178,41 @@ test("runHarness, real, fake claude: off the local route the in-place bound is t
     assert.equal(calls().length, 2);
     assert.equal(rec.ok, true);
   });
+});
+
+test("runHarness, real, fake claude: with another account free (automatic account choice on Actions, #268), a reset past fifteen minutes ends the stage instead of the in-place wait; a nearer one, or none free, is waited for", async () => {
+  const start = Date.parse(RESET) - 2 * 60 * 60_000;
+  const asked = [];
+  try {
+    // Another account free: the two-hour wait the deadline allows ends the stage at once, nothing run again.
+    LIMIT.elsewhere = async (r) => (asked.push(r.code), true);
+    const far = fakeClaude();
+    await inStage(far.bin, start, async ({ waits }) => {
+      waitOutages({ until: () => start + 3 * 60 * 60_000 });
+      await assert.rejects(runHarness(pass(far.bin)), (e) => e.code === USAGE_LIMIT && e.resetAt === Date.parse(RESET));
+      assert.equal(far.calls().length, 1);
+      assert.deepEqual(waits, []);
+    });
+    assert.deepEqual(asked, ["usage_limit_reached"]);
+    // Ten minutes to the reset: waited for in place, as local mode would, without asking.
+    const near = fakeClaude();
+    await inStage(near.bin, Date.parse(RESET) - 10 * 60_000, async () => {
+      waitOutages({ until: (since) => since + 3 * 60 * 60_000 });
+      assert.equal((await runHarness(pass(near.bin))).ok, true);
+      assert.equal(near.calls().length, 2);
+    });
+    assert.equal(asked.length, 1);
+    // None free: the in-place wait, as today.
+    LIMIT.elsewhere = async () => false;
+    const none = fakeClaude();
+    await inStage(none.bin, start, async () => {
+      waitOutages({ until: () => start + 3 * 60 * 60_000 });
+      assert.equal((await runHarness(pass(none.bin))).ok, true);
+      assert.equal(none.calls().length, 2);
+    });
+  } finally {
+    LIMIT.elsewhere = null;
+  }
 });
 
 test("runHarness, real, fake claude: a wait never reruns past the dollar cap; the rerun gets what is left of it", async () => {

@@ -7,8 +7,8 @@
 //   repository's id, the head and the snapshot id. A snapshot is used or deleted only when that listing shows it.
 // Paths inside the image are constants, never read from a record.
 import { SNAPSHOT_TAG } from "./adapters/sandbox.mjs";
-import { ensureLabel, getRepo, listComments, onDefaultBranch, rest, upsertComment } from "./github.mjs";
-import { WAKE_SLACK_MS, isSelf, marker, selfLogin } from "./logic.mjs";
+import { findRecordIssue, getRepo, listComments, onDefaultBranch, openRecordIssue, rest, upsertComment } from "./github.mjs";
+import { WAKE_SLACK_MS, isSelf, marker } from "./logic.mjs";
 
 /** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
 export const IMAGE_LABEL = "factory:image";
@@ -77,22 +77,8 @@ export function imageRecordOf(body) {
   }
 }
 
-/**
- * Factory's image issue, or null: the oldest issue Factory's own login opened with the exact title. The label is only a
- * hint (the first, cheap query); without it, Factory's own issues are searched by creator. On Actions the issue must be
- * locked, as Factory leaves it, so an unlocked one (Factory's, but not this record's) is not trusted.
- */
-export async function findImageIssue(repo, opts, { actions = process.env.GITHUB_ACTIONS === "true" } = {}) {
-  const self = selfLogin();
-  if (!self) return null;
-  const ok = (i) => !i.pull_request && isSelf(i) && i.title === IMAGE_TITLE && (!actions || i.locked === true);
-  const query = (extra) => rest(`repos/${repo.full}/issues?creator=${encodeURIComponent(self)}&state=all&sort=created&direction=asc&per_page=100${extra}`, { ...opts, paginate: !extra });
-  for (const extra of [`&labels=${encodeURIComponent(IMAGE_LABEL)}`, ""]) {
-    const found = (((await query(extra)) || []).filter(ok)).sort((a, b) => a.number - b.number)[0];
-    if (found) return found;
-  }
-  return null;
-}
+/** Factory's image issue, or null (github.mjs findRecordIssue: its own, with the exact title, locked on Actions). */
+export const findImageIssue = (repo, opts, { actions = process.env.GITHUB_ACTIONS === "true" } = {}) => findRecordIssue(repo, { label: IMAGE_LABEL, title: IMAGE_TITLE }, opts, { actions });
 
 /** The builds Factory recorded, newest first: its own marker comment on its own image issue only. */
 export async function listImages(repo, opts) {
@@ -110,12 +96,8 @@ export async function listImages(repo, opts) {
 export async function recordImage(repo, entry, opts) {
   let { issue, builds } = await listImages(repo, opts);
   if (!issue) {
-    await ensureLabel(repo, IMAGE_LABEL, "5319e7", "Factory's sandbox image record", opts);
     const body = "Factory keeps the record of this repository's sandbox image here: what each build made, from which head, in how long. Factory reads only its own comment. Do not reopen.";
-    issue = (await rest(`repos/${repo.full}/issues`, { ...opts, method: "POST", body: { title: IMAGE_TITLE, body, labels: [IMAGE_LABEL] } })).number;
-    await rest(`repos/${repo.full}/issues/${issue}`, { ...opts, method: "PATCH", body: { state: "closed", state_reason: "completed" } });
-    // Locked is part of what makes it Factory's record on Actions (findImageIssue): a failed lock fails the record.
-    await rest(`repos/${repo.full}/issues/${issue}/lock`, { ...opts, method: "PUT", body: { lock_reason: "resolved" } });
+    issue = await openRecordIssue(repo, { label: IMAGE_LABEL, color: "5319e7", description: "Factory's sandbox image record", title: IMAGE_TITLE, body }, opts);
   }
   const next = withBuild(builds, entry);
   const e = next[0];

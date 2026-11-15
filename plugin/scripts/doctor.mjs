@@ -25,13 +25,14 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeCredentialEnv, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
+import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAutoSetting, routeCredentialEnv, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
+import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { dropOwned } from "./lib/fsafe.mjs";
 import { loopCap, machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
@@ -260,14 +261,41 @@ export function neededSecrets(inputs, accounts = "") {
 /**
  * The accounts a repository declares for GitHub Actions and the cloud sandbox (FACTORY_ACCOUNTS in its workflow file,
  * lib/accounts.mjs routeAccounts, #267): none, a FAIL naming why the declaration cannot be used, or a PASS naming each
- * harness's accounts. Names only; secretChecks checks each one's secret by name.
+ * harness's accounts and how a stage's account is picked (`auto`: FACTORY_AUTO_ACCOUNT, #268; a value that is neither 1
+ * nor 0 is a WARN, and leaves it off). Names only; secretChecks checks each one's secret by name.
  */
-export function routeAccountChecks(accounts = "") {
+export function routeAccountChecks(accounts = "", auto = "") {
   const d = routeAccounts(accounts);
   if (!d.ok) return [FAIL("accounts", d.problem, 'set FACTORY_ACCOUNTS in .github/workflows/factory.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
-  if (!d.declared) return [];
+  const setting = routeAutoSetting({ FACTORY_AUTO_ACCOUNT: auto });
+  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "set FACTORY_AUTO_ACCOUNT in .github/workflows/factory.yml to 1 (on) or 0 (off) (docs/INSTALL.md, Several accounts)")] : [];
+  if (!d.declared) return warn;
   const each = Object.entries(d.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
-  return [PASS("accounts", `${each.join("; ")}: on GitHub Actions and the cloud sandbox each stage runs on one, its harness's default or the one a trusted factory:account:<name> label pins, and gets only that account's secrets`)];
+  const how = setting.on ? "the one a trusted factory:account:<name> label pins, else a free one by automatic account choice (FACTORY_AUTO_ACCOUNT)" : "its harness's default or the one a trusted factory:account:<name> label pins";
+  return [PASS("accounts", `${each.join("; ")}: on GitHub Actions and the cloud sandbox each stage runs on one, ${how}, and gets only that account's secrets`), ...warn];
+}
+/**
+ * Factory's account holds issue (lib/route-holds.mjs, #268), with automatic account choice on and accounts declared: a
+ * WARN for more than one (only the oldest locked one is read; Factory retires the rest at its next usage limit) or an
+ * unlocked one (on GitHub Actions its holds count for nothing), a PASS otherwise. `self`: the App's bot login when known,
+ * else any bot's issue with the title counts. One labelled issues query; a failed read is a WARN.
+ */
+export async function holdsIssueChecks({ repo, opts = {}, accounts = "", auto = "", self = null }) {
+  if (!routeAutoSetting({ FACTORY_AUTO_ACCOUNT: auto }).on || !routeAccounts(accounts).declared) return [];
+  let list;
+  try {
+    list = (await rest(`repos/${repo.full}/issues?labels=${encodeURIComponent(HOLDS_LABEL)}&state=all&sort=created&direction=asc&per_page=100`, opts)) || [];
+  } catch (e) {
+    return [WARN("account holds", `could not read Factory's holds issue (${String(e.message).slice(0, 100)})`, "run doctor with a token that can read the repository's issues")];
+  }
+  const key = (l) => String(l ?? "").toLowerCase();
+  const ours = list.filter((i) => !i.pull_request && i.title === HOLDS_TITLE && (self ? key(i.user?.login) === key(self) : i.user?.type === "Bot")).sort((a, b) => a.number - b.number);
+  if (!ours.length) return [PASS("account holds", "no holds issue yet: Factory opens it, closed and locked, at the first usage limit on an account")];
+  const out = [];
+  if (ours.length > 1) out.push(WARN("account holds", `${ours.length} holds issues (${ours.map((i) => `#${i.number}`).join(", ")}): only the oldest locked one is read`, "leave them: Factory retitles and closes the others at its next usage limit"));
+  const open = ours.filter((i) => i.locked !== true);
+  if (open.length) out.push(WARN("account holds", `${open.map((i) => `#${i.number}`).join(", ")} is not locked, so on GitHub Actions its holds count for nothing`, `lock it: gh issue lock ${open[0].number} --reason resolved`));
+  return out.length ? out : [PASS("account holds", `#${ours[0].number}, Factory's own and locked`)];
 }
 const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
@@ -1668,7 +1696,9 @@ async function main() {
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
   const accounts = process.env.GITHUB_ACTIONS ? process.env.FACTORY_ACCOUNTS : wf.FACTORY_ACCOUNTS;
-  if (!local) results.push(...routeAccountChecks(accounts));
+  const autoAccount = process.env.GITHUB_ACTIONS ? process.env.FACTORY_AUTO_ACCOUNT : wf.FACTORY_AUTO_ACCOUNT;
+  if (!local) results.push(...routeAccountChecks(accounts, autoAccount));
+  if (!local) results.push(...(await holdsIssueChecks({ repo, opts: token ? { token } : {}, accounts, auto: autoAccount, self: app?.appSlug ? `${app.appSlug}[bot]` : selfLogin() })));
   results.push(...(await githubChecks({ inputs, repo, token, app, local, accounts })));
   results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));

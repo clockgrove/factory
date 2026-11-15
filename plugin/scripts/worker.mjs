@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -27,6 +27,7 @@ import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { routeInputs } from "./lib/accounts.mjs";
+import { routeLimits } from "./lib/route-holds.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
@@ -146,6 +147,9 @@ async function main() {
   let watch = null;
   // A send-back's rebase stage ({conflict}): its end writes the rebase line and this Objective's rebases so far (#277).
   let rebaseStage = null;
+  // Automatic account choice on GitHub Actions and the cloud sandbox (lib/route-holds.mjs routeLimits, #268): a usage
+  // limit holds this stage's account in Factory's records on GitHub, and the Objective goes on on a free one.
+  let limits = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
@@ -173,6 +177,8 @@ async function main() {
       dropOwned(tmp.factory);
     }
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
+    // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
+    if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
@@ -220,7 +226,7 @@ async function main() {
     // `provider-quota` Block elsewhere (session.mjs usageLimitExit).
     if (e?.code === USAGE_LIMIT) {
       const pause = local && pauseNow ? await pauseNow().catch((x) => log(`the pause's record could not be read, so the next stage starts fresh: ${String(x?.message || x).slice(0, 160)}`) ?? null) : null;
-      await usageLimitExit(e, { local, records, finish, pause, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
+      await usageLimitExit(e, { local, records, finish, pause, goOn: limits?.limit, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
       return;
     }
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
@@ -355,6 +361,8 @@ async function main() {
     return;
   }
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
+  limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "work", harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
+  if (limits) LIMIT.elsewhere = limits.elsewhere;
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
   if (acct.note) await progress(acct.note);
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);

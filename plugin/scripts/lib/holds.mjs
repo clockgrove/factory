@@ -55,6 +55,23 @@ function recordOf(v, account) {
   return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}), ...(v.served === true ? { served: true } : {}), ...(v.guess === true ? { guess: true } : {}) };
 }
 
+/**
+ * Another clock's (or a hand-made) record: no end past the longest window, and one made "after now" is the oldest for the
+ * streak, so it never stands over every later record.
+ */
+const clamped = (r, now) => ({ ...r, until: Math.min(r.until, now + HOLD_MAX_MS), at: r.at > now ? 0 : r.at });
+
+/**
+ * A record kept somewhere other than this machine's files (route-holds.mjs: GitHub Actions and the cloud sandbox keep
+ * theirs on GitHub, #268), checked as a file's is and held to this clock: the record, or null when it is none, its key is
+ * no account's, or it is forgotten (its hold ended HOLD_FORGET_MS ago).
+ */
+export function heldRecord(v, now) {
+  if (typeof v?.account !== "string" || !KEY.test(v.account)) return null;
+  const r = recordOf(v, v.account);
+  return r && now - r.until <= HOLD_FORGET_MS ? clamped(r, now) : null;
+}
+
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
 const ours = (st, uid) => !!st && !st.isSymbolicLink() && (uid === undefined || st.uid === uid) && !(st.mode & 0o022);
 
@@ -90,9 +107,7 @@ function readDir(dir, now, uid) {
       const r = recordOf(JSON.parse(readFileSync(file, "utf8")), m[1]);
       if (!r) continue;
       if (now - r.until > HOLD_FORGET_MS) rmSync(file, { force: true });
-      // Another clock's (or a hand-made) record: no end past the longest window, and one made "after now" is the oldest
-      // for the streak, so it never stands over every later record.
-      else out.push({ ...r, until: Math.min(r.until, now + HOLD_MAX_MS), at: r.at > now ? 0 : r.at });
+      else out.push(clamped(r, now));
     } catch {
       // gone under the read (another serve forgot it), or not JSON: left out
     }
@@ -153,8 +168,10 @@ const START = (key) => `${key}.started.json`;
  * - `startedAt(account, now)`: when a stage last started on the account (ms), or null; a time after `now` (another clock's,
  *   or a hand-made file) counts as long ago, as a hold record's does.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).
+ * With no `dir`, `seed` is the records already kept elsewhere (heldRecord's), and `onPut` hears each record this store
+ * makes, for its caller to keep there (route-holds.mjs).
  */
-export function accountHolds({ dir = null, uid = process.getuid?.(), onError = () => {} } = {}) {
+export function accountHolds({ dir = null, uid = process.getuid?.(), onError = () => {}, seed = [], onPut = null } = {}) {
   // Made before any stage starts, so the outer sandbox's deny of it covers a folder that exists.
   if (dir) {
     try {
@@ -163,7 +180,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       // made again at the first write, which says why it cannot be
     }
   }
-  let kept = [];
+  let kept = dir ? [] : [...seed];
   const starts = new Map();
   const records = (now) => {
     kept = kept.filter((r) => now - r.until <= HOLD_FORGET_MS);
@@ -173,6 +190,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     if (!dir || !KEY.test(r.account) || !NAME.test(r.harness)) {
       kept.push(r);
       if (dir) onError(new Error("the account's key is not one a file may be named by"));
+      else onPut?.(r);
       return;
     }
     const id = randomBytes(8).toString("hex");

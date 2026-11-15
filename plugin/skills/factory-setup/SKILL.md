@@ -35,7 +35,7 @@ Committed copies of the skills and agents, for vendors' cloud sessions only: off
 
 ## Local mode, instead of or beside the Action
 
-On the user's own machine, walk `docs/LOCAL.md` instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates a fine-grained token for this one repository (Contents, Issues and Pull requests read and write; Actions read), and for Copilot a Copilot Requests token. They save them with that page's command; never ask for or read a token. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label are the local loop's; the Action leaves them alone.
+On the user's own machine, walk `docs/LOCAL.md` instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates a fine-grained token for this one repository (Contents, Issues and Pull requests read and write; Actions and Variables read), and for Copilot a Copilot Requests token. They save them with that page's command; never ask for or read one. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label are the local loop's; the Action leaves them alone.
 
 ## After
 

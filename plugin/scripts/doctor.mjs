@@ -17,8 +17,8 @@ import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
-import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
-import { FACTORY_VERSION, input, mask, parseArgs, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, repositoryVariables, rest } from "./lib/github.mjs";
+import { FACTORY_VERSION, appliedLayers, ignoredLines, input, layerLines, mask, parseArgs, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -26,7 +26,7 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { accountEnv, accountToken, defaultAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -388,6 +388,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     if (plugin) out.push(plugin);
     if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:factory-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
+    const vars = varsInputCheck(text);
+    if (vars) out.push(vars);
     out.push(ownedTickCheck(text, env, { job }));
     const waits = longWaitCheck(repoData);
     if (waits) out.push(waits);
@@ -701,6 +703,26 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
   ];
   if (!missing.length) return PASS("merge ticks", "a queue drop, a stalled queue commit and finished CI tick the merge pass");
   return (job ? WARN : FAIL)("merge ticks", `the workflow lacks ${missing.join(", ")}: a dropped or stalled merge queue PR waits for the cron`, "re-run setup --apply workflow and commit the result");
+}
+
+/**
+ * Whether every Factory step of the installed workflow passes the repository's variables (`vars: ${{ toJSON(vars) }}`,
+ * workflow-template.yml): without it the Action's jobs have no variable layer (#284, inputs.mjs applyVariables), and a
+ * variable that applies in local mode does not apply there. WARN naming the re-render; null for a file that does not parse.
+ */
+export function varsInputCheck(text) {
+  let doc = null;
+  try {
+    doc = parseYaml(text);
+  } catch {
+    return null;
+  }
+  const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
+  const steps = Object.values(jobs).flatMap((j) => (Array.isArray(j?.steps) ? j.steps : [])).filter((st) => /^clockgrove\/factory@/.test(String(st?.uses ?? "")));
+  if (!steps.length) return null;
+  const without = steps.filter((st) => !String(st?.with?.vars ?? "").includes("toJSON(vars)")).length;
+  if (!without) return PASS("variables input", "every Factory step passes the repository's variables");
+  return WARN("variables input", `${without} of the workflow's ${steps.length} Factory steps pass${without === 1 ? "es" : ""} no vars, so the repository's FACTORY_* variables do not apply on Actions there`, "re-run setup --apply workflow and commit the result");
 }
 
 /**
@@ -1455,18 +1477,35 @@ export function localDomainChecks({ inputs, env = process.env, local }) {
 }
 
 /**
- * The settings doctor checks with (#236). On Actions the workflow's env block is this process's own. Off Actions it is
- * not: with `--checkout`, or in local mode from a clone, it is read as local mode does, from the default branch's
- * committed workflow (#122), else from the checkout; without either, from the default branch's committed workflow
- * through GitHub's contents API with `token` (else the developer's gh login). Only its settings, as local mode takes
- * them (#119): any other FACTORY_* name there is repository content; this shell still wins. GitHub's copy unreadable:
- * the checkout's copy if there is one, and one WARN naming the harness that leaves. `committed`: local mode's read of
- * the clone (local.mjs committedWorkflowEnv), or null. Returns {wf, committed, env, inputs, checks}.
+ * The settings doctor checks with (#236, #284). On Actions they are this process's own: the workflow's env block, with
+ * the repository's variables laid over it (inputs.mjs applyVariables). Off Actions the env block is not: with
+ * `--checkout`, or in local mode from a clone, it is read as local mode does, from the default branch's committed
+ * workflow (#122), else from the checkout; without either, from the default branch's committed workflow through
+ * GitHub's contents API with `token` (else the developer's gh login). Only its settings, as local mode takes them
+ * (#119): any other FACTORY_* name there is repository content. The repository's variables go over it, listed with
+ * `varsToken` (local mode's token in local mode, as serve lists them; a token that may not is a WARN with the fix, and
+ * the workflow's values stand); this shell wins over both. GitHub's copy unreadable: the checkout's copy if there is
+ * one, and one WARN naming the harness that leaves. `committed`: local mode's read of the clone (local.mjs
+ * committedWorkflowEnv), or null. Returns {wf, committed, env, inputs, layers, checks}.
  */
-export async function doctorSettings({ args, checkout, repo, token, committed = null, env = process.env }) {
-  const settle = (wf, from, checks = []) => {
-    const merged = env.GITHUB_ACTIONS ? env : { ...workflowSettings(wf).kept, ...env };
-    return { wf, committed: from, env: merged, inputs: resolveInputs({ args, env: merged }), checks };
+export async function doctorSettings({ args, checkout, repo, token, varsToken = token, committed = null, env = process.env, local = false }) {
+  const checks = [];
+  let variables = {};
+  if (!env.GITHUB_ACTIONS) {
+    const who = local ? "the local token" : "doctor's token";
+    const fix = local ? "give the local token Variables: read (docs/LOCAL.md, Set it up)" : "run doctor with a gh login that can read the repository's variables (an admin's), or with --local and local mode's token";
+    try {
+      const r = await repositoryVariables(repo, { token: varsToken });
+      if (r.refused) checks.push(WARN("repository variables", `${who} cannot read the repository's variables (HTTP ${r.refused}), so the checks take the workflow's values${local ? " and so does local mode on this machine" : ""}`, fix));
+      else variables = r.vars;
+    } catch (e) {
+      checks.push(WARN("repository variables", `not read (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)}), so the checks take the workflow's values`, "run doctor again"));
+    }
+  }
+  const settle = (wf, from, more = []) => {
+    const layers = env.GITHUB_ACTIONS ? (appliedLayers() ?? settingLayers({ workflow: workflowSettings(env).kept })) : settingLayers({ workflow: workflowSettings(wf).kept, variables, machine: env });
+    const merged = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...env };
+    return { wf, committed: from, env: merged, inputs: resolveInputs({ args, env: merged }), layers, checks: [...more, ...checks] };
   };
   if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);
   const path = ".github/workflows/factory.yml";
@@ -1476,9 +1515,22 @@ export async function doctorSettings({ args, checkout, repo, token, committed = 
     const here = existsSync(join(checkout, path));
     const s = settle(readWorkflowEnv(checkout), null);
     const status = e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80);
-    s.checks.push(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (factory:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
+    s.checks.unshift(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (factory:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
     return s;
   }
+}
+
+/**
+ * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row; and a WARN naming the
+ * repository variables that are ignored: a setting only the reviewed workflow file sets, or no setting at all.
+ */
+export function settingsRows(layers) {
+  const lines = layerLines({ values: layers.values, from: layers.from });
+  const ignored = ignoredLines(layers);
+  return [
+    PASS("settings", `each over the one below (Factory's defaults, the workflow, the repository's variables, this machine):\n       ${lines.join("\n       ")}`),
+    ...(ignored.length ? [WARN("repository variables", ignored.join("; "), "delete those variables; a setting only the workflow file sets goes in its env block, through a pull request")] : []),
+  ];
 }
 
 async function main() {
@@ -1501,8 +1553,10 @@ async function main() {
       app = { error: e.message };
     }
   }
-  const { wf, committed, env, inputs, checks: source } = await doctorSettings({ args, checkout, repo, token, committed: found });
-  const results = [defaultsCheck(inputs), ...source];
+  // The variables are listed as serve lists them: with local mode's token in local mode.
+  const varsToken = (local && localToken(repo.full)) || token;
+  const { wf, committed, env, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
+  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers)];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

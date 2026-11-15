@@ -360,6 +360,21 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   return pages.flatMap((p) => (Array.isArray(p) ? p : p && typeof p === "object" ? Object.values(p).find(Array.isArray) || [p] : []));
 }
 
+/**
+ * The repository's own Actions variables, {NAME: value}, for the variable layer of its settings (inputs.mjs
+ * settingLayers): one list call, 30 a page, conditional with `cache` (rest). A token without Variables: read (a local
+ * fine-grained token made before it was asked for) gets 403 or 404: `{refused: status}`. Any other failure throws.
+ */
+export async function repositoryVariables(repo, { token, cache = null } = {}) {
+  try {
+    const list = await rest(`repos/${repo.full}/actions/variables?per_page=30`, { token, paginate: true, cache });
+    return { vars: Object.fromEntries((list || []).filter((v) => v && typeof v.name === "string").map((v) => [v.name, String(v.value ?? "")])) };
+  } catch (e) {
+    if ((e.status === 403 || e.status === 404) && !e.rateLimited) return { refused: e.status };
+    throw e;
+  }
+}
+
 /** Whether a GraphQL document is a mutation (its first operation keyword, comments aside): a create, never resent blindly. */
 const isMutation = (query) => /^mutation\b/.test(String(query).replace(/#[^\n]*/g, "").trim());
 

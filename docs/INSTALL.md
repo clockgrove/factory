@@ -87,6 +87,23 @@ Seven more optional inputs on the Action; each row gives its default. Every Clau
 | `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. It pins the repository's harness only: another harness an Objective's label chooses installs its latest. |
 | `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains, for every Objective: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. One Objective's own host goes in its `factory:host:<host>` label (USAGE.md, Open a network host for one Objective). |
 
+## Settings in layers
+
+A repository's Factory settings resolve in layers, each over the one below:
+
+1. Factory's defaults (each input's description in `action.yml`).
+2. The workflow's `env:` block on the default branch: the reviewed baseline, changed through a pull request.
+3. Repository variables named `FACTORY_<NAME>` (Settings, Secrets and variables, Actions, Variables; or `gh variable set FACTORY_MAX_CONCURRENT --body 6`), for a change that needs no pull request. Only people with admin access to the repository (its owner, for a personal one), or a token granted Variables write, can set them. Every route reads the same variables: the Action's jobs through the workflow's `vars` input, a cloud sandbox's stages from the launcher that starts them, and local mode through its token (LOCAL.md).
+4. In local mode, the machine's own environment: the `FACTORY_LOCAL_*` settings, and the harness, models and session settings (LOCAL.md, Configuration).
+
+These stay in the reviewed workflow file only, since they steer trust, where money goes, what a stage may reach or receive, or how it is set up: `FACTORY_CREDENTIAL`, `FACTORY_AUTO_MERGE`, `FACTORY_NOTIFY`, `FACTORY_MAINTAINERS`, `FACTORY_PROTECTED_PATHS`, `FACTORY_ALLOWED_DOMAINS`, `FACTORY_LOCAL_DOMAINS`, `FACTORY_WORKER_SECRETS`, `FACTORY_LOCAL_ENV`, `FACTORY_SANDBOX`, `FACTORY_HARNESS_VERSION`, `FACTORY_SETUP`, `FACTORY_INSTALL`, `FACTORY_BUDGET_COMMAND`, `FACTORY_LOCAL_SETUP`, `FACTORY_LOCAL_DB`, and the ids the credentials go with and the dispatcher's own value (`FACTORY_APP_ID`, `FACTORY_ANTHROPIC_OIDC_EXCHANGE_URL`, `FACTORY_VERCEL_TEAM_ID`, `FACTORY_VERCEL_PROJECT_ID`, `FACTORY_IMAGE_OWED`). A variable with one of those names, or a `FACTORY_*` name that is no setting, is named in the job log, `serve`'s log and doctor, and ignored. Caps, money, models and effort, validation and the sweep's settings may be variables.
+
+- A variable that sets another harness than the workflow's drops the workflow's models and effort for that harness's defaults, unless variables set those too; the jobs install that harness.
+- On Actions a variable can lower `FACTORY_TIMEOUT_MINUTES` but not raise it past the workflow's value: the runner jobs' own `timeout-minutes` is the file's.
+- The Action's `vars` context also holds organization and environment variables of the same name, while local mode lists the repository's own: set Factory's on the repository.
+- The workflow passes the variables only once it is rendered with `vars` on every Factory step: re-render it (Upgrade, below). An older file has no variable layer on Actions.
+- `doctor` prints each effective setting and its layer (`settings`), and `factory serve` does at its start; a running `serve` takes a variable's change as it takes the workflow's (LOCAL.md, Settings and repins while `serve` runs).
+
 ## Third-party reviewers
 
 A reviewer App outside Factory, such as Greptile, can be part of each PR's review. Name it by its login in the workflow's env block on the default branch (or `third_party_reviewers` under `with:`), comma-separated for more than one:

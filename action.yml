@@ -170,6 +170,9 @@ inputs:
   drift_model:
     description: The decision model the drift advisory asks (an AI Gateway decision model id); `baseten/elephant-1` when empty.
     required: false
+  vars:
+    description: 'The repository''s variables as JSON, `${{ toJSON(vars) }}` (every `uses:` step of the workflow template passes it). Each `FACTORY_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
+    required: false
   github_token:
     description: 'The job''s GITHUB_TOKEN; Factory reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'
     required: false
@@ -264,7 +267,7 @@ runs:
     - name: Node
       uses: actions/setup-node@v7
       with:
-        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
+        node-version: ${{ inputs.node_version || fromJSON(inputs.vars || '{}').FACTORY_NODE_VERSION || env.FACTORY_NODE_VERSION || '22' }}
 
     # The harness an Objective's `factory:harness:<name>` label names (scripts/objective-harness.mjs), read with the job's
     # own token: the job installs that CLI. The stage checks who applied the label, and Blocks when the harness it runs on
@@ -284,14 +287,16 @@ runs:
       if: inputs.mode != 'dispatch' && inputs.mode != 'launch' && inputs.mode != 'gate' && inputs.mode != 'image' && inputs.mode != 'watch'
       shell: bash
       # The harness comes from the Objective's harness label when it names one, else `with:` when given, else the
-      # workflow's FACTORY_HARNESS env block (visible to composite steps at runtime), else claude: the same precedence as
-      # lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version: lib/choice.mjs harnessVersionFor.
+      # repository's FACTORY_HARNESS variable, else the workflow's FACTORY_HARNESS env block (visible to composite steps at
+      # runtime), else claude: the same precedence as lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version:
+      # lib/choice.mjs harnessVersionFor.
       env:
         FACTORY_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
         FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}
         FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
-        DEFAULT_HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
+        DEFAULT_HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_VARIABLE_HARNESS:-${FACTORY_HARNESS:-claude}}}"
         HARNESS="${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}"
         VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
         # harness_version pins the repository's harness only: another one an Objective's label chose installs its latest.
@@ -345,7 +350,8 @@ runs:
       id: run
       shell: bash
       # Inputs reach the scripts as FACTORY_INPUT_*; an empty `with:` value falls
-      # through to the workflow's FACTORY_* env block, then to the script default.
+      # through to the workflow's FACTORY_* env block (a repository variable of the
+      # same name over it, lib/inputs.mjs applyVariables), then to the script default.
       # The Codex key is set here, on this one step, and the script passes it to the
       # harness child only; validation commands and git hooks never see it.
       env:
@@ -392,6 +398,8 @@ runs:
         FACTORY_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
         FACTORY_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
         FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        # The repository's variables (lib/inputs.mjs applyVariables lays them over the env block, then drops this).
+        FACTORY_INPUT_VARS: ${{ inputs.vars }}
         FACTORY_INPUT_SANDBOX: ${{ inputs.sandbox }}
         FACTORY_INPUT_VERCEL_TOKEN: ${{ inputs.vercel_token }}
         FACTORY_INPUT_VERCEL_TEAM_ID: ${{ inputs.vercel_team_id }}

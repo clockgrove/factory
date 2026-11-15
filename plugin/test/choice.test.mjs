@@ -1,6 +1,7 @@
 // An Objective's harness and models (#224): labels on its issue override the repository's defaults for it alone.
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -197,7 +198,16 @@ test("the Action installs the harness the label names: read before the install, 
   assert.ok(at("choice") >= 0 && at("choice") < at("install") && at("install") < at("run"), "the label is read before the install, the install before the run");
   assert.match(steps[at("choice")].if, /inputs\.mode == 'work' \|\| inputs\.mode == 'review'/);
   assert.equal(steps[at("install")].env.FACTORY_CHOSEN_HARNESS, "${{ steps.choice.outputs.harness }}");
-  assert.match(steps[at("install")].run, /DEFAULT_HARNESS="\$\{FACTORY_INPUT_HARNESS:-\$\{FACTORY_HARNESS:-claude\}\}"\n\s*HARNESS="\$\{FACTORY_CHOSEN_HARNESS:-\$DEFAULT_HARNESS\}"/, "the label, then with:, then the env block");
+  // The label, then with:, then the repository's FACTORY_HARNESS variable (#284), then the env block: the install step's own lines, run.
+  assert.equal(steps[at("install")].env.FACTORY_VARIABLE_HARNESS, "${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}");
+  const pick = steps[at("install")].run.split("\n").slice(0, 2).join("\n");
+  assert.match(pick, /^DEFAULT_HARNESS=.*\nHARNESS=/);
+  const installs = (env) => execFileSync("bash", ["-c", `${pick}\necho "$HARNESS"`], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).trim();
+  assert.equal(installs({}), "claude");
+  assert.equal(installs({ FACTORY_HARNESS: "codex" }), "codex");
+  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot" }), "copilot");
+  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude" }), "claude");
+  assert.equal(installs({ FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude", FACTORY_CHOSEN_HARNESS: "codex" }), "codex");
   assert.match(steps[at("choice")].run, /--branch "\$\{GITHUB_HEAD_REF:-none\}"/, "the review job's branch from its event");
   assert.doesNotMatch(readFileSync(join(ROOT, "plugin", "scripts", "objective-harness.mjs"), "utf8"), /pulls\//, "no pull request read: the job token may not have pull-requests access");
   assert.match(steps[at("install")].run, /echo "harness=\$HARNESS" >> "\$GITHUB_OUTPUT"/);

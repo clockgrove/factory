@@ -12,7 +12,7 @@
 // COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
 // (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
 // fine-grained token for this one repository, in FACTORY_LOCAL_TOKEN or ~/.config/factory/tokens/<owner>/<name>
-// (contents, issues and pull requests read and write; actions read). That token is all the GitHub reach the
+// (contents, issues and pull requests read and write; actions and variables read). That token is all the GitHub reach the
 // model gets. No App needed (one in FACTORY_LOCAL_APP_ID posts the notices), no vendor, no API key; GitHub holds
 // every piece of state, and the box holds one clone per Objective under <clone>/.factory/<issue>/. Factory's own setup, install and validation commands run in the
 // same sandbox as the harness, since they run on a tree the model edited. A sandbox has no route to the box's
@@ -27,14 +27,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, logTo, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, repositoryVariables, rest, setStateLabel, transientError } from "./lib/github.mjs";
+import { MACHINE_SETTINGS, MODEL_SETTINGS, holdSecrets, ignoredLines, input, layerLines, log, logTo, machineSettings, redactSecrets, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -238,9 +238,10 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 }
 
 /**
- * What changed between two sets of workflow settings (workflowSettings's `kept`), one `NAME: old → new` each, in name
- * order; one this shell also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as
- * in baseEnv. Values are the workflow's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
+ * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
+ * name order, with the layer the new value comes from when `layers` (settingLayers's `from`) is given; one this shell
+ * also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as in baseEnv. Values are
+ * the workflow's or a variable's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
  */
 /**
  * The workflow settings a running serve takes from the default branch at its next tick (refreshSettings): how many run,
@@ -249,12 +250,13 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
  */
 export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
 
-export function settingsChanges(before = {}, after = {}, env = process.env) {
+export function settingsChanges(before = {}, after = {}, env = process.env, layers = null) {
   const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
+  const layer = (k) => (!layers ? "" : after[k] === undefined ? " (Factory's default)" : layers[k] === "variable" ? " (repository variable)" : " (workflow)");
   return [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((k) => before[k] !== after[k])
     .sort()
-    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${(k.startsWith("FACTORY_LOCAL_") || k === "FACTORY_HARNESS") && env[k] !== undefined ? " (this shell sets it, and its value wins)" : ""}`);
+    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${layer(k)}${(k.startsWith("FACTORY_LOCAL_") || k === "FACTORY_HARNESS") && env[k] !== undefined ? " (this shell sets it, and its value wins)" : ""}`);
 }
 
 export function repoFromRemote(url) {
@@ -281,7 +283,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
   if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
   problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length }));
-  if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
+  if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (${LOCAL_TOKEN_PERMISSIONS}) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
 
@@ -310,11 +312,6 @@ export function harnessProblems(harness, copilotToken, { outer = outerProbe, san
   return problems;
 }
 
-/** FACTORY_LOCAL_TOKEN, else the file ~/.config/factory/tokens/<owner>/<name> (the sandbox hides ~/.config/factory from the model). */
-export function tokenFile(repoFull, home = homedir()) {
-  const [owner, name] = repoFull.split("/");
-  return join(home, ".config", "factory", "tokens", owner, name);
-}
 export const copilotTokenFile = (home = homedir()) => join(home, ".config", "factory", "copilot-token");
 function copilotToken() {
   if (process.env.COPILOT_GITHUB_TOKEN) return process.env.COPILOT_GITHUB_TOKEN.trim();
@@ -360,11 +357,6 @@ export function stageRelay({ logFile, prefix, write = (s) => process.stdout.writ
 
 /** Local settings for this process only, never copied into a stage's env: the token, and where the App's key is. */
 const HOST_ONLY = ["FACTORY_LOCAL_TOKEN", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY"];
-function localToken(repoFull) {
-  if (process.env.FACTORY_LOCAL_TOKEN) return process.env.FACTORY_LOCAL_TOKEN.trim();
-  const f = tokenFile(repoFull);
-  return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
-}
 
 /** How often serve tries a refused local token again (a 401 GitHub gave for a moment); tests lower it. */
 export const REFUSED_PROBE = { ms: 60_000 };
@@ -544,9 +536,19 @@ export class Local {
     // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
     const wf = workflowSettings(committed.wf);
     if (wf.dropped.length) log(`.github/workflows/factory.yml: ${wf.dropped.join(", ")} ${wf.dropped.length === 1 ? "is" : "are"} no Factory setting; left out of every stage`);
+    this.workflowWf = wf.kept;
     this.wf = wf.kept;
-    this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
+  }
+
+  /**
+   * The settings this loop starts with (#284): the workflow's, under the repository's variables (readVariables, read just
+   * before), each named with its layer, this machine's own over both; then what they decide: the harness and its account,
+   * what must hold before anything starts, and the App that posts the notices.
+   */
+  takeSettings() {
+    this.startSettings();
+    this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     // This machine's declared accounts (lib/accounts.mjs): the loop's harness starts on its default one, checked here as
     // every stage checks them again; a declaration that cannot be used starts nothing, naming the accounts only.
     const accounts = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
@@ -579,8 +581,23 @@ export class Local {
     this.excludeWorkspaces();
   }
 
-  /** The token check and the routing label; both need the network. */
+  /**
+   * The repository's settings this loop starts with: the workflow's, the repository's variables over them (`variables`,
+   * readVariables's), each setting named once with its layer, this machine's own included, and each variable ignored.
+   */
+  startSettings() {
+    const layers = settingLayers({ workflow: this.workflowWf, variables: this.variables || {} });
+    this.wf = layers.values;
+    this.from = layers.from;
+    this.ignoredKey = ignoredLines(layers).join("\n");
+    log(`settings, each over the one below (Factory's defaults, the workflow${this.settingsBranch ? ` on origin/${this.settingsBranch}` : ""}, the repository's variables, this machine):`);
+    for (const line of layerLines(settingLayers({ workflow: this.workflowWf, variables: this.variables || {}, machine: machineSettings(process.env) }))) log(`  ${line}`);
+  }
+
+  /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
   async init() {
+    await this.readVariables();
+    this.takeSettings();
     await checkToken(this.repoFull, this.token);
     if (this.notice) {
       const minted = await this.notice().catch((e) => {
@@ -733,9 +750,9 @@ export class Local {
     // Host-only settings stay out of a stage's env from the workflow too, not only from this shell.
     for (const k of HOST_ONLY) delete wf[k];
     // The workflow's models belong to its harness: a developer who picks another one locally gets that one's defaults.
-    if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) delete wf[k];
-    // The developer's own harness, model and session settings win over the workflow's.
-    for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT", "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_WORKER_SECRETS"]) if (process.env[k]) wf[k] = process.env[k];
+    if ((wf.FACTORY_HARNESS || "claude").toLowerCase() !== this.harness) for (const k of MODEL_SETTINGS) delete wf[k];
+    // The developer's own harness, model and session settings win over the repository's (inputs.mjs MACHINE_SETTINGS).
+    for (const k of MACHINE_SETTINGS) if (k !== "FACTORY_HARNESS" && process.env[k]) wf[k] = process.env[k];
     // A worker secret's NAME or SOURCE never joins every stage's env through FACTORY_LOCAL_ENV (lib/local.mjs localBaseEnv).
     const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV), { workerSecrets: wf.FACTORY_WORKER_SECRETS || "" }), ...wf };
     // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
@@ -2010,12 +2027,42 @@ export class Local {
   }
 
   /**
-   * The workflow's settings as the default branch has them now, read at each serve tick (#276). Only HOT_SETTINGS (caps,
-   * models and effort, validation, resume policy, cache TTL) apply while serve runs: from that tick, to this loop's limit,
-   * the dispatcher's caps and every stage that starts from then on, never to a stage in flight or being set up, and said
-   * once, by name. Every other setting (what a stage may reach or receive, budgets, maintainers, protected paths, the
-   * harness, setup) keeps its value from serve's start until serve starts again, said once. The read also brings the
-   * workflow's Factory pin (followPin).
+   * The repository's variables (#284), the layer of its settings over the workflow's: one conditional list call with
+   * the local token (an unchanged list costs no rate limit), at the start and with each settings read
+   * (refreshSettings). A token without Variables: read (403, 404) is said once, with the fix, and the workflow's values
+   * stand until a read gets through; any other failure is said once and keeps the last read.
+   */
+  async readVariables() {
+    if (!this.repo || !this.token) return;
+    this.variablesCache ??= new Map();
+    let r;
+    try {
+      r = await repositoryVariables(this.repo, { token: this.token, cache: this.variablesCache });
+    } catch (e) {
+      if (!this.variablesFailed) log(`the repository's variables could not be read (${String(e?.message || e).slice(0, 160)}); serve keeps the ones it has`);
+      this.variablesFailed = true;
+      return;
+    }
+    this.variablesFailed = false;
+    if (r.refused) {
+      if (this.variablesRefused !== r.refused) log(variablesRefusedLine(r.refused));
+      this.variablesRefused = r.refused;
+      this.variables = {};
+      return;
+    }
+    if (this.variablesRefused) log("the local token reads the repository's variables now: they apply over the workflow's settings");
+    this.variablesRefused = null;
+    this.variables = r.vars;
+  }
+
+  /**
+   * The repository's settings as they are now, read at each serve tick (#276, #284): the default branch's workflow and
+   * the repository's variables over it (readVariables). Only HOT_SETTINGS (caps, models and effort, validation, resume
+   * policy, cache TTL) apply while serve runs: from that tick, to this loop's limit, the dispatcher's caps and every stage
+   * that starts from then on, never to a stage in flight or being set up, and said once, by name, with the layer each
+   * comes from when a variable is involved. Every other setting (what a stage may reach or receive, budgets, maintainers,
+   * protected paths, the harness, setup) keeps its value from serve's start until serve starts again, said once. The
+   * read also brings the workflow's Factory pin (followPin).
    */
   async refreshSettings() {
     if (!this.settingsBranch) return;
@@ -2025,6 +2072,7 @@ export class Local {
       const read = await committedWorkflowNow(this.dev, this.settingsBranch, { token: this.token });
       // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
       if (!read.unfetched) this.settingsRead = read;
+      await this.readVariables();
     }
     const now = this.settingsRead;
     if (!now) return;
@@ -2037,21 +2085,49 @@ export class Local {
     this.pins = now.pins;
     // A stage being set up keeps the settings it started with (stage()): the change is taken at a later tick.
     if (this.settingUp > 0) return;
-    const next = workflowSettings(now.wf).kept;
+    const layers = settingLayers({ workflow: workflowSettings(now.wf).kept, variables: this.variables || {} });
+    const ignored = ignoredLines(layers);
+    if (ignored.join("\n") !== (this.ignoredKey ?? "")) {
+      for (const line of ignored) log(line);
+      this.ignoredKey = ignored.join("\n");
+    }
+    const next = layers.values;
+    const from = this.from || {};
     const hot = { ...this.wf };
-    for (const k of HOT_SETTINGS) if (next[k] === undefined) delete hot[k];
-    else hot[k] = next[k];
-    const changes = settingsChanges(this.wf, hot);
+    const hotFrom = { ...from };
+    // The models and effort belong to their harness, which waits for a restart: a change of harness holds them too.
+    const harnessOf = (wf) => String(wf.FACTORY_HARNESS || "claude").trim().toLowerCase();
+    const live = harnessOf(next) === harnessOf(this.wf) ? HOT_SETTINGS : HOT_SETTINGS.filter((k) => !MODEL_SETTINGS.includes(k));
+    for (const k of live) {
+      if (next[k] === undefined) {
+        delete hot[k];
+        delete hotFrom[k];
+      } else {
+        hot[k] = next[k];
+        hotFrom[k] = layers.from[k];
+      }
+    }
+    // A variable on either side of a change: the lead names both layers, and each change the layer it comes from now.
+    const lead = (after, layerOf) => {
+      const changed = Object.keys({ ...this.wf, ...after }).filter((k) => this.wf[k] !== after[k]);
+      const viaVariable = changed.some((k) => from[k] === "variable" || layerOf[k] === "variable");
+      return viaVariable ? { text: `the repository's settings (the workflow on origin/${this.settingsBranch} and its variables) changed`, layers: layerOf } : { text: `the workflow's settings on origin/${this.settingsBranch} changed`, layers: null };
+    };
+    const hotLead = lead(hot, hotFrom);
+    const changes = settingsChanges(this.wf, hot, process.env, hotLead.layers);
     // The rest, against what serve started with: said once for each set of differences.
-    const held = settingsChanges(this.wf, { ...next, ...Object.fromEntries(HOT_SETTINGS.map((k) => [k, this.wf[k]])) });
+    const heldTo = { ...next, ...Object.fromEntries(live.map((k) => [k, this.wf[k]])) };
+    const heldLead = lead(heldTo, layers.from);
+    const held = settingsChanges(this.wf, heldTo, process.env, heldLead.layers);
     const heldKey = held.join("\n");
     if (heldKey !== (this.settingsHeld ?? "")) {
-      if (held.length) log(`the workflow's settings on origin/${this.settingsBranch} changed; these take effect when serve restarts, and until then serve keeps the values it started with: ${held.join("; ")}`);
+      if (held.length) log(`${heldLead.text}; these take effect when serve restarts, and until then serve keeps the values it started with: ${held.join("; ")}`);
       this.settingsHeld = heldKey;
     }
     if (!changes.length) return;
-    log(`the workflow's settings on origin/${this.settingsBranch} changed; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
+    log(`${hotLead.text}; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
     this.wf = hot;
+    this.from = hotFrom;
   }
 
   /**

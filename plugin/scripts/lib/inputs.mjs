@@ -3,7 +3,10 @@
 // Precedence, highest first:
 //   1. a CLI flag (`--max-usd 20`), for the plugin skills and local runs;
 //   2. FACTORY_INPUT_<NAME>, which action.yml sets from `with:` on the job;
-//   3. FACTORY_<NAME>, the workflow-level `env:` block the template carries;
+//   3. FACTORY_<NAME>: the repository's settings in layers (settingLayers below): the
+//      workflow-level `env:` block the template carries, under a repository variable of
+//      the same name (on Actions laid over this process's env when this module loads,
+//      applyVariables), under, in local mode, this machine's own environment;
 //   4. the default below.
 // The action declares no defaults of its own, so an empty `with:` value falls
 // through to the env block rather than overriding it with "".
@@ -59,6 +62,7 @@ export const DEFAULTS = {
   mode: "",
   issue: "",
   pr: "",
+  vars: "", // the workflow's `${{ toJSON(vars) }}`: the repository's variables (applyVariables)
   repo: "",
   app_id: "",
   app_private_key: "",
@@ -94,8 +98,11 @@ export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "c
 export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB"];
 /** DEFAULTS keys that are no input of the Action (action.yml): Factory's own, or a run's argument. */
 const NOT_INPUTS = ["action", "objective_label", "repo"];
-/** Inputs each run gives (a dispatch's or a stage's own), never a setting. */
-const PER_RUN_INPUTS = ["mode", "issue", "pr"];
+/**
+ * Inputs each run gives (a dispatch's or a stage's own), never a setting: `vars` is the workflow's `vars` context, the
+ * repository's variables (applyVariables).
+ */
+export const PER_RUN_INPUTS = ["mode", "issue", "pr", "vars"];
 /**
  * The FACTORY_* names a workflow's env block may set (#119): the Action's inputs (DEFAULTS, which test/inputs checks
  * against action.yml) under their env names, but secrets and a run's own, and local mode's settings. Local mode takes
@@ -144,6 +151,154 @@ export function workflowSettings(wf = {}) {
     else dropped.push(k);
   }
   return { kept, dropped, otherRoute };
+}
+/**
+ * Settings that steer trust or money's route, what a stage may reach or receive, or how it is set up and installed, and
+ * the ids of the App, the sandbox vendor and the federation endpoint the credentials go with, and the dispatcher's own
+ * per-run `image_owed`: only the reviewed workflow file sets them, never a repository variable (#284). One set as a
+ * variable is named and ignored.
+ */
+export const WORKFLOW_ONLY_SETTINGS = new Set(
+  [
+    ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
+    ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
+  ].map((n) => `FACTORY_${n}`),
+);
+/** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, models, effort, validation, sweep. */
+export const VARIABLE_SETTINGS = new Set([...WORKFLOW_SETTINGS].filter((k) => !WORKFLOW_ONLY_SETTINGS.has(k)));
+/** The worker's harness, models and effort: a layer that sets another harness drops the lower layers' (settingLayers). */
+export const MODEL_SETTINGS = ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"];
+/**
+ * The settings this machine's own environment sets over the repository's in local mode (local.mjs baseEnv): the harness,
+ * models and session settings, set to a non-empty value, and local mode's own settings (FACTORY_LOCAL_*), set at all.
+ */
+export const MACHINE_SETTINGS = ["FACTORY_HARNESS", ...MODEL_SETTINGS, "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_WORKER_SECRETS"];
+const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("FACTORY_LOCAL_"));
+
+/**
+ * The repository's variables ({NAME: value}, as GitHub lists them or the `vars` context holds them) as settings: `kept`,
+ * the VARIABLE_SETTINGS they set (an empty value sets nothing); `excluded`, the WORKFLOW_ONLY_SETTINGS names they set,
+ * which are ignored; `unknown`, any other FACTORY_* name, no setting. Names without the FACTORY_ prefix are not Factory's.
+ */
+export function variableSettings(vars = {}) {
+  const kept = {};
+  const excluded = [];
+  const unknown = [];
+  for (const [k, v] of Object.entries(vars && typeof vars === "object" ? vars : {})) {
+    const name = String(k).toUpperCase();
+    if (!name.startsWith("FACTORY_")) continue;
+    if (VARIABLE_SETTINGS.has(name)) {
+      if (v !== null && v !== undefined && String(v) !== "") kept[name] = String(v);
+    } else if (WORKFLOW_ONLY_SETTINGS.has(name)) excluded.push(name);
+    else unknown.push(name);
+  }
+  return { kept, excluded: excluded.sort(), unknown: unknown.sort() };
+}
+
+/** This machine's own settings in local mode, from its environment (`env`): MACHINE_SETTINGS's rule. */
+export function machineSettings(env = process.env) {
+  const own = {};
+  for (const k of MACHINE_SETTINGS) if (env[k]) own[k] = env[k];
+  for (const k of MACHINE_LOCAL) if (env[k] !== undefined) own[k] = env[k];
+  return own;
+}
+
+/**
+ * A repository's Factory settings in layers, each over the one below (#284): Factory's defaults (DEFAULTS), the
+ * committed workflow's env block (`workflow`, workflowSettings's kept), the repository's variables (`variables`, all of
+ * them: variableSettings takes the settings), and this machine's own (`machine`: in local mode machineSettings's).
+ * A layer that sets another harness than the layers below drops their models and effort for that harness's defaults,
+ * unless it sets them itself, as the workflow's models belong to its harness. Returns {values, from, excluded, unknown}:
+ * `values` holds the settings some layer sets (the workflow's own empty ones included, which read as the default),
+ * `from` the layer each came from (`workflow`, `variable` or `machine`).
+ */
+export function settingLayers({ workflow = {}, variables = {}, machine = {} } = {}) {
+  const values = {};
+  const from = {};
+  const harnessOf = (v) => String(v || DEFAULTS.harness).trim().toLowerCase();
+  const take = (layer, set) => {
+    if (set.FACTORY_HARNESS && harnessOf(set.FACTORY_HARNESS) !== harnessOf(values.FACTORY_HARNESS)) {
+      for (const k of MODEL_SETTINGS) {
+        if (k in set) continue;
+        delete values[k];
+        delete from[k];
+      }
+    }
+    for (const [k, v] of Object.entries(set)) {
+      values[k] = v;
+      from[k] = layer;
+    }
+  };
+  take("workflow", Object.fromEntries(Object.entries(workflow).filter(([k]) => WORKFLOW_SETTINGS.has(k))));
+  const v = variableSettings(variables);
+  take("variable", v.kept);
+  take("machine", Object.fromEntries(Object.entries(machine).filter(([k]) => WORKFLOW_SETTINGS.has(k))));
+  return { values, from, excluded: v.excluded, unknown: v.unknown };
+}
+
+/** Where each layer comes from, as the settings report names it. */
+const LAYER_NAMES = { workflow: "workflow", variable: "repository variable", machine: "this machine" };
+
+/**
+ * settingLayers's result as lines for serve's log and doctor: each setting a layer sets, `NAME: "value" (layer)`, in name
+ * order (values cut at 80 characters; an empty one reads as the default), then one line naming the rest, at Factory's
+ * defaults, and one each for the variables ignored.
+ */
+export function layerLines({ values = {}, from = {}, excluded = [], unknown = [] } = {}) {
+  const show = (v) => JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v);
+  const set = Object.keys(values).filter((k) => values[k] !== "").sort();
+  const rest = [...WORKFLOW_SETTINGS].filter((k) => !set.includes(k)).sort();
+  const lines = set.map((k) => `${k}: ${show(values[k])} (${LAYER_NAMES[from[k]] || from[k]})`);
+  if (rest.length) lines.push(`Factory's defaults: ${rest.join(", ")}`);
+  return [...lines, ...ignoredLines({ excluded, unknown })];
+}
+
+/** The repository variables settingLayers ignored, one line for the excluded names and one for the rest. */
+export function ignoredLines({ excluded = [], unknown = [] } = {}) {
+  const s = (n) => (n.length === 1 ? "" : "s");
+  return [
+    ...(excluded.length ? [`repository variable${s(excluded)} ${excluded.join(", ")} ignored: only the reviewed workflow file sets ${excluded.length === 1 ? "it" : "them"}`] : []),
+    ...(unknown.length ? [`repository variable${s(unknown)} ${unknown.join(", ")} ignored: no Factory setting`] : []),
+  ];
+}
+
+/**
+ * On Actions: the repository's variables (the workflow's `vars: ${{ toJSON(vars) }}`, which action.yml passes as
+ * FACTORY_INPUT_VARS) laid over the workflow's env block in `env`, by settingLayers, so every script, the cloud sandbox's
+ * stage env the launcher builds included, reads one set of settings. Run once when this module loads, before any script
+ * reads a setting; the variables' JSON then leaves `env`, so no child gets it. A workflow rendered without the input has
+ * no variable layer on Actions. FACTORY_TIMEOUT_MINUTES may only come down here: the runner jobs' own `timeout-minutes`
+ * is the workflow file's, which its env block mirrors. Says what it laid over, and each variable it ignored, once.
+ */
+export function applyVariables(env = process.env, { say = log } = {}) {
+  const raw = env.FACTORY_INPUT_VARS;
+  delete env.FACTORY_INPUT_VARS;
+  if (raw === undefined || raw === "") return null;
+  let vars;
+  try {
+    vars = JSON.parse(raw);
+  } catch {
+    say("repository variables: the vars input is not JSON; the workflow's settings stand");
+    return null;
+  }
+  const workflow = {};
+  for (const k of WORKFLOW_SETTINGS) if (env[k] !== undefined) workflow[k] = env[k];
+  const layers = settingLayers({ workflow, variables: vars });
+  const ceiling = Number(workflow.FACTORY_TIMEOUT_MINUTES || DEFAULTS.timeout_minutes);
+  if (layers.from.FACTORY_TIMEOUT_MINUTES === "variable" && Number(layers.values.FACTORY_TIMEOUT_MINUTES) > ceiling) {
+    say(`repository variable FACTORY_TIMEOUT_MINUTES ${layers.values.FACTORY_TIMEOUT_MINUTES} is over the workflow's ${ceiling}, the runner jobs' own timeout-minutes: kept at ${ceiling} on Actions`);
+    if (workflow.FACTORY_TIMEOUT_MINUTES === undefined) delete layers.values.FACTORY_TIMEOUT_MINUTES;
+    else layers.values.FACTORY_TIMEOUT_MINUTES = workflow.FACTORY_TIMEOUT_MINUTES;
+    layers.from.FACTORY_TIMEOUT_MINUTES = "workflow";
+  }
+  for (const k of WORKFLOW_SETTINGS) {
+    if (layers.from[k] === "variable") env[k] = layers.values[k];
+    else if (!(k in layers.values)) delete env[k];
+  }
+  const taken = Object.keys(layers.from).filter((k) => layers.from[k] === "variable").sort();
+  if (taken.length) say(`repository variables set ${taken.map((k) => `${k}=${JSON.stringify(layers.values[k])}`).join(", ")} over the workflow's env block`);
+  for (const line of ignoredLines(layers)) say(line);
+  return layers;
 }
 /** Factory's own service keys (red-check triage's decision model): for Factory's process only, never any child's. */
 export const FACTORY_SECRET_KEYS = ["AI_GATEWAY_API_KEY"];
@@ -383,3 +538,9 @@ export function eventAction(env = process.env) {
     return null;
   }
 }
+
+// On Actions, before any script reads a setting (applyVariables); what it laid over, for doctor's report.
+let APPLIED = null;
+if (process.env.FACTORY_INPUT_VARS !== undefined) APPLIED = applyVariables(process.env);
+/** On Actions, the layers applyVariables laid over this process's env when this module loaded; null without the input. */
+export const appliedLayers = () => APPLIED;

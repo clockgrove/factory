@@ -152,8 +152,9 @@ export function chosenInputs({ args = {}, env = process.env, choice = {}, gatewa
 }
 
 /**
- * The harness CLI version to install: the repository's pin (`harness_version`) for the harness it was set for, the
- * repository's default (`defaultHarness`); `latest` for another one an Objective's harness label chose.
+ * The harness CLI version to install: the repository's pin (`harness_version`) for the harness it was set for, the one
+ * the workflow's env block names (`defaultHarness`, inputs.mjs workflowHarness); `latest` for another one, chosen by an
+ * Objective's harness label, a run's override or a repository variable.
  */
 export const harnessVersionFor = (harness, defaultHarness, version) => (harness === defaultHarness && version ? version : "latest");
 

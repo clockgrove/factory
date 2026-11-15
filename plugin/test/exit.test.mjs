@@ -9,6 +9,7 @@ import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached,
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
 import { exitRecord } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
+import { parseYaml } from "../scripts/lib/yaml.mjs";
 
 const ok = { ok: true };
 const pr = (body = "## Acceptance\nok", draft = false) => ({ exists: true, draft, body });
@@ -424,7 +425,11 @@ test("workflow template renders with defaults for empty values and stays valid Y
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
   const out = renderWorkflow(template, { harness: "claude", max_concurrent: "4", timeout_minutes: "", runs_on: "ubuntu-latest", version: "v1" });
   assert.match(out, /FACTORY_HARNESS: claude/);
-  assert.match(out, /max-parallel: 4/);
+  assert.match(out, /FACTORY_MAX_CONCURRENT: 4/);
+  assert.doesNotMatch(out, /max-parallel/, "the dispatcher's picks are the cap, so a repository variable that raises max_concurrent is not held to the rendered value (#284)");
+  const steps = Object.values(parseYaml(out).jobs).flatMap((j) => j.steps || []).filter((st) => String(st.uses).startsWith("clockgrove/factory@"));
+  assert.ok(steps.length >= 3);
+  for (const st of steps) assert.equal(st.with.vars, "${{ toJSON(vars) }}", "every Factory step gets the repository's variables (#284)");
   assert.match(out, /timeout-minutes: 240/);
   assert.match(out, /uses: clockgrove\/factory@v\d+\.\d+\.\d+\b/);
   assert.doesNotMatch(out, /\{\{\w+\}\}/, "every {{key}} placeholder rendered; ${{ }} expressions stay");

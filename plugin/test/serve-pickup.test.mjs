@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
@@ -80,6 +81,9 @@ test("workflowPins: the Factory refs a workflow's steps call, once each; setting
     'FACTORY_MODEL: unset → "m"',
   ]);
   assert.deepEqual(settingsChanges({ FACTORY_MODEL: "m" }, { FACTORY_MODEL: "m" }, {}), []);
+  // Every setting this shell sets keeps its value, a model too (inputs.mjs machineSettings), and the change says so.
+  assert.deepEqual(settingsChanges({ FACTORY_MODEL: "m" }, { FACTORY_MODEL: "n" }, { FACTORY_MODEL: "mine" }), ['FACTORY_MODEL: "m" → "n" (this shell sets it, and its value wins)']);
+  assert.deepEqual(settingsChanges({ FACTORY_MAX_USD: "1" }, { FACTORY_MAX_USD: "2" }, { FACTORY_MAX_USD: "3" }), ['FACTORY_MAX_USD: "1" → "2"'], "not one the shell's value does not win for");
 });
 
 test("pinDecision: a release tag or a full SHA other than the running one is followed; a branch, a short SHA or steps that disagree never are", () => {
@@ -326,13 +330,25 @@ test("restartOn: a checkout that changed after its fetch is not run; serve stays
   assert.equal(r.state, "failed");
 });
 
-/** A GitHub with one Objective, #7, that the dispatcher picks for this loop. */
-async function fakeGitHub() {
+/**
+ * A GitHub with one Objective, #7, that the dispatcher picks for this loop. `variables()` answers the repository's
+ * variables list: {status} alone refuses it, else {vars} is listed with an ETag, and a request that sends that ETag back
+ * gets 304 (`seen` records each list request's If-None-Match).
+ */
+async function fakeGitHub({ variables = () => ({ vars: {} }), seen = [] } = {}) {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
       const url = new URL(req.url, "http://x");
-      const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+      const send = (status, body, headers = {}) => res.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body));
+      if (url.pathname === "/repos/o/r/actions/variables") {
+        const v = variables();
+        seen.push(req.headers["if-none-match"] ?? null);
+        if (v.status) return send(v.status, { message: "Resource not accessible by personal access token" });
+        const etag = `"${createHash("sha1").update(JSON.stringify(v.vars)).digest("hex")}"`;
+        if (req.headers["if-none-match"] === etag) return res.writeHead(304, { etag }).end();
+        return send(200, { total_count: Object.keys(v.vars).length, variables: Object.entries(v.vars).map(([name, value]) => ({ name, value })) }, { etag });
+      }
       const issue = { number: 7, title: "t", body: "", state: "open", labels: [{ name: "factory:objective" }], updated_at: new Date().toISOString() };
       if (url.pathname === "/repos/o/r/issues/7" && req.method === "GET") return send(200, issue);
       if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("labels") === "factory:objective") return send(200, [issue]);
@@ -349,9 +365,9 @@ async function fakeGitHub() {
  * runs at each tick, after its settings and pin are read; `paused(n, loop)` is the machine's paused work, when the tick
  * asks for it; `stubs(loop)` replace more of the loop. Returns the log lines and the loop.
  */
-async function serveOver(ad, { wf, factory, atTick, paused = () => [], stubs = () => ({}) }) {
+async function serveOver(ad, { wf, factory, atTick, paused = () => [], stubs = () => ({}), github = {} }) {
   const env = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL, FACTORY_LOCAL_MAX_CONCURRENT: process.env.FACTORY_LOCAL_MAX_CONCURRENT, FACTORY_HARNESS: process.env.FACTORY_HARNESS };
-  const fake = await fakeGitHub();
+  const fake = await fakeGitHub(github);
   process.env.GITHUB_API_URL = fake.url;
   process.env.FACTORY_LOCAL = "1";
   process.env.FACTORY_LOCAL_ALL = "1";
@@ -477,6 +493,52 @@ test("serve: a new pinned release is announced, holds new stages while one runs,
   assert.doesNotMatch(text, /could not start again/);
 });
 
+test("serve: a repository variable sets a setting over the workflow; a hot one applies from the next tick, any other waits for a restart, an excluded one is named and ignored (#284)", async () => {
+  const ad = adopter({ FACTORY_LOCAL_MAX_CONCURRENT: "1", FACTORY_MAX_USD: "25" });
+  let vars = {};
+  const seen = [];
+  const { lines, loop } = await serveOver(ad, {
+    wf: { FACTORY_LOCAL_MAX_CONCURRENT: "1", FACTORY_MAX_USD: "25" },
+    factory: { version: "0.9.30", commit: null, root: "/f", release: true },
+    github: { variables: () => ({ vars }), seen },
+    atTick: (n, l) => {
+      if (n === 2) vars = { FACTORY_LOCAL_MAX_CONCURRENT: "2", FACTORY_MAX_USD: "5", FACTORY_AUTO_MERGE: "false", OTHER: "x" };
+      if (n >= 6) l.stopping = true;
+    },
+    stubs: () => ({ runObjective: async () => ({ exit: "delivered" }) }),
+  });
+  const text = lines.join("");
+  assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; each stage that starts from now on runs with them, and stages in flight keep theirs: FACTORY_LOCAL_MAX_CONCURRENT: "1" → "2" \(repository variable\)/);
+  assert.match(text, /this loop: at most 2 Objective stage\(s\) at once on this machine/);
+  assert.match(text, /the repository's settings \(the workflow on origin\/main and its variables\) changed; these take effect when serve restarts, and until then serve keeps the values it started with: FACTORY_MAX_USD: "25" → "5" \(repository variable\)/);
+  assert.equal(text.split("repository variable FACTORY_AUTO_MERGE ignored: only the reviewed workflow file sets it").length - 1, 1, "named once");
+  assert.doesNotMatch(text, /FACTORY_AUTO_MERGE: /);
+  assert.deepEqual({ cap: loop.wf.FACTORY_LOCAL_MAX_CONCURRENT, usd: loop.wf.FACTORY_MAX_USD, merge: loop.wf.FACTORY_AUTO_MERGE }, { cap: "2", usd: "25", merge: undefined });
+  assert.equal(loop.from.FACTORY_LOCAL_MAX_CONCURRENT, "variable");
+  // One list call a read, conditional: an unchanged list is GitHub's 304, which costs no rate limit.
+  assert.ok(seen.length >= 4);
+  assert.equal(seen[0], null);
+  assert.ok(seen.slice(1).every((t) => typeof t === "string"), "every later read sends the last ETag");
+});
+
+test("serve: a token without Variables: read is said once, with the fix, and the workflow's values stand (#284)", async () => {
+  const ad = adopter({ FACTORY_LOCAL_MAX_CONCURRENT: "1" });
+  const { lines, loop } = await serveOver(ad, {
+    wf: { FACTORY_LOCAL_MAX_CONCURRENT: "1" },
+    factory: { version: "0.9.30", commit: null, root: "/f", release: true },
+    github: { variables: () => ({ status: 403 }) },
+    atTick: (n, l) => {
+      if (n >= 4) l.stopping = true;
+    },
+    stubs: () => ({ runObjective: async () => ({ exit: "delivered" }) }),
+  });
+  const text = lines.join("");
+  const said = "the local token cannot read this repository's variables (HTTP 403), so its FACTORY_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)";
+  assert.equal(text.split(said).length - 1, 1, "said once");
+  assert.equal(loop.wf.FACTORY_LOCAL_MAX_CONCURRENT, "1");
+  assert.doesNotMatch(text, /settings .*changed/);
+});
+
 test("serve: a pin it does not follow is said once and changes nothing: a branch, or a serve run from a checkout that is not a release (#276)", async () => {
   for (const [pin, factory, said] of [
     ["main", { version: "0.9.30", commit: null, root: "/f", release: true }, /pins clockgrove\/factory@main is neither a release tag \(vX\.Y\.Z\) nor a full commit SHA; serve runs no code from it and keeps running v0\.9\.30/],
@@ -538,6 +600,22 @@ test("refreshSettings: a change waits while a stage is being set up, so one stag
     if (harness !== undefined) process.env.FACTORY_HARNESS = harness;
   }
   assert.equal(lines.filter((l) => /settings on origin\/main changed/.test(l)).length, 1);
+});
+
+test("refreshSettings: a change of harness holds the models and effort with it until serve restarts: they belong to that harness (#284)", async () => {
+  const ad = adopter({ FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_MAX_CONCURRENT: "2" });
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  try {
+    const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", harness: "claude", wf: { FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_MAX_CONCURRENT: "2" } });
+    ad.push({ FACTORY_HARNESS: "codex", FACTORY_MODEL: "gpt-x", FACTORY_MAX_CONCURRENT: "3" }, "v0.9.31");
+    await loop.refreshSettings();
+    assert.deepEqual(loop.wf, { FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_MAX_CONCURRENT: "3" }, "a hot setting of another kind still applies");
+    assert.match(lines.join(""), /take effect when serve restarts.*FACTORY_HARNESS: "claude" → "codex"; FACTORY_MODEL: "claude-opus-5-5" → "gpt-x"/);
+  } finally {
+    process.stdout.write = write;
+  }
 });
 
 test("followPin: a new switch waits until 30 minutes after the last, and a SHA before the running commit is refused, not retried", async () => {

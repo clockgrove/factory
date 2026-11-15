@@ -2072,6 +2072,25 @@ export function yamlScalar(raw) {
   return s.replace(/\s+#.*$/, "").trim();
 }
 
+/** Where local mode's token for a repository lives: ~/.config/factory/tokens/<owner>/<name> (the sandboxes hide ~/.config/factory). */
+export function tokenFile(repoFull, home = homedir()) {
+  const [owner, name] = repoFull.split("/");
+  return join(home, ".config", "factory", "tokens", owner, name);
+}
+/** Local mode's token for a repository: FACTORY_LOCAL_TOKEN, else its tokenFile; "" when neither is set. */
+export function localToken(repoFull, env = process.env) {
+  if (env.FACTORY_LOCAL_TOKEN) return env.FACTORY_LOCAL_TOKEN.trim();
+  const f = tokenFile(repoFull);
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
+}
+/** The permissions local mode's token needs, as the set-up and every message that asks for them name them. */
+export const LOCAL_TOKEN_PERMISSIONS = "Contents, Issues and Pull requests read and write; Actions and Variables read";
+/**
+ * What local mode says when its token cannot list the repository's variables (HTTP `status`, 403 or 404): the variable
+ * layer of its settings (inputs.mjs settingLayers) is off on this machine and the workflow's values stand.
+ */
+export const variablesRefusedLine = (status) => `the local token cannot read this repository's variables (HTTP ${status}), so its FACTORY_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)`;
+
 /**
  * The adopter workflow's top-level `env:` block, so a local run uses the repository's own
  * configuration. Only FACTORY_* keys at two-space indent are read; a value that is an Actions

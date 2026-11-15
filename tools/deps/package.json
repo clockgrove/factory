@@ -6,6 +6,7 @@
     "lint": "cd ../.. && eslint -c tools/deps/eslint.config.mjs --max-warnings 0 plugin bench tools plugin/bin/factory"
   },
   "dependencies": {
+    "@actions/expressions": "0.3.61",
     "smol-toml": "1.9.1",
     "yaml": "2.9.1"
   },

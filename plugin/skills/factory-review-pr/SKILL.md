@@ -37,7 +37,7 @@ Before writing a comment, find the body's answer to it (an assumption, a checkli
 - Hand-written protocol, format, codec or provider-API code: reference.md, "SDK first".
 - A protected path touched, an undone item missing from Undone, or a workflow hand-over (reference.md).
 
-On a split part the prompt says is not the last, an entry the PR body assigns to a later part is deferred, not a finding: reference.md, "Split parts".
+On a split part the prompt says is not the last, an entry the PR body assigns to a later part is deferred: reference.md, "Split parts". The foundation pass: reference.md, "Foundation review".
 
 ## What you do not do
 
@@ -45,4 +45,4 @@ No summary comment, no approve, no request changes, no "LGTM", no overall verdic
 
 ## Finish
 
-Your final message is only JSON, no prose around it: `{"acceptance": [...], "comments": [...]}`, with the fields in reference.md, "The final message". Do not post to GitHub yourself.
+Your final message is only JSON: `{"acceptance": [...], "comments": [...]}`, with the fields in reference.md, "The final message". Do not post to GitHub yourself.

@@ -27,6 +27,13 @@ export const AGENT_DIRS = { claude: ".claude/agents", codex: ".codex/agents", co
 const AGENT_SOURCE = { claude: "agents/claude", codex: "agents/codex", copilot: "agents/copilot" };
 
 /**
+ * The model an agent definition is pinned to from the job's inputs (`models`: subagent, reviewer), or null to keep its
+ * file's own: the implementer on the sub-agent model; the reviewer and the foundation pass's agent (review.mjs
+ * FOUNDATION_AGENT) on the reviewer model, so both passes of a review run on the one the labels or workflow choose.
+ */
+export const agentModel = (role, models = {}) => (role === "implementer" ? models.subagent : role === "reviewer" || role === "foundation-reviewer" ? models.reviewer : null) || null;
+
+/**
  * Copy the plugin's skills to .agents/skills and .claude/skills, mirror the
  * repository's own .agents/skills into .claude/skills (Claude Code reads only the
  * latter; Codex and Copilot read .agents/skills), and write the active harness's
@@ -54,7 +61,7 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
     if (!existsSync(src)) continue;
     for (const file of readdirSync(src)) {
       const role = file.replace(/\..*$/, "");
-      const model = role === "implementer" ? models.subagent : role === "reviewer" ? models.reviewer : null;
+      const model = agentModel(role, models);
       const text = readFileSync(join(src, file), "utf8");
       files[join(dir, file)] = { text: model ? pinModel(text, h, model) : text };
     }

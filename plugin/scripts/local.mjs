@@ -46,7 +46,7 @@ import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
-import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
+import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
@@ -447,6 +447,12 @@ async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
   }
 }
 
+/** The start's line when this plugin, which runs every stage here, is older than the release the committed workflow pins; else null. */
+export function pluginLine(committed) {
+  const c = committed?.text ? pluginVersionCheck(committed.text) : null;
+  return c?.status === "WARN" ? `${c.detail}; ${c.fix}` : null;
+}
+
 export class Local {
   constructor(flags) {
     // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
@@ -462,6 +468,8 @@ export class Local {
     const committed = committedWorkflowEnv(this.dev);
     if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
+    const plugin = pluginLine(committed);
+    if (plugin) log(plugin);
     // The workflow file is repository content: only its settings reach a stage, never a name Factory reads as its own
     // control (#119). Every other FACTORY_* name in it is dropped and named here (doctor warns too).
     const wf = workflowSettings(committed.wf);
@@ -910,10 +918,12 @@ export class Local {
     try {
       env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness, runs.hosts || []);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
-      // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
+      // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone
+      // (prepareClone). Not for a work stage: it may continue the pass its usage limit paused on this clone, and decides
+      // that itself, cleaning when it starts fresh (lib/continue.mjs enterStage).
       const locks = staleGitLocks(clone);
       for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
-      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: true, locks: locks.stale });
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, env), { env }), { fresh: script !== "worker.mjs", locks: locks.stale });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();

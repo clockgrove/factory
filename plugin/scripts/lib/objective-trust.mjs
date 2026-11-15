@@ -303,8 +303,11 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   const declared = routeAccounts(env.FACTORY_ACCOUNTS);
   if (declared.ok && !declared.declared) return { account: null, note: accountLabelNote(labels, false, false) };
   if (!declared.ok) return { refusal: { reason: `${declared.problem}, so no stage on GitHub Actions or the cloud sandbox starts`, fix: ACCOUNTS_FIX } };
-  const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account"), kept: () => trustedRoutePin(repo, issue, opts, gh) });
   const prepared = String(env.FACTORY_STAGE_ACCOUNT ?? "").trim();
+  // A pin an untrusted removal left standing (trustedRoutePin) is read from the timeline only when the job's account
+  // step (which read it) prepared another account than the harness's default: it took the step's answer otherwise.
+  const byDefault = prepared === (declared.accounts[harness]?.[0] ?? harness);
+  const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account"), kept: byDefault ? null : () => trustedRoutePin(repo, issue, opts, gh) });
   // Two account labels: the Objective waits until one is left, never Blocked for it (the caller's wait, account-wait.mjs).
   if (r.two) return { wait: r.two };
   if (r.problem) return { refusal: { reason: `${r.problem}, so no stage of it starts`, fix: ROUTE_PIN_FIX } };
@@ -316,11 +319,11 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
 }
 
 /**
- * The account label that still pins an Objective with none on it now (#267): its timeline's account-label events
+ * The account labels that still stand on an Objective with none on it now (#267): its timeline's account-label events
  * replayed oldest first, each counting only when its actor can push or is a pinned maintainer (vouches): a trusted
- * `labeled` pins that label, a trusted `unlabeled` of the pinned label ends the pin, and any other is ignored. So a
- * removal by someone who cannot push leaves the last trusted pin standing. null: no pin. `gh` (timeline, permission) is
- * a test's own; each actor's permission is read once.
+ * `labeled` adds that label, a trusted `unlabeled` takes it away, and any other is ignored. So a removal by someone who
+ * cannot push leaves that trusted pin standing, beside any other still standing: one left is the pin, two wait
+ * (routeAccount). [] when none stands. `gh` (timeline, permission) is a test's own; each actor's permission is read once.
  */
 export async function trustedRoutePin(repo, issue, opts, gh = {}) {
   const read = { permission: collaboratorPermission, ...gh };
@@ -334,13 +337,13 @@ export async function trustedRoutePin(repo, issue, opts, gh = {}) {
     if (!trusted.has(key)) trusted.set(key, await vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, read));
     return trusted.get(key);
   };
-  let pin = null;
+  const standing = new Set();
   for (const e of events) {
     if (!(await vouched(e.actor))) continue;
-    if (e.event === "labeled") pin = e.label.name;
-    else if (pin === e.label.name) pin = null;
+    if (e.event === "labeled") standing.add(e.label.name);
+    else standing.delete(e.label.name);
   }
-  return pin;
+  return [...standing].sort();
 }
 
 /**
@@ -354,7 +357,7 @@ export async function accountGate({ repo, issue, harness, labels = [], env = pro
   if (local) return { ok: true, account: null, note: "" };
   const c = await routeAccountCheck({ repo, issue, harness, labels, env, opts, gh });
   // Two account labels: the stage waits (account-wait.mjs), never Blocks.
-  if (c.wait) return { ok: false, wait: await waitOnAccounts({ repo, issue, stage, pr: pr?.number ?? pr, two: c.wait, opts }) };
+  if (c.wait) return { ok: false, wait: await waitOnAccounts({ repo, issue, stage, pr, two: c.wait, opts }) };
   if (!c.refusal) return { ok: true, account: c.account, note: c.note };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);

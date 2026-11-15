@@ -29,6 +29,7 @@ import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
+import { routeInputs } from "./lib/accounts.mjs";
 import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
@@ -355,7 +356,8 @@ async function main() {
   // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
-  const inputs = resolveInputs({ args });
+  // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
+  const inputs = routeInputs(resolveInputs({ args }));
   if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
   if (!inputs.pr) throw new Error("--pr N is required");
   const repo = repoOf(inputs.repo);

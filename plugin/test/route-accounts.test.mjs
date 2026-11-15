@@ -356,11 +356,11 @@ test("two account labels never Block on these routes: a review takes its label o
     const wait = accountWaitOf(st.comments, 8);
     assert.ok(wait, "the wait is recorded on the PR, as Factory's own comment");
     // Still two: the dispatcher leaves it waiting.
-    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), false);
+    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), "waiting");
     assert.ok(!st.pr.has("factory:review"));
     // One left: the label goes back and the record goes.
     st.issue.delete("factory:account:claude");
-    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), true);
+    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], labelledAt: "2026-01-01T00:00:00Z", opts: { token: "t" } }), "resumed");
     assert.ok(st.pr.has("factory:review"));
     assert.equal(accountWaitOf(st.comments, 8), null);
     // A pasted marker by anyone else is no record.
@@ -388,7 +388,23 @@ test("on an account, a missing or unusable credential is named as that account's
   await assert.rejects(credentialEnv({ harness: "claude", credential: "plan", inputs: {}, env: { ...on("claude-2"), ...dflt } }), /CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2/);
   await assert.rejects(credentialEnv({ harness: "codex", credential: "api", inputs: {}, env: { ...on("codex-2"), ...dflt } }), /CODEX_API_KEY_CODEX_2 \(or FACTORY_CODEX_GATEWAY_KEY_CODEX_2\)/);
   await assert.rejects(credentialEnv({ harness: "copilot", credential: "api", inputs: {}, env: { ...on("copilot-2"), ...dflt } }), /COPILOT_GITHUB_TOKEN_COPILOT_2/);
-  assert.deepEqual((await credentialEnv({ harness: "claude", credential: "plan", inputs: { claudeCodeOauthToken: "fake-claude-2-plan" }, env: { ...on("claude-2"), ...dflt } })).env, { CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-2-plan" });
+  assert.deepEqual((await credentialEnv({ harness: "claude", credential: "plan", inputs: { claudeCodeOauthToken: "fake-claude-2-plan" }, env: { ...on("claude-2"), ...dflt, FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-2-plan" } })).env, { CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-2-plan" });
+  // The env block's FACTORY_<NAME> (a job-level variable resolveInputs falls back to) never stands in for the step's input.
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const { routeInputs } = await import("../scripts/lib/accounts.mjs");
+  const gw = { ...on("codex-2"), FACTORY_CODEX_GATEWAY_KEY: "vck_fake_default_gateway", FACTORY_INPUT_CODEX_API_KEY: "sk-fake-codex-2", FACTORY_HARNESS: "codex" };
+  const gwInputs = routeInputs(resolveInputs({ args: {}, env: gw }), gw);
+  assert.equal(gwInputs.codexGatewayKey, "", "a job-level gateway key does not beat the account's own key");
+  assert.deepEqual((await credentialEnv({ harness: "codex", credential: "api", inputs: resolveInputs({ args: {}, env: gw }), env: gw })).env, { CODEX_API_KEY: "sk-fake-codex-2" });
+  const dfltKey = { ...on("claude-2"), FACTORY_ANTHROPIC_API_KEY: "fake-default-in-env-block" };
+  assert.equal(resolveInputs({ args: {}, env: dfltKey }).anthropicApiKey, "fake-default-in-env-block", "resolveInputs alone would take it");
+  await assert.rejects(credentialEnv({ harness: "claude", credential: "api", inputs: resolveInputs({ args: {}, env: dfltKey }), env: dfltKey }), /ANTHROPIC_API_KEY_CLAUDE_2/, "the account's secret missing: it Blocks, never runs on the default's");
+  const blocked = (await credentialChecks({ inputs: resolveInputs({ args: {}, env: dfltKey }), env: dfltKey, local: false })).filter((c) => c.status === "FAIL");
+  assert.match(blocked[0].fix, /ANTHROPIC_API_KEY_CLAUDE_2/);
+  // Doctor still names a job-level gateway key on an account, and its PASS row says what is there, unrenamed.
+  const gwChecks = await credentialChecks({ inputs: { ...resolveInputs({ args: {}, env: gw }), model: "gpt-6.1-sol" }, env: gw, local: false });
+  assert.ok(gwChecks.some((c) => c.status === "WARN" && /FACTORY_CODEX_GATEWAY_KEY is a job-level variable, which a stage on account `codex-2` never uses/.test(c.detail)));
+  assert.ok(gwChecks.some((c) => c.status === "PASS" && c.detail === "CODEX_API_KEY present, step-scoped"), "a PASS row is not renamed");
   // The account named after its harness: today's names, still its own input alone.
   await assert.rejects(credentialEnv({ harness: "codex", credential: "api", inputs: {}, env: { ...on("codex"), ...dflt } }), /set CODEX_API_KEY \(or FACTORY_CODEX_GATEWAY_KEY\)/);
   // No accounts declared: today's fallbacks.
@@ -473,4 +489,99 @@ test("the dispatcher's tick puts a waiting review's label back once one account 
   assert.deepEqual(one.r.accountResumed, [8]);
   assert.ok(one.writes.includes("POST /repos/acme/app/issues/9/labels"), "the review label goes back on");
   assert.ok(one.writes.includes("DELETE /repos/acme/app/issues/comments/77"), "the wait record goes");
+});
+
+test("removals replay as a set of standing trusted pins: an earlier pin still standing is kept, two standing wait, and the stage reads no timeline when the step prepared the default (#267)", async () => {
+  const { trustedRoutePin } = await import("../scripts/lib/objective-trust.mjs");
+  const ev = (event, name, login, min) => ({ event, label: { name }, created_at: new Date(Date.UTC(2026, 10, 15, 1, min)).toISOString(), actor: { login, type: "User", id: login === "kirk" ? 7 : 9 } });
+  // A is not the default account, so a pin kept is told apart from the default.
+  const A = "factory:account:claude-2";
+  const B = "factory:account:claude";
+  // A pusher applies A, then B, then removes B; a stranger removes A: A stands.
+  const kept = [ev("labeled", A, "kirk", 1), ev("labeled", B, "kirk", 2), ev("unlabeled", B, "kirk", 3), ev("unlabeled", A, "stranger", 4)];
+  assert.deepEqual(await withGitHub({ labels: [], events: kept }, () => trustedRoutePin(REPO, 8, { token: "t" })), [A]);
+  assert.equal((await runStep({ labels: ["factory:objective"], events: kept })).outputs.account, "claude-2");
+  // A stranger removes both: both stand, so the Objective waits on them.
+  const both = [ev("labeled", A, "kirk", 1), ev("labeled", B, "kirk", 2), ev("unlabeled", B, "stranger", 3), ev("unlabeled", A, "stranger", 4)];
+  assert.deepEqual(await withGitHub({ labels: [], events: both }, () => trustedRoutePin(REPO, 8, { token: "t" })), [B, A]);
+  assert.equal((await runStep({ labels: ["factory:objective"], events: both })).outputs.account, NO_SECRET);
+  const c = await withGitHub({ labels: ["factory:objective"], events: both }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET }, opts: { token: "t" } }));
+  assert.deepEqual(c.wait, [B, A]);
+  // The step prepared the harness's default: the stage and the launcher take its answer, with no timeline read.
+  const reads = await withGitHub({ labels: ["factory:objective"] }, async (r) => {
+    const ok = await routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude" }, opts: { token: "t" } });
+    assert.equal(ok.account, "claude");
+    return r;
+  });
+  assert.deepEqual(reads, [], "no read at all");
+});
+
+test("a stale account-wait record resumes nothing: a review label put on since means its wait is over, and the record goes (#267)", async () => {
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
+  setSelf("factory-test[bot]");
+  const record = { id: 41, user: { login: "factory-test[bot]", type: "Bot" }, body: "<!-- factory:8:account-wait -->\nFactory: waiting", created_at: "2026-11-15T01:00:00Z", updated_at: "2026-11-15T01:00:00Z" };
+  await withGitHub({ prLabels: [], comments: [record] }, async (_r, st) => {
+    const wait = accountWaitOf(st.comments, 8);
+    assert.deepEqual(wait, { id: 41, at: "2026-11-15T01:00:00Z" });
+    // The label went on at 02:00 (a resume whose record delete failed, or a person) and came off since, for another wait.
+    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: ["factory:objective"], labelledAt: "2026-11-15T02:00:00Z", opts: { token: "t" } }), "stale");
+    assert.ok(!st.pr.has("factory:review"), "nothing resumed");
+    assert.equal(accountWaitOf(st.comments, 8), null, "the stale record is gone");
+  });
+});
+
+test("a work stage that meets two labels with an open PR goes back to In review, and the dispatcher sends nothing back while two are on (#267)", async () => {
+  const two = ["factory:objective", "factory:running", "factory:account:claude", "factory:account:claude-2"];
+  const env = { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude" };
+  await withGitHub({ labels: two }, async (_reads, st) => {
+    const applied = [];
+    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9, state: "open", draft: false }, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "work" });
+    assert.match(r.wait, /back to In review until one is left/);
+    assert.deepEqual(applied, []);
+    assert.ok(st.issue.has("factory:in-review") && !st.issue.has("factory:running"), "In review again, its PR and branch as they were");
+  });
+  // A draft PR (a Question or Block relabelled) is no send-back: Queued, re-run from its branch when picked.
+  await withGitHub({ labels: two }, async (_reads, st) => {
+    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9, state: "open", draft: true }, opts: { token: "t" }, apply: async () => {}, stage: "work" });
+    assert.match(r.wait, /back to Queued until one is left/);
+    assert.ok(!st.issue.has("factory:in-review") && !st.issue.has("factory:running"));
+  });
+  // The dispatcher: an In-review PR that needs a rebase is not sent back to a work stage while two labels are on.
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const tick = async (labels) => {
+    setSelf("factory-test[bot]");
+    const issue = { number: 8, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "kirk" } };
+    const pr = { number: 9, state: "open", draft: false, labels: [], head: { ref: "factory/8", sha: "abc1234" }, base: { ref: "main" }, mergeable: false, mergeable_state: "dirty" };
+    const real = globalThis.fetch;
+    const saved = process.env.FACTORY_ACCOUNTS;
+    process.env.FACTORY_ACCOUNTS = ACCOUNTS;
+    globalThis.fetch = async (url, init = {}) => {
+      const u = new URL(url);
+      const method = init.method || "GET";
+      const p = u.pathname;
+      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (p.endsWith("/graphql")) return json({ data: { viewer: { login: "factory-test[bot]" }, repository: null } });
+      if (p === "/user") return json({ login: "kirk", type: "User" });
+      if (p === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : [issue]);
+      if (p === "/repos/acme/app/pulls") return json(u.searchParams.get("head") === "acme:factory/8" ? [pr] : []);
+      if (p === "/repos/acme/app/pulls/9") return json(pr);
+      if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
+      if (/\/(timeline|comments|collaborators|reviews|commits|check-runs|status|rulesets)$/.test(p)) return json([]);
+      if (method !== "GET") return json({}, 200);
+      return json({ message: "Not Found" }, 404);
+    };
+    try {
+      return await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+    } finally {
+      globalThis.fetch = real;
+      if (saved === undefined) delete process.env.FACTORY_ACCOUNTS;
+      else process.env.FACTORY_ACCOUNTS = saved;
+    }
+  };
+  const held = await tick(["factory:objective", "factory:in-review", "factory:account:claude", "factory:account:claude-2"]);
+  assert.deepEqual([held.sentBack, held.ready], [[], []], "two labels: no send-back");
+  const sent = await tick(["factory:objective", "factory:in-review", "factory:account:claude-2"]);
+  assert.deepEqual(sent.sentBack, [8], "one label: sent back as ever");
 });

@@ -26,6 +26,7 @@ import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, con
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
+import { routeInputs } from "./lib/accounts.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
@@ -82,7 +83,8 @@ async function main() {
   // Factory's own temp directory, 700 and out of the agent's reach; the harness and its commands keep the stage's TMPDIR.
   const tmp = privateTmp();
   const args = parseArgs(process.argv.slice(2));
-  const inputs = resolveInputs({ args });
+  // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
+  const inputs = routeInputs(resolveInputs({ args }));
   if (!inputs.repo) throw new Error("--repo OWNER/NAME (or GITHUB_REPOSITORY) is required");
   if (!inputs.issue) throw new Error("--issue N is required");
   const repo = repoOf(inputs.repo);

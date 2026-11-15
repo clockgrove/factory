@@ -36,7 +36,7 @@ import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
-import { chatgptLogin, routeSecretSuffix } from "./lib/accounts.mjs";
+import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
 import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
@@ -1209,7 +1209,8 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const gate = args.gate === "true";
-  const inputs = resolveInputs({ args });
+  // On an account (#267) its credential is the step's own input alone, never a job-level variable (accounts.mjs routeInputs).
+  const inputs = routeInputs(resolveInputs({ args }));
   // Every secret is in `inputs` now; the environment (which the vendor SDK in this process can read) keeps none.
   for (const k of Object.keys(process.env)) if (isSecretEnv(k)) delete process.env[k];
   if (!inputs.repo) throw new Error("--repo OWNER/NAME (or GITHUB_REPOSITORY) is required");

@@ -367,11 +367,12 @@ export async function routeAccount({ declared, harness, names = [], vouch, kept 
   if (pin.two) return { two: pin.two };
   const mine = declared?.accounts?.[harness]?.length ? declared.accounts[harness] : [harness];
   if (!pin.label) {
-    // No label now: the pin a removal by someone who cannot push left standing (`kept`, objective-trust.mjs
-    // trustedRoutePin), else the harness's default.
-    const left = kept ? await kept() : null;
-    if (!left) return { account: { name: mine[0], harness } };
-    return pinnedRouteAccount(declared, harness, left, mine, " (it stays: whoever removed it cannot push)");
+    // No label now: the pins removals by someone who cannot push left standing (`kept`, objective-trust.mjs
+    // trustedRoutePin): one is the pin, two wait; with none, the harness's default.
+    const left = (kept ? await kept() : null) || [];
+    if (left.length > 1) return { two: left };
+    if (!left.length) return { account: { name: mine[0], harness } };
+    return pinnedRouteAccount(declared, harness, left[0], mine, " (it stays: whoever removed it cannot push)");
   }
   if (!validAccountName(pin.name)) return { problem: `${pinLabelText(pin.label)} names no account` };
   const refused = await vouch(pin.label);
@@ -418,6 +419,28 @@ export function routeCredentialEnv(env = process.env) {
   for (const k of DEFAULT_CREDENTIAL_ENV) delete out[k];
   return out;
 }
+
+/** The harness credential inputs (lib/inputs.mjs resolveInputs) by the name their step-scoped variable carries. */
+const CREDENTIAL_INPUTS = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN" };
+
+/**
+ * `inputs` with each harness credential taken from the step's own input alone (FACTORY_INPUT_<NAME>, which the workflow
+ * fills from the account's secret) on an account (routeStageAccount): never the env block's FACTORY_<NAME>, a job-level
+ * variable that would be the default account's credential, so a missing account secret Blocks rather than runs on
+ * another's. Unchanged with no account.
+ */
+export function routeInputs(inputs, env = process.env) {
+  if (!routeStageAccount(env)) return inputs;
+  const out = { ...inputs };
+  for (const [k, n] of Object.entries(CREDENTIAL_INPUTS)) out[k] = env[`FACTORY_INPUT_${n}`] || "";
+  return out;
+}
+
+/**
+ * The job-level variables that would carry a harness credential besides the step's input: the bare names, the env
+ * block's FACTORY_<NAME> and FACTORY_CODEX_GATEWAY_KEY. A stage on an account uses none of them (doctor names any set).
+ */
+export const jobLevelCredentials = (env = process.env) => [...new Set([...DEFAULT_CREDENTIAL_ENV.filter((k) => !k.startsWith("ACTIONS_")), ...Object.values(CREDENTIAL_INPUTS).map((n) => `FACTORY_${n}`)])].filter((k) => env[k]);
 
 const SECRET_NAMES = /\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|FACTORY_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g;
 /**

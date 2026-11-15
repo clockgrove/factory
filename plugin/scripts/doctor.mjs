@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, loadAccounts, routeAccounts, routeCredentialEnv, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
+import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeCredentialEnv, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
@@ -49,7 +49,9 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
-export async function credentialChecks({ inputs, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
+export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
+  // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs), as the stage runs it.
+  const inputs = routeInputs(asked, given);
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
@@ -58,7 +60,11 @@ export async function credentialChecks({ inputs, env: given = process.env, probe
   // never sets the default account's.
   const account = routeStageAccount(given);
   const env = routeCredentialEnv(given);
-  const named = (c) => (account && / credential$/.test(c.name) ? { ...c, detail: accountSecretText(c.detail, given, h), fix: c.fix ? accountSecretText(c.fix, given, h) : c.fix } : c);
+  // A FAIL's line and any fix name the account's secret; a PASS or WARN row says what is there, as it is named.
+  const named = (c) => (account && / credential$/.test(c.name) ? { ...c, detail: c.status === "FAIL" ? accountSecretText(c.detail, given, h) : c.detail, fix: c.fix ? accountSecretText(c.fix, given, h) : c.fix } : c);
+  // Job-level credential variables (the default account's, or a gateway key) a stage on an account never uses: named.
+  const jobLevel = account ? jobLevelCredentials(given) : [];
+  if (jobLevel.length) out.push(WARN(`${h} credential`, `${jobLevel.join(", ")} ${jobLevel.length === 1 ? "is a job-level variable" : "are job-level variables"}, which a stage on account \`${account}\` never uses`, "remove them from the workflow's env block: each account's credential is its own secret, passed to the stage's step as its input"));
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));

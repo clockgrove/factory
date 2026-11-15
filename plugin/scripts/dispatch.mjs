@@ -94,6 +94,8 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
+/** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
+const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
@@ -815,18 +817,28 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       // A review waiting on two account labels (lib/account-wait.mjs, #267): its label goes back once one account label or
       // none is left; meanwhile nothing else runs on the PR.
-      if (!reviewing && accountWait) {
-        if (dryRun) continue;
+      if (!reviewing && accountWait && !dryRun) {
+        let how = "waiting";
         try {
-          if (await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, opts })) {
-            accountResumed.push(issue.number);
-            log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
-          } else log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
+          // The review label's latest time on the PR: a record older than it is stale (account-wait.mjs).
+          const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts);
+          how = await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, labelledAt, opts });
         } catch (e) {
-          log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
+          log(`  #${issue.number}: the account wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
           retry(`#${issue.number}'s review label`);
+          continue;
         }
-        continue;
+        if (how === "resumed") {
+          accountResumed.push(issue.number);
+          log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
+          continue;
+        }
+        if (how === "waiting") {
+          log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
+          continue;
+        }
+        // Stale: removed, and the PR is handled as any In-review PR below.
+        log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
       }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -867,6 +879,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
+      // Two account labels on these routes (#267): no work stage could start on it, so nothing is sent back to one (a
+      // GitHub update of the branch runs no stage and goes ahead); it waits In review until one label or none is left.
+      if (decision === "rebase" && twoAccounts(issue)) {
+        log(`  #${issue.number}: PR #${open.number} needs a rebase, but ${routeTwoLine(accountPin(issue.labels).two)}`);
+        continue;
+      }
       // The send-backs could not be counted (session.mjs rebaseMarkers `unread`): no update, send-back or Block this tick.
       if (unread && decision !== "ignore") {
         retry(`#${issue.number}'s send-backs`);
@@ -954,12 +972,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // Two account labels on GitHub Actions and the cloud sandbox, with accounts declared there (lib/accounts.mjs, #267): no
   // stage starts until one is left; the Objective waits Queued, never Blocked for it, as in local mode.
-  if (backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared) {
-    for (const issue of wanted) {
-      const two = accountPin(issue.labels).two;
-      if (two) held[issue.number] ??= routeTwoLine(two);
-    }
-  }
+  for (const issue of wanted) if (twoAccounts(issue)) held[issue.number] ??= routeTwoLine(accountPin(issue.labels).two);
   for (const [key, reason] of Object.entries(localStopped || {})) {
     const n = Number(key);
     const issue = wanted.find((i) => i.number === n);

@@ -579,6 +579,15 @@ export async function setDraft(repo, number, draft, opts) {
   await graphql(`mutation($id: ID!) { ${mutation}(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`, { id: pr.node_id }, opts);
 }
 
+/**
+ * Mark the PR ready for review (delivered) and return it as it now stands, `draft: false`: a Block later in the same exit
+ * then says the PR was delivered (session.mjs applyExit), never that it is a draft with what exists.
+ */
+export async function markReady(repo, pr, opts) {
+  if (pr.draft) await setDraft(repo, pr.number, false, opts);
+  return { ...pr, draft: false };
+}
+
 export async function requestReviewers(repo, number, reviewers, opts) {
   // GitHub refuses a review request to the PR's own author (a local run opens PRs as the developer, who is also notify).
   const author = (await getPr(repo, number, opts).catch(() => null))?.user?.login?.toLowerCase();

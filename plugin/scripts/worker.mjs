@@ -17,7 +17,7 @@ import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
+import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
@@ -820,7 +820,7 @@ async function main() {
   }
   if (decision.exit === "delivered" && pr && conflict) {
     // Ready, unvalidated and unlabelled: the dispatcher sends a ready In-review PR that conflicts back to a worker.
-    if (pr.draft) await setDraft(repo, pr.number, false, token);
+    pr = await markReady(repo, pr, token);
     decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;
     log(decision.reason);
   } else if (decision.exit === "delivered" && pr) {
@@ -828,7 +828,7 @@ async function main() {
     // the review label goes on first, because the App applying it is what fires the review job.
     const head = (await observe(repo, outbox, { branch, prNumber: pr.number }, token)).pr.head.sha;
     await postValidated(repo, pr.number, issue, head, token);
-    if (pr.draft) await setDraft(repo, pr.number, false, token);
+    pr = await markReady(repo, pr, token);
     // A conflicting PR gets no pull_request runs at all (GitHub cannot build its merge ref), so it may reach
     // rebase mode without a review pass. Reviewed already: the rebased head Factory pushed is recorded as mergeable, and
     // it merges once its required checks are green (the dispatcher's next tick). Not yet reviewed: relabel (remove,

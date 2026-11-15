@@ -8,11 +8,12 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CLEAN_REFUSED, CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, enterStage, installEnd, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
+import { CLEAN_REFUSED, CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
 import { UsageLimitReached, runHarness } from "../scripts/lib/harness.mjs";
 import { claudeProject, gitPinFile, pinGitDir, prepareClone } from "../scripts/lib/local.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
 import { installCommand, installDeps } from "../scripts/lib/checkout.mjs";
+import { decisionsRead, decisionsReadMarker, decisionsShown } from "../scripts/lib/logic.mjs";
 import { restoreTranscript, saveTranscript, usageLimitExit, writeUsage } from "../scripts/lib/session.mjs";
 import { Local } from "../scripts/local.mjs";
 
@@ -398,4 +399,21 @@ test("a continued stage's frozen install that fails on its unfinished dependency
   assert.ok(continuePrompt({ in: "/i", out: "/o" }, { note: kept.note }).endsWith(kept.note), "the resumed session is told");
   assert.ok(keptPrompt("# Task card\n", { note: kept.note }).endsWith(kept.note), "so is a fresh session on the kept checkout");
   assert.deepEqual(installEnd({ ok: true }, { continued: true, command }), {});
+});
+
+test("a continued session's resumed pass is recorded as reading every decision it is told to read again, so none stays unread for an answer pass", () => {
+  // A long thread: more than fits the task card, the newest posted during the pause.
+  const decisions = Array.from({ length: 8 }, (_, n) => ({ key: `comment:${n + 1}`, at: `2026-11-14T0${n}:00:00Z`, author: "kirk", body: `decision ${n + 1}: ${"x".repeat(3000)}` }));
+  const shown = decisionsShown(decisions);
+  assert.ok(shown.length < decisions.length, "the card cuts the oldest");
+  const resumed = decisionsFed({ decisions, full: false, continued: true, rebaseConflict: false });
+  assert.deepEqual(resumed, decisions, "decisions.md in the new $FACTORY_IN holds every one, and the prompt says to read it");
+  assert.match(continuePrompt({ in: "/i", out: "/o" }), /\$FACTORY_IN\/decisions\.md again/);
+  assert.match(decisionsReadMarker(decisionsRead(resumed)), /"comment:8":"2026-11-14T07:00:00Z"/, "the one posted during the pause is recorded read");
+  assert.deepEqual(decisionsFed({ decisions, full: true, continued: true, rebaseConflict: false }), shown, "a fresh session on the kept checkout reads the card's");
+  assert.deepEqual(decisionsFed({ decisions, full: true, continued: false, rebaseConflict: false }), shown);
+  assert.equal(decisionsFed({ decisions, full: false, continued: false, rebaseConflict: false }), null, "a died pass's retry is told no decisions");
+  assert.equal(decisionsFed({ decisions, full: true, continued: false, rebaseConflict: true }), null, "a conflict pass only rebases");
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
+  assert.match(src, /decisionsFed\(\{ decisions, full, continued: !!continued, rebaseConflict \}\)/, "worker.mjs records what decisionsFed says");
 });

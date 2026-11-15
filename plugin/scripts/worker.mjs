@@ -20,7 +20,7 @@ import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, restartedAt, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, restartedAt, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -40,7 +40,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
-import { CLEAN_REFUSED, checkoutHolds, continuePrompt, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
+import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -650,8 +650,10 @@ async function main() {
     const full = !(attempt === 1 && restored?.id) && (attempt === 1 || !session.id);
     // Recorded before the run: a comment posted while it works is unread, and the review's answer pass applies it.
     // Only the decisions that fit the card are recorded; those cut for length stay unread.
-    if (full && !rebaseConflict && !fedDecisions) {
-      await progress.decisionsRead(decisionsRead(decisionsShown(decisions)));
+    // A continued session's resumed pass reads them all again from $FACTORY_IN/decisions.md (continue.mjs decisionsFed).
+    const fed = fedDecisions ? null : decisionsFed({ decisions, full, continued: !!continued, rebaseConflict });
+    if (fed) {
+      await progress.decisionsRead(decisionsRead(fed));
       fedDecisions = true;
     }
     rec = await runHarness({

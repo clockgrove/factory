@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { decisionsShown } from "./logic.mjs";
 
 /** Why a fresh work stage Blocks (cause setup) when its clone's untracked leftovers could not be removed: no local path. */
 export const CLEAN_REFUSED = "local mode: the untracked files an earlier stage left in the Objective's clone could not be removed, so the work stage does not run on them; the local loop's log has the error. Fix it on that machine, then re-apply the Objective's label.";
@@ -188,4 +189,15 @@ export function installEnd(result, { continued, command }) {
   if (result.ok) return {};
   if (!continued) return { block: result.reason };
   return { note: `Factory's install (${command}) failed on this checkout, which keeps your unfinished changes: finish any dependency change, its lockfile included, and install before you validate.` };
+}
+
+/**
+ * The maintainers' decisions a work pass is recorded as having read (logic.mjs decisionsRead), or null for none: a pass
+ * given the whole task card reads those that fit it (decisionsShown); a continued session's resumed pass is told to read
+ * $FACTORY_IN/decisions.md, which holds every one (continuePrompt); a conflict pass is told only to rebase.
+ */
+export function decisionsFed({ decisions, full, continued, rebaseConflict }) {
+  if (rebaseConflict) return null;
+  if (full) return decisionsShown(decisions);
+  return continued ? decisions || [] : null;
 }

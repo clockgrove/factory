@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -832,6 +832,11 @@ async function main() {
       // Actions (actions: write), the repository token locally.
       triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }) : null,
       drift,
+      // A work pass that ended well hands its pushed head to the review stage without waiting for the required checks:
+      // the review waits for them beside its reviewer, and its answer pass fixes a red with the review's comments. A
+      // send-back's rebase waits here as before (a reviewed head merges on it), as does a pass whose harness erred
+      // (green checks are what outweigh its error).
+      handOff: !!rec.ok && !rebaseMode && !!pr,
     });
     records.push(...validation.usage);
     passes = validation.passes;
@@ -868,7 +873,7 @@ async function main() {
     harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass } : undefined,
+    validation: validation?.handedOff ? { passes: validation.passes, green: true } : validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     unresolved,
     record: asked.record,
@@ -914,7 +919,10 @@ async function main() {
     // Delivered means an open, non-draft PR (Factory opens it as a draft until its own validation is green);
     // the review label goes on first, because the App applying it is what fires the review job.
     const head = (await observe(repo, outbox, { branch, prNumber: pr.number }, token)).pr.head.sha;
-    await postValidated(repo, pr.number, issue, head, token);
+    // A head handed off with its checks running is not validated: the review stage waits for them (session.mjs
+    // postHandedOff, read back by review.mjs).
+    if (validation?.handedOff) await postHandedOff(repo, pr.number, issue, head, token);
+    else await postValidated(repo, pr.number, issue, head, token);
     pr = await markReady(repo, pr, token);
     // A conflicting PR gets no pull_request runs at all (GitHub cannot build its merge ref), so it may reach
     // rebase mode without a review pass. Reviewed already: the rebased head Factory pushed is recorded as mergeable, and

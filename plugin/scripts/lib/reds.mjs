@@ -73,9 +73,10 @@ export function evidenceText({ branch, job, evidence, lines }) {
  * branch, green, diff, diffError}. `base` is {sha} when the job fails exactly the same way, steadily, on the default
  * branch (steadyOnBase), else null; `evidence` is what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the two-dot diff from it to `sha`, made by `diffOf(from, to)`
  * (Factory's own mirror) or, when the red head descends from it, GitHub's compare; `diffError` says why there is none.
+ * With `sinceGreen` false (a merge queue commit, no head of the PR) neither is read: `green` and `diff` are null.
  * `token` reads the repository and the PR; `actionsToken` the job logs.
  */
-export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5 }) {
+export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5, sinceGreen = true }) {
   const opts = { token };
   const actions = { token: actionsToken };
   const { jobs: picked, truncated } = jobsToDetail(failedRuns, required);
@@ -117,6 +118,8 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
       if (j.required) j.gathers = said.needs.get(j.id) ?? null;
     }
   }
+  // Not for a commit that is no head of the PR (the merge queue's: `sinceGreen` false): no diff from the PR's green head.
+  if (!sinceGreen) return { jobs, truncated, branch, green: null, diff: null, diffError: "" };
   const comments = await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { ...opts, paginate: true }).catch(() => []);
   const green = lastGreenHead(comments, issue);
   let diff = null;

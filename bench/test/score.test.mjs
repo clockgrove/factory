@@ -522,7 +522,7 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   const work = body(7, ["23:50Z setup", "23:52Z install", "00:01Z harness claude (claude-opus-5-5) attempt 1", "00:31Z waiting for required checks (quality) on abc1234", "00:45Z validation pass 1 red: required checks quality on abc1234; fix run", "00:55Z waiting for required checks (quality) on def5678", "01:05Z exit: delivered; usd 1.00"]);
   const review = `<!-- factory:7:progress:review:2 -->\nFactory review run 2\n- 01:10Z setup\n- 01:11Z reviewer claude-fable-5-1\n- 01:20Z answer pass: 2 comment(s)\n- 01:24Z exit: delivered; usd 0.50`;
   const p = phaseMinutes([{ body: "<!-- factory:7:plan -->" }, { body: work }, { body: review }], 7);
-  assert.deepEqual(p, { runs: 2, firstSetupMinutes: 0, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, otherMinutes: 0, basis: "2 progress comment(s)" });
+  assert.deepEqual(p, { runs: 2, firstSetupMinutes: 0, setupMinutes: 11 + 1, modelMinutes: 30 + 10 + 9 + 4, ciWaitMinutes: 14 + 10, overlapMinutes: 0, otherMinutes: 0, basis: "2 progress comment(s)" });
   assert.equal(phaseMinutes([{ body: "<!-- factory:8:progress:work:1 -->\n- 01:00Z setup" }], 7).runs, 0);
   assert.equal(phaseMinutes([], 7).modelMinutes, null);
   // A local Objective's first stage on a machine: the clone's seconds ride its line, the cold install is its own phase.
@@ -533,7 +533,53 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   assert.equal(f.modelMinutes, 10);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
-  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Review beside CI min \| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
+});
+
+test("phaseMinutes: a reviewer beside the required checks counts its minutes once, as review beside CI, from the review stage's own lines (#312)", async () => {
+  const { reviewOverlap } = await import("../../plugin/scripts/review.mjs");
+  // The review stage's lines as reviewOverlap writes them, with a validation pass that settles when told to.
+  const run = async (end) => {
+    const lines = [];
+    const progress = async (l) => lines.push(l);
+    let settle;
+    const o = reviewOverlap({
+      progress,
+      head: () => "abc1234def".padEnd(40, "0"),
+      run: async (more) => {
+        await more.onPhase("pre-review-validation pass 1 (required checks)");
+        await more.onPhase("waiting for required checks (quality) on abc1234");
+        more.onRead({ done: false, green: true, failed: [], pending: ["quality"], missing: [] }, [{ id: 1, name: "quality", status: "in_progress" }]);
+        return new Promise((r) => (settle = r));
+      },
+    });
+    assert.equal(await o.beside(), true);
+    await progress(`reviewer claude-fable-5-2${o.besideText()}`);
+    if (end === "during") {
+      settle({ green: true, passes: 1, usage: [] });
+      await o.done;
+    }
+    const after = o.reviewerDone();
+    if (end === "after") settle({ green: true, passes: 1, usage: [] });
+    await after;
+    await progress("answer pass: 2 comment(s)");
+    return lines;
+  };
+  const at = (lines, clocks) => `<!-- factory:7:progress:review:3 -->\nFactory review run 3\n${lines.map((l, i) => `- ${clocks[i]} ${l}`).join("\n")}\n- 01:40Z exit: delivered; usd 1.00`;
+  // The checks outlast the reviewer: 1 min CI wait, 8 min side by side, 5 min CI wait after it, 10 min answer pass.
+  const after = await run("after");
+  assert.deepEqual(after, ["pre-review-validation pass 1 (required checks)", "waiting for required checks (quality) on abc1234", "reviewer claude-fable-5-2 beside the required checks on abc1234", "waiting for required checks on abc1234 after the reviewer", "answer pass: 2 comment(s)"]);
+  const p = phaseMinutes([{ body: at(after, ["01:15Z", "01:16Z", "01:17Z", "01:25Z", "01:30Z"]) }], 7);
+  assert.deepEqual([p.otherMinutes, p.ciWaitMinutes, p.overlapMinutes, p.modelMinutes], [1, 1 + 5, 8, 10]);
+  // The checks end first: 6 min side by side, then the reviewer alone for 3 (model), no CI wait after it.
+  const during = await run("during");
+  assert.deepEqual(during.slice(2), ["reviewer claude-fable-5-2 beside the required checks on abc1234", "required checks on abc1234 green while the reviewer runs", "answer pass: 2 comment(s)"]);
+  const q = phaseMinutes([{ body: at(during, ["01:15Z", "01:16Z", "01:17Z", "01:23Z", "01:26Z"]) }], 7);
+  assert.deepEqual([q.ciWaitMinutes, q.overlapMinutes, q.modelMinutes], [1, 6, 3 + 14]);
+  // Each minute once: the phases add up to the run's wall clock (01:15 to 01:40).
+  for (const x of [p, q]) assert.equal(x.otherMinutes + x.ciWaitMinutes + x.overlapMinutes + x.modelMinutes + x.setupMinutes, 25);
+  // The pass's own lines during the overlap stay in it.
+  assert.equal(phaseMinutes([{ body: "<!-- factory:7:progress:review:4 -->\n- 02:00Z reviewer m beside the required checks on abc1234\n- 02:03Z during the reviewer: triage: off (no-key); fix pass\n- 02:07Z required checks on abc1234 red while the reviewer runs\n- 02:09Z exit: delivered" }], 7).overlapMinutes, 7);
 });
 
 test("dispatchLatency: each run's pickup against the latest trigger since the previous run; skipped duplicates and Running are not triggers", () => {

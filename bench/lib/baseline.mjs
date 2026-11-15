@@ -22,6 +22,8 @@ export const MEASURES = [
   ["cachedTokens", (r) => r.cost?.tokens?.cached ?? null, "cached tok"],
   ["writtenTokens", (r) => r.cost?.tokens?.written ?? null, "written tok"],
   ["ciWaitMinutes", (r) => r.phases?.ciWaitMinutes ?? null, "CI wait min"],
+  // The reviewer's minutes beside the required checks it ran with (bench/lib/phases.mjs), in neither model nor CI wait.
+  ["overlapMinutes", (r) => r.phases?.overlapMinutes ?? null, "review beside CI min"],
   ["dispatchSeconds", (r) => r.dispatch?.maxSeconds ?? null, "dispatch s"],
   ["slotWaitSeconds", (r) => r.dispatch?.slotWaitSeconds ?? null, "slot wait s"],
   ["setupSeconds", (r) => r.phases?.setupSeconds ?? null, "setup s"],

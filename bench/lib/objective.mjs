@@ -423,16 +423,40 @@ export function handoverSteps(collected, pulls = branchPulls(collected)) {
 }
 
 /**
- * Whether Factory's hand-over comment is on the issue with a patch in it (`<!-- factory:N:handover -->` first, then
- * handoverOf's fenced diff): the hand-over a person can apply. A person's comment carrying the marker is not Factory's.
+ * Whether an act on the issue is Factory's own for the hand-over: its App's login (factoryLogin: `app`, else the App
+ * that applied factory:running), or in local mode the operator's where localFactoryActions says so. Never just any
+ * bot: another machine's comment or label is not Factory's hand-over.
  */
-export function handoverPosted(collected, { bots = new Set() } = {}) {
+function handoverActor(collected, { app = null } = {}) {
+  const self = factoryLogin(collected.issueTimeline, app);
+  const local = localFactoryActions(collected);
+  return (at, actor, kind) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind);
+}
+
+/**
+ * Whether Factory's hand-over comment is on the issue with a patch in it (`<!-- factory:N:handover -->` first, then
+ * handoverOf's fenced diff): the hand-over a person can apply. Only Factory's own comment (handoverActor) counts.
+ */
+export function handoverPosted(collected, { app = null } = {}) {
   const mark = `${handoverMarker(collected.issue.number)}\n`;
-  const factoryLocal = localFactoryActions(collected);
+  const factory = handoverActor(collected, { app });
   return (collected.issueComments || []).some((c) => {
     const body = String(c.body || "").replace(/\r\n?/g, "\n");
-    return body.startsWith(mark) && (!isHuman(c.user, bots) || factoryLocal(c.created_at, c.user, "marker comment")) && handoverOf(body.slice(mark.length)) !== null;
+    return body.startsWith(mark) && factory(c.created_at, c.user, "marker comment") && handoverOf(body.slice(mark.length)) !== null;
   });
+}
+
+/**
+ * The person's mark that the hand-over is applied, as Factory reads it (plugin handoff.mjs handoverApplied): their
+ * latest removal of factory:handover in `marks`, unless Factory applied the label again after it (a later part's new
+ * patch, still pending). `{at, by}` or null.
+ */
+function handoverApplied(collected, marks, { app = null } = {}) {
+  const last = marks.at(-1);
+  if (!last) return null;
+  const factory = handoverActor(collected, { app });
+  const again = (collected.issueTimeline || []).some((e) => e.event === "labeled" && e.label?.name === HANDOVER_LABEL && ms(e.created_at) > ms(last.at) && factory(e.created_at, e.actor, `labeled ${HANDOVER_LABEL}`));
+  return again ? null : { at: last.at, by: last.by };
 }
 
 /**
@@ -812,11 +836,11 @@ export function scoreObjective(collected, opts = {}) {
   // input; the person's removal of factory:handover from then on is their mark that they applied it, part of that step.
   // Unposted (no Factory comment holds the patch), or under input, each step is one human action, as asked for.
   const steps = handoverSteps(collected).filter((a) => ms(a.at) > ms(since));
-  const owned = handover === "owner-step" && steps.length > 0 && handoverPosted(collected, { bots });
+  const owned = handover === "owner-step" && steps.length > 0 && handoverPosted(collected, { app });
   let ownerStep = null;
   if (owned) {
     const mark = (a) => a.where === `#${issue.number}` && a.kind === `unlabeled ${HANDOVER_LABEL}` && ms(a.at) >= ms(steps[0].at);
-    const applied = actions.filter(mark).at(-1) ?? null;
+    const applied = handoverApplied(collected, actions.filter(mark), { app });
     actions = actions.filter((a) => !mark(a));
     const timed = typeof ownerMinutes === "number" && Number.isFinite(ownerMinutes);
     ownerStep = {

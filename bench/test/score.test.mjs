@@ -134,9 +134,30 @@ test("workflow hand-over: an owner step only when Factory's comment with the pat
   assert.equal(unposted.walkAway.firstHumanAction.detail, "Factory's hand-over comment with the patch is not on the issue");
   // A person's comment carrying the marker is not Factory's hand-over; nor is Factory's notice with no patch in it.
   assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "maintainer", type: "User" } }), { prices, now: NOW }).ownerStep, null);
+  // Nor is another machine's: only Factory's own login (the App that applied factory:running, or --app) posts it.
+  assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "other-tool[bot]", type: "Bot" } }), { prices, now: NOW }).ownerStep, null);
+  assert.equal(scoreObjective(withHandover(cleanMerge(47), { by: { login: "other-tool[bot]", type: "Bot" } }), { prices, now: NOW, app: "other-tool[bot]" }).walkAway.value, true);
   const notice = withHandover(cleanMerge(47));
   notice.issueComments.at(-1).body = notice.issueComments.at(-1).body.replace(/```diff[\s\S]*```/, "");
   assert.equal(scoreObjective(notice, { prices, now: NOW }).walkAway.value, false);
+});
+
+test("workflow hand-over on a split Objective: Factory applying the label again for a later part's patch makes it pending again, until the person removes it again", () => {
+  const MAINTAINER = { login: "maintainer", type: "User" };
+  const APP = { login: "acme-factory[bot]", type: "Bot" };
+  const c = withHandover(cleanMerge(48));
+  const line = c.pulls[0].body.split("\n\n")[0];
+  c.pulls[0].body = `${line}\n\npart 1\n\nRefs #48\n`;
+  c.pulls.push({ ...c.pulls[0], number: 101, created_at: "2031-03-02T04:00:00Z", merged_at: "2031-03-02T05:00:00Z", body: `${line}\n\npart 2\n\nCloses #48\n` });
+  c.pullDetails[101] = { commits: [], timeline: [], comments: [], reviews: [], reviewComments: [] };
+  const removed = (at) => ({ event: "unlabeled", label: { name: "factory:handover" }, actor: MAINTAINER, created_at: at });
+  c.issueTimeline.push(removed("2031-03-02T03:45:00Z"), { event: "labeled", label: { name: "factory:handover" }, actor: APP, created_at: "2031-03-02T04:00:30Z" });
+  const pending = scoreObjective(c, { prices, now: NOW });
+  assert.equal(pending.walkAway.value, true);
+  assert.deepEqual(pending.ownerStep.steps.map((x) => x.where), ["PR #100", "PR #101"]);
+  assert.equal(pending.ownerStep.applied, null);
+  c.issueTimeline.push(removed("2031-03-02T06:00:00Z"));
+  assert.deepEqual(scoreObjective(c, { prices, now: NOW }).ownerStep.applied, { at: "2031-03-02T06:00:00Z", by: "maintainer" });
 });
 
 test("workflow hand-over in local mode: Factory's own factory:handover label under the operator's login is Factory's, the operator's later removal is the owner step's", () => {

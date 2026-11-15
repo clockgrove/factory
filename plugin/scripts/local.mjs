@@ -69,7 +69,7 @@ export const copilotOuterReason = "local mode: Copilot runs locally only inside 
 /** The Blocked reason when the sandboxes' scan for protected paths fails its check at a stage's start (lib/local.mjs writeNestedGitScan). */
 export const loginLinkReason = "local mode: a login file of the harness login this stage runs on links into another harness login on this machine (login-link), which the stage's harness would then read; the local loop's log names the path; make that login's files its own";
 /** The Blocked reason when a harness-state path Factory makes before a stage leads where it may not make it (lib/local.mjs homePlaces). */
-export const homeLinkReason = "local mode: a path Factory makes in the harness's state folder before each stage leads, through a link, outside the folders this stage's login may write or into a login or credential store, or passes a file or a loop of links (home-link); the local loop's log names the path; create it yourself or remove the link";
+export const homeLinkReason = "local mode: a path Factory makes in the harness's state folder before each stage leads, through a link, outside the folders this stage's login may write or into a login or credential store, passes a file or a loop of links, or is a file where the harness keeps a folder (home-link); the local loop's log names the path; create it yourself or remove the link";
 export const sandboxScanReason = "local mode: the sandboxes' scan for protected paths (ripgrep, sandbox-scan) failed its check on this machine; the local loop's log says why; check that `rg` on PATH runs";
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 

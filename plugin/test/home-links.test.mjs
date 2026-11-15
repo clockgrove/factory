@@ -91,6 +91,36 @@ test("#261: a link to nothing never makes a login file or another login's path, 
   }
 });
 
+test("#261: another login nested in the stage's own folder stays refused: a link to nothing never makes its files", () => {
+  // CODEX_HOME inside the Claude Code stage's own folder; a planted `cache/model-catalog` link to its `auth.json`, not there yet.
+  const { h, two, env } = fakeHome();
+  const codex = join(two, "codex");
+  mkdirSync(codex);
+  mkdirSync(join(two, "cache"));
+  symlinkSync(join(codex, "auth.json"), join(two, "cache", "model-catalog"));
+  refused(() => ensureHarnessHomes("claude", { ...env, CODEX_HOME: codex }, h), { link: join(two, "cache", "model-catalog"), target: join(codex, "auth.json"), why: /credential store or another harness login/ });
+  // The stage's own folder otherwise stays its own: a link to a new name there is made.
+  const { h: h2, two: two2, env: env2 } = fakeHome();
+  mkdirSync(join(two2, "codex"));
+  symlinkSync(join(two2, "own-plans"), join(two2, "plans"));
+  ensureHarnessHomes("claude", { ...env2, CODEX_HOME: join(two2, "codex") }, h2);
+  assert.ok(lstatSync(join(two2, "own-plans")).isDirectory());
+});
+
+test("#261: a file where the harness keeps a directory, or a link to one, is refused with home-link", () => {
+  const { h, two, env } = fakeHome();
+  writeFileSync(join(two, "plans"), "");
+  refused(() => ensureHarnessHomes("claude", env, h), { link: join(two, "plans"), target: join(two, "plans"), made: null, why: /no directory/ });
+  const { h: h2, two: two2, env: env2 } = fakeHome();
+  writeFileSync(join(two2, "notes"), "");
+  symlinkSync(join(two2, "notes"), join(two2, "hooks"));
+  refused(() => ensureHarnessHomes("claude", env2, h2), { link: join(two2, "hooks"), target: join(two2, "notes"), made: null, why: /a link to .*notes\) is no directory/ });
+  // The state folder itself a file.
+  const { h: h3 } = fakeHome();
+  writeFileSync(join(h3, ".claude-four"), "");
+  refused(() => ensureHarnessHomes("claude", { CLAUDE_CONFIG_DIR: join(h3, ".claude-four") }, h3), { link: join(h3, ".claude-four"), target: null, made: null, why: /no directory/ });
+});
+
 test("#261: every directory Factory makes is checked where it really lies; a file or a loop of links on the way is refused", () => {
   const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
   // `cache` a link to a directory that exists outside every home: `cache/model-catalog` would be made there.

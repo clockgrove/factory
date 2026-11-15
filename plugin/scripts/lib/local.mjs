@@ -1537,17 +1537,23 @@ export const ensureHarnessHomes = (harness, env = {}, home = homedir()) => {
 /**
  * Where ensureHarnessHomes may make a directory or a file, by real path: inside the stage's own login folder (stageLogin)
  * and, for a Claude Code stage, the default `~/.claude` (a second account's folder that links its entries there); never
- * at or under a credential store or another login (credentialPaths, the stage's own login files included, though not the
- * rest of its own folder, which is its harness's state). A link to nothing on the way has its target made there; one that
- * leads anywhere else, a directory on the way that really lies elsewhere, a file or a loop of links on the way, refuses
- * the stage (`home-link`), naming the path for this machine's log only (local.mjs homeLinkReason is GitHub's).
+ * at or under a credential store or another login (credentialPaths, and every other login's files, one nested in the
+ * stage's own folder included), nor on the stage's own login files; the rest of its own folder is its harness's state. A
+ * link to nothing on the way has its target made there; one that leads anywhere else, a directory on the way that really
+ * lies elsewhere, a file or a loop of links on the way, or a file where a directory belongs, refuses the stage
+ * (`home-link`), naming the path for this machine's log only (local.mjs homeLinkReason is GitHub's).
  */
 export function homePlaces(harness, env = {}, home = homedir()) {
   const own = stageLogin(harness, env, home);
   const roots = [...new Set([...(own ? [own.dir] : []), ...(harness === "claude" ? [join(home, ".claude")] : [])].map(realPlace))];
-  const ownDir = own ? realPlace(own.dir) : null;
+  // The stage's own login's entries (credentialPaths `own`: what bears it, or a Codex or Copilot home whole) leave the
+  // refused list, its login files excepted; every other login's stay, one nested in the stage's own folder included.
+  const logins = harnessLogins(home, env, { declared: own ? [own] : [] });
+  const mine = own ? logins.find((l) => l.harness === own.harness && sameDir(l.dir, own.dir)) : null;
+  const ownEntries = new Set((mine ? (mine.harness === "claude" ? mine.bearing : mine.files) : []).map(realPlace));
   const ownFiles = harness === "claude" ? ownLogin("claude", env, home) : harness === "codex" && own ? [join(own.dir, "auth.json")] : [];
-  const denied = [...new Set([...credentialPaths(home, env, { own }).map(realPlace).filter((c) => !ownDir || !within(c, ownDir)), ...ownFiles.map(realPlace)])];
+  const others = logins.filter((l) => l !== mine).flatMap((l) => [...l.files, ...l.bearing]);
+  const denied = [...new Set([...credentialPaths(home, env, { own }).map(realPlace).filter((c) => !ownEntries.has(c)), ...others.map(realPlace), ...ownFiles.map(realPlace)])];
   const where = (real) => (denied.some((c) => within(real, c)) ? "in a credential store or another harness login" : roots.some((r) => within(real, r) || r.startsWith(`${real}/`)) ? null : "outside the harness homes this stage may write");
   return {
     // Refused unless `p` really lies where Factory may make it (an ancestor of a home not made yet included). `link`: the
@@ -1604,11 +1610,15 @@ function danglingTarget(link, place, hops) {
 function ensureStateDir(p, place, hops = 0) {
   walking(p, () => {
     const st = lstatSync(p, { throwIfNoEntry: false });
-    if (st?.isSymbolicLink()) {
-      if (!resolves(p)) ensureStateDir(danglingTarget(p, place, hops), place, hops + 1);
+    if (st?.isSymbolicLink() && !resolves(p)) {
+      ensureStateDir(danglingTarget(p, place, hops), place, hops + 1);
       return;
     }
-    if (st) return;
+    // There already: a directory, or a link to one. A file there would leave the harness a state folder it cannot use.
+    if (st) {
+      if (!statSync(p).isDirectory()) throw homeLinkError(p, realPlace(p), `${p}${st.isSymbolicLink() ? ` (a link to ${realPlace(p)})` : ""} is no directory, where the harness keeps one; remove it`);
+      return;
+    }
     if (dirname(p) !== p) ensureStateDir(dirname(p), place, hops);
     place.check(p);
     try {

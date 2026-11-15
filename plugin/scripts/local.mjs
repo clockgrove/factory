@@ -870,8 +870,9 @@ export class Local {
     }
     // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
     // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
-    // A declared account's token from its own file; none from serve's environment then.
-    const token = account?.declared ? accountToken(account) : this.copilotToken || copilotToken();
+    // The stage's account's token, read now: a declared account's from its own file (none from serve's environment
+    // then), the implicit one's from where it always came (never a declared account's token kept from serve's start).
+    const token = account ? copilotTokenOf(account) : this.copilotToken || copilotToken();
     return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: token, GIT_CONFIG_GLOBAL: "/dev/null" };
   }
 

@@ -30,6 +30,9 @@ function readDeclaration(home) {
   const file = accountsFile(home);
   const st = lstatSync(file, { throwIfNoEntry: false });
   if (!st) return { absent: true };
+  // The sandboxes deny ~/.config/factory by that literal path: through a link, the file could be where one writes.
+  const dir = factoryKeyDir(home);
+  if (real(dir) !== dir) return { error: "~/.config/factory is not a real directory (a link), so the sandboxes' deny of it does not cover the accounts file" };
   if (!st.isFile()) return { error: "the accounts file is not a regular file (a link or a folder)" };
   if (st.mode & 0o022) return { error: "the accounts file is writable by others; chmod 600 it" };
   try {

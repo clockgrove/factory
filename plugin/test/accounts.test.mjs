@@ -159,6 +159,17 @@ test("#263: the accounts file itself: a regular file only its owner writes, JSON
   symlinkSync(join(h, "elsewhere.json"), accountsFile(h));
   assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "the accounts file is not a regular file (a link or a folder)" }]);
   rmSync(accountsFile(h));
+  // ~/.config/factory through a link (into a clone a sandbox writes, say): the deny by its literal path misses the file.
+  const keys = join(h, ".config", "factory");
+  const moved = join(h, "work", "keys");
+  rmSync(keys, { recursive: true });
+  mkdirSync(moved, { mode: 0o700 });
+  symlinkSync(moved, keys);
+  declare(h, { claude: [good(h).claude[0]] });
+  assert.deepEqual(loadAccounts({ home: h, env: {} }).problems, [{ account: "the accounts file", why: "~/.config/factory is not a real directory (a link), so the sandboxes' deny of it does not cover the accounts file" }]);
+  rmSync(keys);
+  mkdirSync(keys, { mode: 0o700 });
+  writeFileSync(join(keys, "copilot-a"), "copilot-token-a\n", { mode: 0o600 });
   // Serve's CLAUDE_CONFIG_DIR on a folder no search finds and no account declares: a stage's env would drop it unhidden.
   mkdirSync(join(h, "work", "claude-own"));
   assert.deepEqual(problems(h, { claude: [good(h).claude[0]] }, { env: { CLAUDE_CONFIG_DIR: join(h, "work", "claude-own") } }), [["CLAUDE_CONFIG_DIR", "this shell's CLAUDE_CONFIG_DIR names a folder no declared Claude Code account has; declare it as one, or unset CLAUDE_CONFIG_DIR"]]);
@@ -236,6 +247,11 @@ test("#263, the real path: a stage runs on its harness's default account, set ex
     // A Copilot stage's token comes from its account's file, never serve's environment.
     const extra = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", local.accountFor("copilot"));
     assert.equal(extra.COPILOT_GITHUB_TOKEN, "copilot-token-a");
+    // The declaration gone after a start on it: the implicit account's token, never the one kept from that start.
+    local.copilotToken = "copilot-token-a";
+    const implicit = local.harnessEnv(8, [stageTmp], clone, usage, null, "copilot", { name: "copilot", harness: "copilot", declared: false });
+    assert.equal(implicit.COPILOT_GITHUB_TOKEN, "from-serve-env");
+    delete local.copilotToken;
   });
   // Nothing declared: the stage keeps serve's own CLAUDE_CONFIG_DIR, as always, on the account named `claude`.
   rmSync(accountsFile(h));

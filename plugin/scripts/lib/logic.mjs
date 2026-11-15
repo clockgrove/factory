@@ -86,6 +86,20 @@ export function protectedPaths(additions = []) {
 export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catchUps = 0 }) => passes < maxPasses + catchUps + (fromChecks && !checksFixed ? 1 : 0);
 
 /**
+ * Why a red head a fix pass left unchanged gets no fresh worker pass before the stage Blocks (session.mjs
+ * validationLoop), or "" when it gets one. Only a red that is the work's (unchangedBlock's cause `work`; an outage or a
+ * setup gap is no code's to fix), once per head (`tried`: the heads already given one), with dollars left under max_usd
+ * (`leftUsd`, when `maxUsd` is set) and a minute of the stage's wall clock (`leftMs`).
+ */
+export function freshPassDenied({ cause, head, tried, maxUsd, leftUsd, leftMs }) {
+  if (cause !== "work") return `the red is not the work's (${cause})`;
+  if (tried?.has(head)) return "a fresh worker pass already ran on this head";
+  if (maxUsd > 0 && !(leftUsd > 0)) return "max_usd is spent";
+  if (!(leftMs >= 60_000)) return "the stage's wall clock is spent";
+  return "";
+}
+
+/**
  * Whether a protected entry covers `path` (from the repository root). A directory entry ends with `/` and matches from
  * the root; a file entry matches at any depth (`build.mjs` covers `packages/web/build.mjs`) unless it starts with `/`,
  * which anchors it at the root (`/build.mjs` covers `build.mjs` only). A leading `./` is dropped and anchors nothing.
@@ -760,7 +774,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
  *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
- *              committed nothing on a red head: session.mjs unchangedBlock)}
+ *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
+ *              pass was given after a fix pass changed nothing on it, when the red after it is the last)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -838,7 +853,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
-    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;
+    // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
+    const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
+    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }

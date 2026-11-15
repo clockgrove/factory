@@ -171,6 +171,59 @@ function codexError(events) {
 }
 
 /**
+ * The `rate_limit_reached_type`s of a workspace's credits or spend cap (codex-rs protocol RateLimitReachedType): an
+ * owner refills or raises them, so no window's reset ends them.
+ */
+const CODEX_WORKSPACE_LIMITS = new Set(["workspace_owner_credits_depleted", "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached"]);
+
+/**
+ * A failed Codex run's subscription usage limit, read from its thread's rollout: `{status, type, code, message, reset,
+ * limitType}`, else null. Codex's `exec --json` stream reports the limit as prose only (codex-cli 0.167: its error
+ * event holds a `message` and nothing else, and the exit is 1 for every failure), so the stream cannot decide it. When
+ * the ChatGPT backend refuses a request with `usage_limit_reached`, Codex records the rate-limit snapshot from that
+ * answer's headers as a `token_count` event in the rollout (codex-rs core session/turn.rs, `update_rate_limits`), and
+ * the rollout keeps it (rollout/src/policy.rs). The structure read:
+ * - the run's stream ended on an error: its last `turn.failed`, `error` or `turn.completed` event is no completed turn;
+ * - the last `token_count` line of the rollout stamped at or after `since` (the pass's start: a resumed thread's older
+ *   lines are an earlier pass's) whose `payload.rate_limits` is an object of the subscription's own limit group
+ *   (`limit_id` "codex" or absent); another group's snapshot (a per-model limit) is not read;
+ * - that snapshot names a `rate_limit_reached_type`, or a window (`primary`, `secondary`) at `used_percent` 100 or more;
+ * - and it shows no credits to go on (`credits.has_credits` and `credits.unlimited` both not true), unless the type is
+ *   a workspace's credits or spend cap (CODEX_WORKSPACE_LIMITS): on credits Codex runs on past its windows, so an
+ *   unrelated failure then is no limit, and reading it as one would hold every Codex Objective until the reset.
+ * The reset is the latest `resets_at` (epoch seconds) of the full windows, or of any window when a type is named and no
+ * window is full; a workspace's credits or spend cap (CODEX_WORKSPACE_LIMITS) has none. `type` is the backend's error type, `usage_limit_reached` (the only refusal that
+ * records a snapshot at the failure); `code` the snapshot's `rate_limit_reached_type`. A limit Codex meets in a
+ * compaction records no snapshot, and an API key or the AI Gateway gets no ChatGPT rate-limit headers: those failures
+ * stay what the stream says.
+ */
+function codexLimit(events, rollout, since) {
+  const last = [...events].reverse().find((e) => e?.type === "turn.failed" || e?.type === "error" || e?.type === "turn.completed");
+  const from = Date.parse(since);
+  if (!last || last.type === "turn.completed" || typeof rollout !== "string" || !Number.isFinite(from)) return null;
+  let snap = null;
+  for (const line of rollout.split("\n")) {
+    if (!line.includes('"token_count"')) continue;
+    const o = jsonLines(line)[0];
+    if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
+    const at = Date.parse(o.timestamp);
+    const rl = o.payload.rate_limits;
+    if (Number.isFinite(at) && at >= from && rl && typeof rl === "object" && (rl.limit_id == null || rl.limit_id === "codex")) snap = rl;
+  }
+  if (!snap) return null;
+  const reached = str(snap.rate_limit_reached_type);
+  const onCredits = snap.credits?.has_credits === true || snap.credits?.unlimited === true;
+  const windows = ["primary", "secondary"].filter((k) => num(snap[k]?.used_percent) !== null);
+  const full = windows.filter((k) => snap[k].used_percent >= 100);
+  if (!reached && !full.length) return null;
+  if (onCredits && !CODEX_WORKSPACE_LIMITS.has(reached)) return null;
+  const resets = CODEX_WORKSPACE_LIMITS.has(reached) ? [] : (full.length ? full : windows).map((k) => ({ k, at: epochMs(snap[k].resets_at) })).filter((w) => w.at !== null);
+  const latest = resets.reduce((a, w) => (!a || w.at > a.at ? w : a), null);
+  const message = str(last.type === "turn.failed" ? last.error?.message : last.message);
+  return { status: null, type: "usage_limit_reached", code: reached, message, reset: latest?.at ?? null, ...(latest ? { limitType: `${str(snap.limit_id) ?? "codex"}/${latest.k}` } : {}) };
+}
+
+/**
  * The error codes of a resumed Codex thread whose encrypted reasoning the provider cannot read: the thread was written
  * through another provider credential (an AI Gateway session pin that moved to another account between passes, or an
  * OpenAI key from another organization). A fresh thread passes; a retry of the resume never does.
@@ -201,10 +254,12 @@ export function rotatedPin(harness, events) {
  *   claude  : the result's `api_error` is the code (`usage_limit_reached`); the reset is the API error message's
  *             `api_error_params.rate_limit_info.resetsAt`, else the last `rate_limit_event` whose status is `rejected`,
  *             of the error's own window (`rateLimitType`, kept as `limitType`) when it names one
- *   codex   : Codex reports its usage limit as prose only, so it is not read as one
+ *   codex   : the stream reports it as prose only, so it is read from the rate-limit snapshot Codex records in the
+ *             thread's rollout (`rollout`, its text, the lines stamped from `since`, the pass's start: codexLimit), with
+ *             the reset from that snapshot's full window
  *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
-export function providerRefusal(harness, events) {
+export function providerRefusal(harness, events, { rollout = null, since = null } = {}) {
   let r = null;
   let reset = null;
   if (harness === "claude") {
@@ -221,7 +276,11 @@ export function providerRefusal(harness, events) {
     if (limitType && USAGE_LIMIT_KINDS.has(r.code)) r.limitType = limitType;
   } else if (harness === "codex") {
     r = codexError(events);
-    if (!r) return null;
+    if (!r) {
+      const limit = codexLimit(events, rollout, since);
+      if (!limit) return null;
+      ({ reset, ...r } = limit);
+    }
   } else if (harness === "copilot") {
     const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
     if (!d || typeof d !== "object") return null;
@@ -386,9 +445,10 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
  * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
  * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure. A stream `error` or
  * `turn.failed` event (a dropped stream Codex reconnects, a failed request) may be a request the provider billed whose
- * tokens Codex never reports: the dollars are then a lower bound (usdLowerBound).
+ * tokens Codex never reports: the dollars are then a lower bound (usdLowerBound). `rollout` (the thread's rollout text)
+ * and `since` (the pass's start, ISO) let a failed run's usage limit be read (providerRefusal).
  */
-export function parseCodex(stdout, model) {
+export function parseCodex(stdout, model, { rollout = null, since = null } = {}) {
   const rec = empty("codex", model);
   const events = jsonLines(stdout);
   if (!events.length) {
@@ -431,7 +491,7 @@ export function parseCodex(stdout, model) {
   rec.cache = { first };
   rec.ok = turns > 0 && !failed;
   rec.error = failed;
-  const refusal = rec.ok ? null : providerRefusal("codex", events);
+  const refusal = rec.ok ? null : providerRefusal("codex", events, { rollout, since });
   if (refusal) rec.refusal = refusal;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
@@ -609,7 +669,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
 
 /** One entry point: harness name to parser. A provider's refusal is the run's error, in its structured fields. */
 export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
-  const parse = { claude: () => parseClaude(stdout, model), codex: () => parseCodex(stdout, model), copilot: () => parseCopilot(stdout, model, exitCode, extra) }[harness];
+  const parse = { claude: () => parseClaude(stdout, model), codex: () => parseCodex(stdout, model, extra), copilot: () => parseCopilot(stdout, model, exitCode, extra) }[harness];
   if (!parse) throw new Error(`unknown harness ${harness}`);
   const rec = parse();
   if (rec.refusal) rec.error = `refused by the provider: ${refusalFields(rec.refusal)}`;

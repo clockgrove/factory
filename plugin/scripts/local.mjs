@@ -34,7 +34,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -51,6 +51,7 @@ import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./docto
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { runningStint, timelineOf } from "./lib/relaunch.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -1092,8 +1093,21 @@ export class Local {
    * that ends with an exit record drops it. One that ends without (killed, crashed, threw) keeps it and this loop
    * resumes it once (pausedHere); a second such end in a row Blocks it here with the stage's exit and log (lapse). A
    * claim that cannot be read or written is a failed start (`startFailed`, runObjective's unstart).
+   *
+   * `stint` (a work start): the Objective's Running stint (relaunch.mjs runningStint) is read first, and again before and
+   * after the claim is written. A start that waited long enough for another loop to put the Objective back to Queued, or
+   * to pick it again (serve's sweep of a Running one with no claim, the dispatcher's), sees the stint change and steps
+   * aside: it writes no claim, or takes back the one it wrote.
    */
-  async withClaim(issue, fn, { onStop = null } = {}) {
+  async withClaim(issue, fn, { onStop = null, stint = false } = {}) {
+    const stintNow = async () => {
+      try {
+        return runningStint(await timelineOf(this.repo, issue, this.opts)).key;
+      } catch (e) {
+        throw Object.assign(e, { startFailed: "claim-read" });
+      }
+    };
+    const picked = stint ? await stintNow() : null;
     const active = await activeWorkIssues(this.repo, this.opts).catch(() => new Set());
     if (active.has(issue)) {
       log(`#${issue}: an Actions worker job is running it; local mode leaves it alone`);
@@ -1117,8 +1131,13 @@ export class Local {
       if (!held && onStop) await onStop().catch((e) => log(`#${issue}: stopping before its claim, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`));
       return { exit: "skipped" };
     }
+    if (stint && (await stintNow()) !== picked) {
+      log(`#${issue}: its Running stint changed while this start waited (another loop queued or picked it again); leaving it alone, no claim written`);
+      return { exit: "skipped" };
+    }
+    let wrote;
     try {
-      await writeClaim(this.repo, issue, this.holder, this.opts);
+      wrote = await writeClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       throw Object.assign(e, { startFailed: "claim", othersClaim: others });
     }
@@ -1133,10 +1152,14 @@ export class Local {
       log(`#${issue}: the claim could not be read back (${String(e.message).slice(0, 160)}); it stays, and this loop resumes the Objective once it is stale`);
       return { exit: "skipped" };
     }
-    if (mine?.holder !== this.holder) {
-      log(`#${issue}: another local loop claimed it first; leaving it alone`);
+    const after = mine?.holder === this.holder && stint ? await stintNow().catch(() => undefined) : picked;
+    const aside = mine?.holder !== this.holder ? "another local loop claimed it first" : after === undefined ? "its Running stint could not be read back, so a second start cannot be ruled out" : after !== picked ? "its Running stint changed while this start claimed it (another loop queued or picked it again)" : null;
+    if (aside) {
+      log(`#${issue}: ${aside}; leaving it alone`);
+      await this.cede(issue, wrote);
       return { exit: "skipped" };
     }
+    this.ceded?.delete(issue);
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it.
     let beating = null;
@@ -1176,6 +1199,21 @@ export class Local {
         }
       }
     }
+  }
+
+  /**
+   * Take back a claim this loop wrote and then stepped aside from (withClaim). A comment its write created that still names
+   * this loop goes (with different logins, each loop's claim is a comment of its own, never left beside the live one). A
+   * comment it updated was another loop's under the same login: it stays for that loop's next heartbeat to write its own
+   * name back, and this loop never resumes the Objective from it (pausedHere).
+   */
+  async cede(issue, wrote) {
+    (this.ceded ??= new Set()).add(issue);
+    // GitHub gives a comment it creates the same created and updated time; an update moves the updated one on.
+    if (!wrote?.id || wrote.created_at !== wrote.updated_at) return;
+    const now = await listComments(this.repo, issue, this.opts).catch(() => null);
+    const c = now?.find((x) => x.id === wrote.id);
+    if (c && parseClaim(c.body)?.holder === this.holder) await rest(`repos/${this.repo.full}/issues/comments/${c.id}`, { ...this.opts, method: "DELETE" }).catch(() => {});
   }
 
   /**
@@ -1306,6 +1344,8 @@ export class Local {
       }
       const c = await localClaim(this.repo, issue.number, this.opts).catch(() => null);
       if (!c || !sameMachineHolder(c.holder)) continue;
+      // A claim this loop stepped aside from (cede): another loop's under its name until that loop's next heartbeat.
+      if (c.holder === this.holder && this.ceded?.has(issue.number)) continue;
       // Paused on the network: resumed once the host it could not reach answers a probe (GitHub answered these reads),
       // and taken up past OUTAGE.blockMs whatever the probe says, so resume Blocks it (a provider unreachable while GitHub
       // answers would otherwise leave it Running with no notice). Paused on GitHub's spent rate limit: resumed once its
@@ -1440,7 +1480,7 @@ export class Local {
       return { exit: "skipped" };
     }
     try {
-      return await this.withClaim(issue, () => this.work(issue, { wait }), { onStop: () => this.unpickStopped(issue) });
+      return await this.withClaim(issue, () => this.work(issue, { wait }), { onStop: () => this.unpickStopped(issue), stint: true });
     } catch (e) {
       if (!e?.startFailed) throw e;
       return this.unstart(issue, e);
@@ -1506,13 +1546,15 @@ export class Local {
 
   /** Back to Queued: the Running label off, the card to Queued, this loop's claim dropped. */
   async requeue(issue) {
-    await this.unpick(issue);
+    await setStateLabel(this.repo, issue, null, this.opts);
+    const project = await findProject(this.repo, this.opts).catch(() => null);
+    if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
     await dropClaim(this.repo, issue, this.holder, this.opts);
   }
 
-  /** Back to Queued with no claim to drop: the Running label off and the card to Queued. */
+  /** A pick this loop marked and never started, back to Queued: only factory:running comes off, and the card to Queued. */
   async unpick(issue) {
-    await setStateLabel(this.repo, issue, null, this.opts);
+    await removeLabel(this.repo, issue, "factory:running", this.opts);
     const project = await findProject(this.repo, this.opts).catch(() => null);
     if (project) await moveCard(project, this.repo, issue, "Queued", this.opts).catch(() => {});
   }
@@ -1829,7 +1871,10 @@ export class Local {
       if (this.stopping) break;
       // localLive: a stage of the Objective runs on this machine (an earlier serve's), so the dispatcher never takes a
       // Running one with no claim for a start that never wrote it. localStopping: a stop mid-dispatch marks no more picks.
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping }).catch(async (e) => {
+      // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
+      // dispatch that threw midway.
+      const marked = [];
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1840,9 +1885,15 @@ export class Local {
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
       }).then(async (r) => {
-        // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit.
+        // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit,
+        // unless a claim is on the issue now (another loop picked it too and holds it) or cannot be read: those stay.
         if (!this.stopping) return r;
-        for (const n of (r.ready || []).filter((x) => !running.has(x))) {
+        for (const n of [...new Set(marked)].filter((x) => !running.has(x))) {
+          const c = await localClaim(this.repo, n, this.opts).then((x) => ({ x }), () => null);
+          if (!c || c.x) {
+            log(`#${n}: stopping before it started; ${c ? `a claim is on it (${c.x.holder}), so it stays as it is` : "its claim could not be read, so it stays as it is; the next serve's tick settles it"}`);
+            continue;
+          }
           await this.unpick(n).then(
             () => log(`#${n}: stopping before it started; back to Queued`),
             (e) => log(`#${n}: stopping before it started, it could not be put back to Queued (${String(e?.message || e).slice(0, 120)}); the next serve's tick does it`),

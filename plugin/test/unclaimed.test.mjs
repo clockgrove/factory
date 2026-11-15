@@ -20,10 +20,12 @@ const LOCAL = pathToFileURL(join(import.meta.dirname, "..", "scripts", "local.mj
 
 /**
  * A GitHub with one Objective, #7, of repository o/r: its labels, comments and timeline. `hook(req, path, state)` runs
- * on every request as it arrives and may return a promise its answer waits for (its write is made at once).
+ * on every request as it arrives and may return a promise its answer waits for (its write is made at once); one that
+ * resolves to {status} answers with that status instead. `listed`: the labels the issue listings show (a listing older
+ * than GitHub), else the issue's own. `clockMs`: how far GitHub's clock (its Date header) is from this machine's.
  */
-async function fakeGitHub({ labels = ["factory:objective", "factory:local"], comments = [], timeline = [], hook = () => {} } = {}) {
-  const state = { labels: new Set(labels), comments, timeline, writes: [] };
+async function fakeGitHub({ labels = ["factory:objective", "factory:local"], listed = null, comments = [], timeline = [], clockMs = 0, hook = () => {} } = {}) {
+  const state = { labels: new Set(labels), listed: listed && new Set(listed), comments, timeline, writes: [] };
   let id = 500;
   const issue = () => ({ number: 7, title: "t", body: "", state: "open", user: { login: "maintainer" }, labels: [...state.labels].map((name) => ({ name })), created_at: "2026-11-01T00:00:00Z", updated_at: new Date().toISOString() });
   const server = createServer((req, res) => {
@@ -36,12 +38,21 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], com
       if (req.method !== "GET") state.writes.push(`${req.method} ${p}`);
       // The write lands on GitHub at once; only its answer waits for the hook.
       const gate = Promise.resolve(hook(req, p, state));
-      const send = (status, b) => void gate.then(() => res.writeHead(status, { "content-type": "application/json" }).end(b === undefined ? "" : JSON.stringify(b)));
+      // The answer is GitHub's state as the request arrived, sent once the hook lets it go.
+      const send = (status, b) => {
+        const text = b === undefined ? "" : JSON.stringify(b);
+        void gate.then((o) => {
+          const head = { "content-type": "application/json", date: new Date(Date.now() + clockMs).toUTCString() };
+          if (o?.status) return res.writeHead(o.status, head).end(JSON.stringify({ message: "Validation Failed" }));
+          res.writeHead(status, head).end(text);
+        });
+      };
       if (p === "/user") return send(200, { login: "maintainer", type: "User" });
-      if (p === "/repos/o/r/collaborators") return send(200, [{ login: "maintainer", permissions: { push: true } }]);
+      if (p === "/repos/o/r/collaborators") return send(200, [{ login: "maintainer", permissions: { push: true } }, { login: "other", permissions: { push: true } }]);
       if (p === "/repos/o/r/issues" && req.method === "GET") {
         const want = (url.searchParams.get("labels") || "").split(",").filter(Boolean);
-        return send(200, url.searchParams.get("state") !== "closed" && want.every((l) => state.labels.has(l)) ? [issue()] : []);
+        const shown = state.listed || state.labels;
+        return send(200, url.searchParams.get("state") !== "closed" && want.every((l) => shown.has(l)) ? [{ ...issue(), labels: [...shown].map((name) => ({ name })) }] : []);
       }
       if (p === "/repos/o/r/issues/7" && req.method === "GET") return send(200, issue());
       if (p === "/repos/o/r/issues/7/labels" && req.method === "POST") {
@@ -49,11 +60,17 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], com
         return send(200, []);
       }
       const label = /^\/repos\/o\/r\/issues\/7\/labels\/(.+)$/.exec(p);
-      if (label && req.method === "DELETE") return state.labels.delete(decodeURIComponent(label[1])) ? send(200, []) : send(404, { message: "Not Found" });
+      if (label && req.method === "DELETE") {
+        const l = decodeURIComponent(label[1]);
+        if (!state.labels.delete(l)) return send(404, { message: "Not Found" });
+        state.timeline.push({ event: "unlabeled", label: { name: l }, actor: { login: "maintainer" }, created_at: new Date().toISOString() });
+        return send(200, []);
+      }
       if (p === "/repos/o/r/issues/7/timeline") return send(200, state.timeline);
       if (p === "/repos/o/r/issues/7/comments" && req.method === "GET") return send(200, state.comments);
       if (p === "/repos/o/r/issues/7/comments" && req.method === "POST") {
-        const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: body.body, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+        const at = new Date().toISOString();
+        const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: body.body, created_at: at, updated_at: at };
         state.comments.push(c);
         return send(201, c);
       }
@@ -227,5 +244,212 @@ test("serve: a Running Objective with a claim, a fresh Running label, or a stage
     } finally {
       await fake.close();
     }
+  }
+});
+
+const ago = (ms) => new Date(Date.now() - ms).toISOString();
+const labelEvent = (event, name, at = new Date().toISOString()) => ({ event, label: { name }, actor: { login: "maintainer" }, created_at: at });
+/**
+ * The label removals, less those of a pick marking it Running (dispatch's mark sets the one state label: it removes the
+ * other three, then adds factory:running).
+ */
+const labelDeletes = (state) => {
+  const out = [];
+  const del = (l) => `DELETE /repos/o/r/issues/7/labels/${encodeURIComponent(l)}`;
+  const mark = ["factory:blocked", "factory:question", "factory:in-review"].map(del);
+  for (const w of state.writes) {
+    if (w === "POST /repos/o/r/issues/7/labels") {
+      if (out.slice(-3).join() === mark.join()) out.splice(-3);
+    } else if (w.startsWith("DELETE /repos/o/r/issues/7/labels/")) out.push(w);
+  }
+  return out;
+};
+
+test("serve: a listing older than GitHub never sweeps an Objective that has since left Running; only factory:running ever comes off (#304 review)", async () => {
+  // The listing still shows Running; GitHub has a Question since, and the timeline shows the label's removal.
+  const fake = await fakeGitHub({
+    labels: ["factory:objective", "factory:local", "factory:question"],
+    listed: ["factory:objective", "factory:local", "factory:running"],
+    timeline: [labelEvent("labeled", "factory:running", ago(40 * 60_000)), labelEvent("unlabeled", "factory:running", ago(5_000)), labelEvent("labeled", "factory:question", ago(5_000))],
+  });
+  try {
+    const { log } = await serveTicks(fake);
+    assert.ok(fake.state.labels.has("factory:question"), log);
+    assert.deepEqual(labelDeletes(fake.state), []);
+    assert.doesNotMatch(log, /back to Queued/);
+  } finally {
+    await fake.close();
+  }
+  // The listing and the timeline agree it is Running, but a fresh read of the issue shows it In review too.
+  const both = await fakeGitHub({ labels: ["factory:objective", "factory:local", "factory:running", "factory:in-review"], listed: ["factory:objective", "factory:local", "factory:running"], timeline: runningSince(40 * 60_000) });
+  try {
+    await serveTicks(both);
+    assert.deepEqual(labelDeletes(both.state), []);
+  } finally {
+    await both.close();
+  }
+  // Swept: only the Running label is removed, never the other state labels.
+  const swept = await fakeGitHub({ labels: ["factory:objective", "factory:local", "factory:running"], timeline: runningSince(40 * 60_000) });
+  try {
+    await serveTicks(swept);
+    assert.deepEqual(labelDeletes(swept.state), ["DELETE /repos/o/r/issues/7/labels/factory%3Arunning"]);
+  } finally {
+    await swept.close();
+  }
+});
+
+test("serve: the sweep's few minutes are on GitHub's clock, not this machine's (#304 review)", async () => {
+  // This machine's clock is 10 minutes ahead of GitHub's: a label GitHub wrote 3 minutes ago reads 13 minutes old here.
+  const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local", "factory:running"], clockMs: -10 * 60_000, timeline: runningSince(13 * 60_000) });
+  try {
+    const { log } = await serveTicks(fake);
+    assert.ok(fake.state.labels.has("factory:running"), log);
+    assert.doesNotMatch(log, /back to Queued/);
+  } finally {
+    await fake.close();
+  }
+});
+
+/** A loop whose work stage only records that it started (`started`), against `fake`; runObjective and its claim are real. */
+async function startLoop(fake) {
+  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  process.env.GITHUB_API_URL = fake.url;
+  process.env.FACTORY_LOCAL = "1";
+  const started = [];
+  const loop = Object.assign(Object.create(Local.prototype), {
+    dev: mkdtempSync(join(tmpdir(), "unclaimed-dev-")), repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", notice: null, harness: "claude",
+    wf: {}, opts: { token: "t" }, holder: holderId(machineIdentity()), children: new Set(), firstSetup: new Map(), claimRetryMs: 0, claimSettleMs: 0, stopping: false,
+    work: async (n) => (started.push(n), { exit: "delivered" }),
+  });
+  const restore = () => {
+    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  };
+  return { loop, started, restore };
+}
+
+/** Another loop, meanwhile: the sweep put the Objective back to Queued, and that loop picked it again (a new stint). */
+const anotherStint = (state) => {
+  state.timeline.push(labelEvent("unlabeled", "factory:running"), labelEvent("labeled", "factory:running"));
+};
+const claimOf = (login, holder) => ({ id: 90, user: { login, type: "User" }, body: `${claimMarker(7)}\n${claimBody(holder)}`, created_at: ago(1_000), updated_at: ago(1_000) });
+
+test("a start that waited while another loop took the Objective again writes no claim over that loop's (#304 review)", async () => {
+  let stalled = false;
+  const fake = await fakeGitHub({
+    labels: ["factory:objective", "factory:local", "factory:running"],
+    timeline: runningSince(60_000),
+    // The start's claim read answers with no claim, late: meanwhile the other loop (same login) takes it and claims.
+    hook: async (req, p, state) => {
+      if (req.method === "GET" && p === "/repos/o/r/issues/7/comments" && !stalled) {
+        stalled = true;
+        await new Promise((r) => setTimeout(r, 50));
+        anotherStint(state);
+        state.comments.push(claimOf("maintainer", "otherbox:4242:abcdef:m0:b0"));
+      }
+    },
+  });
+  const { loop, started, restore } = await startLoop(fake);
+  try {
+    const r = await loop.runObjective(7);
+    assert.equal(r.exit, "skipped");
+    assert.deepEqual(started, [], "no second start");
+    assert.ok(!fake.state.writes.some((w) => w.startsWith("PATCH ") || w === "POST /repos/o/r/issues/7/comments"), fake.state.writes.join("\n"));
+    assert.match(claims(fake.state)[0].body, /holder: otherbox:4242:abcdef:m0:b0/);
+  } finally {
+    restore();
+    await fake.close();
+  }
+});
+
+test("a start whose claim write landed after another loop took the Objective again steps aside and leaves no claim of its own (#304 review)", async () => {
+  let stalled = false;
+  const fake = await fakeGitHub({
+    labels: ["factory:objective", "factory:local", "factory:running"],
+    timeline: runningSince(60_000),
+    // The claim's write is slow to land: meanwhile another loop (another login) picks the Objective again.
+    hook: async (req, p, state) => {
+      if (req.method === "POST" && p === "/repos/o/r/issues/7/comments" && !stalled) {
+        stalled = true;
+        anotherStint(state);
+      }
+    },
+  });
+  const { loop, started, restore } = await startLoop(fake);
+  try {
+    const r = await loop.runObjective(7);
+    assert.equal(r.exit, "skipped");
+    assert.deepEqual(started, [], "no second start");
+    assert.deepEqual(claims(fake.state), [], "its own claim is taken back");
+    // This loop never resumes it from a claim of its name.
+    assert.deepEqual(await loop.pausedHere(new Map()), []);
+  } finally {
+    restore();
+    await fake.close();
+  }
+});
+
+test("a start with no other loop about claims and starts as before (#304 review)", async () => {
+  const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local", "factory:running"], timeline: runningSince(60_000) });
+  const { loop, started, restore } = await startLoop(fake);
+  try {
+    assert.equal((await loop.runObjective(7)).exit, "delivered");
+    assert.deepEqual(started, [7]);
+  } finally {
+    restore();
+    await fake.close();
+  }
+});
+
+test("serve stopped while its dispatch fails after marking a pick still puts that pick back to Queued (#310 review)", { skip: process.platform === "win32" }, async () => {
+  let child = null;
+  let signalled = false;
+  const fake = await fakeGitHub({
+    // The Running label lands, but GitHub answers 422: the dispatch throws after the mark.
+    hook: async (req, p) => {
+      if (req.method === "POST" && p === "/repos/o/r/issues/7/labels" && !signalled) {
+        signalled = true;
+        child.kill("SIGINT");
+        await new Promise((r) => setTimeout(r, 300));
+        return { status: 422 };
+      }
+    },
+  });
+  try {
+    const run = childServe(fake);
+    child = run.child;
+    const end = await run.exited;
+    assert.ok(signalled, end.out());
+    assert.equal(end.code, 130, end.out());
+    assert.ok(!fake.state.labels.has("factory:running"), `left Running with no claim:\n${end.out()}`);
+    assert.match(end.out(), /#7: stopping before it started; back to Queued/);
+  } finally {
+    await fake.close();
+  }
+});
+
+test("serve stopped while its dispatch marks a pick that another loop has claimed meanwhile leaves that loop's Objective Running (#310 review)", { skip: process.platform === "win32" }, async () => {
+  let child = null;
+  let signalled = false;
+  const fake = await fakeGitHub({
+    hook: async (req, p, state) => {
+      if (req.method === "POST" && p === "/repos/o/r/issues/7/labels" && !signalled) {
+        signalled = true;
+        state.comments.push(claimOf("other", "otherbox:4242:abcdef:m0:b0"));
+        child.kill("SIGINT");
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    },
+  });
+  try {
+    const run = childServe(fake);
+    child = run.child;
+    const end = await run.exited;
+    assert.ok(signalled, end.out());
+    assert.equal(end.code, 130, end.out());
+    assert.ok(fake.state.labels.has("factory:running"), `another loop's Objective was put back:\n${end.out()}`);
+    assert.deepEqual(labelDeletes(fake.state), []);
+    assert.match(end.out(), /#7: stopping before it started; a claim is on it \(otherbox:4242:abcdef:m0:b0\), so it stays as it is/);
+  } finally {
+    await fake.close();
   }
 });

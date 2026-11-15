@@ -13,7 +13,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -25,7 +25,7 @@ import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -88,7 +88,7 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, failedLaunch = null, recordWrites = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -630,14 +630,24 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         const local = hasLocalLabel(issue);
         // A local loop's own pass (serve, which says whether a stage of it runs on its machine: localLive): a
-        // factory:local Objective Running for UNCLAIMED_MS with no claim comment at all, no stage of it here and none
-        // this loop is starting (localHeld) is a start that never wrote its claim (its loop stopped or died between the
-        // Running label and the claim). Every stage runs under a claim, so no machine works it: back to Queued for the
-        // next pick, rather than a day's wait. A label that cannot be removed is tried again next tick.
-        if (localLive && local && !hold && !claimed.has(issue.number) && since && Date.now() - Date.parse(since) >= UNCLAIMED_MS && !localHeld?.[issue.number] && !localLive(issue.number)) {
+        // factory:local Objective Running for UNCLAIMED_MS on GitHub's clock with no claim comment at all, no stage of it
+        // here and none this loop is starting (localHeld) is a start that never wrote its claim (its loop stopped or died
+        // between the Running label and the claim). Every stage runs under a claim, so no machine works it: back to
+        // Queued for the next pick, rather than a day's wait. The listing may be older than GitHub, so it must read so
+        // again: the timeline with no removal of the label since that stint began, and a fresh read of the issue open,
+        // Running and in no other state. Only factory:running comes off; a label that cannot be removed is tried again
+        // next tick.
+        if (localLive && local && !hold && !claimed.has(issue.number) && since && githubNow() - Date.parse(since) >= UNCLAIMED_MS && !localHeld?.[issue.number] && !localLive(issue.number)) {
           const n = issue.number;
+          const stint = runningStint(events);
+          const fresh = stint.running && stint.at === since ? await getIssue(repo, n, opts).catch(() => null) : null;
+          const shown = (fresh?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+          if (fresh?.state !== "open" || !shown.includes("factory:running") || shown.some((l) => /^factory:(blocked|question|in-review)$/.test(l))) {
+            log(`  #${n}: Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick`);
+            continue;
+          }
           if (!dryRun) {
-            const off = await setStateLabel(repo, n, null, opts).then(
+            const off = await removeLabel(repo, n, "factory:running", opts).then(
               () => true,
               (e) => (log(`  #${n}: Running with no claim, but its label could not be removed (${String(e?.message || e).slice(0, 120)}); next tick tries again`), retry(`#${n}'s Running label`), false),
             );
@@ -1031,13 +1041,16 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Mark the picked issues Running now, so the next cron tick does not pick them again
   // before their matrix jobs start; the worker's doctor step re-marks on failure.
   // A local loop told to stop (localStopping) marks no more: its picks from there on stay Queued, and it returns only
-  // the ones it marked, which it puts back to Queued itself (local.mjs serve).
+  // the ones it marked. It is told each one before its write (localMarked), so a dispatch that throws midway still
+  // leaves it the list to put back to Queued (local.mjs serve).
   if (!dryRun) {
     for (const [i, n] of picked.ready.entries()) {
       if (localStopping?.()) {
         picked.ready = picked.ready.slice(0, i);
         break;
       }
+      // Named before the write: a write whose answer is lost may still have landed.
+      localMarked?.(n);
       await setStateLabel(repo, n, "running", opts);
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }

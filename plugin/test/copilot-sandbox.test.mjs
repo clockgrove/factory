@@ -99,7 +99,7 @@ test("Factory's bwrap: the real one starts with no environment; each command's H
   writeFileSync(real, '#!/bin/sh\necho "env=$(env | grep -c .)"\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
   const shim = join(root, "bwrap");
   writeFileSync(shim, bwrapShim(real, "/home/factory-agent", "/home/factory-agent/tmp"), { mode: 0o755 });
-  const out = execFileSync(shim, ["--clearenv", "--setenv", "HOME", "/var/lib/factory-copilot", "--setenv", "TMPDIR", "/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } });
+  const out = execFileSync(shim, ["--clearenv", "--setenv", "HOME", "/var/lib/factory-copilot", "--setenv", "TMPDIR", "/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } });
   const lines = out.trim().split("\n");
   // `env` itself shows PWD at most: nothing the shim was started with.
   assert.ok(Number(lines[0].slice(4)) <= 1, `no environment: ${lines[0]}`);
@@ -114,7 +114,7 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   mkdirSync(bin);
   // A stand-in copilot: reports whether the decoy it was given holds the marker.
   writeFileSync(join(bin, "copilot"), `#!/bin/sh\necho "args=$*"\ntr '\\0' '\\n' < /proc/$FACTORY_PROBE_DECOY/environ | grep -c '^${PROBE_MARKER}=m9$'\n`, { mode: 0o755 });
-  const got = execFileSync("/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", "--sandbox"], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m9" } }).split("\n");
+  const got = execFileSync("/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", "--sandbox"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m9" } }).split("\n");
   assert.deepEqual(got.slice(0, 2), ["args=--sandbox", "1"]);
   for (const s of [COPILOT_DECOY_LAUNCH, probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m" })]) assert.ok(!s.includes("${"), "nothing systemd-run would expand");
   // The driver, unconfined here: the marker is in this shell's own parent, so the probe says so and the result is written.
@@ -202,7 +202,7 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   const shim = join(root, "bwrap");
   writeFileSync(shim, bwrapShim(real, null, "/s/t"), { mode: 0o755 });
   const argv = ["--clearenv", "--setenv", "HOME", "/home/dev", "--setenv", "TMPDIR", "/s/copilot-tmp", "--", "sh"];
-  const out = execFileSync(shim, argv, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } }).trim().split("\n");
+  const out = execFileSync(shim, argv, { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } }).trim().split("\n");
   assert.ok(Number(out[0].slice(4)) <= 1 && !out.join("\n").includes("github_pat_secret"), "the real bwrap gets no environment");
   assert.deepEqual(out.slice(1).map((l) => l.slice(4)), argv.map((a) => (a === "/s/copilot-tmp" ? "/s/t" : a)), "Copilot's HOME kept, its commands' TMPDIR the stage's, nothing else changed");
   const [home, tmp, usage, clone, chome] = ["h", "t", "u", "w", "c"].map((d) => join(root, d));
@@ -323,7 +323,7 @@ test("Copilot's commands get the stage's toolchain (#105): each PATH directory i
   const path = [join(tc, "bin"), join(root, "locked", "bin"), join(root, "linked", "bin"), join(root, "swappable", "bin"), "/usr/local/bin", "/usr/bin"].join(":");
   try {
     await resetCopilotState(runner, { PATH: path, HOME: "/nonexistent-factory-home" });
-    const agentSays = execFileSync("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", tc, join(root, "locked"), join(root, "swappable"), "/tmp", "/usr/local"], { encoding: "utf8", env: { PATH: process.env.PATH } });
+    const agentSays = execFileSync("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", tc, join(root, "locked"), join(root, "swappable"), "/tmp", "/usr/local"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: process.env.PATH } });
     if (process.getuid() !== 0) assert.deepEqual(agentSays.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]), system ? ["/usr/local"] : [], "not the agent's own, not one it cannot reach, not under a link it could swap, not a directory it can write (/tmp)");
   } finally {
     chmodSync(join(root, "locked"), 0o755);
@@ -346,7 +346,7 @@ test("Copilot's probe proves the stage's toolchain runs in a command; a toolchai
   writeFileSync(join(bin, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   const drive = (toolchain) => {
     const driver = probeDriver({ gitConfig: "", host: "", marker: "m7", toolchain, copilotTmp: join(root, "no-copilot-tmp") });
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   // Unconfined here, so a toolchain that runs goes on to the confinement probe, which names the marker.
@@ -392,7 +392,7 @@ test("local Copilot (#111): the stage's node, from a version manager in the home
   writeFileSync(real, '#!/bin/sh\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
   writeFileSync(join(root, "bwrap"), bwrapShim(real, null, "/s/t", `/u/gitbin:${join(prefix, "bin")}`), { mode: 0o755 });
   const argv = ["--setenv", "PATH", "/u/bwrapbin:/usr/bin", "--setenv", "TMPDIR", "/x", "--", "sh", "--setenv", "PATH", "kept"];
-  const out = execFileSync(join(root, "bwrap"), argv, { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim().split("\n").map((l) => l.slice(4));
+  const out = execFileSync(join(root, "bwrap"), argv, { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin" } }).trim().split("\n").map((l) => l.slice(4));
   assert.deepEqual(out, ["--setenv", "PATH", `/u/gitbin:${join(prefix, "bin")}:/u/bwrapbin:/usr/bin`, "--setenv", "TMPDIR", "/s/t", "--", "sh", "--setenv", "PATH", "kept"]);
   assert.ok(!bwrapShim("/usr/bin/bwrap", "/h", "/t").includes("PATH"), "a runner's shim leaves PATH alone");
   // The stage hands it to the harness process, and the local probe proves it, Blocking with the rule.
@@ -469,7 +469,7 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   const drive = (ok) => {
     writeFileSync(join(bin, "pnpm"), `#!/bin/sh\nexit ${ok ? 0 : 1}\n`, { mode: 0o755 });
     const driver = probeDriver({ gitConfig: "", host: "", marker: "m8", toolchain: { pm: "pnpm" }, copilotTmp: join(root, "no-copilot-tmp") });
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   assert.equal(drive(false), `4\n${TOOLCHAIN_RULE}\n`);

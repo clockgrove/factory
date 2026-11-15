@@ -15,8 +15,10 @@ const root = ownedTemp(base, "factory-test-");
 process.env.TMPDIR = root;
 process.on("exit", () => dropOwned(root, { unlock: true }));
 
-// The harness logins' variables, the credentials local mode reads from the shell, and the base directories that would
-// lead a tool outside the fake home. Every module's homedir() and every child process then sees the fake home alone.
+// The harness logins' variables, the credentials Factory reads from the shell, the SSH agent, and the base directories
+// that would lead a tool outside the fake home; and local mode itself with all its settings (DEVELOPER_ENV_PREFIX: its
+// token, App, sandbox, limits). Every module's homedir() and every child process then sees the fake home alone, and a
+// test that wants local mode or one of its settings sets it.
 export const DEVELOPER_ENV = [
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
@@ -24,9 +26,6 @@ export const DEVELOPER_ENV = [
   "COPILOT_CACHE_HOME",
   "GH_CONFIG_DIR",
   "COPILOT_GITHUB_TOKEN",
-  "FACTORY_LOCAL_TOKEN",
-  "FACTORY_LOCAL_APP_ID",
-  "FACTORY_LOCAL_APP_KEY",
   "AI_GATEWAY_API_KEY",
   "ANTHROPIC_API_KEY",
   "CLAUDE_CODE_OAUTH_TOKEN",
@@ -34,13 +33,22 @@ export const DEVELOPER_ENV = [
   "OPENAI_API_KEY",
   "GITHUB_TOKEN",
   "GH_TOKEN",
+  "VERCEL_TOKEN",
+  "FACTORY_APP_TOKEN",
+  "FACTORY_READ_TOKEN",
+  "FACTORY_CODEX_GATEWAY_KEY",
+  "FACTORY_INPUT_CODEX_API_KEY",
+  "FACTORY_INPUT_CODEX_GATEWAY_KEY",
+  "SSH_AUTH_SOCK",
   "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
   "XDG_STATE_HOME",
 ];
+/** FACTORY_LOCAL and every FACTORY_LOCAL_* variable. */
+export const DEVELOPER_ENV_PREFIX = /^FACTORY_LOCAL(_|$)/;
 const home = join(root, "home");
 mkdirSync(home, { mode: 0o700 });
 // Its real path: local mode compares a home's folders with their real paths (lib/accounts.mjs).
 process.env.HOME = realpathSync(home);
-for (const k of DEVELOPER_ENV) delete process.env[k];
+for (const k of Object.keys(process.env)) if (DEVELOPER_ENV.includes(k) || DEVELOPER_ENV_PREFIX.test(k)) delete process.env[k];

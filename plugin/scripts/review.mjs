@@ -20,7 +20,7 @@ import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
-import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { commandFailed, eventAction, eventSender, log, parseArgs, postedError, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
@@ -563,7 +563,8 @@ async function main() {
       return;
     }
     log(`review crashed: ${e.message.slice(0, 300)}`);
-    const reason = `review crashed: ${e.message.slice(0, 200)}`;
+    // A system error by its code and call alone: its message names a path on this machine (postedError).
+    const reason = `review crashed: ${postedError(e, { log: "the stage's log" }).slice(0, 200)}`;
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
     await finish("blocked", reason);
@@ -699,7 +700,7 @@ async function main() {
   await outbox.feed();
   // Whatever an earlier stage left in a reused checkout (local mode) is discarded (outbox.mjs putOn).
   const onBranch = await outbox.putOn(`refs/remotes/origin/${branch}`);
-  if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
+  if (onBranch.code !== 0) throw commandFailed(`the checkout could not be put on ${branch}`, { code: onBranch.code, stderr: onBranch.error });
   // Git LFS before validation and any fix pass: filters set up in the checkout, the branch's objects handed over.
   const lfs = await outbox.lfsSetup(outbox.expected(), { timeoutMs: remainingMs(deadlineAt) });
   // Factory's own git work on the checkout is done: locally its git state is recorded, and checked before each harness start.

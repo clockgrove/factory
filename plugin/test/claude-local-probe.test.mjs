@@ -18,7 +18,7 @@ test("Claude Code's local probe: the driver proves the toolchain, tries the home
   for (const d of [tmp, home, bin]) mkdirSync(d);
   const result = join(tmp, CLAUDE_PROBE_RESULT);
   const drive = (driver, extra = {}) => {
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: `${bin}:/usr/bin:/bin`, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m1", ...extra } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m1", ...extra } });
     return readFileSync(result, "utf8");
   };
   const base = { gitConfig: "", host: "", marker: "m1", result, tmp, persist: [home] };

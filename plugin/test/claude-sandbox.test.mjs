@@ -261,7 +261,7 @@ test("services: the env file relays each port inside the sandbox through its pro
   assert.match(text, /case "\$__f_a" in\n {2}srt:\*\|srt\.\*:\*\)/, "only inside Claude Code's sandbox, whose proxy login is srt or starts with srt.");
   execFileSync("bash", ["-n", "-c", text]);
   // Outside the sandbox (no proxy set) sourcing it starts nothing and leaves no variable behind.
-  const out = execFileSync("bash", ["-c", `${text}\nset | grep -c '^__f_' || true`], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  const out = execFileSync("bash", ["-c", `${text}\nset | grep -c '^__f_' || true`], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: process.env.PATH } });
   assert.equal(out.trim(), "0");
 });
 
@@ -275,7 +275,7 @@ test("services: the relay starts for a proxy login of srt or srt.<session>, and 
   const text = envFileText(runnerLayout(AGENT), [5432]);
   const started = async (proxy, n = 3) => {
     writeFileSync(calls, "");
-    execFileSync("bash", ["-c", text], { env: { PATH: `${bin}:/usr/bin:/bin`, HTTPS_PROXY: proxy } });
+    execFileSync("bash", ["-c", text], { env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, HTTPS_PROXY: proxy } });
     for (let i = 0; i < 40 && readFileSync(calls, "utf8").split("\n").filter(Boolean).length < n; i++) await new Promise((r) => setTimeout(r, 50));
     return readFileSync(calls, "utf8").split("\n").filter(Boolean).sort();
   };

@@ -352,7 +352,7 @@ test("the shim wraps only a command sandbox: --unshare-net before the separator,
     assert.equal(statSync(shimDir).mode & 0o777, 0o755);
     const shim = readFileSync(join(shimDir, "bwrap"), "utf8");
     assert.match(shim.split("\n")[0], /^#!\/bin\/bash -p$/, "no BASH_ENV or ENV is read");
-    const run = (...a) => execFileSync(join(shimDir, "bwrap"), a, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", BASH_ENV: join(dir, "planted") } }).trim().split("\n");
+    const run = (...a) => execFileSync(join(shimDir, "bwrap"), a, { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", BASH_ENV: join(dir, "planted") } }).trim().split("\n");
     writeFileSync(join(dir, "planted"), "echo PLANTED\n");
     assert.deepEqual(run("--version"), ["--version"]);
     assert.deepEqual(run("--ro-bind", "/", "/", "--", "/usr/bin/true"), ["--ro-bind", "/", "/", "--", "/usr/bin/true"], "no network namespace: as given");
@@ -493,7 +493,7 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
     // relay's address carries the run's token, never the key.
     const script = `fetch(process.env.FACTORY_GATEWAY_URL + "${IMAGE}", { method: "POST", headers: { authorization: "Bearer " + process.env.AI_GATEWAY_API_KEY, "content-type": "application/json", "ai-model-id": "recraft/recraft-v4.1-flash" }, body: "{}" }).then(async (r) => { console.log(r.status); process.exit(0); }, (e) => { console.log("failed " + e.message); process.exit(1); })`;
     // In a process group of its own: the forwarder's socat goes with it afterwards, as it goes with a sandbox's namespace.
-    const child = spawn(join(relay.shimDir, "bwrap"), ["--unshare-net", "--", process.execPath, "-e", script], { env: { PATH: "/usr/bin:/bin", FACTORY_GATEWAY_URL: relay.url, AI_GATEWAY_API_KEY: opened.shell[RELAYED_NAME] }, detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    const child = spawn(join(relay.shimDir, "bwrap"), ["--unshare-net", "--", process.execPath, "-e", script], { env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", FACTORY_GATEWAY_URL: relay.url, AI_GATEWAY_API_KEY: opened.shell[RELAYED_NAME] }, detached: true, stdio: ["ignore", "pipe", "inherit"] });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     const code = await new Promise((r) => child.on("exit", r));
@@ -769,7 +769,7 @@ test("Copilot: its own shim hands each call to the relay's, which adds the socke
     writeFileSync(shim, bwrapShim(fake, null, "/agent/tmp", null, relayShim), { mode: 0o755 });
     const absent = join(dir, "bwrap-absent");
     writeFileSync(absent, bwrapShim(fake, null, "/agent/tmp", null, join(dir, "missing", "bwrap")), { mode: 0o755 });
-    const run = (args, env = {}, which = shim) => execFileSync(which, args, { encoding: "utf8", env: { PATH: "/usr/bin:/bin", ...env } }).trim().split("\n");
+    const run = (args, env = {}, which = shim) => execFileSync(which, args, { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", ...env } }).trim().split("\n");
     const cmd = ["--unshare-net", "--setenv", "TMPDIR", "/x", "--seccomp", "60", "--", "sh", "-c", "curl x"];
     const plain = run(cmd, {}, absent);
     assert.deepEqual(plain, ["--unshare-net", "--setenv", "TMPDIR", "/agent/tmp", "--seccomp", "60", "--", "sh", "-c", "curl x"], "no relay shim at the baked path: as before");
@@ -814,7 +814,7 @@ test("Copilot on a runner: each stage's relay shim is its own, in its relay dire
     };
     const a = stage("a");
     const b = stage("b");
-    const run = (shim) => execFileSync(shim, ["--unshare-net", "--", "sh", "-c", "x"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim().split("\n");
+    const run = (shim) => execFileSync(shim, ["--unshare-net", "--", "sh", "-c", "x"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin" } }).trim().split("\n");
     assert.ok(run(a.shim).includes(join(a.relayDir, "a.sock")) && !run(a.shim).includes(join(b.relayDir, "b.sock")), "stage a hands to its own relay");
     assert.ok(run(b.shim).includes(join(b.relayDir, "b.sock")), "stage b to its own");
     // Stage a ends: its relay directory goes; stage b is unaffected, and a's Copilot shim falls back to the real one.

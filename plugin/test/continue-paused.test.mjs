@@ -168,7 +168,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     delete process.env.FACTORY_LOCAL;
     process.env.PATH = `${bin}:${saved.PATH}`;
     const dirs = { in: join(root, "h", "in"), out: join(root, "h", "out") };
-    const rec = await runHarness({ harness: "claude", model: "claude-fable-5-2", prompt: continuePrompt(dirs), freshPrompt: keptPrompt("the task card"), resume: entry.session.id, maxUsd: 0, cwd: clone, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+    const rec = await runHarness({ harness: "claude", model: "claude-fable-5-2", prompt: continuePrompt(dirs), freshPrompt: keptPrompt("the task card"), resume: entry.session.id, maxUsd: 0, cwd: clone, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
     const call = JSON.parse(readFileSync(join(root, "call.json"), "utf8"));
     assert.equal(call.args[call.args.indexOf("--resume") + 1], id);
     assert.ok(call.prompt.includes(`FACTORY_IN is now ${dirs.in}`) && call.prompt.includes(`FACTORY_OUT is now ${dirs.out}`), "the new hand-off folders restated");

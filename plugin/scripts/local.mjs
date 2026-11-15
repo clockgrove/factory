@@ -987,8 +987,8 @@ export class Local {
       const err = e instanceof Error ? e : new Error(String(e));
       throw err.stageStarted ? err : Object.assign(err, { stageSetup: name });
     } finally {
-      slot?.release();
       setUp();
+      slot?.release();
     }
   }
 
@@ -2262,6 +2262,7 @@ export class Local {
         if (why) stopped.set(n, { why });
       });
     const first = this.machineBox(0);
+    let shownCap = Math.min(first.cap, first.budget);
     log(`machine budget: ${first.budget} Objective stage(s) at once on this machine, shared by every Factory loop here (${first.from === "setting" ? first.file : "from its CPU threads and memory"}); this loop: at most ${Math.min(first.cap, first.budget)}${first.cap > first.budget ? `, the budget (FACTORY_LOCAL_MAX_CONCURRENT ${first.cap} is above it)` : " (FACTORY_LOCAL_MAX_CONCURRENT)"}`);
     this.factory ??= runningFactory();
     log(`serve runs Factory ${runningName(this.factory)} from ${this.factory.root}`);
@@ -2324,6 +2325,10 @@ export class Local {
       // machine's load. Each start takes its slot of the budget just before it is started or picked (takeSlots), and
       // holds it while it runs.
       const box = this.machineBox(running.size);
+      // This loop's cap, read again at each tick from the settings as they are then (refreshSettings), said when it changes.
+      const capNow = Math.min(box.cap, box.budget);
+      if (capNow !== shownCap) log(`this loop: at most ${capNow} Objective stage(s) at once on this machine (${box.cap >= box.budget ? `the machine's budget${box.cap > box.budget ? `; FACTORY_LOCAL_MAX_CONCURRENT ${box.cap} is above it` : ""}` : "FACTORY_LOCAL_MAX_CONCURRENT"})`);
+      shownCap = capNow;
       const slots = this.takeSlots(box, running);
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
       const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : null;

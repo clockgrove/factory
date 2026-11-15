@@ -1025,7 +1025,6 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       picked.ready = picked.ready.slice(0, Math.max(0, taken));
       picked.reason = picked.reason || "this machine's budget is full: another loop here took its last slots";
     }
-    }
   }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
   // state label and its card moves to Done. No job runs on merge, so the cron does it. A local loop does it only for

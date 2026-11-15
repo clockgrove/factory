@@ -8,6 +8,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fakeProc } from "./fixtures/machine.mjs";
 import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
 import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
 import { DOWNGRADE_LINE, checkoutProblem, markInUse, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningFactory, startProblem } from "../scripts/lib/release.mjs";
@@ -358,6 +359,7 @@ async function serveOver(ad, { wf, factory, atTick, paused = () => [], stubs = (
   delete process.env.FACTORY_HARNESS;
   let tick = 0;
   const loop = Object.assign(Object.create(Local.prototype), {
+    machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     dev: ad.dev,
     settingsBranch: "main",
     // Every tick fetches, so a push between two ticks is seen at the next.
@@ -419,7 +421,7 @@ test("serve: a change to a hot setting applies from the next tick, says what cha
   });
   const text = lines.join("");
   assert.match(text, /the workflow's settings on origin\/main changed; each stage that starts from now on runs with them, and stages in flight keep theirs: FACTORY_LOCAL_MAX_CONCURRENT: "1" → "2"; FACTORY_MODEL: "m1" → "m2"/);
-  assert.match(text, /at most 2 Objective stage\(s\) at once on this box/);
+  assert.match(text, /at most 2 Objective stage\(s\) at once on this machine/);
   assert.deepEqual(resumed, [8], "the new limit gives the paused Objective a slot beside the stage in flight");
   assert.equal(loop.baseEnv().FACTORY_MODEL, "m2", "stages that start now get the new settings");
   assert.match(text, /the workflow's settings on origin\/main changed; these take effect when serve restarts, and until then serve keeps the values it started with: FACTORY_LOCAL_DOMAINS: "a\.example" → "evil\.example"; FACTORY_LOCAL_ENV: unset → "AWS_SECRET_ACCESS_KEY"/);

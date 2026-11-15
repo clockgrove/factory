@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
-import { choiceLabels, choiceOf, chosenInputs, isChoiceLabel, routeProblem } from "./choice.mjs";
+import { choiceLabels, choiceOf, chosenInputs, foundationLabel, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
@@ -207,28 +207,32 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
   return planTextState({ sha, plan: posted, editedAt }) === "changed";
 }
 
-/** What a Blocked notice tells a person to do about a harness or model label Factory did not act on. */
-export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective on the repository's defaults, then re-applies `factory:objective`.";
+/** What a Blocked notice tells a person to do about a harness, model or foundation label Factory did not act on. */
+export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective without it (on the repository's defaults, with the one-pass review), then re-applies `factory:objective`.";
 
 /**
  * The harness and model labels among `names` (the issue's, read with its text) as Factory may act on them: choice.mjs
  * choiceOf, and each label's latest `labeled` event on the timeline by a person who can push or a pinned maintainer.
- * Returns {ok, choice, labels} or {ok: false, reason, fix}, the reason naming the label. `gh` (labelers, permission) is a
- * test's own.
+ * The foundation label (choice.mjs FOUNDATION_LABEL) is checked the same way: `foundation` is true when it is on the
+ * issue. Returns {ok, choice, labels, foundation} or {ok: false, reason, fix}, the reason naming the label. `gh`
+ * (labelers, permission) is a test's own.
  */
 export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
   const parsed = choiceOf(names);
-  if (!parsed.ok || !parsed.labels.length) return parsed;
+  const foundation = foundationLabel(names);
+  if (!parsed.ok) return parsed;
+  if (!parsed.labels.length && !foundation) return { ...parsed, foundation: false };
   const read = { labelers: labelersOf, permission: collaboratorPermission, ...gh };
-  const by = await read.labelers(repo, issue, parsed.labels, opts);
-  for (const label of parsed.labels) {
+  const vouched = [...parsed.labels, ...(foundation ? [foundation] : [])];
+  const by = await read.labelers(repo, issue, vouched, opts);
+  for (const label of vouched) {
     const a = by?.[label]?.actor;
     // The REST timeline's actor, in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches.
     const actor = a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null;
     if (!actor) return { ok: false, labels: parsed.labels, reason: `who applied \`${label}\` could not be read from the issue's timeline, so Factory does not run on its choice`, fix: CHOICE_FIX };
     if (!(await vouches(repo, actor, opts, read))) return { ok: false, labels: parsed.labels, reason: `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so Factory does not run on its choice`, fix: CHOICE_FIX };
   }
-  return parsed;
+  return { ...parsed, foundation: !!foundation };
 }
 
 /**
@@ -257,7 +261,7 @@ export async function choiceGate({ repo, issue, labels, args = {}, env = process
   const t = await choiceTrusted(repo, issue, labels, opts, gh);
   const c = t.ok ? chosenInputs({ args, env, choice: t.choice }) : t;
   const refusal = c.ok ? routeProblem(env.FACTORY_STAGE_HARNESS, c.inputs.harness) : c;
-  if (!refusal) return { ...c, labels: t.labels };
+  if (!refusal) return { ...c, labels: t.labels, foundation: t.foundation };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: refusal.reason, fix: refusal.fix, cause: "setup", notify, stage }, opts);
   return { ok: false, reason: refusal.reason };

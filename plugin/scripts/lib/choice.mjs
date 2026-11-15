@@ -14,6 +14,16 @@ export const CHOICE_PREFIXES = Object.freeze({ harness: "factory:harness:", mode
  * prefix (34 for a harness, 36 for a worker model, 27 for a sub-agent or reviewer model). USAGE.md says so.
  */
 export const LABEL_MAX = 50;
+/**
+ * The label that marks an Objective as a foundation (#275): later work builds on what it adds, so its review gets a
+ * second pass that checks the shared contracts the diff changes against their callers (review.mjs foundationPrompt).
+ * Trusted as the choice labels are (objective-trust.mjs choiceTrusted); not in the plan's record, since it changes only
+ * the review, which reads it when it starts.
+ */
+export const FOUNDATION_LABEL = "factory:foundation";
+/** The foundation label's own name among `names` (names, or GitHub's label objects), or null. */
+export const foundationLabel = (names = []) => (names || []).map((n) => (typeof n === "string" ? n : n?.name)).find((n) => typeof n === "string" && n.trim().toLowerCase() === FOUNDATION_LABEL) ?? null;
+
 /** The words a reason uses for each choice. */
 const WHAT = { harness: "harness", model: "worker model", subagent_model: "sub-agent model", reviewer_model: "reviewer model" };
 const tick = (s) => `\`${s}\``;

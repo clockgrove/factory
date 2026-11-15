@@ -44,6 +44,16 @@ The workflow file's `FACTORY_HARNESS`, `FACTORY_MODEL`, `FACTORY_SUBAGENT_MODEL`
 - **A label added, removed or changed after the plan is an edit** (Edit an Objective, below): the next stage Blocks, re-applying `factory:objective` plans again on the new choice, and `factory:restart` starts over with it.
 - **What ran is on the record:** the progress comment's harness line, the usage record's `ran` and the scorecard's Harness column name the harness, the worker, sub-agent and reviewer models, and the labels that chose them.
 
+## Ask for a foundation review
+
+Label an Objective `factory:foundation` when later work builds on what it adds: a shared type or schema, an error table, a command registry, a file format, a test fixture other tests import. Its review then runs a second reviewer call, the foundation pass, after the usual one.
+
+- **What it checks:** each shared contract the diff adds or changes (an exported function, type, schema, error code, CLI flag, file format, shared fixture) against its callers and readers in the repository: every value it can produce reaches the caller meant to handle it, every caller uses what it now says, and a shared test fixture keeps tests off the developer's real home, state and proxy settings (the factory-review-pr skill's reference.md, "Foundation review").
+- **One review:** its findings are line-tied comments in the same comment-only review as the usual pass's, and the worker's answer pass answers them all. The review body counts them.
+- **Within `max_usd`:** the pass is one more call on the reviewer model, so a foundation review costs about one more reviewer call. It starts only with budget and time left; at the cap or the time cap the stage Blocks before it, and nothing is posted, as for the usual pass. A call that fails is run once more; when neither answers, nothing is posted and the Objective Blocks with how each call ended.
+- **Trusted like the harness and model labels:** it counts only when the person who last applied it can push or is a maintainer the workflow names; otherwise the Objective Blocks naming the label.
+- **Not an edit:** it changes only the review, so adding or removing it after the plan Blocks nothing; the review reads it when it starts. An Objective without it is reviewed in one pass.
+
 ## What you see on the issue
 
 While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.

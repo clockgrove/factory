@@ -23,6 +23,19 @@ Only when the prompt says the PR is a part of a split Objective and not the last
 
 The last part and an Objective in one PR are judged against every entry, never deferred.
 
+## Foundation review
+
+Only when the prompt says this is the foundation pass: the Objective is labelled `factory:foundation`, so later work builds on what it adds. Another pass reviews the rest of the PR and judges the acceptance entries; this one returns comments only.
+
+A shared contract is what other code builds on: an exported function, class or constant; a type, schema or config key; an error code or error table; a CLI command, flag or exit code; a file, wire or event format; a test fixture or helper other tests import. For each one the diff adds or changes, find its callers and readers in the checkout (`git grep`, the tests included, and those the diff adds), then check:
+
+- Every value the contract can produce (an error code, a status, an enum member, a field) reaches the caller meant to handle it, and every value a caller, a doc or the issue expects is one the contract can produce. A mapping that folds new codes into an old one, so the new ones never reach the result, is a finding.
+- Each caller passes and reads what the changed signature, field names, types, defaults and units now say; nothing still uses a removed or renamed name.
+- The contract's docs, schema and help text say what the code does.
+- A shared test fixture or helper isolates what a test touches: home, state, config, cache and temp directories inside the test's own temp root; variables that redirect I/O (`HOME`, `XDG_*`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, tokens) set or cleared; no network the repository's testing guide does not allow; its files removed after. One that could read or write the developer's real state is a finding.
+
+Each finding is a comment on the new-side line of the contract or fixture, naming the caller's `path:line`, its body starting `foundation review:`, and its `entry` the acceptance entry it falls under, else `foundation`. Skip a finding the PR body answers, as in any pass; general findings are the other pass's.
+
 ## Workflow hand-over
 
 Factory never pushes a change under `.github/workflows/`; the worker hands one over, and Factory posts it in its comment on the issue for a person to apply after the merge. The prompt gives it under `## Workflow hand-over`. That patch is part of the change: review it like the diff, against the acceptance entries and the repository's rules, and check each workflow it adds or changes for what it can run and reach: its triggers (`push`, `pull_request_target`, `workflow_run`), its `permissions:`, every secret it uses, third-party actions not pinned to a full commit SHA, and any checkout of pull-request head code (under `pull_request_target` or `workflow_run` that runs untrusted code with the repository's token and secrets). A finding on it names the workflow file as `path` and the patch's new-side line as `line`; Factory moves it onto the diff with a note naming where it is. Each workflow change the body's Undone names and the patch lacks, or the patch makes and Undone does not explain, is a finding too. Never ask for the workflow change to be committed instead.
@@ -33,6 +46,7 @@ Factory never pushes a change under `.github/workflows/`; the worker hands one o
 
 - `acceptance` has one `{entry, met, path, line, evidence}` per acceptance entry of the issue, plus `"deferred": true` on an entry deferred to a later part ("Split parts").
 - `comments` holds `{path, line, entry, body}` and may be empty, but every entry not met and not deferred has one.
+- The foundation pass ("Foundation review") answers `{"comments": [...]}` only.
 
 ## SDK first
 

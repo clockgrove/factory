@@ -115,7 +115,7 @@ test("choiceTrusted: a label counts only when the person who last applied it can
     setMaintainers("other/repo", []);
   }
   const none = await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no choice label: no timeline read") });
-  assert.deepEqual(none, { ok: true, choice: {}, labels: [] });
+  assert.deepEqual(none, { ok: true, choice: {}, labels: [], foundation: false });
   assert.equal((await choiceTrusted(repo, 7, ["factory:model:a", "factory:model:b"], {}, { labelers: async () => assert.fail("refused on the names first") })).ok, false);
 });
 

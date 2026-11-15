@@ -141,13 +141,17 @@ export function noReviewReason(recs, reviewOf) {
  * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Factory's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
- * post a review that did not happen (reviewAnswer; the review job Blocks instead).
+ * post a review that did not happen (reviewAnswer; the review job Blocks instead). `foundation`: a foundation Objective's
+ * second pass (review.mjs foundationReview), parsed: its comments go up with the first pass's and the body counts them.
  */
-export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false }) {
+export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
   if (review?.parsed === false) throw new Error("no review to post: the reviewer's answer held no findings JSON");
+  if (foundation?.parsed === false) throw new Error("no review to post: the foundation pass's answer held no findings JSON");
   const judged = review?.acceptance || [];
-  const raw = (review?.comments || []).filter((c) => c && typeof c === "object");
+  const own = (list) => (list || []).filter((c) => c && typeof c === "object");
+  const extra = own(foundation?.comments);
+  const raw = [...own(review?.comments), ...extra];
   const commented = new Set(raw.map(commentEntry).filter(Boolean));
   // On a split part that is not the last, an entry judged deferred (a later part delivers it) gets no comment.
   const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
@@ -169,7 +173,7 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
         : "no findings; the pass ran and returned nothing line-tied.";
     comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nFactory reviewer: ${said}` }];
   }
-  const lines = [`${marker(issue, "review")}`, `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`];
+  const lines = [`${marker(issue, "review")}`, foundation ? `Factory reviewer: one comment-only review of two passes, ${comments.length} comment(s); the foundation pass checked the shared contracts the diff changes against their callers and raised ${extra.length}.` : `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`];
   if (judged.length || entries.length) {
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);

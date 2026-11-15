@@ -124,6 +124,57 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
   ].join("\n");
 }
 
+/**
+ * The foundation pass's prompt (#275): a second reviewer call, only on an Objective labelled `factory:foundation` (choice.mjs
+ * FOUNDATION_LABEL), that checks the shared contracts the diff adds or changes against their callers in the repository,
+ * and shared test fixtures against isolation (factory-review-pr reference.md, "Foundation review"). It returns comments
+ * only: the first pass judges the acceptance entries.
+ */
+export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
+  const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
+  return [
+    `You are the Factory reviewer's foundation pass for the pull request on issue #${issue}: ${issueTitle}. The Objective is labelled \`factory:foundation\`: later work builds on what it adds.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the factory-review-pr skill (in .claude/skills/factory-review-pr and .agents/skills/factory-review-pr), its reference.md section "Foundation review", exactly. Another pass reviews the rest of the PR and judges the acceptance entries; this pass does neither.`,
+    "Read the repository as you need to: the callers are in the checkout, on the PR's head. Do NOT post anything to GitHub yourself: the job posts your findings with the other pass's. Your final message must be only a JSON object of this shape, with no prose around it:",
+    '```json\n{"comments": [{"path": "src/errors.ts", "line": 12, "entry": "foundation", "body": "foundation review: ..."}]}\n```',
+    "`comments` may be empty. `line` is a line number on the new side of the diff, on the contract or fixture the finding concerns; a caller outside the diff is named in the body as `path:line`. `entry` is the acceptance entry the finding falls under, else `foundation`.",
+    "",
+    "## Issue",
+    issueBody || "(no body)",
+    "",
+    "## PR body",
+    prBody || "(no body)",
+    "",
+    "## Diff",
+    "```diff",
+    promptDiff(diff),
+    "```",
+  ].join("\n");
+}
+
+/**
+ * The foundation pass (foundationPrompt): one reviewer call, rerun once like the first pass when it misses (no answer,
+ * or no JSON: handoff.mjs reviewMissed, with no entries to judge; on the fallback reviewer where the harness has one),
+ * never after a provider's refusal. Each call starts only with budget and time left: `over()` true (max_usd spent) ends
+ * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"`. `run` makes one call ({model, effort,
+ * label, timeoutMs}) and books it, so `over()` counts it. Returns {review, recs, stop}: `review` the parsed answer
+ * (parseReview) when a call produced one, else null with `stop` saying why (`missed` when every call ran and none did).
+ */
+export async function foundationReview({ run, model, effort, fallback = null, over, timeout }) {
+  const recs = [];
+  const again = reviewRetry({ model, effort, fallback });
+  for (const call of [{ model, effort, label: "review-foundation" }, { model: again.model, effort: again.effort, label: again.label.replace(/^review-/, "review-foundation-") }]) {
+    if (over()) return { review: null, recs, stop: "cap" };
+    const timeoutMs = timeout();
+    if (timeoutMs === null) return { review: null, recs, stop: "time" };
+    const rec = await run({ ...call, timeoutMs });
+    recs.push(rec);
+    const review = parseReview(rec.finalText || "");
+    if (!reviewMissed({ ok: rec.ok, review })) return { review, recs, stop: null };
+    if (rec.refusal) break;
+  }
+  return { review: null, recs, stop: "missed" };
+}
+
 /** The reviewer's brief for a split part that is not the last (factory-review-pr reference.md, "Split parts"). */
 export const splitPartBrief = (part) =>
   `This PR is part ${part.number} of this Objective, which is split into sequential PRs, and it is not the last part: a later part delivers the acceptance entries its PR body assigns to one. Judge such an entry \`"met": false, "deferred": true\` with no comment, as the factory-review-pr reference says under "Split parts". That changes only those judgments: review every line this part changes, every claim its body makes for this part, and the repository's rules and checklist answers exactly as for any PR. A defect in this part's own lines is a finding on those lines even when the entry it relates to is deferred: a schema, constraint, signature or error this part adds that a later part's entry cannot be built on as it stands (a column that cannot hold a record that entry needs, a call with no way to bound or stop it, a refusal whose reason is lost) is raised now, not left for that part.`;
@@ -477,6 +528,8 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // A foundation Objective (`factory:foundation`, trusted as the choice labels are): its review gets the foundation pass too.
+  const foundation = !!chosen.foundation;
   progress.ran(ranWith(inputs, chosenLabels));
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.
@@ -780,7 +833,55 @@ async function main() {
     return;
   }
   if (retryRec && answer === reviewRec) log(`the reviewer's rerun ended in ${reviewCallEnd(retryRec, reviewOf(retryRec))}; posting the first pass's answer`);
-  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart });
+  // A foundation Objective's second pass (foundationReview): its comments go up in the same review as the first pass's.
+  // Without an answer from it nothing is posted, as for the first pass, so a later run reviews the PR again whole.
+  let found = null;
+  if (foundation && !alreadyReviewed) {
+    log("foundation Objective: the foundation pass checks the shared contracts the diff changes against their callers");
+    await progress("reviewer foundation pass");
+    const foundationLive = liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
+    found = await foundationReview({
+      model: inputs.reviewerModel,
+      effort: inputs.reviewerEffort,
+      fallback: inputs.reviewerFallback,
+      over: () => over() || overBudget,
+      timeout: () => reviewCallTimeout(remainingMs(deadlineAt)),
+      run: async ({ model, effort, label, timeoutMs }) => {
+        const rec = await runHarness({
+          harness: inputs.harness,
+          model,
+          effort,
+          prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+          maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+          agent: inputs.harness === "codex" ? undefined : "reviewer",
+          reviewer: true,
+          cwd: checkout,
+          env: harnessEnv,
+          timeoutMs,
+          eventsFile,
+          label,
+          onLine: foundationLive.onLine,
+        });
+        mark(rec, rec);
+        records.push(rec);
+        return rec;
+      },
+    });
+    foundationLive.finish();
+    if (found.stop === "cap") return blockedAtCap("the foundation pass");
+    if (found.stop === "time") return blockedAtTime("the foundation pass");
+    if (found.stop) {
+      const last = found.recs.at(-1);
+      const reason = last.refusal ? refusalReason(last.refusal) : `the foundation pass produced no review (${found.recs.map((r) => reviewCallEnd(r, reviewOf(r))).join(", then ")}), so nothing was posted and the PR does not merge`;
+      log(reason);
+      await dropLabel();
+      await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: last.refusal ? refusalCause(last.refusal) : "factory", notify: inputs.notify, stage: "review" }, token);
+      await finish("blocked", reason);
+      return;
+    }
+    log(`foundation pass: ${found.review.comments.length} comment(s)`);
+  }
+  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null });
   if (post?.unjudged.length) log(`reviewer left ${post.unjudged.length} of ${entries.length} acceptance entr${entries.length === 1 ? "y" : "ies"} unjudged: ${post.unjudged.join(", ")}`);
   const comments = post ? post.comments : [];
   const placeholder = !!post?.placeholder;

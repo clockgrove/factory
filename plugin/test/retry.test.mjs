@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
+import { fakeProc } from "./fixtures/machine.mjs";
 
 // #168: a transient GitHub or git transport failure is retried within a bound; a create is never duplicated; a
 // refusal is never retried; a 401 under serve stops new work and names the token's source.
@@ -392,6 +393,8 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
     token: "github_pat_old",
     notice: null,
     wf: { FACTORY_LOCAL_MAX_CONCURRENT: "1" },
+    // A machine of its own (lib/machine.mjs): this one's slots and load are never read or held.
+    machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     opts: { token: "github_pat_old" },
     children: new Set(),
     baseEnv: () => ({ FACTORY_INPUT_MAX_CONCURRENT: "1" }),

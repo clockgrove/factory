@@ -4,7 +4,11 @@ import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { approvalPolicyCheck, githubChecks } from "../scripts/doctor.mjs";
 import { HUNG_CODE, marker, setSelf } from "../scripts/lib/logic.mjs";
-import { mergeBlockReason, mergeReadyOne } from "../scripts/lib/session.mjs";
+import { QUEUE_FIX_PASSES, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueDropBlock, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed, recordQueueFix } from "../scripts/lib/session.mjs";
+import { openTriage } from "../scripts/lib/triage.mjs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // #2683: factory-scratch PR #468's queue commit hung in CI's setup step; the queue dropped it with checks_timed_out, and
 // the `dequeued` run that would re-enqueue it was held for approval (its actor, github-merge-queue[bot], is an outside
@@ -35,6 +39,9 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     timeline: {}, // issue timeline events (REST) by number
     queueRuns: [], // the merge_group workflow runs (REST actions/runs)
     annotations: {}, // check-run annotations by check-run id
+    labels: [], // the PR's label writes, in order: "+name" or "-name"
+    logs: {}, // Actions job logs by job id
+    prFiles: [{ filename: "src/add.js", patch: "+export const add = (a, b) => a - b;" }], // the PR's files
   };
   let id = 200;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -73,6 +80,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
       return json(200, { data: {} });
     }
     if (method === "GET" && /\/repos\/o\/r$/.test(u)) return json(200, { default_branch: "main" });
+    if (method === "GET" && (m = /\/actions\/jobs\/(\d+)\/logs$/.exec(u))) return new Response(s.logs[m[1]] ?? "", { status: 200 });
+    if (method === "GET" && /\/pulls\/\d+\/files/.test(u)) return json(200, s.prFiles);
     if (method === "GET" && (m = /\/actions\/jobs\/(\d+)$/.exec(u))) return s.jobs[m[1]] ? json(200, s.jobs[m[1]]) : json(404, { message: "Not Found" });
     if (method === "GET" && (m = /\/actions\/runs\/(\d+)\/jobs/.exec(u))) {
       const steps = s.history[Number(m[1]) - 1000] || {};
@@ -83,7 +92,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     if (method === "GET" && /\/actions\/runs\?/.test(u)) {
       const q = new URL(u).searchParams;
       const from = Date.parse((q.get("created") || "").replace(/^>=/, ""));
-      return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from)) });
+      // `status=failure`: finished runs that failed only, as GitHub lists them.
+      return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from) && (!q.get("status") || r.conclusion === q.get("status"))) });
     }
     if (method === "GET" && (m = /\/check-runs\/(\d+)\/annotations/.exec(u))) return json(200, s.annotations[m[1]] || []);
     if (method === "GET" && (m = /\/commits\/([0-9a-z]+)$/.exec(u))) return json(200, { sha: m[1], commit: { committer: { date: s.headAt } }, parents: [] });
@@ -115,6 +125,14 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     if (method === "GET" && /\/commits\/[0-9a-z]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && /\/commits\/[0-9a-z]+\/check-suites/.test(u)) return json(200, { check_suites: [] });
     if (method === "GET" && (m = /\/issues\/(\d+)\/timeline/.exec(u))) return json(200, s.timeline[m[1]] || []);
+    if (method === "POST" && /\/issues\/\d+\/labels$/.test(u)) {
+      s.labels.push(...body.labels.map((l) => `+${l}`));
+      return json(200, body.labels.map((name) => ({ name })));
+    }
+    if (method === "DELETE" && (m = /\/issues\/\d+\/labels\/(.+)$/.exec(u))) {
+      s.labels.push(`-${decodeURIComponent(m[1])}`);
+      return json(200, []);
+    }
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
   /**
@@ -162,6 +180,18 @@ async function withGitHub(fake, fn) {
 // The Actions route: the job token reads Actions (actionsToken). The local route passes none.
 const merge = (report = {}, extra = {}) => mergeReadyOne(repo, { issue: ISSUE, prNumber: PR, queue: true, checkNames: ["Quality"], report, actionsToken: "job", ...extra }, { token: "t" });
 const requeues = (s) => (s.comments[ISSUE] || []).filter((c) => c.body.includes(`<!-- factory:${ISSUE}:requeue:`));
+/**
+ * A review stage read each red queue drop (FAILED_CHECKS) as no failure of the PR's own (#312: session.mjs queueRedOf):
+ * its record says so, and the merge pass treats the drop as any other.
+ */
+const readByReview = (fake, kind = "flaky") => {
+  for (const r of fake.s.removals.filter((x) => x.reason === "FAILED_CHECKS")) {
+    const body = `${queueRedMarker(ISSUE, r.createdAt)}\n${queueRedBody(ISSUE, PR, { at: r.createdAt, state: "requeued", kind })}`;
+    const had = (fake.s.comments[ISSUE] || []).find((c) => c.body.startsWith(queueRedMarker(ISSUE, r.createdAt)));
+    if (had) had.body = body;
+    else (fake.s.comments[ISSUE] ||= []).push({ id: 5000 + fake.s.removals.indexOf(r), user: { login: SELF }, body, created_at: r.createdAt });
+  }
+};
 const MIN = 60_000;
 
 test("queue watch: a PR the queue drops after its CI started ticks the dispatcher, with no dequeued run; the merge pass re-enqueues it once (#2683)", async () => {
@@ -179,7 +209,12 @@ test("queue watch: a PR the queue drops after its CI started ticks the dispatche
     const r = await watchQueue(repo, [PR], { token: "t" }, { now: () => now, sleep, maxMs: 2 * 3600_000 });
     assert.deepEqual(r, { tick: true, pr: PR, left: true }, "the watch outlives the check starting and ticks when the PR leaves");
 
-    // That tick's merge pass: enqueued again once, with the one line on the issue, and watched again.
+    // That tick's merge pass hands the red run to the review stage first (#312); the review read it as a flake.
+    assert.equal(await merge({}), "queue-red");
+    assert.deepEqual(fake.s.labels, ["-factory:review", "+factory:review"], "the review label back on: the review stage reads the failure");
+    assert.equal(fake.s.enqueued.length, 0);
+    readByReview(fake);
+    // Then the merge pass: enqueued again once, with the one line on the issue, and watched again.
     const report = {};
     assert.equal(await merge(report), "queued");
     assert.equal(fake.s.enqueued.length, 1);
@@ -321,6 +356,7 @@ test("hung queue check: a hung removal read back on a later pass keeps its code,
     assert.equal(await merge({}), "queued");
     // Factory's removal is on the timeline now, and its requeue comment holds the code. The queue then drops the PR.
     fake.drop("FAILED_CHECKS", "github-merge-queue", "Bot");
+    readByReview(fake);
     const blocked = {};
     const how = await merge(blocked);
     assert.equal(how, "dropped");
@@ -372,6 +408,7 @@ test("queue drops: drops before the issue's last re-entry or Block, or before th
     fake.s.headAt = ago(5 * 3600_000);
     fake.s.removals = [queueDrop(ago(4 * 3600_000)), queueDrop(ago(3.5 * 3600_000))];
     fake.s.timeline[ISSUE] = [labeled("factory:blocked", ago(3.4 * 3600_000)), labeled("factory:objective", ago(3 * 3600_000))];
+    readByReview(fake);
     const report = {};
     assert.equal(await merge(report), "queued", "the re-entry starts the count over: the new head is enqueued");
     assert.equal(fake.s.enqueued.length, 1);
@@ -396,6 +433,7 @@ test("queue drops: drops before the issue's last re-entry or Block, or before th
     fake.s.headAt = ago(5 * 3600_000);
     fake.s.timeline[ISSUE] = [labeled("factory:objective", ago(3 * 3600_000))];
     fake.s.removals.push(queueDrop(ago(2 * 3600_000)), queueDrop(ago(3600_000)));
+    readByReview(fake);
     const blocked = {};
     assert.equal(await merge(blocked), "dropped");
     assert.match(mergeBlockReason("dropped", blocked), /dropped the reviewed PR 2 times/);
@@ -418,6 +456,7 @@ test("queue drops: a Block on drops whose merge_group jobs GitHub never started 
     queueRun(1, ago(2 * 3600_000));
     queueRun(2, ago(3600_000));
     fake.s.removals = [queueDrop(ago(2 * 3600_000 - MIN)), queueDrop(ago(3600_000 - MIN))];
+    readByReview(fake, "not-started");
     const blocked = {};
     assert.equal(await merge(blocked), "dropped");
     const why = mergeBlockReason("dropped", blocked);
@@ -425,11 +464,17 @@ test("queue drops: a Block on drops whose merge_group jobs GitHub never started 
     assert.match(why, /infrastructure, not the change/);
     assert.doesNotMatch(why, /Check that the required checks run/, "not blamed on the checks");
 
-    // A job that ran and failed on the queue's commit is the checks': the queue's own words stay.
+    // A job that ran and failed on the queue's commit: the Block names it and its first failure line, the work's (#312).
     for (const k of [1, 2]) fake.s.jobs[700 + k] = { ...fake.s.jobs[700 + k], steps: [{ name: "Run npm test", conclusion: "failure" }], runner_id: 5, runner_name: "r" };
+    fake.s.logs[702] = testLog;
+    // The review stage read these drops with triage off, and no failure named what the PR changed.
+    readByReview(fake, "unclassified");
     const ran = {};
     assert.equal(await merge(ran), "dropped");
-    assert.match(mergeBlockReason("dropped", ran), /Check that the required checks run on the queue's merge_group commits/);
+    const said = mergeBlockReason("dropped", ran);
+    assert.match(said, /its run on the queue's commit failed: `Quality`: .+\. Fix that on the branch/);
+    assert.doesNotMatch(said, /Check that the required checks run/, "they ran and failed: the cause is named, not the wiring");
+    assert.equal(mergeBlockCause("dropped", ran), "work");
   });
 });
 
@@ -476,4 +521,313 @@ test("doctor: the dequeue approval check runs only with a merge queue, and says 
   assert.equal(held.checks[0].status, "WARN");
   const none = await run({ queue: false, policy: "all_external_contributors" });
   assert.deepEqual(none, { checks: [], asked: false }, "no merge queue: no dequeued run, nothing read");
+});
+
+// ------------------------------------------------------------------ a red merge-queue run (#312)
+
+const testLog = ["##[group]Run npm test", "not ok 1 - adds", "  AssertionError [ERR_ASSERTION]: 2 == 3", "##[error]Process completed with exit code 1."].join("\n");
+
+/** The queue's failed run for PR 21 on its merge_group commit `sha`, its Quality job (id) as `job` has it, with `log`. */
+function queueRed(fake, { sha = "c".repeat(40), id = 610, at = ago(10 * MIN), job = {}, log = testLog } = {}) {
+  fake.s.queueRuns.push({ id: 900 + id, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR}-${"f".repeat(40)}`, head_sha: sha, created_at: at, conclusion: "failure" });
+  fake.s.runs[sha] = [{ id, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 800 }, started_at: at, completed_at: at }];
+  fake.s.jobs[id] = { id, run_id: 900 + id, name: "Quality", status: "completed", conclusion: "failure", steps: [{ name: "Run npm test", conclusion: "failure", number: 3 }], runner_id: 5, runner_name: "r", ...job };
+  fake.s.logs[id] = log;
+  return sha;
+}
+const records = (fake) => queueRedRecords(fake.s.comments[ISSUE] || [], ISSUE);
+
+/**
+ * The review stage's step (session.mjs readQueueRed) on the fake, with triage's decider answering `verdict` (none: off),
+ * on the PR's `head`. With `commit` its fix pass committed and pushed (review.mjs records it: recordQueueFix).
+ */
+async function reviewReads(fake, verdict = null, { head = HEAD, commit = true } = {}) {
+  const home = mkdtempSync(join(tmpdir(), "nokey-"));
+  try {
+    const triage = openTriage({ inputs: {}, env: {}, home, repo, issue: ISSUE, prNumber: PR, token: "t", actionsToken: "job", ...(verdict ? { decider: { decide: async () => verdict } } : {}) });
+    const step = await readQueueRed({ repo, issue: ISSUE, prNumber: PR, base: "main", head, names: async () => ["Quality"], triage, token: "t", actionsToken: "job" });
+    if (step?.state === "fixing" && commit) await recordQueueFix(repo, ISSUE, PR, step.record, { token: "t" });
+    return step;
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+const own = { verdict: "change_caused", confidence: 0.95 };
+
+test("queue red: a red run on the queue's commit goes to the review stage once per drop, before any re-enqueue or Block; other drops do not (#312)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.deepEqual(records(fake).map((r) => r.state), ["handed"]);
+    assert.deepEqual(fake.s.labels, ["-factory:review", "+factory:review"]);
+    assert.equal(fake.s.enqueued.length, 0, "nothing enqueued before the review stage read it");
+    assert.match(fake.s.comments[ISSUE].at(-1).body, /the merge queue's run of PR #21's required checks failed \(failed_checks\) at [^;]+; the review stage reads whether the failure is the PR's own change\./);
+    // Not read yet (the stage did not run): handed again, with the one record.
+    assert.equal(await merge({}), "queue-red");
+    assert.equal(records(fake).length, 1);
+    // A second red drop after a re-enqueue is its own: handed too, even past the queue's bound of drops.
+    readByReview(fake);
+    fake.s.removals.push(queueDrop(ago(2 * MIN)));
+    assert.equal(await merge({}), "queue-red", "before the Block the two drops would make");
+    assert.deepEqual(records(fake).map((r) => r.state), ["requeued", "handed"]);
+    // A drop of another kind (the queue's timeout) is enqueued again as before, never handed.
+    const other = fakeGitHub();
+    await withGitHub(other, async () => {
+      other.s.removals = [{ createdAt: ago(5 * MIN), reason: "CHECKS_TIMED_OUT", actor: { login: "github-merge-queue", __typename: "Bot" } }];
+      assert.equal(await mergeReadyOne(repo, { issue: ISSUE, prNumber: PR, queue: true, checkNames: ["Quality"], actionsToken: "job" }, { token: "t" }), "queued");
+      assert.deepEqual(other.s.labels, []);
+    });
+  });
+});
+
+test("queue red: the review stage reads the PR's own change as one fix pass, handed the queue's failure; red again the same way after it, it Blocks (#312)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const sha = queueRed(fake, { at: ago(20 * MIN) });
+    fake.s.removals = [queueDrop(ago(18 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, own);
+    assert.equal(step.state, "fixing");
+    assert.equal(step.red.sha, sha);
+    assert.equal(step.red.queue, true);
+    assert.deepEqual(step.red.failures.map((f) => [f.command, f.code]), [["CI job Quality", 1]]);
+    assert.ok(step.red.failures[0].full.includes("AssertionError [ERR_ASSERTION]: 2 == 3"), "the job's whole log for $FACTORY_IN/checks/");
+    assert.match(step.line, /^merge queue run red on ccccccc: Quality \(required check\): .+; the PR's own change, one fix pass \(the answer pass\)$/);
+    const [rec] = records(fake);
+    assert.equal(rec.state, "fixed");
+    assert.equal(rec.sigs.length, 1);
+    assert.match(rec.sigs[0], /^sig:[0-9a-f]{12}$/);
+    // Read once: nothing is pending now.
+    assert.equal(await reviewReads(fake), null);
+
+    // The fix's head goes back in; the queue's run fails again the same way: no second fix pass, Blocked.
+    const again = queueRed(fake, { sha: "d".repeat(40), id: 611, at: ago(12 * MIN) });
+    fake.s.removals.push(queueDrop(ago(10 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    const blocked = await reviewReads(fake, own);
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit ${again.slice(0, 7)} failed in this PR's own change \\(Quality \\(required check\\): .+\\) after Factory's fix pass for the same failure`));
+    assert.deepEqual(records(fake).map((r) => r.state), ["fixed", "blocked"]);
+
+    // Another failure on a later drop is a class of its own: it gets its fix pass.
+    queueRed(fake, { sha: "e".repeat(40), id: 612, at: ago(5 * MIN), log: testLog.replace("2 == 3", "4 == 5").replace("adds", "subtracts") });
+    fake.s.removals.push(queueDrop(ago(3 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(fake, own)).state, "fixing");
+    assert.deepEqual(records(fake).map((r) => r.state), ["fixed", "blocked", "fixed"]);
+  });
+});
+
+test("queue red: a flake, a job GitHub never started or no readable run is enqueued again as any drop, with no fix pass (#312)", async () => {
+  // Triage reads the failure as a flake: recorded, and the merge pass re-enqueues it once.
+  const flaky = fakeGitHub();
+  await withGitHub(flaky, async () => {
+    queueRed(flaky, { log: testLog.replace("AssertionError [ERR_ASSERTION]: 2 == 3", "Error: connect ETIMEDOUT 10.0.0.1:5432") });
+    flaky.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(flaky, { verdict: "flaky_or_infra", confidence: 0.9 });
+    assert.equal(step.state, "requeued");
+    assert.equal(step.red, undefined, "no fix pass");
+    assert.match(step.line, /not known to be the PR's change \(flaky\), enqueued again as any drop$/);
+    assert.equal(await merge({}), "queued");
+    assert.equal(requeues(flaky.s).length, 1, "the re-enqueue's one line, as before");
+  });
+  // GitHub never started the queue's job: infrastructure, and the queue's bound Blocks it as before.
+  const locked = fakeGitHub();
+  await withGitHub(locked, async () => {
+    queueRed(locked, { job: { steps: [], runner_id: null, runner_name: null } });
+    locked.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(locked, { verdict: "change_caused", confidence: 0.95 })).state, "requeued");
+    assert.equal(records(locked)[0].kind, "not-started");
+  });
+  // No queue run of the drop is ever listed (a failing check no Actions run carries): read again by the next stage, then
+  // nothing is known, so it is no fix pass.
+  const none = fakeGitHub();
+  await withGitHub(none, async () => {
+    none.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(none)).state, "pending");
+    assert.deepEqual(records(none).map((r) => [r.state, r.reads]), [["handed", 1]]);
+    assert.equal(await merge({}), "queue-red", "handed again");
+    const step = await reviewReads(none);
+    assert.equal(step.state, "requeued");
+    assert.equal(records(none)[0].kind, "none");
+  });
+});
+
+test("queue red: a deterministic failure only the queue's jobs run (another OS) is the PR's own change, judged from the log, and its fix pass gets that job's log (#312, assetgrove#174)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    // The PR's checks run Linux only and were green; the queue runs Windows too. The PR's new test expects SIGKILL,
+    // which Windows reports as null: red on Windows only, every time.
+    fake.s.prFiles = [{ filename: "test/kill.test.mjs", patch: '+test("kills", () => assert.equal(child.signalCode, "SIGKILL"));' }];
+    const sha = "7".repeat(40);
+    const at = ago(10 * MIN);
+    const winLog = ["##[group]Run npm test", "# Subtest: kills", "not ok 3 - kills", "  AssertionError [ERR_ASSERTION]: null == 'SIGKILL'", "      at TestContext.<anonymous> (file:///D:/a/app/app/test/kill.test.mjs:12:10)", "##[error]Process completed with exit code 1."].join("\n");
+    fake.s.queueRuns.push({ id: 951, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR}-${"f".repeat(40)}`, head_sha: sha, created_at: at, conclusion: "failure" });
+    fake.s.runs[sha] = [
+      { id: 620, name: "test (windows-latest)", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 801 }, started_at: at, completed_at: ago(8 * MIN) },
+      { id: 621, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 801 }, started_at: ago(7 * MIN), completed_at: ago(7 * MIN) },
+    ];
+    fake.s.jobs[620] = { id: 620, run_id: 951, name: "test (windows-latest)", status: "completed", conclusion: "failure", steps: [{ name: "Run npm test", conclusion: "failure", number: 4 }], runner_id: 7, runner_name: "w" };
+    fake.s.jobs[621] = { id: 621, run_id: 951, name: "Quality", status: "completed", conclusion: "failure", steps: [{ name: "Run test \"$RESULT\" = success", conclusion: "failure", number: 2 }], runner_id: 8, runner_name: "l" };
+    fake.s.logs[620] = winLog;
+    fake.s.logs[621] = 'test "$RESULT" = success\n##[error]Process completed with exit code 1.';
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    // Even a decider that calls every job a flake does not decide it: the failure names a test the PR changed.
+    const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+    assert.equal(step.state, "fixing", "the PR's own change: one fix pass, no re-enqueue");
+    assert.equal(step.red.sha, sha);
+    const win = step.red.failures.find((f) => f.command === "CI job test (windows-latest)");
+    assert.ok(win, step.red.failures.map((f) => f.command).join(", "));
+    assert.ok(win.full.includes("AssertionError [ERR_ASSERTION]: null == 'SIGKILL'"), "the failed job's whole log");
+    assert.match(step.red.lead, /test \(windows-latest\)[^\n]*\n?[\s\S]*null == 'SIGKILL'/, "the job named, with its first failing test");
+    assert.match(step.line, /test \(windows-latest\)/);
+  });
+});
+
+// ------------------------------------------------------------------ the queue's fix passes: bounded, recorded once done (#312 review)
+
+/** Three different failures of the PR's own on three drops, each with its own run and log. */
+const failureNo = (i) => testLog.replace("adds", ["alpha", "beta", "gamma", "delta"][i]).replace("2 == 3", `${i} is not ${i + 1}`);
+
+test("queue red: the queue's fix passes are bounded per re-entry, whatever new failure each drop shows; a re-entry starts the count over", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const states = [];
+    for (let i = 0; i < 3; i++) {
+      queueRed(fake, { sha: String(i + 1).repeat(40), id: 630 + i, at: ago((40 - 10 * i) * MIN), log: failureNo(i) });
+      fake.s.removals.push(queueDrop(ago((38 - 10 * i) * MIN)));
+      assert.equal(await merge({}), "queue-red");
+      states.push((await reviewReads(fake, own)).state);
+    }
+    assert.equal(QUEUE_FIX_PASSES, 2);
+    assert.deepEqual(states, ["fixing", "fixing", "blocked"], "each failure new, still no third fix pass");
+    assert.match(records(fake).at(-1).state, /^blocked$/);
+    // A person re-applies the Objective label: the fixes before it are not this re-entry's.
+    fake.s.timeline[ISSUE] = [{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(5 * MIN) }];
+    queueRed(fake, { sha: "4".repeat(40), id: 633, at: ago(4 * MIN), log: failureNo(3) });
+    fake.s.removals.push(queueDrop(ago(3 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(fake, own)).state, "fixing");
+  });
+});
+
+test("queue red: with triage off, a red is the PR's own only when its failure names what the PR changed; else it is enqueued again as any drop", async () => {
+  for (const [files, want] of [[[{ filename: "src/other.js", patch: "+x" }], "requeued"], [[{ filename: "test/x.test.mjs", patch: '+test("adds", () => {});' }], "fixing"]]) {
+    const fake = fakeGitHub();
+    await withGitHub(fake, async () => {
+      fake.s.prFiles = files;
+      queueRed(fake, { id: 640 + files.length + want.length });
+      fake.s.removals = [queueDrop(ago(5 * MIN))];
+      assert.equal(await merge({}), "queue-red");
+      const step = await reviewReads(fake);
+      assert.equal(step.state, want, files[0].filename);
+      if (want === "requeued") assert.equal(records(fake)[0].kind, "unclassified");
+    });
+  }
+});
+
+test("queue red: the fix pass is recorded only once it committed; a stage that ends first leaves the drop for the next, and two that commit nothing Block", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    queueRed(fake, { id: 650, at: ago(20 * MIN) });
+    fake.s.removals = [queueDrop(ago(18 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(fake, own, { commit: false })).state, "fixing");
+    assert.deepEqual(records(fake).map((r) => [r.state, r.tries]), [["handed", 1]], "still pending: no fix counted");
+    // The merge pass hands it again; the next stage takes it up and runs the fix pass once more.
+    assert.equal(await merge({}), "queue-red");
+    assert.equal(fake.s.enqueued.length, 0);
+    assert.equal((await reviewReads(fake, own, { commit: false })).state, "fixing");
+    const third = await reviewReads(fake, own, { commit: false });
+    assert.equal(third.state, "blocked");
+    assert.match(third.reason, /after Factory's 2 fix passes that committed nothing for it/);
+  });
+});
+
+test("queue red: unreadable job logs on the queue's commit are no failure of the PR's own; a record of an older head is superseded", async () => {
+  const fake = fakeGitHub();
+  const inner = fake.fetch;
+  fake.fetch = async (url, init = {}) => (/\/actions\/jobs\/66\d\/logs$/.test(String(url)) ? new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403, headers: { "content-type": "application/json" } }) : inner(url, init));
+  await withGitHub(fake, async () => {
+    queueRed(fake, { id: 660 });
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, own);
+    assert.equal(step.state, "requeued");
+    assert.equal(records(fake)[0].kind, "none");
+  });
+  const moved = fakeGitHub();
+  await withGitHub(moved, async () => {
+    queueRed(moved, { id: 661 });
+    moved.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal(records(moved)[0].head, HEAD);
+    const step = await reviewReads(moved, own, { head: "e".repeat(40) });
+    assert.equal(step.state, "superseded");
+    assert.deepEqual(records(moved).map((r) => r.state), ["superseded"]);
+  });
+});
+
+test("queue drops: the Block's cause and advice follow what the review stage read the red drops as", async () => {
+  const cases = { infra: ["outage", /GitHub's side \(infra\); rerun the queue's jobs/], "not-started": ["outage", /GitHub's side \(not-started\)/], base: ["work", /The default branch fails the same way: fix it there/], flaky: ["work", /read the failure as a flake each time/], unclassified: ["work", /Fix that on the branch/] };
+  for (const [kind, [cause, said]] of Object.entries(cases)) {
+    const fake = fakeGitHub();
+    await withGitHub(fake, async () => {
+      queueRed(fake, { id: 670, at: ago(30 * MIN) });
+      queueRed(fake, { sha: "d".repeat(40), id: 671, at: ago(8 * MIN) });
+      fake.s.removals = [queueDrop(ago(28 * MIN)), queueDrop(ago(6 * MIN))];
+      readByReview(fake, kind);
+      const report = {};
+      assert.equal(await merge(report), "dropped", kind);
+      assert.equal(mergeBlockCause("dropped", report), cause, kind);
+      assert.match(mergeBlockReason("dropped", report), said, kind);
+    });
+  }
+  assert.equal(queueDropBlock({ drops: 2, codes: ["failed_checks"] }), null, "nothing recorded or read: the queue's own words");
+});
+
+test("queue red: a record another trusted writer wrote is read (the merge pass and the review can run under different logins)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    queueRed(fake, { id: 680 });
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    for (const c of fake.s.comments[ISSUE]) if (c.body.includes("queue-red")) Object.assign(c, { user: { login: "kirk" }, author_association: "MEMBER" });
+    assert.equal(records(fake).length, 1, "a writer's record counts");
+    assert.equal((await reviewReads(fake, own)).state, "fixing");
+    for (const c of fake.s.comments[ISSUE]) if (c.body.includes("queue-red")) Object.assign(c, { user: { login: "stranger" }, author_association: "NONE" });
+    assert.equal(records(fake).length, 0, "a stranger's pasted record does not");
+  });
+});
+
+test("queue red: a drop is read from its own merge-group run, never an earlier drop's; a run still going counts, and one not listed yet is read later", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    // Drop 1: its run failed on A, and the fix pass committed.
+    queueRed(fake, { sha: "1".repeat(40), id: 690, at: ago(40 * MIN) });
+    fake.s.removals = [queueDrop(ago(38 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(fake, own)).state, "fixing");
+    // Drop 2: the queue dropped the PR at its first failed job while the run goes on, and the finished-failed listing
+    // has not got it yet. Before, the stage read drop 1's run (A, already fixed) and Blocked quoting the old failure.
+    fake.s.removals.push(queueDrop(ago(10 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    const notYet = await reviewReads(fake, own);
+    assert.equal(notYet.state, "pending", "no run of this drop yet: nothing decided");
+    assert.ok(Date.parse(records(fake).at(-1).after) >= Date.parse(fake.s.removals[0].createdAt), "runs before the previous drop are not this drop's");
+    // Its run appears, still in progress, with a new failure B: the PR's own, its own fix pass.
+    const sha = "2".repeat(40);
+    queueRed(fake, { sha, id: 691, at: ago(12 * MIN), log: failureNo(1) });
+    fake.s.queueRuns.at(-1).status = "in_progress";
+    fake.s.queueRuns.at(-1).conclusion = null;
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, own);
+    assert.equal(step.state, "fixing");
+    assert.equal(step.red.sha, sha);
+  });
 });

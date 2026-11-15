@@ -9,6 +9,7 @@ import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
+import { fakeProc } from "./fixtures/machine.mjs";
 import { accountHolds } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
@@ -109,6 +110,8 @@ async function serveAgainst({ view, onList = () => {}, onIssue, extra, firstStag
     notice: null,
     second: null,
     wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2" },
+    // A machine of its own (lib/machine.mjs): this one's slots and load are never read or held.
+    machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     opts: { token: "t" },
     children: new Set(),
     baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "2" }),

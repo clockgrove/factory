@@ -6,7 +6,7 @@
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
@@ -25,7 +25,8 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { accountEnv, accountToken, defaultAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1308,6 +1309,60 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
+ * Whether a declared account's login works, by its CLI's own login status (exit code only; its output, which can name the
+ * person, is never read): `claude auth status` and `codex login status` on the account's folder. True, false, or null
+ * when the CLI is not on PATH or did not answer.
+ */
+export function cliLoggedIn(account, env = process.env) {
+  const bin = account.harness;
+  if (!whichSync(bin)) return null;
+  const args = bin === "claude" ? ["auth", "status"] : ["login", "status"];
+  const r = spawnSync(bin, args, { env: accountEnv(env, account), stdio: "ignore", timeout: 30_000 });
+  return r.status === 0 ? true : r.status === 1 ? false : null;
+}
+
+/**
+ * Whether a declared Copilot account's token is one GitHub takes (GET /user: 200), with no write anywhere; true, false,
+ * or null when GitHub did not answer. The token never leaves this process but to GitHub.
+ */
+export const copilotTokenWorks = (token) => rest("user", { token }).then(() => true, (e) => (e.status === 401 || e.status === 403 ? false : null));
+
+/**
+ * Local mode: each account this machine declares (lib/accounts.mjs, ~/.config/factory/accounts.json), named by its name
+ * alone, never a path. A declaration serve would refuse is a FAIL per account, with why. Else, per account: its folder
+ * owner-only (a WARN), its login hidden from every sandbox (credentialPaths covers its login files) and in no home another
+ * account's harness may write (loginsExposedBy), and its login working (`loggedIn`, `tokenWorks`: seams for the tests).
+ * Nothing declared: one PASS saying each harness runs on its one login.
+ */
+export async function localAccountChecks({ env = process.env, local, home = homedir(), checkout = null, loggedIn = cliLoggedIn, tokenWorks = copilotTokenWorks }) {
+  if (!local || env.GITHUB_ACTIONS) return [];
+  const loaded = loadAccounts({ home, env, roots: sandboxRoots(checkout, home) });
+  const fix = "fix that entry in ~/.config/factory/accounts.json (docs/LOCAL.md, Accounts); serve refuses to start and each stage Blocks until then";
+  if (!loaded.ok) return loaded.problems.map((p) => FAIL(`account ${p.account}`, p.why, fix));
+  if (!loaded.declared) return [PASS("accounts", "none declared: each harness runs on its one login (claude, codex, copilot)")];
+  const all = Object.values(loaded.accounts).flat();
+  const denied = credentialPaths(home, env);
+  const covered = (p) => denied.some((d) => p === d || p.startsWith(`${d}/`));
+  const logins = harnessLogins(home, env);
+  const out = [];
+  for (const a of all) {
+    const name = `account ${a.name}`;
+    const rows = [];
+    if (a.home && statSync(a.home).mode & 0o077) rows.push(WARN(name, `its ${a.harness === "claude" ? "Claude Code" : "Codex"} folder is open to the group or others`, "chmod 700 that folder"));
+    const login = a.home ? logins.find((l) => l.harness === a.harness && l.dir === a.home) : null;
+    const files = a.tokenFile ? [a.tokenFile] : (login?.files ?? [a.home]);
+    if (!files.every(covered)) rows.push(FAIL(name, "its login is not hidden from every sandbox", "report it: every declared login is on the sandboxes' deny list"));
+    const exposer = all.find((b) => b !== a && b.home && loginsExposedBy(b.harness, accountEnv(env, b, home), home).some((x) => x.path === a.home));
+    if (exposer) rows.push(FAIL(name, `its folder is inside a home account ${exposer.name}'s harness may write, so that harness's sandbox can reach it`, fix));
+    const works = a.tokenFile ? await tokenWorks(accountToken(a)) : loggedIn(a, env);
+    if (works === false) rows.push(FAIL(name, a.tokenFile ? "GitHub refuses its token" : `its ${a.harness} login does not work (not logged in)`, a.tokenFile ? "save a new fine-grained token with the Copilot Requests permission to its file" : `log in on that folder: ${a.harness === "claude" ? "CLAUDE_CONFIG_DIR=<its folder> claude" : "CODEX_HOME=<its folder> codex login"}`));
+    else if (works === null) rows.push(WARN(name, a.tokenFile ? "GitHub did not answer the token check" : `its login was not checked (${a.harness} is not on PATH or did not answer)`, "run doctor --local again"));
+    out.push(...(rows.length ? rows : [PASS(name, `${a.harness}${loaded.accounts[a.harness][0] === a ? ", its default" : ""}: on its own path, hidden from every sandbox, login works`)]));
+  }
+  return out;
+}
+
+/**
  * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
  * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
  * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
@@ -1373,7 +1428,10 @@ async function main() {
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
-  results.push(...localLoginChecks({ inputs, env: process.env, local }));
+  // The login a stage of this harness runs on: its default declared account's, else this shell's (lib/accounts.mjs).
+  const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(checkout) }) : null;
+  results.push(...localLoginChecks({ inputs, env: declared?.ok ? accountEnv(process.env, defaultAccount(declared, inputs.harness)) : process.env, local }));
+  results.push(...(await localAccountChecks({ env: process.env, local, checkout })));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));

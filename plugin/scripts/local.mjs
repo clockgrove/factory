@@ -50,6 +50,7 @@ import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { accountEnv, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -266,6 +267,8 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/** The Copilot token a stage on `account` runs on: a declared account's file alone, else copilotToken(). */
+const copilotTokenOf = (account) => (account?.declared ? accountToken(account) : copilotToken());
 /**
  * A stage's output, relayed line by line to its log file and this terminal, with every held secret (inputs.mjs
  * holdSecrets: the worker secrets' values) redacted. Whole lines only: a value split across two chunks is redacted
@@ -469,13 +472,19 @@ export class Local {
     this.wf = wf.kept;
     this.harness = (process.env.FACTORY_HARNESS || this.wf.FACTORY_HARNESS || "claude").toLowerCase();
     this.token = localToken(this.repoFull);
-    this.copilotToken = this.harness === "copilot" ? copilotToken() : "";
-    const problems = preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf });
+    // This machine's declared accounts (lib/accounts.mjs): the loop's harness starts on its default one, checked here as
+    // every stage checks them again; a declaration that cannot be used starts nothing, naming the accounts only.
+    const accounts = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
+    this.startAccount = accounts.ok ? defaultAccount(accounts, this.harness) : implicitAccount(this.harness);
+    this.copilotToken = this.harness === "copilot" ? copilotTokenOf(this.startAccount) : "";
+    const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/factory/accounts.json): ${p.why}`);
+    problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf }));
     // The Factory App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
     // notice token over its IPC channel (stage()), and nothing else, env or file, carries the key or the token.
-    const { app, problem } = localApp(process.env, homedir(), this.harness);
+    const startEnv = accountEnv(process.env, this.startAccount);
+    const { app, problem } = localApp(startEnv, homedir(), this.harness);
     if (problem) problems.push(problem);
-    const gateway = gatewayKeyProblem(process.env, homedir(), this.harness);
+    const gateway = gatewayKeyProblem(startEnv, homedir(), this.harness);
     if (gateway) problems.push(gateway);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
@@ -500,7 +509,7 @@ export class Local {
     }
     // Before any run: a repository that uses Postgres needs FACTORY_LOCAL_DB=1 here, or its database commands fail (#2601).
     for (const c of localDatabaseChecks({ checkout: this.dev, env: process.env, wf: this.wf })) log(`${c.status} ${c.name}: ${c.detail}${c.status !== "PASS" ? ` — fix: ${c.fix}` : ""}`);
-    this.codexSelfTest();
+    this.codexSelfTest(this.harness, accountEnv(process.env, this.startAccount));
     await ensureLabel(this.repo, LOCAL_LABEL, "0e8a16", "Factory: run this Objective in a developer's local loop, not on Actions", this.opts).catch((e) => log(`label ${LOCAL_LABEL}: ${e.message.slice(0, 120)}`));
     return this;
   }
@@ -509,11 +518,11 @@ export class Local {
    * Codex reports success even when its sandbox cannot start (the command just never runs), so a local Codex loop
    * first runs one command under the same profile, which must run and must fail to write the home directory.
    */
-  codexSelfTest(harness = this.harness) {
+  codexSelfTest(harness = this.harness, env = process.env) {
     if (harness !== "codex") return;
     const probe = 'f="$HOME/.factory-sandbox-check"; if touch "$f" 2>/dev/null; then rm -f "$f"; exit 9; fi';
     try {
-      execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains(), clone: this.dev }), "--", "sh", "-c", probe], { cwd: this.dev, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+      execFileSync("codex", ["sandbox", ...codexLocalConfig({ domains: this.domains(), clone: this.dev, env }), "--", "sh", "-c", probe], { cwd: this.dev, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     } catch (e) {
       const why = e.status === 9 ? "a command in it could write the home directory" : `it does not run here (${String(e.stderr || e.message).trim().slice(0, 200)})`;
       throw new Error(`local mode cannot start: Codex's sandbox is not confining: ${why}`);
@@ -523,7 +532,8 @@ export class Local {
   /**
    * The harness an Objective's stage runs on here (objective-trust.mjs objectiveInputs): its harness and model labels
    * over this loop's settings, read before the stage's sandbox is set up for it. Another harness than the loop's is
-   * checked on this machine as the loop's own was at its start (harnessReady). {ok, harness} or {ok: false, reason, fix}.
+   * checked on this machine as the loop's own was at its start (harnessReady), on the account the stage runs on
+   * (accountFor). {ok, harness, account} or {ok: false, reason, fix}.
    */
   async harnessFor(issue) {
     const env = this.baseEnv();
@@ -532,29 +542,53 @@ export class Local {
     const chosen = await objectiveInputs({ repo: this.repo, issue, args, env, opts: this.opts });
     if (!chosen.ok) return chosen;
     const harness = chosen.inputs.harness;
-    const problems = this.harnessReady(harness);
-    if (!problems.length) return { ok: true, harness };
+    let account;
+    try {
+      account = this.accountFor(harness);
+    } catch (e) {
+      log(`#${issue}: refusing to run: ${e.message}`);
+      return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/factory/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `factory:objective`." };
+    }
+    const problems = this.harnessReady(harness, account);
+    if (!problems.length) return { ok: true, harness, account };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
     return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
   }
 
-  /** Why `harness` cannot run on this machine (local.mjs harnessProblems, the App key, the gateway key, Codex's sandbox); a yes is kept. */
-  harnessReady(harness) {
-    this.ready ??= new Set([this.harness]);
-    if (this.ready.has(harness)) return [];
-    const problems = harnessProblems(harness, harness === "copilot" ? copilotToken() : "");
-    const app = localApp(process.env, homedir(), harness).problem;
-    const gateway = gatewayKeyProblem(process.env, homedir(), harness);
+  /**
+   * The account a `harness` stage runs on (lib/accounts.mjs): its default, from this machine's declaration read and
+   * checked afresh. Throws (code `account`, `reason` the Blocked reason naming the accounts alone) when any declared
+   * account cannot be used; the why, which names no path either, goes to this machine's log.
+   */
+  accountFor(harness) {
+    const loaded = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
+    if (loaded.ok) return defaultAccount(loaded, harness);
+    const why = loaded.problems.map((p) => `account ${p.account}: ${p.why}`).join("; ");
+    throw Object.assign(new Error(`this machine's account declaration cannot be used: ${why}`), { code: "account", reason: accountReason(loaded.problems) });
+  }
+
+  /**
+   * Why `harness` cannot run on this machine on `account` (local.mjs harnessProblems, the App key, the gateway key,
+   * Codex's sandbox), each checked with that account's login; a yes is kept per account.
+   */
+  harnessReady(harness, account = implicitAccount(harness)) {
+    const key = (a) => `${a.harness}:${a.name}:${a.home || a.tokenFile || ""}`;
+    this.ready ??= new Set([key(this.startAccount ?? implicitAccount(this.harness))]);
+    if (this.ready.has(key(account))) return [];
+    const env = accountEnv(process.env, account);
+    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "");
+    const app = localApp(env, homedir(), harness).problem;
+    const gateway = gatewayKeyProblem(env, homedir(), harness);
     for (const p of [app, gateway]) if (p) problems.push(p);
     if (!problems.length && harness === "codex") {
       try {
-        this.codexSelfTest(harness);
+        this.codexSelfTest(harness, env);
       } catch (e) {
         problems.push(e.message.replace(/^local mode cannot start: /, ""));
       }
     }
-    if (!problems.length) this.ready.add(harness);
+    if (!problems.length) this.ready.add(key(account));
     return problems;
   }
 
@@ -622,8 +656,13 @@ export class Local {
   /**
    * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
    * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
+   * `account`: the one it runs on (harnessFor), else its harness's default (accountFor, which throws code `account`).
    */
-  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = this.harness) {
+  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = this.harness, account = null) {
+    account ??= this.accountFor(harness);
+    // This machine's env with the account's login set explicitly (lib/accounts.mjs accountEnv): every check and setting
+    // below is made for that login, and serve's own environment never picks it.
+    const host = accountEnv(process.env, account);
     const ws = this.ws(issue);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
@@ -657,9 +696,9 @@ export class Local {
     // Copilot stage runs on a home Factory makes, which holds no login.
     // A login file of the stage's own that really is another login's (a link planted in its folder) would be read by its
     // harness: the stage refuses, naming the path in this machine's log only.
-    const linked = harness === "copilot" ? [] : ownLoginProblems(harness, process.env);
+    const linked = harness === "copilot" ? [] : ownLoginProblems(harness, host);
     if (linked.length) throw Object.assign(new Error(`the ${harness} login this stage runs on leads into another login: ${linked.map((l) => `${l.path} -> ${l.real}`).join(", ")}`), { code: "login-link" });
-    const credentials = credentialPaths(homedir(), process.env, { own: harness === "copilot" ? null : stageLogin(harness, process.env) });
+    const credentials = credentialPaths(homedir(), host, { own: harness === "copilot" ? null : stageLogin(harness, host) });
     writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, credentials, readOnly: [usageDir], ripgrep }), null, 2));
     // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
     const srtGitFile = join(sandboxDir, `srt-git-${basename(usageDir)}.json`);
@@ -680,7 +719,7 @@ export class Local {
       copyFileSync(lfs, join(binDir, "git-lfs"));
       chmodSync(join(binDir, "git-lfs"), 0o755);
     }
-    const base = this.baseEnv();
+    const base = accountEnv(this.baseEnv(), account);
     // The stage runs on its own harness's login folder alone (lib/local.mjs stageLogin): the other harness's variable stays out.
     for (const [h, k] of [["claude", "CLAUDE_CONFIG_DIR"], ["codex", "CODEX_HOME"]]) if (h !== harness) delete base[k];
     // A stage that relays the gateway key (lib/worker-relay.mjs): its socket's directory, made here so the outer sandbox
@@ -705,14 +744,14 @@ export class Local {
     // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
     const tools = localTools({ harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
     const lead = tools.lead;
-    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness);
+    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness, account);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
     const outerFile = join(sandboxDir, `srt-harness-${basename(usageDir)}.json`);
     // Whether the harness runs in it on this host: Claude Code on Linux, Codex where its own sandbox starts inside it (probed
     // once per host and version, lib/local.mjs outerProbe), Copilot where its sandbox's network starts inside it (probed the
     // same way). Said once when it does not.
-    const outer = outerProbe(harness, { domains: this.domains(), env: { ...process.env, ...extra } });
+    const outer = outerProbe(harness, { domains: this.domains(), env: { ...host, ...extra } });
     const outerOn = outer.on;
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
@@ -727,13 +766,13 @@ export class Local {
     }
     if (outerOn) {
       mkdirSync(join(usageDir, "harness"), { recursive: true });
-      ensureHarnessHomes(harness, { ...process.env, ...extra });
+      ensureHarnessHomes(harness, { ...host, ...extra });
       // Claude Code's projects are read-only in it; the clone's own project links to a directory of the Objective's.
-      const projectDir = harness === "claude" ? claudeProjectLink(clone, join(ws, "claude-project"), { ...process.env, ...extra }) : null;
+      const projectDir = harness === "claude" ? claudeProjectLink(clone, join(ws, "claude-project"), { ...host, ...extra }) : null;
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, credentials, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...host, ...extra }, credentials, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -806,12 +845,14 @@ export class Local {
       FACTORY_LFS_PIN: "1",
       // The harness this sandbox is set up for: a stage whose labels name another by the time it runs Blocks (choiceGate).
       FACTORY_STAGE_HARNESS: harness,
+      // The account it runs on, by name only: its result.json, progress comment and the scorecard record it.
+      FACTORY_STAGE_ACCOUNT: account.name,
       ...extra,
     };
   }
 
-  /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
-  harnessEnv(issue, addDirs, clone, usageDir, tools = null, harness = this.harness) {
+  /** What the harness's own sandbox needs beyond the shared env: Copilot its home and its account's token. */
+  harnessEnv(issue, addDirs, clone, usageDir, tools = null, harness = this.harness, account = null) {
     if (harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
@@ -829,7 +870,9 @@ export class Local {
     }
     // On macOS Copilot's sandbox cannot read ~/.gitconfig and git then refuses to run; the clone's own config carries
     // Factory's identity and credential helper, so git skips the global file (which may hold credentials anyway).
-    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken || copilotToken(), GIT_CONFIG_GLOBAL: "/dev/null" };
+    // A declared account's token from its own file; none from serve's environment then.
+    const token = account?.declared ? accountToken(account) : this.copilotToken || copilotToken();
+    return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: token, GIT_CONFIG_GLOBAL: "/dev/null" };
   }
 
   /**
@@ -898,7 +941,7 @@ export class Local {
     };
     let env;
     try {
-      env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness);
+      env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness, runs.account ?? null);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
       const locks = staleGitLocks(clone);
@@ -907,7 +950,7 @@ export class Local {
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();
-      const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason, "login-link": loginLinkReason, "home-link": homeLinkReason }[e.code];
+      const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason, "login-link": loginLinkReason, "home-link": homeLinkReason, account: e.reason }[e.code];
       if (!reason) throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
       await this.block(issue, name, reason);

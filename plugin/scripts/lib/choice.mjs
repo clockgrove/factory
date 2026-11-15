@@ -131,5 +131,10 @@ export function routeProblem(prepared, harness) {
   return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage is prepared for the harness the labels name." };
 }
 
-/** What a stage records of the harness and models it ran (the usage record's `choice`, the progress comment's harness line). */
-export const ranWith = (inputs, labels = []) => ({ harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels) });
+/**
+ * What a stage records of the harness and models it ran (the usage record's `choice`, the progress comment's harness
+ * line), and in local mode the account it ran on (`account`: FACTORY_STAGE_ACCOUNT, accounts.mjs), by name only.
+ */
+export const ranWith = (inputs, labels = [], account = null) => ({ harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), ...(stageAccountName(account) ? { account } : {}) });
+/** An account name as accounts.mjs allows one (a harness's own name included), else null: nothing else is recorded. */
+export const stageAccountName = (name) => (typeof name === "string" && name.length <= LABEL_MAX - "factory:account:".length && /^[a-z0-9][a-z0-9-]*$/.test(name) ? name : null);

@@ -595,6 +595,8 @@ function factoryStages(collected, { app = null } = {}) {
 }
 
 const HARNESSES = new Set(["claude", "codex", "copilot"]);
+/** An account name as plugin accounts.mjs allows one. */
+const ACCOUNT = /^[a-z0-9][a-z0-9-]{0,33}$/;
 /**
  * The harness one stage ran, from its progress comment's structure: the `<!-- factory:harness {...} -->` line (plugin
  * logic.mjs harnessMarker, written from the stage's start), else the fixed line the worker writes as it starts the
@@ -608,7 +610,9 @@ export function stageHarnessOf(body) {
       // The line's `models` and `labels` (plugin logic.mjs harnessMarker): the Objective's three models and the labels that chose them.
       const str = (x) => (typeof x === "string" && x ? x : null);
       const ran = v?.models && typeof v.models === "object" ? { ran: { worker: str(v.models.worker), subagent: str(v.models.subagent), reviewer: str(v.models.reviewer), labels: Array.isArray(v.labels) ? v.labels.filter((l) => typeof l === "string") : [] } } : {};
-      if (HARNESSES.has(v?.harness)) return { harness: v.harness, model: str(v.model), ...ran };
+      // The local account the stage ran on (plugin accounts.mjs), by name.
+      const account = typeof v?.account === "string" && ACCOUNT.test(v.account) ? { account: v.account } : {};
+      if (HARNESSES.has(v?.harness)) return { harness: v.harness, model: str(v.model), ...ran, ...account };
     } catch {
       // a malformed line: read the progress line instead
     }
@@ -631,12 +635,19 @@ export function objectiveModels(usage, cost) {
   return { worker: cost?.model ?? work?.worker ?? null, subagent: work?.subagent ?? review?.subagent ?? null, reviewer: review?.reviewer ?? work?.reviewer ?? null, labels: [...new Set([...(work?.labels || []), ...(review?.labels || [])])].sort() };
 }
 
-/** The scorecard's Harness cell: the harness, the worker model, the sub-agent and reviewer models, and the labels that chose them. */
+/**
+ * The local accounts an Objective's stages ran on (plugin accounts.mjs), by name, in the order first seen: each usage
+ * record's `account` (a stage's result.json, or its progress comment's harness line). Empty where none names one.
+ */
+export const objectiveAccounts = (usage) => [...new Set((usage || []).map((r) => r?.account).filter((a) => typeof a === "string" && ACCOUNT.test(a)))];
+
+/** The scorecard's Harness cell: the harness, the worker model, the sub-agent and reviewer models, the local accounts, and the labels that chose them. */
 export function harnessCell(r) {
   const m = r.models || {};
   const parts = [`${r.harness ?? "?"}${(m.worker ?? r.model) ? ` ${m.worker ?? r.model}` : ""}`];
   if (m.subagent) parts.push(`sub-agents ${m.subagent}`);
   if (m.reviewer) parts.push(`reviewer ${m.reviewer}`);
+  if (r.accounts?.length) parts.push(`account${r.accounts.length > 1 ? "s" : ""} ${r.accounts.join(", ")}`);
   return `${parts.join("; ")}${m.labels?.length ? ` (by label: ${m.labels.join(", ")})` : ""}`;
 }
 
@@ -691,7 +702,7 @@ export function spendRecords(collected, { app = null } = {}) {
     const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!out.some((r) => r.usd !== null || r.vendor)) return [];
@@ -882,6 +893,7 @@ export function scoreObjective(collected, opts = {}) {
     harnessMixed: ran.mixed,
     model: cost.model,
     models: objectiveModels(usage, cost),
+    accounts: objectiveAccounts(usage),
     exit,
     parked,
     pr: (merged ?? open ?? pulls[0])?.number ?? null,

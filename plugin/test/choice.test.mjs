@@ -389,7 +389,7 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
       globalThis.fetch = real;
     }
   };
-  assert.deepEqual(await run("dev"), { ok: true, harness: "claude" });
+  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", account: { name: "claude", harness: "claude", declared: false } }, "nothing declared here: the account named after the harness");
   const refused = await run("reader");
   assert.equal(refused.ok, false);
   assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);

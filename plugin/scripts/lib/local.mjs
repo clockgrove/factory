@@ -13,6 +13,7 @@ import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor
 import { isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
 import { SKIP_SMUDGE_ENV } from "./lfs.mjs";
+import { declaredLogins } from "./accounts.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -700,7 +701,8 @@ export const realish = (p) => {
  * That is enough for every login a stage can run on: a stage runs on the home directory and the CLAUDE_CONFIG_DIR or
  * CODEX_HOME of Factory's own environment (stageLogin), and Copilot's home is Factory's. A login kept elsewhere under
  * another name and named in no variable is out of its reach, and so is one the system keeps outside the disk (Claude
- * Code's on macOS is in the Keychain): `declared` ([{harness, dir}], the accounts #259 declares) adds folders.
+ * Code's on macOS is in the Keychain). The accounts this machine declares (accounts.mjs declaredLogins) are added, and
+ * `declared` ([{harness, dir}]) adds more folders.
  */
 export function harnessLogins(home = homedir(), env = process.env, { declared = [] } = {}) {
   const byDir = new Map();
@@ -738,7 +740,8 @@ export function harnessLogins(home = homedir(), env = process.env, { declared = 
   add("copilot", join(home, ".config", "github-copilot"), whole, none, true);
   for (const d of folders(".copilot-")) add("copilot", d, whole, none);
   if (env.COPILOT_HOME) add("copilot", env.COPILOT_HOME, whole, none);
-  for (const { harness, dir } of declared) if (dir && ![...byDir.values()].some((l) => l.harness === harness && sameDir(l.dir, dir))) add(harness, dir, harness === "claude" ? claudeFiles : whole, harness === "claude" ? claudeBearing : harness === "codex" ? codexBearing : none);
+  // The accounts this machine declares (accounts.mjs), and those the caller adds.
+  for (const { harness, dir } of [...declaredLogins(home), ...declared]) if (dir && ![...byDir.values()].some((l) => l.harness === harness && sameDir(l.dir, dir))) add(harness, dir, harness === "claude" ? claudeFiles : whole, harness === "claude" ? claudeBearing : harness === "codex" ? codexBearing : none);
   // A Codex login denied file by file is still its `files` (the home) where nothing of it is shared: see credentialPaths.
   for (const l of byDir.values()) if (l.harness === "codex") l.bearing = l.bearing.filter((p) => p !== l.dir);
   return [...byDir.values()];

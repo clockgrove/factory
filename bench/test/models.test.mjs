@@ -41,3 +41,15 @@ test("a local Objective's row reads what ran from its stages' harness lines", ()
   assert.deepEqual(row.models, { worker: "gpt-6.1-terra", subagent: "gpt-6-luna", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"] });
   assert.match(markdownTable([row]), /\| codex gpt-6\.1-terra; sub-agents gpt-6-luna; reviewer gpt-6\.1-sol \(by label: factory:harness:codex, factory:model:gpt-6\.1-terra\) \|/);
 });
+
+test("#263: the row's accounts come from the usage artifacts and the local stages' harness lines, once each; the dollars from the artifacts", () => {
+  // Work on Actions (its usage artifact, account-less, or on an account), review run locally on account `alpha`.
+  const c = localMerge(62);
+  c.issueComments[2].body += `\n${harnessMarker("codex", "gpt-6.1-sol", { ...ran("gpt-6.1-terra", null, "gpt-6.1-sol"), harness: "codex", account: "alpha" })}`;
+  c.usage = [{ artifact: "factory-usage-62", harness: "codex", model: "gpt-6.1-terra", usd: 2 }];
+  const row = score(c);
+  assert.deepEqual(row.accounts, ["alpha"], "the local review's account");
+  assert.equal(row.cost.usd, score({ ...localMerge(62), usage: c.usage }).cost.usd, "the progress lines' dollars are not added to the artifacts'");
+  c.usage = [{ ...c.usage[0], account: "alpha" }, { ...c.usage[0], account: "beta" }];
+  assert.deepEqual(score(c).accounts, ["alpha", "beta"], "deduplicated");
+});

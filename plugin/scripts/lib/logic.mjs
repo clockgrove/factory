@@ -2302,11 +2302,11 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
 /**
  * The progress comment's harness line: the stage's harness and its own model (the worker's, or the reviewer's), and with
  * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default), the harness, model and
- * host labels that chose them (`labels`, none on the repository's defaults) and, when its host labels open any, those
- * hosts (`hosts`).
+ * host labels that chose them (`labels`, none on the repository's defaults), when its host labels open any, those
+ * hosts (`hosts`), and in local mode the account's name (`account`).
  */
 export const harnessMarker = (harness, model = "", ran = null) =>
-  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}) })} -->`;
+  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}), ...(ran?.account ? { account: ran.account } : {}) })} -->`;
 const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
 /** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
 export function spendOf(body) {

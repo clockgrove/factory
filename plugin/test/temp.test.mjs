@@ -1,10 +1,10 @@
 // Temp directories Factory makes (lib/fsafe.mjs): each is removed when its holder is done, and a killed holder's
 // leftover is cleared by the next sweep, never one a live process still holds.
-import "./temp.mjs";
+import { DEVELOPER_ENV } from "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { dropOwned, ownedTemp, pidGone, removeTree, sweepOwned } from "../scripts/lib/fsafe.mjs";
@@ -17,6 +17,14 @@ const age = (p, ms) => utimesSync(p, new Date(Date.now() - ms), new Date(Date.no
 test("the test files run in a temp root of their own, held by their process", () => {
   assert.match(tmpdir(), /\/factory-test-[A-Za-z0-9]{6}$/);
   assert.equal(readFileSync(`${tmpdir()}.pid`, "utf8"), `${process.pid}\n`);
+});
+
+test("#305: the test files run on a home of their own in that root, with no harness login or credential of the shell", () => {
+  assert.equal(homedir(), realpathSync(join(tmpdir(), "home")), "os.homedir(), and so ~/.config/factory, is the fake home's");
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "FACTORY_LOCAL_APP_KEY", "XDG_CONFIG_HOME"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
+  // What the code under test starts sees the same.
+  const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify([require('os').homedir(), process.env.CLAUDE_CONFIG_DIR ?? null]))"], { encoding: "utf8" });
+  assert.deepEqual(JSON.parse(child.stdout), [homedir(), null]);
 });
 
 test("ownedTemp records its holder beside the directory; dropOwned removes both", () => {

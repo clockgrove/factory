@@ -2,6 +2,7 @@ import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -89,7 +90,9 @@ function leaderless(tag = null) {
   return { member, leader };
 }
 const deadPid = () => spawnSync("true").pid;
-const tags = { a: "a".repeat(24), b: "b".repeat(24), c: "c".repeat(24), d: "d".repeat(24), e: "e".repeat(24), f: "f".repeat(24) };
+// Fresh tags for each run of this file: a reap kills every process of this user that carries its tag, so a fixed tag
+// would let a copy of this file running at the same time (another checkout's suite) reap, or be reaped by, this one.
+const tags = Object.fromEntries(["a", "b", "c", "d", "e", "f"].map((k) => [k, randomBytes(12).toString("hex")]));
 
 test("a start reaps the harness a dead stage of the Objective recorded, and only that one", { skip: process.platform !== "linux" }, async () => {
   const ws = mkdtempSync(join(tmpdir(), "ws-"));

@@ -3,8 +3,11 @@
 
 import { parseToml } from "./toml.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { refusalFields, usageLimited } from "./usage.mjs";
+import { refusalCause, refusalFields, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
+
+/** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
+export { refusalCause };
 
 // ---------------------------------------------------------------- validation commands
 
@@ -687,22 +690,6 @@ export function blockCauseOf(body) {
   } catch {
     return null;
   }
-}
-
-/** Provider error types and codes (usage.mjs REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
-const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota"]);
-const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
-
-/**
- * A provider refusal's cause (usage.mjs providerRefusal): the AI Gateway's budget or credits, the provider's quota or
- * billing (those kinds, or HTTP 402), else a setup gap (a key, an authorization, a payment method, a request the
- * settings make).
- */
-export function refusalCause(r) {
-  const kinds = [r?.type, r?.code];
-  if (kinds.some((k) => GATEWAY_BUDGET_KINDS.has(k))) return "gateway-budget";
-  if (kinds.some((k) => PROVIDER_QUOTA_KINDS.has(k)) || r?.status === 402) return "provider-quota";
-  return "setup";
 }
 
 /**
@@ -2011,6 +1998,22 @@ export const isSelf = (item) => !!SELF && loginKey(item?.user?.login) === SELF;
  * push. Any other App, the job's own token (github-actions[bot]) included, is a stranger. Anyone can paste a marker.
  */
 export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
+
+/**
+ * GitHub's code scanning App: its alerts on a PR's lines (CodeQL's, say) are review comments by this login. A `[bot]`
+ * login is an App's, which no person can hold.
+ */
+export const CODE_SCANNING = "github-advanced-security[bot]";
+// Factory's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
+const REPLY_AT_START = /^<!-- factory:\d+:reply:\S+ -->/;
+
+/**
+ * Whether `reply` answers the line comment that `rootLogin` opened, the same on every side (the answer pass's list, the
+ * threads Factory resolves, the merge pass): a reply by Factory or someone who can push (trustedAuthor). On code
+ * scanning's comment only Factory's own answer counts (its reply marker, by such an author): a person's "looking into
+ * it" leaves a security finding to the answer pass, and never lets Factory resolve it.
+ */
+export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && (loginKey(rootLogin) !== CODE_SCANNING || REPLY_AT_START.test(String(reply?.body ?? "")));
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker

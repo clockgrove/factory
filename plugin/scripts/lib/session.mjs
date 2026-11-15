@@ -29,6 +29,9 @@ import {
   onDefaultBranch,
   removeLabel,
   requiredCheckSpecs,
+  resolutionRule,
+  resolveThread,
+  reviewThreads,
   requiredChecks,
   findPr,
   findProject,
@@ -51,15 +54,16 @@ import {
   setStateLabel,
   upsertComment,
   transientError,
+  RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
-import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -74,7 +78,7 @@ import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalFields, transcriptTotal } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
@@ -662,7 +666,7 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * answers it in a PR comment under its reply marker (handoff.mjs postReplies). Factory's own reviews and reply markers
  * are those by Factory or someone who can push (trustedAuthor). `thirdParty` (third-party-review.mjs logins): a named
  * reviewer's root comments are listed too, shaped and sanitised for the answer pass with `from` set (thirdPartyComment);
- * one counts until Factory or someone who can push replies in its thread.
+ * one counts until it is answered (logic.mjs answersComment: on code scanning's, only Factory's own answer counts).
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
@@ -670,7 +674,8 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // A named reviewer's comment is never Factory's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && trustedAuthor(c)).map((c) => c.in_reply_to_id));
+  const byId = new Map(comments.map((c) => [c.id, c]));
+  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && answersComment(byId.get(c.in_reply_to_id)?.user?.login, c)).map((c) => c.in_reply_to_id));
   const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty) && !answeredByUs.has(c.id)).map((c) => thirdPartyComment(c, namedReviewer(c, thirdParty))) : [];
   const open = [...roots.filter((c) => !replies.has(c.id)), ...theirs];
   // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
@@ -1583,9 +1588,9 @@ export function keyBreakdown(records, workerKey = null) {
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
-  // rollout): the provider's structured refusal on a pass (logic.mjs refusalCause), never its prose. A local serve keeps
-  // automatic account choice off that account for a while.
-  const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find((r) => r && refusalCause(r) === "provider-quota" && !Number.isFinite(r.resetAt)) : null;
+  // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
+  // choice passes that account over for a while.
+  const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1903,24 +1908,27 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
 }
 
 /**
- * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
- * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
+ * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place,
+ * or a usage limit or quota with no reset reported that moves the Objective to another account, `resetAt` null), which
+ * is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
  * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
- * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
- * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
- * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
- * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`; with automatic
- * account choice on there (`goOn`, route-holds.mjs routeLimits `limit`), the limit holds its account first, and with
- * another account free the stage ends `waiting` and the Objective goes on there, else the Block names the others' first
- * reset too. A hold that cannot be written Blocks as with the setting off.
+ * (`usageLimit`: harness, reset (null with none reported, then `noReset`), since, and `continue`, the work pass's `pause`
+ * record for the next work stage to weigh: continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no
+ * stage on that account until the reset (or its guess's end) and resumes the Objective after it, or on a free account
+ * before then; a no-reset limit with none free it Blocks (local.mjs limitPaused). On any other route nothing resumes a
+ * stage, so it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`; with
+ * automatic account choice on there (`goOn`, route-holds.mjs routeLimits `limit`), the limit holds its account first (a
+ * guess with no reset), and with another account free the stage ends `waiting` and the Objective goes on there, else
+ * the Block names the others' holds too. A hold that cannot be written Blocks as with the setting off.
  */
 export async function usageLimitExit(e, { local, records, finish, block, pause = null, goOn = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
+  const noReset = !Number.isFinite(e.resetAt);
+  const usageLimit = { harness: e.refusal.harness, reset: noReset ? null : new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(noReset ? { noReset: true } : {}), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
-    const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
-    log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);
+    const reason = noReset ? `${e.refusal.harness} reached its usage limit or quota (${refusalFields(e.refusal)}) with no reset reported` : `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
+    log(`paused: ${reason}; the claim stays, and serve ${noReset ? "moves the Objective to a free account" : "resumes the stage after the reset"}`);
     await finish("paused", reason, null, usageLimit);
     return;
   }
@@ -1930,7 +1938,7 @@ export async function usageLimitExit(e, { local, records, finish, block, pause =
     await finish("waiting", moved.goOn, null, usageLimit);
     return;
   }
-  const reason = `${usageLimitReason(e.refusal)}${moved?.note ? ` ${moved.note}` : ""}`;
+  const reason = `${noReset ? refusalReason(e.refusal) : usageLimitReason(e.refusal)}${moved?.note ? ` ${moved.note}` : ""}`;
   log(`blocked: ${reason}`);
   await block(reason, "provider-quota").catch((x) => log(`the usage limit's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", reason, null, usageLimit);
@@ -2581,16 +2589,130 @@ export async function queueConflictWait(repo, { issue, prNumber, base, removal }
 
 /**
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
- * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
+ * an unresolved review conversation the base's rules require resolved (conversationsGate), or the merge queue dropping
+ * the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
  */
-/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check is the work's; a drop is `report.cause`, else Factory's. */
-export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" ? "work" : report.cause ?? "factory");
+/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check or an unresolved conversation is the work's; a drop is `report.cause`, else Factory's. */
+export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" || how === "threads" ? "work" : report.cause ?? "factory");
 
 export function mergeBlockReason(how, report = {}) {
   if (how === "red") return "a required check is red on the reviewed head";
   if (how === "edited") return EDITED_REASON;
+  if (how === "threads") return report.reason || "a review conversation is unresolved and the default branch's rules require every conversation resolved before a merge";
   if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Factory re-enqueued it";
   return null;
+}
+
+/** How long a merge refused just after Factory resolved threads waits before its one more try (mergeReadyOne). */
+const RESOLVED_SETTLE_MS = 5_000;
+/** The most unresolved conversations a Block names one by one. */
+const THREADS_NAMED = 5;
+/** The most review rounds the merge pass starts for code scanning's comments per re-entry (conversationsGate). */
+export const CODE_SCANNING_ROUNDS = 2;
+
+const SCAN_RECORD = (issue) => `<!-- factory:${issue}:code-scanning-record `;
+
+/**
+ * The review rounds the merge pass started for code scanning's comments on `prNumber`, from Factory's own record on the
+ * issue (one comment, marker(issue, "code-scanning"); a record by Factory or someone who can push, since two routes can
+ * write it): the times of each, oldest first. Throws when the comments cannot be read.
+ */
+export async function codeScanningRounds(repo, issue, prNumber, opts) {
+  const rounds = [];
+  for (const c of await listComments(repo, issue, opts)) {
+    if (!trustedAuthor(c) || !(c.body || "").startsWith(marker(issue, "code-scanning"))) continue;
+    const line = (c.body || "").split("\n").find((l) => l.startsWith(SCAN_RECORD(issue)) && l.endsWith(" -->"));
+    try {
+      const v = JSON.parse(line.slice(SCAN_RECORD(issue).length, -4));
+      if (Number(v?.pr) === Number(prNumber) && Array.isArray(v.rounds)) rounds.push(...v.rounds.filter((t) => Number.isFinite(Date.parse(t))));
+    } catch {
+      // not a record
+    }
+  }
+  return [...new Set(rounds)].sort((a, b) => Date.parse(a) - Date.parse(b));
+}
+
+/** Write the record of code scanning's review rounds on `prNumber` (codeScanningRounds). */
+const writeScanRounds = (repo, issue, prNumber, rounds, opts) =>
+  upsertComment(repo, issue, marker(issue, "code-scanning"), `${SCAN_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds })} -->\nFactory: code scanning commented on PR #${Number(prNumber)} after its answer pass; the review ran again to answer it (${rounds.length} time(s) since its last re-entry, at most ${CODE_SCANNING_ROUNDS}).`, opts);
+
+const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`;
+const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
+const RESUME = "re-apply `factory:objective` to resume";
+
+/**
+ * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Factory
+ * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
+ * resolved now (`resolvedNow` counts them). Code scanning's unanswered comment is the answer pass's: the review label
+ * goes back on and this returns "code-scanning", at most CODE_SCANNING_ROUNDS times per re-entry (the Objective label
+ * applied again, a restart or a Block, from the issue's timeline), counted in Factory's record on the issue; past that it
+ * Blocks ("threads") naming each open alert. Any other unresolved thread, when the base's rules require every
+ * conversation resolved (branch protection, or an active ruleset's pull_request rule), returns "threads" with
+ * `report.reason` naming each one: its author, file and line. Otherwise null: the merge goes on. Unreadable threads or
+ * rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable round count is "pending".
+ */
+async function conversationsGate(repo, ctx, report, opts) {
+  const { issue, prNumber, base, thirdParty = [], objectiveLabel } = ctx;
+  let read;
+  try {
+    read = await reviewThreads(repo, prNumber, issue, opts, { thirdParty: answeredReviewers(thirdParty) });
+  } catch (e) {
+    log(`#${issue}: PR #${prNumber}'s review threads are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
+    return null;
+  }
+  const open = [];
+  for (const t of read) {
+    if (t.resolved) continue;
+    if (t.by && t.answered) {
+      const done = await resolveThread(t.id, opts).then(
+        () => true,
+        (e) => (log(`#${issue}: an answered review thread on PR #${prNumber} could not be resolved (${errCode(e)})`), false),
+      );
+      if (done) {
+        ctx.resolvedNow = (ctx.resolvedNow || 0) + 1;
+        continue;
+      }
+    }
+    open.push(t);
+  }
+  const scans = open.filter((t) => t.author === CODE_SCANNING && !t.answered);
+  if (scans.length) {
+    let rounds;
+    let since;
+    try {
+      [rounds, since] = await Promise.all([codeScanningRounds(repo, issue, prNumber, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked", "factory:restart"], opts)]);
+    } catch (e) {
+      log(`#${issue}: the code scanning rounds on PR #${prNumber} are unreadable (${errCode(e)}); next tick`);
+      return "pending";
+    }
+    const counted = rounds.filter((t) => !since || Date.parse(t) > Date.parse(since));
+    if (counted.length >= CODE_SCANNING_ROUNDS) {
+      report.reason = `code scanning still has ${scans.length} unanswered alert(s) on PR #${prNumber} after ${counted.length} review rounds answered its earlier ones: ${listed(scans.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`;
+      return "threads";
+    }
+    try {
+      await writeScanRounds(repo, issue, prNumber, [...counted, new Date().toISOString()], opts);
+    } catch (e) {
+      log(`#${issue}: the code scanning round on PR #${prNumber} could not be recorded (${errCode(e)}); next tick`);
+      return "pending";
+    }
+    await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
+    await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
+    log(`#${issue}: code scanning commented on PR #${prNumber} after its answer pass; the review runs again to answer it (round ${counted.length + 1} of ${CODE_SCANNING_ROUNDS})`);
+    return "code-scanning";
+  }
+  if (!open.length) return null;
+  let rule;
+  try {
+    rule = await resolutionRule(repo, base, opts);
+  } catch (e) {
+    log(`#${issue}: the rules on ${base} are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
+    return null;
+  }
+  if (!rule) return null;
+  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.by === "named" && !t.answered ? " (posted after the answer pass)" : t.answered ? " (answered; Factory could not resolve it)" : ""}`;
+  report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME}`;
+  return "threads";
 }
 
 /**
@@ -2598,6 +2720,9 @@ export function mergeBlockReason(how, report = {}) {
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
+ * "code-scanning" (code scanning commented after the answer pass: the review runs again to answer it), "threads" (an
+ * unresolved review conversation the base's rules require resolved, read before the merge or after GitHub refused it:
+ * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
  * of; the caller Blocks), "conflict" (the PR conflicts with the
@@ -2618,7 +2743,7 @@ export function mergeBlockReason(how, report = {}) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [] }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -2794,6 +2919,11 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
     if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + 1})`);
   }
+  // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
+  // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
+  const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty, objectiveLabel };
+  const held = await conversationsGate(repo, conversations, report, opts);
+  if (held) return held;
   // The squash commit says what Factory says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
   const parts = await partsRecord(repo, issue, opts).catch(() => null);
   let how;
@@ -2812,10 +2942,17 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return "queued";
     }
     if (now?.state === "open" && now.mergeable_state === "dirty") return "conflict";
+    // A conversation opened since the read above: named as one, never a bare refusal.
+    let late = null;
+    if (now?.state === "open") late = await conversationsGate(repo, conversations, report, opts);
+    if (late) return late;
     // That read failing for now leaves the refusal unexplained: its own transient error is thrown, so the review job
     // leaves the PR to the dispatcher's next tick instead of Blocking a PR another pass may have queued.
     if (transientError(unread)) throw unread;
-    throw e;
+    // Threads this pass resolved may not count yet at GitHub's merge check: once more after a moment, else the refusal.
+    if (now?.state !== "open" || !conversations.resolvedNow) throw e;
+    await RETRY.sleep(RESOLVED_SETTLE_MS);
+    how = await mergeVerified(repo, prNumber, sha, { queue, title: `${pr.title} (#${prNumber})`, message: prFooter(issue, isSplitPart(parts, prNumber)) }, opts);
   }
   if (how === "queued") {
     // The queue's commit is made in a moment: the caller has it watched for a check run to start.

@@ -1,20 +1,22 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 // The stage script serve starts is this file's fake worker: it notes the account its env was made for, waits for FAKE_GO
 // when told to (a stage still running), then writes the result.json a test gives it, with that account's name as the real
-// worker records it (session.mjs writeUsage `account`). Set before local.mjs is loaded, so
-// serve's real start, hold, pause and resume paths run.
+// worker records it (session.mjs writeUsage `account`). A limit with no reset ends it `paused` only when serve's env says
+// automatic choice picked its account (FACTORY_STAGE_AUTO_ACCOUNT: harness.mjs LIMIT.moves); else it Blocks recording
+// the refusal (`limitRefused`), as the real stage does. Set before local.mjs is loaded, so serve's real start, hold, pause
+// and resume paths run.
 const root = realpathSync(mkdtempSync(join(tmpdir(), "plugin-")));
 mkdirSync(join(root, "scripts"));
 writeFileSync(
   join(root, "scripts", "worker.mjs"),
-  'import { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, `${process.env.FAKE_ACCOUNT}\\n`);\nif (process.env.FAKE_GO) while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), JSON.stringify({ ...JSON.parse(process.env.FAKE_RESULT), account: process.env.FAKE_ACCOUNT }));\n',
+  'import { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, `${process.env.FAKE_ACCOUNT}\\n`);\nif (process.env.FAKE_GO) while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\nconst r = { ...JSON.parse(process.env.FAKE_RESULT), account: process.env.FAKE_ACCOUNT };\nif (r.usageLimit?.noReset && process.env.FACTORY_STAGE_AUTO_ACCOUNT !== "1") Object.assign(r, { exit: "blocked", usageLimit: undefined, limitRefused: { harness: r.usageLimit.harness } });\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), JSON.stringify(r));\n',
 );
 process.env.FACTORY_PLUGIN_ROOT = root;
 const { RETRY } = await import("../scripts/lib/github.mjs");
@@ -915,6 +917,169 @@ test("#266: with every account held and the first to end a guess, the pause says
       const body = gh.notices()[0].body;
       assert.match(body, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about \S+, an estimate/);
       assert.ok(!body.includes("resets at"), body);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+/** A stage that ended on a usage limit or quota with no reset reported, as session.mjs usageLimitExit writes it locally (#332). */
+const noReset = (since, harness = "claude") => ({ exit: "paused", usd: 0.1, tokens: { output: 0 }, usageLimit: { harness, reset: null, since: new Date(since).toISOString(), noReset: true } });
+
+test("#332: on, a limit with no reset reported moves the Objective to a free account at the next tick, with no Block and no person, never back to the one it left, which its guess passes over", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      loop.result = noReset(t);
+      const paused = await work(loop);
+      assert.deepEqual([paused.exit, paused.account], ["paused", "alpha"]);
+      assert.equal(gh.blocked().length, 0, "no Block");
+      assert.equal(loop.holds.avoidUntil("alpha", t), t + 60 * MIN, "alpha is passed over for its guess");
+      assert.equal(loop.holds.until("alpha", t), null, "a guess, no hold");
+      assert.equal(loop.offline.get(8).reset, t + 60 * MIN, "paused at most until the guess's end");
+      const notice = gh.notices()[0].body;
+      assert.match(notice, /Claude Code account `alpha` reached its limit with no reset reported, and is passed over until about \S+, an estimate\./);
+      assert.match(notice, /Free now: `beta`, `gamma`\. This machine chooses accounts by itself/);
+      assert.ok(!notice.includes("Every Claude Code account"), notice);
+      // The next tick moves it, and its stage starts on a free account, not alpha.
+      t += 1000;
+      assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+      loop.result = delivered;
+      assert.equal((await work(loop)).account, "beta");
+      assert.deepEqual(loop.ran(), ["alpha", "beta"]);
+      assert.equal(gh.blocked().length, 0);
+      // Every serve on the machine passes alpha over until the guess ends.
+      assert.ok(!autoServe(h, () => t).freeAccounts("claude", "none").includes("alpha"));
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#332: on, with every other account held or passed over, a limit with no reset Blocks once, provider-quota, naming each account's state, and the claim goes", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      loop.holds.limit({ harness: "claude", account: "beta", reset: t + 120 * MIN, now: t });
+      loop.holds.spent({ harness: "claude", account: "gamma", now: t - MIN });
+      loop.result = noReset(t);
+      const end = await work(loop);
+      assert.deepEqual([end.exit, end.account], ["paused", "alpha"], "alpha, free, was chosen");
+      const blocks = gh.blocked();
+      assert.equal(blocks.length, 1, "one Block");
+      const at = (ms) => new Date(ms).toISOString().replaceAll(".", "\\.");
+      assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\. Re-apply \`factory:objective\` once a Claude Code account is free again\\.`));
+      assert.match(blocks[0].body, /"cause":"provider-quota"/);
+      assert.equal(loop.offline?.has(8) ?? false, false, "not kept paused");
+      assert.deepEqual(await loop.pausedHere(new Map()), [], "nothing resumes it");
+      assert.equal(loop.holds.avoidUntil("alpha", t), t + 60 * MIN, "alpha's guess is kept for every serve");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#332: a pinned Objective, or any with the setting off, still Blocks on a limit with no reset, as before: no move; on, the pinned account's guess is kept", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const on = autoServe(h, () => t);
+      gh.apply("factory:account:beta");
+      on.result = noReset(t);
+      const pinned = await work(on);
+      assert.deepEqual([pinned.exit, pinned.account], ["blocked", "beta"], "pinned: Blocked on its own account");
+      assert.equal(on.offline?.has(8) ?? false, false);
+      assert.equal(on.holds.avoidUntil("beta", t), t + 60 * MIN, "its guess, for other Objectives");
+      gh.remove("factory:account:beta");
+      t += 1000;
+      const off = serveOn(h, () => t);
+      off.result = noReset(t);
+      const plain = await work(off);
+      assert.deepEqual([plain.exit, plain.account], ["blocked", "alpha"], "off: Blocked on the default");
+      assert.equal(off.holds.avoidUntil("alpha", t), null, "off writes no guess");
+      assert.deepEqual([on.ran(), off.ran()], [["beta"], ["alpha"]]);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#332: a Codex stage's limit feeds the same holds: with no reset, a guess automatic choice passes over, and the Objective moves; with a reset, a hold", async () => {
+  const h = fakeHome();
+  mkdirSync(join(h, "work", "codex-y"), { recursive: true, mode: 0o700 });
+  const at = (d) => join(h, "work", d);
+  writeFileSync(accountsFile(h), JSON.stringify({ claude: [{ name: "alpha", home: at("claude-a") }], codex: [{ name: "cx", home: at("codex-x") }, { name: "cy", home: at("codex-y") }] }), { mode: 0o600 });
+  const gh = fakeGitHub();
+  gh.apply("factory:harness:codex");
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      loop.result = noReset(t, "codex");
+      assert.deepEqual([(await work(loop)).account, gh.blocked().length], ["cx", 0]);
+      assert.equal(loop.holds.avoidUntil("cx", t), t + 60 * MIN);
+      assert.equal(loop.autoAccount("codex").account.name, "cy", "cx is passed over");
+      assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+      // On cy, a limit with its reset: held, and the Objective waits for the first to end (cx's guess) with no Block.
+      t += 1000;
+      loop.result = limited(t + 180 * MIN, t, "codex/primary");
+      loop.result.usageLimit.harness = "codex";
+      assert.equal((await work(loop)).account, "cy");
+      assert.equal(loop.holds.until("cy", t), t + 180 * MIN);
+      assert.equal(loop.freeAccounts("codex", "none").length, 0);
+      assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#332: a guess is remembered a day past its end, so a limit again within that day counts on (1, 4, then 24 hours) and an account out for weeks is retried less and less; a day later it starts again at an hour", async () => {
+  const { GUESS_FORGET_MS, HOLD_FORGET_MS } = await import("../scripts/lib/holds.mjs");
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t = Date.now();
+  const holds = accountHolds({ dir });
+  assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t }), t + 60 * MIN);
+  // The guess ended two hours ago, past a hold's hour of memory: the next limit there is the second in a row.
+  const second = t + 60 * MIN + 2 * 60 * MIN;
+  assert.ok(second - (t + 60 * MIN) > HOLD_FORGET_MS);
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: second }), second + 240 * MIN, "four hours, in every serve");
+  const third = second + 240 * MIN + 20 * 60 * MIN;
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: third }), third + 1440 * MIN);
+  // A day and more past the last guess's end, it is forgotten (its file too): the count starts again.
+  const later = third + 1440 * MIN + GUESS_FORGET_MS + MIN;
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: later }), later + 60 * MIN);
+  assert.equal(readdirSync(dir).filter((f) => f.startsWith("seat.")).length, 1, "the forgotten guesses' files are removed");
+  // A hold with a reset is still forgotten an hour past its end: its back-off count starts again.
+  holds.limit({ harness: "claude", account: "beta", reset: t + MIN, now: t });
+  assert.equal(holds.limit({ harness: "claude", account: "beta", reset: t + 2 * HOLD_FORGET_MS, now: t + 2 * HOLD_FORGET_MS }), t + 2 * HOLD_FORGET_MS + 2 * MIN);
+});
+
+test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {
+  const { localBaseEnv } = await import("../scripts/lib/local.mjs");
+  const { FACTORY_CONTROL_KEYS } = await import("../scripts/lib/inputs.mjs");
+  const shell = { PATH: "/bin", FACTORY_STAGE_AUTO_ACCOUNT: "1", FACTORY_STAGE_ACCOUNT: "beta", DATABASE_URL: "postgres://x" };
+  const base = localBaseEnv(shell, ["FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_STAGE_ACCOUNT", "DATABASE_URL"]);
+  assert.equal(base.DATABASE_URL, "postgres://x");
+  for (const k of FACTORY_CONTROL_KEYS) assert.ok(!(k in base), k);
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const off = serveOn(h, () => t);
+      await off.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, usageLimit: { harness: "claude", reset: null, since: new Date(t).toISOString(), noReset: true } });
+      assert.equal(off.holds.avoidUntil("alpha", t), null, "no guess");
+      assert.equal(gh.blocked().length, 1, "Blocked, as with no move");
+      assert.match(gh.blocked()[0].body, /Re-apply `factory:objective` once a Claude Code account is free again\./);
     });
   } finally {
     gh.restore();

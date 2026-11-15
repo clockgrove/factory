@@ -210,6 +210,7 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
       else if (!st.isFile()) bad(a.name, "its token file is not a regular file");
       else if (st.nlink > 1) bad(a.name, "its token file has more than one hard link; keep one copy");
       else if (st.mode & 0o077) bad(a.name, "its token file is readable or writable by others; chmod 600 it");
+      else if (tokenText(a.tokenFile) === null) bad(a.name, "its token file cannot be read by this user; chmod 600 it");
       else if (!tokenText(a.tokenFile)) bad(a.name, "its token file is empty");
       else if (all.some((b) => b !== a && b.tokenFile === a.tokenFile)) bad(a.name, "another account has the same token file");
     }
@@ -247,12 +248,12 @@ export function accountEnv(env, account, home = homedir()) {
 /** A declared Copilot account's token, read from its file (loadAccounts checked it); "" for any other account. */
 export const accountToken = (account) => (account?.declared && account.tokenFile ? readFileSync(account.tokenFile, "utf8").trim() : "");
 
-/** A token file's text, trimmed; "" when it cannot be read. */
+/** A token file's text, trimmed; null when this user cannot read it. */
 const tokenText = (file) => {
   try {
     return readFileSync(file, "utf8").trim();
   } catch {
-    return "";
+    return null;
   }
 };
 /** statSync, or null when the path is gone (a folder removed between its realpath and here) or cannot be read. */

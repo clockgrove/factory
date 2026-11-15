@@ -369,7 +369,7 @@ test("#263: a declaration this user cannot read is an account problem with a fix
   }
 });
 
-test("#263: a Copilot token file may not be one of Factory's own secrets, and a blank one is empty", () => {
+test("#263: a Copilot token file may not be one of Factory's own secrets; a blank one is empty and an unreadable one refused", () => {
   const h = fakeHome();
   const keys = join(h, ".config", "factory");
   const own = "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)";
@@ -385,6 +385,10 @@ test("#263: a Copilot token file may not be one of Factory's own secrets, and a 
   assert.deepEqual(one(join(keys, "app.pem")), [], "a file of that name is only the App's key when FACTORY_LOCAL_APP_KEY names it");
   writeFileSync(join(keys, "blank"), " \n\t\n", { mode: 0o600 });
   assert.deepEqual(one(join(keys, "blank")), [["gh", "its token file is empty"]]);
+  // Write-only: no group or world bit, but Factory cannot read it. An account problem, never a throw at the stage.
+  writeFileSync(join(keys, "write-only"), "copilot-token-w\n", { mode: 0o200 });
+  chmodSync(join(keys, "write-only"), 0o200);
+  assert.deepEqual(one(join(keys, "write-only")), [["gh", "its token file cannot be read by this user; chmod 600 it"]]);
 });
 
 test("#263: an account may not take another harness's name, which its hold and label key on", () => {

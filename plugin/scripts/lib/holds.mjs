@@ -4,9 +4,9 @@
 // limit another already met. Each limit met is one file of its own, written whole under a dot-name and renamed into
 // place, never rewritten: writers at the same time each add theirs and lose none, with no lock. A hold is the latest
 // reset any file names for the account; its back-off streak is the newest file's. The record holds no secret: a
-// harness, an account's name, times and a count. The folder is outside every directory a sandbox may write, and the
-// outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A file a sandbox or another user could have
-// made (a link, another owner, group or world write bits) is not read.
+// harness, an account's name, times, a count and the limit's window when the harness named it. The folder is outside
+// every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
+// file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,12 +31,17 @@ const FILE = new RegExp(`^(${KEY_SRC})\\.[0-9a-f]{16}\\.json$`);
 const TEMP = new RegExp(`^\\.${KEY_SRC}\\.[0-9a-f]{16}\\.tmp$`);
 const MAX_BYTES = 4096;
 
-/** One record, checked: {harness, account, until, streak, at}, or null. */
+/** A usage limit's window as the harness names it (usage.mjs providerRefusal `limitType`: `five_hour`, `codex/primary`), else null. */
+const WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
+export const windowOf = (w) => (typeof w === "string" && WINDOW.test(w) ? w : null);
+
+/** One record, checked: {harness, account, until, streak, at, window?}, or null. */
 function recordOf(v, account) {
   if (!v || typeof v !== "object" || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness)) return null;
   const { until, at, streak } = v;
   if (![until, at].every(Number.isSafeInteger) || !Number.isSafeInteger(streak) || streak < 0) return null;
-  return { harness: v.harness, account, until, streak, at };
+  const window = windowOf(v.window);
+  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}) };
 }
 
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
@@ -80,14 +85,15 @@ function readDir(dir, now, uid) {
 }
 
 /**
- * An account's hold from its records: the latest reset any names, and the newest record's streak (of two made in the
- * same millisecond, the longer streak); null with none.
+ * An account's hold from its records: the latest reset any names (and that record's window, when it names one), and
+ * the newest record's streak (of two made in the same millisecond, the longer streak); null with none.
  */
 function fold(records, account, now) {
   const mine = records.filter((r) => r.account === account && now - r.until <= HOLD_FORGET_MS);
   if (!mine.length) return null;
   const newest = mine.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a));
-  return { harness: newest.harness, until: Math.max(...mine.map((r) => r.until)), streak: newest.streak, at: newest.at };
+  const latest = mine.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a));
+  return { harness: newest.harness, until: latest.until, streak: newest.streak, at: newest.at, window: latest.window ?? null };
 }
 
 /**
@@ -95,9 +101,10 @@ function fold(records, account, now) {
  * person who removes an account's files lifts its hold for every serve. A record that cannot be written to `dir` is
  * kept in this process's memory instead, so this process still holds the account, and `onError` hears why.
  * - `until(account, now)`: the reset (ms) the account is held until, when still ahead; else null.
+ * - `window(account, now)`: the window of the usage limit that holds it that long (`five_hour`), or null when unknown.
  * - `held(harness, now)`: whether any account of that harness is held now.
- * - `limit({harness, account, reset, now})`: a stage on the account met its usage limit, reset at `reset` (ms, the
- *   provider's). A provider that refuses again past the reset it stated (or states one no more than LIMIT_BACKOFF_MS's
+ * - `limit({harness, account, reset, now, window})`: a stage on the account met its usage limit, reset at `reset` (ms, the
+ *   provider's), of `window` when the harness named one. A provider that refuses again past the reset it stated (or states one no more than LIMIT_BACKOFF_MS's
  *   last ahead) is not taken at its word: the hold is at least now plus a backoff that grows with each such pause in
  *   a row on that account (2, 5, 10, then 15 minutes); a reset further out starts the count again. Returns the hold's end.
  * - `served({harness, account, now, started})`: a pass on the account completed, its stage started at `started` (ms):
@@ -144,13 +151,18 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       const h = of(account, now);
       return h && h.until > now ? h.until : null;
     },
+    window(account, now) {
+      const h = of(account, now);
+      return h && h.until > now ? h.window : null;
+    },
     held(harness, now) {
       return records(now).some((r) => r.harness === harness && r.until > now);
     },
-    limit({ harness, account, reset, now }) {
+    limit({ harness, account, reset, now, window = null }) {
       const n = reset - now > LIMIT_BACKOFF_MS.at(-1) ? 0 : (of(account, now)?.streak ?? 0) + 1;
       const until = Math.min(n ? Math.max(reset, now + LIMIT_BACKOFF_MS[Math.min(n, LIMIT_BACKOFF_MS.length) - 1]) : reset, now + HOLD_MAX_MS);
-      put({ harness, account, until, streak: n, at: now });
+      const w = windowOf(window);
+      put({ harness, account, until, streak: n, at: now, ...(w ? { window: w } : {}) });
       return until;
     },
     served({ harness, account, now, started }) {

@@ -967,7 +967,8 @@ async function freshRun({ before = testFailed, after = before, logBefore = faili
         env: codex.env,
         deadlineAt: Date.now() + windowMs,
         checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
-        outbox: { push: async () => true, expected: () => (commits && codex.calls().length >= 2 ? next : sha), fence: async (f) => fences.push(f) },
+        // The checkout's HEAD as the agent's git reads it: the fresh pass's commit once it ran, with `commits`.
+        outbox: { push: async () => true, expected: () => (commits && codex.calls().length >= 2 ? next : sha), fence: async (f) => fences.push(f), agentGit: async () => ({ code: 0, stdout: `${commits && codex.calls().length >= 2 ? next : sha}\n` }) },
         triage: openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 4, prNumber: 5, token: "t", ...(key ? { decider: asking({ verdict: "flaky_or_infra", confidence: 0.55 }) } : {}) }),
         onPhase: async (l) => phases.push(l),
       }).then((r) => ({ ...r, reruns: seen.reruns })),
@@ -1065,6 +1066,15 @@ test("validation loop, priced: a fresh pass that reaches the dollar cap Blocks a
   assert.equal(over.calls.length, 2, "the fresh pass ran");
   assert.equal(over.result.harness, undefined, "not a bare dollar-cap Block");
   assert.deepEqual(over.result.unchanged, { reason: `${unchangedLead}; the fresh worker pass after it reached the dollar cap`, cause: "work" });
+  assert.equal(over.session.id, "t-1", "it committed nothing: the worker's thread again, not the capped fresh one");
+});
+
+test("validation loop, priced: a fresh pass that committed and then reached the dollar cap says what it committed, unvalidated, and keeps its session", async () => {
+  const over = await freshRun({ outputTokens: [200_000, 400_000], maxUsd: 2.5, commits: true });
+  assert.equal(over.calls.length, 2, "the fresh pass ran");
+  assert.deepEqual(over.result.unchanged, { reason: `the fix pass changed nothing on 9999999 (quality: ${supplyChain}); the fresh worker pass committed bbbbbbb and reached the dollar cap; not validated`, cause: "work" });
+  assert.equal(over.session.id, "t-2", "its session carries the commit");
+  assert.ok(!over.phases.some((l) => /validation pass 2/.test(l)), "its commit is not validated");
 });
 
 test("validation loop, priced: a wall clock with room for a fix pass but not another pass, its checks and the exit buys no fresh pass", async () => {

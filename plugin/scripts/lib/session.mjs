@@ -1177,6 +1177,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       ...(detail?.truncated ? ["", `More jobs failed than the ${detail.jobs.length} shown; the required checks' runs on GitHub list them all.`] : []),
     ];
   };
+  // The checkout's HEAD as the agent's git reads it (outbox.mjs agentGit), or with no outbox the checkout's own; null
+  // when it cannot be read.
+  const checkoutHead = async () => {
+    const r = await (outbox?.agentGit ? outbox.agentGit(["rev-parse", "--verify", "HEAD^{commit}"]) : git(checkout, ["rev-parse", "--verify", "HEAD^{commit}"])).catch(() => null);
+    const sha = r?.code === 0 ? String(r.stdout).trim() : "";
+    return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
+  };
   const fixClosing = `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question. Ask no other questions.`;
   /**
    * One fix pass on `red` (lastFix): resumed in the stage's session where the harness can. With `fresh`, a new session
@@ -1268,9 +1275,17 @@ export async function validationLoop({ checkout, commands, harness, model, effor
           freshHeads.set(head, { unchanged: v.unchanged, session: session.id });
           // The scope fence names what this red names, as a fix pass's does.
           if (red !== lastFix && outbox?.fence) await outbox.fence({ plan: "", texts: red.failures.map((f) => f.output || "") }).catch((e) => log(`fresh-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+          const before = await checkoutHead();
           const ended = await fixPass(red, { fresh: true });
           if (ended?.capped) {
-            const reason = `${block.reason}; the fresh worker pass after it reached the ${ended.capped} cap`;
+            // Whether it committed, read on the checkout's HEAD before and after it: a commit is the stage's to push
+            // (worker.mjs, review.mjs) and not validated, and its session carries it; none hands the worker's thread back.
+            const after = before ? await checkoutHead() : null;
+            const moved = !!after && after !== before;
+            if (!moved && after) session.id = freshHeads.get(head).session;
+            const reason = moved
+              ? `the fix pass changed nothing on ${head.slice(0, 7)}${lastLead ? ` (${String(lastLead).split("\n")[0].replace(/^--- /, "")})` : ""}; the fresh worker pass committed ${after.slice(0, 7)} and reached the ${ended.capped} cap; not validated`
+              : `${block.reason}; the fresh worker pass after it reached the ${ended.capped} cap${after ? "" : " (whether it committed could not be read)"}`;
             log(`${label}: ${reason}`);
             if (onPhase) await onPhase(`${label}: ${reason}`);
             return { green: false, passes, lastOutput: red.tail, command: v.command, usage, unchanged: { reason, cause: "work" } };

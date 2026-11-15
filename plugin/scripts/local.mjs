@@ -5,6 +5,7 @@
 //   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all] [--interval SECONDS (30)]
 //   node scripts/local.mjs issue <issue> | deliver <issue> | post-review <pr> <findings.json>   (a session's route)
 //   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
+//   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
 // serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
@@ -27,7 +28,7 @@ import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, logTo, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -50,6 +51,7 @@ import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./docto
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -86,8 +88,15 @@ export const COMMANDS = {
   deliver: { args: ["issue"], flags: { ...WHERE, out: { value: "PATH" } }, about: "Factory's half of an Objective worked in a session" },
   "post-review": { args: ["pr", "findings.json"], flags: WHERE, about: "post a session's reviewer pass" },
   handover: { args: ["issue"], flags: { ...WHERE, push: "bool", app: { value: "ID", number: true } }, about: "put Factory's workflow hand-over on a new branch and show it, then stop for you to read it (--push: commit, push and open its pull request)" },
+  wait: {
+    args: [],
+    more: "issue",
+    flags: { ...WHERE, since: { value: "CURSOR" }, on: { value: "KINDS" }, follow: "bool", interval: { value: "SECONDS", number: true }, timeout: { value: "SECONDS", number: true } },
+    check: (f) => (f.since !== undefined && !parseCursor(f.since) ? `--since needs a cursor a line printed or a time with its zone, not ${JSON.stringify(f.since)}` : f.on !== undefined && !parseKinds(f.on) ? `--on takes ${WAIT_KINDS.join(", ")}, not ${JSON.stringify(f.on)}` : null),
+    about: `one JSON line per event on the queue (or the issues named): ${WAIT_KINDS.join(", ")}; exits 0 after the first, ${WAIT_TIMEOUT_EXIT} at --timeout (with --follow, keeps going)`,
+  },
 };
-const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
+const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
 /** The usage text: one command's, or every command's. */
 export const usage = (cmd = null) => (cmd ? `usage: ${usageOf(cmd)}\n  ${COMMANDS[cmd].about}\n` : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}`);
 
@@ -131,12 +140,15 @@ export function parseArgs(argv) {
     } else flags[key] = value;
   }
   const given = flags._.slice(1);
-  if (given.length !== spec.args.length) throw fail(given.length < spec.args.length ? `missing <${spec.args[given.length]}>` : `unexpected argument ${JSON.stringify(given[spec.args.length])}`);
-  spec.args.forEach((name, i) => {
+  if (given.length < spec.args.length || (given.length > spec.args.length && !spec.more)) throw fail(given.length < spec.args.length ? `missing <${spec.args[given.length]}>` : `unexpected argument ${JSON.stringify(given[spec.args.length])}`);
+  given.forEach((arg, i) => {
+    const name = spec.args[i] ?? spec.more;
     if (name !== "issue" && name !== "pr") return;
-    const n = Number(given[i]);
-    if (!/^\d+$/.test(given[i]) || !Number.isSafeInteger(n) || n <= 0) throw fail(`<${name}> must be a number, not ${JSON.stringify(given[i])}`);
+    const n = Number(arg);
+    if (!/^\d+$/.test(arg) || !Number.isSafeInteger(n) || n <= 0) throw fail(`<${name}> must be a number, not ${JSON.stringify(arg)}`);
   });
+  const bad = spec.check?.(flags);
+  if (bad) throw fail(bad);
   return { cmd, flags };
 }
 
@@ -2256,6 +2268,36 @@ async function postFindings(prNumber, file, flags) {
   return 0;
 }
 
+/**
+ * `factory wait [<issue>...]` (lib/wait.mjs): one JSON line per event on the queue, read from GitHub, so it tells every
+ * route's Objectives with or without `serve`. The repository from --repo, else the clone's origin; the local token,
+ * else the gh login (it only reads). A spent rate limit or this machine's network waits, as serve's do, within --timeout.
+ * Stdout carries only the events; log lines go to stderr.
+ */
+async function waitForQueue(flags) {
+  const repoFull = flags.repo || repoFromRemote(sh("git", ["-C", resolve(flags.dir || process.cwd()), "remote", "get-url", "origin"]));
+  if (!repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
+  // Stdout is the events, one JSON line each; Factory's log lines (a retry, a rate limit's wait) go to stderr.
+  logTo(process.stderr);
+  const timeoutMs = flags.timeout ? flags.timeout * 1000 : null;
+  const deadline = timeoutMs ? Date.now() + timeoutMs : Infinity;
+  waitOutages({ until: () => deadline });
+  const { objectiveLabel } = resolveInputs({ args: { repo: repoFull }, env: process.env });
+  const r = await waitQueue(repoOf(repoFull), {
+    // At --timeout a read in flight is ended, not waited for (lib/wait.mjs: the timeout line, exit 3).
+    opts: { token: sessionToken(repoFull), deadlineAt: deadline, ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) },
+    objectiveLabel,
+    issues: flags._.slice(1).map(Number),
+    kinds: parseKinds(flags.on),
+    since: flags.since !== undefined ? parseCursor(flags.since) : null,
+    follow: !!flags.follow,
+    intervalMs: flags.interval ? flags.interval * 1000 : WAIT_POLL_MS,
+    timeoutMs,
+    emit: (line) => process.stdout.write(`${jsonLine(line)}\n`),
+  });
+  return r.code;
+}
+
 async function main() {
   let parsed;
   try {
@@ -2313,6 +2355,10 @@ async function main() {
     local.stopOnSignals(() => task);
     task = local.runReview(Number(arg), { wait: !!flags.wait });
     process.exitCode = (await task).exit === "delivered" ? 0 : 1;
+    return;
+  }
+  if (cmd === "wait") {
+    process.exitCode = await waitForQueue(flags);
     return;
   }
   if (cmd === "serve") await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });

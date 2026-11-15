@@ -46,9 +46,9 @@
       "words": 699
     },
     "factory-objective-plan": {
-      "sha256": "d209e270d833076517e953e8e8043df77093ccd3fea9108c6cf54115c544fb31",
+      "sha256": "749cfccb55f04d540d10a45bd31cb25ef14817e03631c45d3de1a0d3e0a2a782",
       "lines": 42,
-      "words": 699
+      "words": 700
     },
     "factory-prove-acceptance": {
       "sha256": "6f85136e37a29cb10e710350c1552d93e1564963a345b8e49a9eb38795afb40e",
@@ -56,9 +56,9 @@
       "words": 669
     },
     "factory-queue": {
-      "sha256": "132c6be352331f5eae0ec8cfd041c2d539deea1cce8136e28496b37176c4b146",
-      "lines": 46,
-      "words": 694
+      "sha256": "3dc163cc8c7db8f104dcf79e8aeed51f1fba878f80b61665a46421f07e76469e",
+      "lines": 48,
+      "words": 699
     },
     "factory-restart": {
       "sha256": "75499bca33d3adc97bee4a13d7e92c714cce986d7318c53bbc11e7949c5cdf41",
@@ -105,9 +105,9 @@
       }
     },
     "factory-serve": {
-      "sha256": "f3bb9c7b0ebcdc17bccfb5335406ca3894c2554bb5a231bf39a909c78547f4c7",
-      "lines": 24,
-      "words": 351
+      "sha256": "16df9107e72c81af6f53063a30ce814f1f923be31eb2444e1f98eab333c2a234",
+      "lines": 26,
+      "words": 447
     },
     "factory-setup": {
       "sha256": "bc3886102902bb71117a5388566baadd69988fd174972d0684d81c141cac7db7",

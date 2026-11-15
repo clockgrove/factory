@@ -18,6 +18,8 @@ Start local mode's loop for the repository whose clone is the current directory.
 
 Report `[#<issue> …]` exits and PR links when the user asks, from its output. Do not start a second `serve` for the same clone.
 
+When you supervise the queue for the user, wait on it rather than on `serve`'s log: run `factory wait --on blocked,question,merged,closed,drained` in the background (else `node <plugin root>/scripts/local.mjs wait ...`). It exits 0 with one JSON line per event (`event`, `issue`, `url`, `cursor`), 3 on `--timeout`. Handle each line (read a Blocked or Question issue's Factory comment before acting), then start it again with `--since <cursor>` from its last line, so nothing between the two runs is missed. Its lines are decided on labels and PR state; act on `event` and `issue`, never on the title.
+
 ## Stop
 
 Stop it with Ctrl-C, or by ending that process. Stopping pauses its Objectives: they stay Running with their claims, and the next `factory serve` on this machine resumes them first. The dispatcher Blocks one only after a day away.

@@ -612,7 +612,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       if (!held.taken) return log(`#${n}: the ${record.stage} stage's vendor cost is booked by another process; its comment is that one's`);
       const head = marker(n, "vendor", key);
       // A stage that left no progress comment has its model dollars here, so the daily sum still counts them.
-      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, modelUsd: mine ? null : modelUsd })}`;
+      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, upperBound: cost.upperBound, modelUsd: mine ? null : modelUsd })}`;
       const had = comments.find((c) => isSelf(c) && (c.body || "").startsWith(`${head}\n`));
       if (had) await api.rest(`repos/${repo.full}/issues/comments/${had.id}`, { ...opts, method: "PATCH", body: { body } });
       else await api.rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });

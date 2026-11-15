@@ -982,7 +982,9 @@ export function scoreObjective(collected, opts = {}) {
     harnessMixed: ran.mixed,
     model: cost.model,
     models: objectiveModels(usage, cost),
-    accounts: objectiveAccounts(usage),
+    // The accounts from both: a stage run locally (`factory review`) on an Objective whose work ran on Actions is only in
+    // its progress line. The dollars stay the artifacts' alone (cost above).
+    accounts: objectiveAccounts(artifacts.length ? [...usage, ...spendRecords(collected, { app })] : usage),
     exit,
     parked,
     pr: (merged ?? open ?? pulls[0])?.number ?? null,

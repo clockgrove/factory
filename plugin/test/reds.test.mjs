@@ -93,7 +93,7 @@ test("a red is handed back only when every failing job is a steady base failure"
 
 test("leadJobs: every red required check first and named, even when an optional job failed first; one with no line says so (#280)", () => {
   const j = (name, line, more = {}) => ({ name, sig: { line, lines: line ? [line] : [] }, required: false, aggregate: false, suite: 1, ...more });
-  const lead = failureLead(leadJobs([j("e2e", "e2e broke"), j("build", "", { required: true }), j("unit", "unit broke", { required: true })]));
+  const lead = failureLead(leadJobs([j("e2e", "e2e broke", { suite: 2 }), j("build", "", { required: true }), j("unit", "unit broke", { required: true })]));
   assert.deepEqual(lead.split("\n"), ["--- build (required check): no failure line found in its log", "--- unit (required check): unit broke", "--- e2e (not required): e2e broke"]);
   assert.deepEqual(leadJobs([j("e2e", ""), j("unit", "", { required: true })]), [], "no failure line anywhere: the Block quotes the tail");
   // A roll-up whose gathered jobs are known: a gathered job may fail without failing the run, so it is quoted last.
@@ -105,6 +105,12 @@ test("leadJobs: every red required check first and named, even when an optional 
   // A known set that holds no failing job with a failure line explains nothing: the roll-up's run's jobs, none called not required.
   const stale = leadJobs([j("b", "b broke"), j("a", ""), j("ci", "", { required: true, aggregate: true, gathers: ["a", "gone"] })]);
   assert.deepEqual(stale.map((x) => x.name), ["ci (required check), from b"]);
+  // A required check that printed its own failure still counts the jobs it needs: they are never called not required.
+  const own = leadJobs([j("unit", "unit broke", { coe: false }), j("lint", "lint broke", { coe: false }), j("ci", "ci broke", { required: true, gathers: ["unit"] })]);
+  assert.deepEqual(own.map((x) => x.name), ["ci (required check)", "unit", "lint (not required)"]);
+  // Jobs of the same name in another workflow's run are not the roll-up's.
+  const twoRuns = leadJobs([j("test", "other run's test broke", { suite: 2, coe: false }), j("test", "this run's test broke", { coe: null }), j("ci", "", { required: true, aggregate: true, gathers: ["test"] })]);
+  assert.deepEqual(twoRuns.map((x) => `${x.name}: ${x.line}`), ["ci (required check), from test: this run's test broke", "test (not required): other run's test broke"]);
 });
 
 test("mirrorDiff: two-dot, the green tree against the red one; not three-dot, which after a rebase shows the whole PR again", async () => {

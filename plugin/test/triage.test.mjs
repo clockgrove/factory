@@ -613,13 +613,15 @@ const MAC = "AssertionError [ERR_ASSERTION]: the cache key differs on APFS";
 const REUSE = "Error: 2 files have no licence";
 
 /** The red of #280's shape through the real validation loop, its last pass: what its Block quotes. */
-async function rollupRed(workflow) {
+async function rollupRed(workflow, ciLog = aggregateLog) {
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const at = (min) => `2026-11-14T01:${String(min).padStart(2, "0")}:00Z`;
   const run = (id, name, from, to) => ({ id, name, status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: at(from), completed_at: at(to) });
   // GitHub lists the Windows leg first, as on the post-mortem's red.
-  const runs = [run(51, "test (windows-2025)", 0, 5), run(52, "test (macos-26)", 0, 6), run(53, "test (ubuntu-26.04)", 0, 7), run(54, "reuse", 0, 1), run(55, "ci", 8, 9)];
-  const logs = { 51: legLog(WINDOWS), 52: legLog(MAC), 53: legLog(LINUX), 54: legLog(REUSE), 55: aggregateLog };
+  // `ci`'s id differs with its log: a finished job's log is read once per process (github.mjs jobLog's cache).
+  const ci = ciLog === aggregateLog ? 55 : 56;
+  const runs = [run(51, "test (windows-2025)", 0, 5), run(52, "test (macos-26)", 0, 6), run(53, "test (ubuntu-26.04)", 0, 7), run(54, "reuse", 0, 1), run(ci, "ci", 8, 9)];
+  const logs = { 51: legLog(WINDOWS), 52: legLog(MAC), 53: legLog(LINUX), 54: legLog(REUSE), [ci]: ciLog };
   const result = await withRed({ runs, logs, workflow }, () =>
     validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000, maxPasses: 0, checks: { repo: { owner: "acme", name: "app", full: "acme/app" }, issue: 4, prNumber: 5, names: ["ci"], token: "t" }, outbox: { push: async () => true, expected: () => "c".repeat(40) } }),
   );
@@ -634,6 +636,14 @@ test("a red Block leads with the required roll-up, quoted from the job it needs 
   assert.ok(lead.includes(`--- test (windows-2025) (not required: continue-on-error): ${WINDOWS}`), lead.join("\n"));
   assert.ok(lead.includes(`--- reuse (not required): ${REUSE}`), "a job the roll-up does not need is no required check's");
   assert.equal(lead.filter((l) => l.includes(LINUX)).length, 1, "the job quoted under the required check is not quoted again");
+});
+
+test("a required check that printed its own failure still counts the jobs it needs: none of them is called not required (#280 review)", async () => {
+  const lead = await rollupRed(ROLLUP_YML, legLog("AssertionError [ERR_ASSERTION]: the roll-up's own check failed"));
+  assert.equal(lead[0], "--- ci (required check): AssertionError [ERR_ASSERTION]: the roll-up's own check failed", lead.join("\n"));
+  assert.ok(lead.includes(`--- test (ubuntu-26.04): ${LINUX}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- test (windows-2025) (not required: continue-on-error): ${WINDOWS}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- reuse (not required): ${REUSE}`), lead.join("\n"));
 });
 
 test("a red Block whose roll-up's workflow file cannot be read still leads with the required check, by name (#280)", async () => {

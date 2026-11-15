@@ -1092,8 +1092,8 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable,
 
 /**
  * The hosts a runner's sandboxed commands may reach: LOCAL_DOMAINS plus the `allowed_domains` input (the Actions and
- * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space. An entry is a host name or
- * `*.` and one; anything else is dropped.
+ * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space, plus `hosts`, the stage's
+ * Objective's own (openedStageHosts). An entry is a host name or `*.` and one; anything else is dropped.
  */
 const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
@@ -1103,9 +1103,23 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-export function runnerDomains(value = "") {
-  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry)])];
+/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+export function runnerDomains(value = "", hosts = []) {
+  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }
+
+/**
+ * The hosts this stage's Objective opens with its `factory:host:` labels (choice.mjs hostsOf), once the stage's choice
+ * check has passed (worker.mjs, review.mjs: openStageHosts). A runner's sandboxes add them to `allowed_domains`
+ * (harness.mjs claudeRunner, codexRunner, copilotRunner); a stage process works one Objective, and nothing else sets
+ * them, so no other Objective's sandbox ever gets them. Local mode's loop opens them itself (Local.stageEnv).
+ */
+let stageHosts = [];
+export const openStageHosts = (hosts = []) => {
+  stageHosts = [...new Set(hosts.filter(isSandboxHost))];
+};
+export const openedStageHosts = () => stageHosts;
 
 /** The `allowed_domains` entries runnerDomains drops (doctor names each). */
 export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !hostEntry(d));

@@ -44,6 +44,17 @@ The workflow file's `FACTORY_HARNESS`, `FACTORY_MODEL`, `FACTORY_SUBAGENT_MODEL`
 - **A label added, removed or changed after the plan is an edit** (Edit an Objective, below): the next stage Blocks, re-applying `factory:objective` plans again on the new choice, and `factory:restart` starts over with it.
 - **What ran is on the record:** the progress comment's harness line, the usage record's `ran` and the scorecard's Harness column name the harness, the worker, sub-agent and reviewer models, and the labels that chose them.
 
+## Open a network host for one Objective
+
+Every Objective's sandboxes reach GitHub, the npm and Yarn registries and the hosts the repository allows for all of them (the `allowed_domains` input; `FACTORY_LOCAL_DOMAINS` in local mode). An Objective that needs one more host (a model hub, a vendor's API) gets it for itself with a label, `factory:host:<host>`: `factory:host:huggingface.co`, or `factory:host:*.hf.co` for that domain's subdomains. One label per host; apply as many as it needs.
+
+- **It opens that host to this Objective's sandboxes alone,** on every route: the work stage, the reviewer and the fix and answer passes, on Actions, in a cloud sandbox and in local mode. No other Objective's sandbox gets it, and `/factory:factory-run --here` runs in your own session, outside Factory's sandboxes.
+- **Who applied it counts,** as for a harness or model label: Factory opens the host only when the person who last applied the label can push or is a maintainer the workflow names. A label anyone else applied Blocks the Objective before any spend, naming it.
+- **A host name, nothing else:** a name such as `example.com`, or `*.` and one; no scheme, port, path, IP address or `localhost`. A label naming anything else Blocks, naming it. GitHub caps a label at 50 characters, which leaves 37 for the host; a longer one goes in the repository's setting.
+- **A host label added, removed or changed after the plan is an edit,** as for the other labels (Edit an Objective, below).
+- **The Block for a denied host names both fixes:** the host label for this Objective, and the repository's setting for every Objective.
+- **Where to see them:** the progress comment's Network line, the usage record's `ran.hosts`, and doctor's `objective hosts` line, which lists each open Objective's hosts.
+
 ## What you see on the issue
 
 While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.
@@ -71,7 +82,7 @@ Each step is one action on GitHub. Where a skill is named, a plain-words request
 
 ## Edit an Objective
 
-Edit the issue as much as you like until the worker reads it: the first work stage makes its plan from the title, the body and the harness and model labels as they are when it starts. After that, the plan and the code follow that text, and an edit to the title or body, or a harness or model label added, removed or changed, does not reach the run halfway:
+Edit the issue as much as you like until the worker reads it: the first work stage makes its plan from the title, the body and the harness, model and host labels as they are when it starts. After that, the plan and the code follow that text, and an edit to the title or body, or a harness, model or host label added, removed or changed, does not reach the run halfway:
 
 - The stage running when you edit finishes on the text it read. The next one (the review, the merge, or a work stage Factory starts on its own, such as a rebase) stops the Objective as Blocked, saying the Objective changed after its plan was made, and the PR, if there is one, becomes a draft. A PR already in the merge queue is taken out of it. Nothing goes on with a plan made from one text and an issue that says another.
 - Saving the issue without changing it is no edit: line endings and trailing spaces do not count. That needs the record of its text Factory keeps on the plan comment: a plan comment without one (an older plan) gets it at the next work stage, and until then any save after the plan counts as an edit.

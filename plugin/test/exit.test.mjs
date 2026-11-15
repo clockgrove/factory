@@ -171,8 +171,8 @@ test("deniedHosts: a blocked exit record's host names, checked for DNS shape, be
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).reason, "worker blocked: the proof needs the download host");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).deniedHosts, undefined, "without hosts no host fix");
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, protectedHits: [".github/x"], record: rec }).deniedHosts, undefined, "a Block of Factory's own carries no host fix");
-  assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, add it to `FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `factory:objective`.");
-  assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, add them to `FACTORY_LOCAL_DOMAINS`/);
+  assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, a person who can push applies `factory:host:cdn.example.org` to this issue, which opens it to this Objective alone, then re-applies `factory:objective`. To open it to every Objective, add it to `FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `factory:objective`.");
+  assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, .*To open them to every Objective, add them to `FACTORY_LOCAL_DOMAINS`/);
   assert.match(deniedHostsFix(["github.com", "a.cdn.example.com", "b.example.com"], ["github.com", "*.cdn.example.com"]), /denied `b\.example\.com`\./, "hosts already allowed are left out");
   assert.equal(deniedHostsFix(["github.com"], ["github.com"]), null, "allowed already: the generic fix stands");
   assert.equal(deniedHostsFix(["not a host"]), null);

@@ -11,7 +11,7 @@ Lookup detail for the factory-scoring skill. SKILL.md says when to load each sec
 
 ## Harness and models
 
-Each stage's usage record carries `ran`: the worker, sub-agent and reviewer models it ran on (null for a harness's own default) and `labels`, the `factory:harness:`, `factory:model:`, `factory:subagent-model:` and `factory:reviewer-model:` labels that chose them; none means the repository's defaults. It is in `result.json`, and for a local stage in the `models` and `labels` of the `<!-- factory:harness -->` line of its progress comment. Report the worker's model as the harness reported it (the work stage's `model`), else its `ran.worker`; the sub-agent model from the last work stage's `ran`; the reviewer's from the last review stage's `ran`; and the labels.
+Each stage's usage record carries `ran`: the worker, sub-agent and reviewer models it ran on (null for a harness's own default) and `labels`, the `factory:harness:`, `factory:model:`, `factory:subagent-model:` and `factory:reviewer-model:` labels that chose them; none means the repository's defaults. Its `hosts` are the network hosts the Objective's `factory:host:` labels (also in `labels`) opened to its sandboxes. It is in `result.json`, and for a local stage in the `models` and `labels` of the `<!-- factory:harness -->` line of its progress comment. Report the worker's model as the harness reported it (the work stage's `model`), else its `ran.worker`; the sub-agent model from the last work stage's `ran`; the reviewer's from the last review stage's `ran`; and the labels.
 
 ## Reading the artifacts
 

@@ -33,7 +33,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -555,8 +555,9 @@ export class Local {
 
   /**
    * The harness an Objective's stage runs on here (objective-trust.mjs objectiveInputs): its harness and model labels
-   * over this loop's settings, read before the stage's sandbox is set up for it. Another harness than the loop's is
-   * checked on this machine as the loop's own was at its start (harnessReady). {ok, harness} or {ok: false, reason, fix}.
+   * over this loop's settings, read before the stage's sandbox is set up for it, and the hosts its approved host labels
+   * open (`hosts`: stageEnv sets this stage's sandboxes up with them). Another harness than the loop's is checked on this
+   * machine as the loop's own was at its start (harnessReady). {ok, harness, hosts} or {ok: false, reason, fix}.
    */
   async harnessFor(issue) {
     const env = this.baseEnv();
@@ -566,7 +567,7 @@ export class Local {
     if (!chosen.ok) return chosen;
     const harness = chosen.inputs.harness;
     const problems = this.harnessReady(harness);
-    if (!problems.length) return { ok: true, harness };
+    if (!problems.length) return { ok: true, harness, hosts: chosen.hosts };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
     return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
@@ -607,8 +608,12 @@ export class Local {
     return resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }).objectiveLabel;
   }
 
-  domains() {
-    return [...LOCAL_DOMAINS, ...list(process.env.FACTORY_LOCAL_DOMAINS || this.wf.FACTORY_LOCAL_DOMAINS)];
+  /**
+   * The hosts this machine's sandboxes allow: LOCAL_DOMAINS and FACTORY_LOCAL_DOMAINS for every Objective, plus `hosts`,
+   * those one Objective's approved host labels open for its own stage (harnessFor), never another's.
+   */
+  domains(hosts = []) {
+    return [...new Set([...LOCAL_DOMAINS, ...list(process.env.FACTORY_LOCAL_DOMAINS || this.wf.FACTORY_LOCAL_DOMAINS), ...hosts.filter(isSandboxHost)])];
   }
 
   /** One clone per Objective, kept between stages so the dependencies and the transcript wait for the next one. Cloned without blocking heartbeats. */
@@ -656,8 +661,10 @@ export class Local {
    * One stage's env: the base, the scoped token, and the sandbox both the harness and Factory's own commands run in.
    * `stageTmp` is the stage's own temp directory (stage() makes it and removes it on every path). `script`: the stage's.
    */
-  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = this.harness) {
+  stageEnv(issue, usageDir, clone, stageTmp, script = null, harness = this.harness, hosts = []) {
     const ws = this.ws(issue);
+    // The hosts this machine's sandboxes allow, with the ones this Objective's approved host labels open (harnessFor).
+    const domains = this.domains(hosts);
     // The package managers' caches, one set per Objective: the sandboxes cannot write the developer's own (pnpm's
     // store sits in the home directory), and a cache shared between Objectives would let one plant code in another.
     // pnpm and Bun hardlink from theirs, which only works on the clone's own mount (each writable directory is a
@@ -693,7 +700,7 @@ export class Local {
     const linked = harness === "copilot" ? [] : ownLoginProblems(harness, process.env);
     if (linked.length) throw Object.assign(new Error(`the ${harness} login this stage runs on leads into another login: ${linked.map((l) => `${l.path} -> ${l.real}`).join(", ")}`), { code: "login-link" });
     const credentials = credentialPaths(homedir(), process.env, { own: harness === "copilot" ? null : stageLogin(harness, process.env) });
-    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains: this.domains(), writable: [clone, ...caches, stageTmp], clone, credentials, readOnly: [usageDir], ripgrep }), null, 2));
+    writeFileSync(srtFile, JSON.stringify(srtSettings({ domains, writable: [clone, ...caches, stageTmp], clone, credentials, readOnly: [usageDir], ripgrep }), null, 2));
     // Factory's own git work on the clone (backend.mjs sandbox.git): the clone writable, its .git included; no network.
     const srtGitFile = join(sandboxDir, `srt-git-${basename(usageDir)}.json`);
     writeFileSync(srtGitFile, JSON.stringify(srtSettings({ domains: [], writable: [clone, stageTmp], credentials, readOnly: [usageDir] }), null, 2));
@@ -738,18 +745,18 @@ export class Local {
     // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
     const tools = localTools({ harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
     const lead = tools.lead;
-    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness);
+    const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness, domains);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
     // stage's directories, its own state and the usage directory's `harness` folder (Copilot's usage file).
     const outerFile = join(sandboxDir, `srt-harness-${basename(usageDir)}.json`);
     // Whether the harness runs in it on this host: Claude Code on Linux, Codex where its own sandbox starts inside it (probed
     // once per host and version, lib/local.mjs outerProbe), Copilot where its sandbox's network starts inside it (probed the
     // same way). Said once when it does not.
-    const outer = outerProbe(harness, { domains: this.domains(), env: { ...process.env, ...extra } });
+    const outer = outerProbe(harness, { domains, env: { ...process.env, ...extra } });
     const outerOn = outer.on;
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
-    const dropped = ["codex", "copilot"].includes(harness) ? sandboxDroppedHosts(this.domains()) : [];
+    const dropped = ["codex", "copilot"].includes(harness) ? sandboxDroppedHosts(domains) : [];
     if (dropped.length) log(`FACTORY_LOCAL_DOMAINS: ${dropped.map((d) => JSON.stringify(d)).join(", ")} left out of ${harness === "codex" ? "Codex's" : "Copilot's"} sandbox: not host names (a port or an address it cannot enforce as written)`);
     // Copilot never runs without it (preflight refuses such a host): here it stopped starting after serve began, for
     // example a new Copilot, bubblewrap or slirp4netns version probed again. The stage refuses; stage() Blocks.
@@ -766,7 +773,7 @@ export class Local {
       // Copilot's outer sandbox runs bwrap through Factory's wrapper (lib/local.mjs bwrapTunScript), in the usage directory,
       // which no sandbox may write: srt runs it on the host.
       const bwrapPath = harness === "copilot" ? writeBwrapTun(join(usageDir, "outer")) : null;
-      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains: this.domains(), writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, credentials, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
+      writeFileSync(outerFile, JSON.stringify(harnessOuterSettings({ harness, domains, writable: [clone, ...addDirs, join(usageDir, "harness")], clone, env: { ...process.env, ...extra }, credentials, install: harnessInstall(whichSync(harness)), projectDir, bwrapPath, relaySocketDir: socketDir, ripgrep }), null, 2));
     }
     // Last on PATH, so nothing there can ever stand in for git, gh, srt or claude in Factory's own unsandboxed calls;
     // and neither sandbox may write it (FACTORY_LOCAL_SANDBOX.readOnly, srt denyWrite), so nothing can be planted.
@@ -829,7 +836,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains: this.domains(), clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
@@ -839,12 +846,15 @@ export class Local {
       FACTORY_LFS_PIN: "1",
       // The harness this sandbox is set up for: a stage whose labels name another by the time it runs Blocks (choiceGate).
       FACTORY_STAGE_HARNESS: harness,
+      // The hosts this Objective's host labels opened in these sandboxes: a stage whose labels name others by the time it
+      // runs Blocks (choiceGate).
+      FACTORY_STAGE_HOSTS: [...new Set(hosts.filter(isSandboxHost))].sort().join(","),
       ...extra,
     };
   }
 
   /** What the harness's own sandbox needs beyond the shared env: Copilot its home and token. */
-  harnessEnv(issue, addDirs, clone, usageDir, tools = null, harness = this.harness) {
+  harnessEnv(issue, addDirs, clone, usageDir, tools = null, harness = this.harness, domains = this.domains()) {
     if (harness !== "copilot") return {};
     // One Copilot home per Objective, outside every writable directory: it holds the sandbox policy (which the
     // model must not loosen) and the sessions a later stage resumes.
@@ -854,7 +864,7 @@ export class Local {
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
     // The stage's node and package manager (stageEnv) read-only, its global npmrc denied.
     const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(tools?.denied || [])] : [];
-    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains: this.domains(), clone, addDirs, readOnly: [usageDir], readable: tools?.readable || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
+    const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains, clone, addDirs, readOnly: [usageDir], readable: tools?.readable || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {
       // A directory an earlier run left under the name too.
       rmSync(join(home, f), { force: true, recursive: true });
@@ -941,7 +951,7 @@ export class Local {
     };
     let env;
     try {
-      env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness);
+      env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness, runs.hosts || []);
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone (prepareClone).
       const locks = staleGitLocks(clone);

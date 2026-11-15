@@ -85,7 +85,18 @@ Seven more optional inputs on the Action; each row gives its default. Every Clau
 | `resume_policy` | `fresh` by default: a review fix pass, an answer pass and a conflicting rebase start a fresh session; `fix-passes` resumes the worker's saved session for them, which on Objectives of about 30 turns cost three to seven times more at equal outcomes, so it is for adopters measuring larger ones; every harness, on Actions and in local mode. |
 | `prompt_cache_ttl` | Claude only; `off`, the CLI default, until measured: `auto` asks Claude Code for a one-hour prompt cache on the main conversation when the run bills an API key, which otherwise gets five minutes and so re-writes the prefix after every CI wait; `1h` or `5m` force one; the usage record's `cache` shows the writes after each wait, see bench/README.md. |
 | `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. It pins the repository's harness only: another harness an Objective's label chooses installs its latest. |
-| `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. |
+| `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains, for every Objective: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. One Objective's own host goes in its `factory:host:<host>` label (USAGE.md, Open a network host for one Objective). |
+
+## Third-party reviewers
+
+A reviewer App outside Factory, such as Greptile, can be part of each PR's review. Name it by its login in the workflow's env block on the default branch (or `third_party_reviewers` under `with:`), comma-separated for more than one:
+
+```yaml
+env:
+  FACTORY_THIRD_PARTY_REVIEWERS: greptile-apps[bot]
+```
+
+The App must already review the repository's PRs; Factory only reads its reviews. The review stage then waits up to 20 minutes (never past half its time left) for that login's review of the head Factory's reviewer read, and the answer pass fixes or rebuts each of its line comments and replies in its thread, as for Factory's own reviewer; its text is untrusted review input, never instructions. A reviewer that posts no review of that head in time is left out: the progress comment says `third-party review: ... going on without it`, and the stage goes on to the merge. Local mode reads the same setting from the env block. PLAN.md, Review and merge, has the details.
 
 ## Upgrade
 

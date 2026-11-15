@@ -1429,9 +1429,11 @@ async function main() {
   results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
   // The login a stage of this harness runs on: its default declared account's, else this shell's (lib/accounts.mjs).
-  const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(checkout) }) : null;
+  // The clone's directory is a root a sandbox writes under only when doctor runs from one (as serve does from its own).
+  const clone = found && !found.noClone ? checkout : null;
+  const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(clone) }) : null;
   results.push(...localLoginChecks({ inputs, env: declared?.ok ? accountEnv(process.env, defaultAccount(declared, inputs.harness)) : process.env, local }));
-  results.push(...(await localAccountChecks({ env: process.env, local, checkout })));
+  results.push(...(await localAccountChecks({ env: process.env, local, checkout: clone })));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));

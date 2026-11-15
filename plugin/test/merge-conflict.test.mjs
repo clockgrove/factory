@@ -235,8 +235,12 @@ test("#243: a PR the merge queue took out for a conflict with a PR ahead of it w
     rec = queueConflictRecord(gh.comments[2], 2);
     c.body = c.body.replace(rec.seen, new Date(Date.now() - QUEUE_CONFLICT_WAIT_MS - 1000).toISOString());
     assert.equal(await merge(2, 12), "queued");
-    // Two drops for failed checks still Block, as before.
+    // Two drops for failed checks still Block, as before, once the review stage read the newest as no failure of the
+    // PR's own (#312: a red queue run goes to the review stage first).
     gh.state.removals = [{ at: later(4), reason: "failed_checks" }, { at: later(5), reason: "failed_checks" }];
+    assert.equal(await merge(2, 12), "queue-red");
+    const { writeQueueRed } = await import("../scripts/lib/session.mjs");
+    await writeQueueRed(repo, 2, 12, { at: gh.state.removals[1].at, state: "requeued", kind: "flaky" }, { token: "t" });
     assert.equal(await merge(2, 12), "dropped");
   });
 });

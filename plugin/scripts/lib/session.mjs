@@ -972,7 +972,20 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
   };
 }
 
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null }) {
+/**
+ * Factory's validation of the branch (the commands, or the required checks on the head it pushed), each red handed to a
+ * fix pass until green or the passes run out. Three options let a stage take the checks' wait apart from the fix passes:
+ * - `handOff`: with required checks, the first head whose local part is green (the commands first on the local route)
+ *   is pushed and not waited for: the result is `{handedOff: sha}` (worker.mjs hands it to the review stage, which waits
+ *   for its checks beside the reviewer).
+ * - `holdRed()`: asked at a red that would get a fix pass (after triage's rerun and the base-failure check); an answer
+ *   (true, or the words the pass's line ends with) ends the loop with that red as `held` ({passes, sha, failures, detail, tail, lead, command}) instead, for the caller's
+ *   own pass to fix (review.mjs: the answer pass, with the reviewer's comments).
+ * - `checksOnlyFirst`: the first pass reads the required checks only, the commands not run again (a head the worker
+ *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
+ *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
+ */
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
   const usage = [];
   let passes = 0;
   let last = null;
@@ -1006,18 +1019,22 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? "required checks" : `${commands.length} commands`})`);
   };
   const validate = async () => {
+    // The commands on this pass: not on a first pass that reads the checks only (checksOnlyFirst).
+    const commandsNow = localFirst && !(checksOnlyFirst && passes === 1);
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
     // memory and reaches the fix run in $FACTORY_IN/checks/; the prompt carries each one's tail.
-    if (!byChecks || localFirst) await begin();
+    if (!byChecks || commandsNow) await begin();
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
-    if (localFirst) {
+    if (commandsNow) {
       const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
       if (!local.green) return local;
     }
     // The checks run on the head Factory pushed (outbox.mjs); a refused push ends the loop, and the stage Blocks.
     if (outbox && !(await outbox.push())) return { green: false, pushRefused: outbox.error };
     const sha = outbox ? outbox.expected() : (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
-    if (!localFirst) await begin(sha);
+    // Handed off: the checks on this head are the review stage's to wait for, beside its reviewer.
+    if (handOff) return { handedOff: sha, ranCommands: commandsNow, command: `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}` };
+    if (!commandsNow) await begin(sha);
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
@@ -1030,7 +1047,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed") || !all.some((w) => ENDED_EARLY.includes(w.conclusion))) return false;
       return (await classify({ runs })).kind === "ended";
     };
-    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
     // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
@@ -1051,6 +1068,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     };
     // The first wait, once what it may ask (ended, classify) is defined.
     let r = await wait();
+    if (signal?.aborted) return { aborted: true };
     const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
     if (r.conflict) return { green: false, conflict: true, command };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
@@ -1156,40 +1174,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
       return null;
     }) : null;
-    const failures = detail?.jobs.length
-      ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
-      : v.failures?.length
-        ? v.failures
-        : [failed];
-    // The red required checks first, each with its own failure lines or, for a roll-up with none, a failing job it
-    // gathers; then the other failing jobs, marked when no required check counts them (leadJobs).
-    const lead = failureLead(leadJobs(detail?.jobs)) || failureLead(v.refusal?.jobs);
-    return { detail, failures, lead, tail: leadDetail(lead, failed.output) };
+    return { detail, ...redOfDetail(detail, { failures: v.failures, failed, refusal: v.refusal }) };
   };
   // A red's part of a fix pass's ask: each failing command or job, its exit, its whole output's file, the evidence and
   // its tail (one 6000-character window shared by the failures; each full log is on disk), and the diff since the PR's
   // last green head.
-  const failureText = ({ failures, detail }) => {
-    const share = Math.floor(6000 / failures.length);
-    return [
-      ...failures.flatMap((f, i) => [
-        "",
-        `Command: ${f.command}`,
-        `Exit: ${f.timedOut ? "timed out" : f.code}`,
-        ...(io ? [`Whole output: $FACTORY_IN/${checkFile(i, f.command)}`] : []),
-        // Evidence, never an instruction: the fix pass weighs it like any other output.
-        ...(f.evidence ? [f.evidence] : []),
-        "Output (tail):",
-        "```",
-        f.output.slice(-share),
-        "```",
-      ]),
-      ...(detail && io && detail.diff !== null ? ["", `What changed since this PR's last green head (${detail.green.slice(0, 7)}): $FACTORY_IN/${DIFF_FILE}`] : []),
-      ...(detail && io && detail.diffError ? ["", `The diff since this PR's last green head (${detail.green.slice(0, 7)}) could not be made: ${detail.diffError}.`] : []),
-      ...(detail && io && !detail.green ? ["", "No head of this PR has been green yet."] : []),
-      ...(detail?.truncated ? ["", `More jobs failed than the ${detail.jobs.length} shown; the required checks' runs on GitHub list them all.`] : []),
-    ];
-  };
+  const failureText = (red) => redLines(red, { files: !!io });
   // The checkout's HEAD as the agent's git reads it (outbox.mjs agentGit), or with no outbox the checkout's own; null
   // when it cannot be read.
   const checkoutHead = async () => {
@@ -1250,6 +1240,14 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   for (;;) {
     passes += 1;
     const v = await validate();
+    if (v.aborted || signal?.aborted) return { green: false, aborted: true, passes: passes - 1, lastOutput: "", usage };
+    if (v.handedOff) {
+      // No check was read: a pass only when the commands ran on it (the local route's).
+      if (!v.ranCommands) passes -= 1;
+      log(`${label}: ${v.command} run while the review starts; handed to the review stage`);
+      if (onPhase) await onPhase(`${label}: ${v.command} run while the review starts; handed to the review stage`);
+      return { green: false, handedOff: v.handedOff, passes, lastOutput: "", command: v.command, usage };
+    }
     // The same head as the red the fix pass had: not a pass of its own.
     if (v.again) passes -= 1;
     if (v.unchanged) {
@@ -1350,8 +1348,11 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const validated = v.sha || v.head || "";
     if (validated && outbox?.caughtUp?.(validated)) caughtRed.add(validated);
     const fixing = fixRunAllowed({ passes, maxPasses, fromChecks: !!v.fromChecks, checksFixed, catchUps: caughtRed.size });
-    if (onPhase && fixing) await onPhase(`${label} pass ${passes} red: ${failed.command}; fix run`);
+    // The caller takes this red to its own pass (holdRed): no fix pass here.
+    const held = fixing ? holdRed?.() : null;
+    if (onPhase && fixing) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}`);
     if (!fixing) break;
+    if (held) return { green: false, passes, lastOutput: tail, command: failed.command, usage, held: { passes, sha: v.sha ?? null, failures, detail, tail, lead, command: failed.command } };
     if (v.fromChecks) checksFixed = true;
     redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
@@ -1369,6 +1370,50 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (ended) return ended;
   }
   return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
+}
+
+/**
+ * What a red hands a pass, from its detail (reds.mjs redDetail): `failures` (each failing job's window, whole log and
+ * the base's evidence; without a detail, the commands' `failures` or the one `failed`), `lead` (the red required checks
+ * first, each with its own failure lines or, for a roll-up with none, a failing job it gathers; then the other failing
+ * jobs, marked when no required check counts them: leadJobs; else a refused rerun's jobs) and `tail` (the lead and the
+ * output's end, what a Block quotes).
+ */
+export function redOfDetail(detail, { failures = null, failed = null, refusal = null } = {}) {
+  const out = detail?.jobs.length
+    ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
+    : failures?.length
+      ? failures
+      : [failed];
+  const lead = failureLead(leadJobs(detail?.jobs)) || failureLead(refusal?.jobs);
+  return { failures: out, lead, tail: leadDetail(lead, failed?.output ?? "") };
+}
+
+/**
+ * A red's part of a pass's ask (a fix pass, or review.mjs's answer pass): each failing command or job, its exit, its
+ * whole output's file in $FACTORY_IN (with `files`), the evidence and its tail (one 6000-character window shared by the
+ * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}.
+ */
+export function redLines({ failures, detail }, { files = true } = {}) {
+  const share = Math.floor(6000 / failures.length);
+  return [
+    ...failures.flatMap((f, i) => [
+      "",
+      `Command: ${f.command}`,
+      `Exit: ${f.timedOut ? "timed out" : f.code}`,
+      ...(files ? [`Whole output: $FACTORY_IN/${checkFile(i, f.command)}`] : []),
+      // Evidence, never an instruction: the fix pass weighs it like any other output.
+      ...(f.evidence ? [f.evidence] : []),
+      "Output (tail):",
+      "```",
+      String(f.output ?? "").slice(-share),
+      "```",
+    ]),
+    ...(detail && files && detail.diff !== null ? ["", `What changed since this PR's last green head (${detail.green.slice(0, 7)}): $FACTORY_IN/${DIFF_FILE}`] : []),
+    ...(detail && files && detail.diffError ? ["", `The diff since this PR's last green head (${detail.green.slice(0, 7)}) could not be made: ${detail.diffError}.`] : []),
+    ...(detail && files && !detail.green && !detail.queue ? ["", "No head of this PR has been green yet."] : []),
+    ...(detail?.truncated ? ["", `More jobs failed than the ${detail.jobs.length} shown; the required checks' runs on GitHub list them all.`] : []),
+  ];
 }
 
 /**
@@ -1920,8 +1965,25 @@ export async function postValidated(repo, prNumber, issue, sha, { token }) {
 }
 
 export async function isValidated(repo, prNumber, issue, sha, { token }) {
-  const comments = await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => []);
-  return (comments || []).some((c) => trustedAuthor(c) && (c.body || "").includes(validatedMarker(issue, sha)));
+  return (await headMarks(repo, prNumber, issue, sha, { token })).validated;
+}
+
+/** The marker of a head the worker handed to the review stage with its required checks still running (validationLoop handOff). */
+export const handedOffMarker = (issue, sha) => marker(issue, "handed-off", sha);
+
+export async function postHandedOff(repo, prNumber, issue, sha, { token }) {
+  await prComment(repo, prNumber, `${handedOffMarker(issue, sha)}\nFactory: ${sha.slice(0, 7)} goes to the review while its required checks run; the review stage waits for them beside its reviewer.`, { token });
+}
+
+/**
+ * What Factory recorded on the PR about `sha`, from Factory's own comments or those of someone who can push, in one
+ * read: `validated` (its validation was green) and `handedOff` (the worker handed it to the review with its checks running,
+ * after its commands, if any, ran green). An unreadable list is neither.
+ */
+export async function headMarks(repo, prNumber, issue, sha, { token }) {
+  const comments = (await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => [])) || [];
+  const has = (m) => comments.some((c) => trustedAuthor(c) && (c.body || "").includes(m));
+  return { validated: has(validatedMarker(issue, sha)), handedOff: has(handedOffMarker(issue, sha)) };
 }
 
 // ------------------------------------------------------------------ the merge
@@ -2141,6 +2203,124 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
   return [];
 }
 
+// ------------------------------------------------------------------ a red merge-queue run
+
+/** The queue's removal code when the required checks failed on its merge_group commit (GitHub's FAILED_CHECKS). */
+export const QUEUE_RED_CODE = "failed_checks";
+
+const QUEUE_RED_RECORD = (issue) => `<!-- factory:${issue}:queue-red-record `;
+/** The marker of Factory's record of one red queue drop on the issue, keyed by the drop's time (one comment per drop). */
+export const queueRedMarker = (issue, at) => marker(issue, "queue-red", String(at).replace(/[^0-9TZ:.-]/g, ""));
+
+/**
+ * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, kind, sigs}` as JSON, read back by
+ * queueRedRecords) and one line for a person. `state`: `handed` (the merge pass gave it to the review stage), `fixed`
+ * (its failure was the PR's own: one fix pass, `sigs` its failure classes), `requeued` (a flake, GitHub's side or the
+ * default branch's: enqueued again as any drop, `kind` which) or `blocked` (the PR's own again, of a class already fixed).
+ */
+export function queueRedBody(issue, prNumber, rec) {
+  const at = Number.isFinite(Date.parse(rec.at)) ? new Date(Date.parse(rec.at)).toISOString().replace(/\.\d{3}Z$/, "Z") : "an unknown time";
+  const said = {
+    handed: "the review stage reads whether the failure is the PR's own change",
+    fixed: "the failure is the PR's own change: one fix pass, then the queue again",
+    requeued: `not the PR's change (${rec.kind || "unknown"}): enqueued again as any drop`,
+    blocked: "the PR's own change failed the same way after its fix pass: Blocked",
+  }[rec.state] || rec.state;
+  return `${QUEUE_RED_RECORD(issue)}${JSON.stringify({ at: rec.at, state: rec.state, ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}) })} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
+}
+
+/** Factory's records of red queue drops on the issue (queueRedBody), oldest first: `{at, state, kind, sigs}`. Its own comments only. */
+export function queueRedRecords(comments, issue) {
+  const out = [];
+  for (const c of comments || []) {
+    if (!isSelf(c) || !(c.body || "").startsWith(marker(issue, "queue-red").replace(/ -->$/, ":"))) continue;
+    const line = (c.body || "").split("\n").find((l) => l.startsWith(QUEUE_RED_RECORD(issue)) && l.endsWith(" -->"));
+    try {
+      const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
+      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.state === "string") out.push({ at: v.at, state: v.state, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [] });
+    } catch {
+      // not a record
+    }
+  }
+  return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+}
+
+/** Whether a record is of the drop at `at` (the timeline's time, to the minute as the requeue records match). */
+const sameDrop = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) <= 60_000;
+
+/** Write (or update) the record of the drop at `rec.at` on the issue. */
+export const writeQueueRed = (repo, issue, prNumber, rec, opts) => upsertComment(repo, issue, queueRedMarker(issue, rec.at), queueRedBody(issue, prNumber, rec), opts);
+
+/** A failure class of the queue's red: the failing job's failure signature (triage.mjs failureSignature), else its name. */
+export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job:${job?.name}`);
+
+/**
+ * What the review stage does with a red queue drop the merge pass handed it (pendingQueueRed), decided as a red PR
+ * check is (validationLoop): the queue's failed run for the PR at or before the drop (github.mjs mergeGroupRuns, read
+ * with `actionsToken`), its commit's failed check runs, then in order: a required job GitHub never started
+ * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), triage's flaky verdict (`flaky`,
+ * triage.mjs classify), every failing job failing the same way on the default branch (`base`, reds.mjs allOnBase), else
+ * the PR's own change (`own`). `fixed`: the failure classes (queueRedClass) earlier queue reds of this Objective had their
+ * fix pass for. Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
+ * detail, tail, lead, command, queue: true}), `sigs` (its classes) and `repeat` (every class had its fix pass already).
+ * `none`: no failed queue run of the PR could be read, so nothing is known (enqueued again as any drop).
+ */
+export async function queueRedOf({ repo, issue, prNumber, base, at, names = [], triage = null, token, actionsToken = token, fixed = [] }) {
+  const opts = { token };
+  const since = new Date(Date.parse(at) - 6 * 3600_000).toISOString();
+  const runs = await mergeGroupRuns(repo, prNumber, base, since, { token: actionsToken }).catch((e) => {
+    log(`PR #${prNumber}'s merge_group runs are unreadable (${errCode(e)})`);
+    return [];
+  });
+  const run = runs.find((r) => !(Date.parse(r.at) > Date.parse(at) + 60_000));
+  if (!run) return { kind: "none", sha: null, reason: "no failed merge-queue run of the PR could be read" };
+  const sha = run.sha;
+  const failedRuns = (await checkRuns(repo, sha, opts).catch(() => []))
+    .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
+    .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
+  if (!failedRuns.length) return { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
+  const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken }).catch(() => []);
+  if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
+  if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
+  const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
+    log(`triage failed: ${String(e?.message || e).slice(0, 160)}; the change's`);
+    return { flaky: false };
+  });
+  if (verdict?.flaky) return { kind: "flaky", sha, reason: "triage reads every failing job as a flake" };
+  const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false }).catch((e) => {
+    log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
+    return null;
+  });
+  if (allOnBase(detail)) return { kind: "base", sha, reason: baseFailureReason(detail) };
+  const command = `required checks ${names.join(", ")} on the merge queue's commit ${sha.slice(0, 7)}`;
+  const output = detail?.jobs?.length ? "" : failedRuns.map((r) => `--- ${r.name}: ${r.conclusion}`).join("\n");
+  const { failures, lead, tail } = redOfDetail(detail, { failed: { command, ok: false, code: 1, output } });
+  const sigs = detail?.jobs?.length ? [...new Set(detail.jobs.map(queueRedClass))] : failedRuns.map((r) => `job:${r.name}`);
+  const done = new Set(fixed);
+  return { kind: "own", sha, reason: String(lead || "").split("\n")[0].replace(/^--- /, "") || command, red: { sha, failures, detail: detail ? { ...detail, queue: true } : null, tail, lead, command, queue: true }, sigs, repeat: sigs.every((x) => done.has(x)) };
+}
+
+/**
+ * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`,
+ * read (queueRedOf, with the classes earlier `fixed` records had their fix pass for) and its record written with what
+ * follows: `fixed` (the PR's own change, a class with no fix pass yet: the answer pass gets `red`), `blocked` (the PR's
+ * own change, every class fixed once already: the stage Blocks with `reason`) or `requeued` (not the PR's change: the
+ * merge enqueues it again as any drop). Null when nothing is pending. `names()` gives the required checks, read only then.
+ */
+export async function readQueueRed({ repo, issue, prNumber, base, names = async () => [], triage = null, token, actionsToken = token }) {
+  const records = queueRedRecords(await listComments(repo, issue, { token }), issue);
+  const pending = records.at(-1);
+  if (pending?.state !== "handed") return null;
+  const fixed = records.filter((r) => r.state === "fixed").flatMap((r) => r.sigs);
+  const q = await queueRedOf({ repo, issue, prNumber, base, at: pending.at, names: await names(), triage, token, actionsToken, fixed });
+  const state = q.kind !== "own" ? "requeued" : q.repeat ? "blocked" : "fixed";
+  await writeQueueRed(repo, issue, prNumber, { at: pending.at, state, kind: q.kind, sigs: q.kind === "own" ? q.sigs : [] }, { token });
+  const where = q.sha ? ` on ${q.sha.slice(0, 7)}` : "";
+  const line = `merge queue run red${where}: ${q.reason}; ${state === "fixed" ? "the PR's own change, one fix pass (the answer pass)" : state === "blocked" ? "the PR's own change again, after its fix pass" : `not the PR's change (${q.kind}), enqueued again as any drop`}`;
+  if (state === "blocked") return { state, line, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed again in this PR's own change (${q.reason}) after Factory's fix pass for the same failure; fix it on the branch, then re-apply the label` };
+  return { state, line, red: state === "fixed" ? q.red : null };
+}
+
 /** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
 export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
 
@@ -2213,7 +2393,9 @@ export function mergeBlockReason(how, report = {}) {
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for a
  * rebase under logic.mjs staleDecision's rules), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
- * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason) or
+ * `objectiveLabel` applied again) or Block: logic.mjs queueSince and queueRetry; the caller Blocks with mergeBlockReason),
+ * "queue-red" (the queue's newest drop is a red run on its commit, QUEUE_RED_CODE, that no review stage has read: its
+ * record goes on the issue and the review label back on, and the review stage decides it, queueRedOf) or
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
  * or "stopped" (its Objective is stopped or waits for its restart, read first, from `issueData` when the caller has it: nothing merges; the stop's
  * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
@@ -2359,6 +2541,21 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     if (retry.conflict) {
       const wait = await queueConflictWait(repo, { issue, prNumber, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
       if (wait) return wait;
+    }
+    // The newest drop is a red run on the queue's commit (QUEUE_RED_CODE): the review stage reads it first, once per drop
+    // (Factory's record on the issue), as a red PR check is read: a failure in the PR's own change gets one fix pass there;
+    // a flake, GitHub's side or the default branch's goes back here, enqueued again or Blocked as any drop.
+    if (retry.last?.code === QUEUE_RED_CODE && !retry.last.factory) {
+      const mine = queueRedRecords(await listComments(repo, issue, opts), issue).find((r) => sameDrop(r.at, retry.last.at));
+      // Handed before and not read yet (the label taken off, a stage that ended first): handed again, one record.
+      if (!mine || mine.state === "handed") {
+        if (!mine) await writeQueueRed(repo, issue, prNumber, { at: retry.last.at, state: "handed" }, opts);
+        await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
+        await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
+        delete report.watch;
+        log(`#${issue}: the merge queue's run of PR #${prNumber} failed (${QUEUE_RED_CODE}); the review stage reads the failure`);
+        return "queue-red";
+      }
     }
     if (retry.block) {
       delete report.watch;

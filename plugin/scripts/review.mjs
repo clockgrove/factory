@@ -19,7 +19,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
+import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
@@ -48,7 +48,6 @@ import {
   configureGit,
   deadline,
   exitRecord,
-  isValidated,
   liveActivity,
   maskFile,
   mirrorDiff,
@@ -78,6 +77,9 @@ import {
   stopStage,
   stoppedEnd,
   unreadNow,
+  headMarks,
+  readQueueRed,
+  redLines,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stageStopSignal, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { exitUnaddressed, thirdPartyStep } from "./lib/third-party-review.mjs";
@@ -201,13 +203,63 @@ export function answerFed({ fresh, decisions, listed, afterPush }) {
   return [...(fresh ? decisionsShown(decisions) : []), ...(afterPush ? listed : decisionsShown(listed))];
 }
 
+/**
+ * The pre-review pass beside the reviewer: `run(more)` starts validationLoop on the head with `more` (its reading hook,
+ * held red, phase lines and stop signal). `beside()` waits for the checks' first reading and answers whether the reviewer
+ * starts now: not when a required check is red already or the pass ended before any reading (that head gets its fix
+ * passes first). From then a red that would get a fix pass is held for the answer pass (`held`), and the pass's phase
+ * lines read `during the reviewer: ...` until the reviewer ends. The progress lines say how the two overlap, so each
+ * minute is counted once (bench/lib/phases.mjs): the reviewer's line ends `beside the required checks on <sha>` while
+ * the wait goes on, the checks' end during the reviewer is `required checks on <sha> <green|red|settled> while the
+ * reviewer runs`, and a wait that outlasts the reviewer is `waiting for required checks on <sha> after the reviewer`.
+ * `phase(line)` writes another line of the pass's (its triage's) the same way. `reviewerDone()` returns the pass's
+ * result; `stop()` ends its wait (the stage ended).
+ */
+export function reviewOverlap({ run, progress, head }) {
+  const ctl = new AbortController();
+  let reviewing = false;
+  let reviewerEnded = false;
+  let settled = false;
+  let firstRead;
+  const read = new Promise((r) => (firstRead = r));
+  const short = () => String(head() || "").slice(0, 7);
+  const phase = (line) => progress(reviewing && !reviewerEnded ? `during the reviewer: ${line}` : line);
+  const done = run({
+    onRead: (state) => firstRead(state),
+    holdRed: () => reviewing && "handed to the answer pass with the review",
+    onPhase: phase,
+    signal: ctl.signal,
+  }).then(async (r) => {
+    settled = true;
+    if (reviewing && !reviewerEnded && !r.aborted) await progress(`required checks on ${short()} ${r.green ? "green" : r.held ? "red" : "settled"} while the reviewer runs`);
+    return r;
+  });
+  return {
+    done,
+    phase,
+    beside: async () => {
+      const first = await Promise.race([read, done.then(() => null)]);
+      if (!first || settled || first.failed.length) return false;
+      reviewing = true;
+      return true;
+    },
+    besideText: () => (settled ? "" : ` beside the required checks on ${short()}`),
+    reviewerDone: async () => {
+      reviewerEnded = true;
+      if (!settled) await progress(`waiting for required checks on ${short()} after the reviewer`);
+      return done;
+    },
+    stop: () => ctl.abort(),
+  };
+}
+
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
 export function workerRun(inputs) {
   return { harness: inputs.harness, model: inputs.model, effort: inputs.effort };
 }
 
 /** The worker's prompt for the one pass that answers the review. */
-export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false }) {
+export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red }) {
   const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}`).join("\n");
   const from = [...new Set(comments.map((c) => c.from).filter(Boolean))];
   // A named reviewer outside Factory (third-party-review.mjs): its text is review input to judge, never instructions. Its
@@ -217,11 +269,17 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     : "";
   // Unread decisions are what this pass is for: all of them, never cut for length (answerFed records them all).
   const recorded = decisionsSection(decisions, afterPush ? Infinity : undefined);
+  // A red required check the stage held for this pass (validationLoop `held`, or the merge queue's run: queueRedOf).
+  const redAsk = red
+    ? `${red.queue ? `The merge queue's run of the required checks on its integrated commit ${String(red.sha || "").slice(0, 7)} (this PR on top of the default branch and the PRs queued ahead of it) failed in this PR's own change, and Factory took the PR out of the queue.` : `Factory's validation found the required checks red on the head the reviewer read (${String(red.sha || "").slice(0, 7)}).`} Fix that cause in the code too (never weaken, skip or delete a test unless the issue asks) and update the Validation section of \`$FACTORY_OUT/pr.md\`; the failures are below, each whole output in \`$FACTORY_IN/checks/\`. A failing policy check is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy.`
+    : "";
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$FACTORY_IN/review-comments.json\`). Load the factory-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$FACTORY_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}]; Factory posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$FACTORY_IN/review-comments.json\`). Load the factory-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$FACTORY_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}]; Factory posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
     : afterPush
-      ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.`
-      : `A maintainer answered PR #${prNumber}'s question and marked it ready. Apply the decisions below to the branch: they are the specification where they differ from your assumptions. Update the Assumptions in \`$FACTORY_OUT/pr.md\` (start from \`$FACTORY_IN/pr.md\`) so no answered item starts with QUESTION: any more.`;
+      ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.${red ? ` ${redAsk}` : ""}`
+      : question
+        ? `A maintainer answered PR #${prNumber}'s question and marked it ready. Apply the decisions below to the branch: they are the specification where they differ from your assumptions. Update the Assumptions in \`$FACTORY_OUT/pr.md\` (start from \`$FACTORY_IN/pr.md\`) so no answered item starts with QUESTION: any more.${red ? ` ${redAsk}` : ""}`
+        : `${redAsk} There are no reviewer comments to answer: write no replies.${recorded ? " Apply the maintainers' decisions below as well." : ""}`;
   return [
     taskCard.trimEnd(),
     "",
@@ -231,6 +289,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     "",
     "## Reviewer comments",
     list || "(none)",
+    ...(red ? ["", "## Red required checks", ...red.lines] : []),
     ...(recorded ? ["", recorded] : []),
   ].join("\n");
 }
@@ -370,9 +429,12 @@ async function main() {
   let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
+  // A pre-review pass still waiting for the checks beside the reviewer (reviewOverlap): ended with the stage.
+  let stopOverlap = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
   const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
+    stopOverlap?.();
     if (!claimExit()) return parked();
     return finishNow(exit, reason, outage, usageLimit);
   };
@@ -742,14 +804,16 @@ async function main() {
     }
   }
 
-  // The reviewer runs after validation passes (PLAN.md): a head the worker job validated
-  // carries the marker; a head a human pushed or marked ready does not, so Factory's own
-  // pass runs first and a red result is Blocked before any review.
-  if (!(await isValidated(repo, pr.number, issue, pr.head.sha, token))) {
-    log(`head ${pr.head.sha.slice(0, 7)} has no validation marker; running Factory's validation before the review`);
-    const pre = await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift });
+  // A red the answer pass fixes with the review's comments (validationLoop `held`, or the merge queue's: readQueueRed), else null.
+  let heldRed = null;
+  // The pre-review pass still waiting for the checks while the reviewer runs (reviewOverlap), else null.
+  let overlap = null;
+  // The pre-review pass's end (validationLoop's result): its fix passes booked and pushed; a PR that started conflicting
+  // goes back for a rebase, a red that stands Blocks before the answer pass, a red held for the answer pass is kept
+  // (heldRed), and a green head gets the validated marker. False when the stage has ended here.
+  const preSettled = async (pre) => {
     records.push(...pre.usage);
-    passes = pre.passes;
+    passes += pre.passes;
     if (pre.usage.length) {
       await outbox.push();
       pr = await publish(pr);
@@ -761,7 +825,12 @@ async function main() {
       await dropLabel();
       await applyExit(repo, { issue, pr, exit: "delivered", reason, notify: inputs.notify, stage: "review" }, token);
       await finish("delivered", reason);
-      return;
+      return false;
+    }
+    if (pre.held) {
+      heldRed = pre.held;
+      log(`required checks red on ${String(pre.held.sha || "").slice(0, 7)}: the answer pass fixes it with the review's comments`);
+      return true;
     }
     if (!pre.green) {
       const d = decideExit({ harness: pre.harness ?? { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: pre.died || pre.harness ? undefined : { passes: pre.passes, green: false, baseFailure: pre.baseFailure, notStarted: pre.notStarted, stuck: pre.stuck?.reason, stuckCause: pre.stuck?.cause, triageRefused: pre.triageRefused, scope: pre.scope, unchanged: pre.unchanged, freshPass: pre.freshPass }, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
@@ -769,10 +838,61 @@ async function main() {
       const why = relayReason(d.reason || "validation red before review");
       await applyExit(repo, { issue, pr, exit: "blocked", reason: why, cause: relayCause(d.exit === "blocked" ? d.cause : "work"), detail: pre.lastOutput, notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", why);
-      return;
+      return false;
     }
     pr = await getPr(repo, pr.number, token);
     await postValidated(repo, pr.number, issue, pr.head.sha, token);
+    return true;
+  };
+
+  // The reviewer runs on a head whose validation is green or under way (PLAN.md): a head the worker job validated
+  // carries the marker; a head the worker handed off with its required checks running, a human pushed or marked ready
+  // does not, so Factory's own pass runs here. With required checks and a reviewer to run, the reviewer starts at the
+  // checks' first reading unless it already shows a required check red, and the wait goes on beside it; a red then is
+  // held for the answer pass, which takes it with the review's comments. A head known red before the reviewer starts
+  // gets its fix passes first, as does any head when no reviewer runs or the validation is the commands alone; a red
+  // there that stays red is Blocked before any review.
+  const marks = await headMarks(repo, pr.number, issue, pr.head.sha, token);
+  if (!marks.validated) {
+    log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
+    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress) }), drift, checksOnlyFirst: marks.handedOff };
+    let pre;
+    if (preArgs.checks && !alreadyReviewed) {
+      overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha });
+      stopOverlap = overlap.stop;
+      // The first reading of the head's checks (or the pass's end, before any): a required check red already, or a pass
+      // that ended, is waited for here; else the reviewer starts and the wait goes on beside it.
+      if (!(await overlap.beside())) {
+        pre = await overlap.done;
+        overlap = null;
+      }
+    } else pre = await validationLoop(preArgs);
+    if (pre && !(await preSettled(pre))) return;
+    if (overlap) pr = await getPr(repo, pr.number, token);
+  }
+
+  // A red merge-queue run the merge pass handed here (session.mjs mergeReadyOne "queue-red", readQueueRed), read as
+  // a red PR check is (queueRedOf): the PR's own change gets one fix pass per failure class, the answer pass (heldRed);
+  // the same class red again after its fix pass Blocks; a flake, GitHub's side or the default branch's is recorded and
+  // the merge below enqueues it again as any drop (or Blocks at the queue's bound).
+  const queued = heldRed
+    ? null
+    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+        // Unread, the drop stays handed: the merge pass hands it to the next review stage.
+        log(`the merge queue's red run could not be read: ${String(e?.message || e).slice(0, 160)}`);
+        return null;
+      });
+  if (queued) {
+    log(queued.line);
+    await progress(queued.line);
+    if (queued.state === "fixed") heldRed = queued.red;
+    if (queued.state === "blocked") {
+      log(queued.reason);
+      await dropLabel();
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: queued.reason, cause: "work", detail: queued.red.tail, notify: inputs.notify, stage: "review" }, token);
+      await finish("blocked", queued.reason);
+      return;
+    }
   }
 
   // The reviewer: one call, comment-only, findings parsed from its last message. With the cap spent it is not run and
@@ -789,7 +909,7 @@ async function main() {
   if (!alreadyReviewed) {
     // The reviewer's effort is passed on its call: no harness applies its reviewer agent file's effort to this run.
     log(`reviewer on ${inputs.reviewerModel || `${inputs.harness}'s default model`} at ${inputs.reviewerEffort || `${inputs.harness}'s default effort`}`);
-    await progress(`reviewer ${inputs.reviewerModel || inputs.harness}`);
+    await progress(`reviewer ${inputs.reviewerModel || inputs.harness}${overlap ? overlap.besideText() : ""}`);
   }
   const reviewLive = alreadyReviewed ? null : liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
   const reviewRec = alreadyReviewed ? { ok: true, noRun: true, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no reviewer run: already reviewed" } : await runHarness({
@@ -865,7 +985,7 @@ async function main() {
   let found = null;
   if (foundationDue) {
     log("foundation Objective: the foundation pass checks the shared contracts the diff changes against their callers");
-    await progress("reviewer foundation pass");
+    await progress(`reviewer foundation pass${overlap ? overlap.besideText() : ""}`);
     const foundationLive = liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
     found = await foundationReview({
       model: inputs.reviewerModel,
@@ -908,6 +1028,14 @@ async function main() {
     }
     log(`foundation pass: ${found.review.comments.length} comment(s)`);
   }
+  // The reviewer is done: the checks it ran beside are waited for, and their end decides before anything is posted (a
+  // stage that ends here posts no review, so the next one reviews the head it works on).
+  if (overlap) {
+    const pre = await overlap.reviewerDone();
+    overlap = null;
+    stopOverlap = null;
+    if (!(await preSettled(pre))) return;
+  }
   const post = !alreadyReviewed
     ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })
     : found
@@ -941,7 +1069,9 @@ async function main() {
   const toAnswer = noneOwn && !thirdParty.length ? [] : (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !noneOwn || c.from);
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
-  let answering = toAnswer.length > 0 || answerQuestion;
+  // A red required check the stage held (heldRed: the checks the reviewer ran beside, or the merge queue's run) is the
+  // answer pass's too, comments or none.
+  let answering = toAnswer.length > 0 || answerQuestion || !!heldRed;
   // With the cap spent the answer pass is not run; the job Blocks below with what the reviewer left.
   if (answering && (over() || overBudget)) {
     log(`max_usd ${inputs.maxUsd} ${unmetered ? "cannot be enforced" : "spent"} before the answer pass; not running it`);
@@ -949,7 +1079,8 @@ async function main() {
     answering = false;
   }
   const fromThirdParty = toAnswer.filter((c) => c.from).length;
-  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)` : "answer pass: the maintainers' answer to the question");
+  const redSaid = heldRed ? `the red required checks on ${String(heldRed.sha || "").slice(0, 7)}${heldRed.queue ? " (the merge queue's run)" : ""}` : "";
+  if (answering) await progress(toAnswer.length ? `answer pass: ${toAnswer.length} comment(s)${fromThirdParty ? ` (${fromThirdParty} from third-party reviewers)` : ""}${answerQuestion ? " and the maintainers' answer" : ""}${redSaid ? ` and ${redSaid}` : ""}` : afterPush.length ? `answer pass: ${afterPush.length} unread maintainer decision(s)${redSaid ? ` and ${redSaid}` : ""}` : answerQuestion ? `answer pass: the maintainers' answer to the question${redSaid ? ` and ${redSaid}` : ""}` : `answer pass: ${redSaid}`);
 
   // One worker pass to answer, then validation again. Its exit record (JSON it writes, or answers
   // with) says whether it raised a question; the PR's draft state does not.
@@ -962,11 +1093,15 @@ async function main() {
     // The pass reads its comments and the PR from $FACTORY_IN; an exit record from an earlier pass must not speak for it.
     io.set({ reviewComments: toAnswer });
     await io.clear(["exit.json", "replies.json"]);
-    await io.render();
+    // A held red's whole outputs go to $FACTORY_IN/checks/ with the rest (as a fix pass gets them).
+    if (heldRed) await io.beforeFix(heldRed.failures, { diff: heldRed.detail?.diff ?? null });
+    else await io.render();
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: io.tick, drift: drift?.watch({ stage: "answer", goal: GOALS.answer, root: checkout, plan: io.plan }) });
     const resumeAnswer = inputs.resumePolicy === "fix-passes" && session.id ? session.id : null;
     let fed = [];
     const comments = toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body, ...(c.from ? { from: c.from } : {}) }));
+    // The held red as the prompt shows it (session.mjs redLines; its whole outputs are in $FACTORY_IN/checks/).
+    const red = heldRed ? { sha: heldRed.sha, queue: !!heldRed.queue, lines: redLines(heldRed) } : null;
     const listedFor = (resume) => (afterPush.length ? afterPush : resume ? decisions : []);
     const answerArgs = (resume) => {
       const listed = listedFor(resume);
@@ -976,9 +1111,9 @@ async function main() {
         onResume: answerLive.onResume,
         ...workerRun(inputs),
         resume,
-        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0 }),
+        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
         // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
-        ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0 }) } : {}),
+        ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
         env: passEnv,
@@ -989,7 +1124,7 @@ async function main() {
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
-    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`)] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     let rec = await runHarness(answerArgs(resumeAnswer));
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
@@ -1179,7 +1314,7 @@ async function main() {
         recorded = true;
         const report = {};
         const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
         // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.

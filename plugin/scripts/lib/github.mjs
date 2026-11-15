@@ -741,12 +741,26 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
  * `ended(runs)` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends
- * the wait unfinished.
+ * the wait unfinished. `onRead(state)` (optional) gets each reading's evaluateChecks state as it is made; `signal` (an
+ * AbortSignal, optional) ends the wait, unfinished, at its next pause.
  */
+/** `ms` of sleep, cut short when `signal` aborts. */
+const pause = (ms, signal = null) =>
+  new Promise((r) => {
+    if (signal?.aborted) return r();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      r();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+
 /** A check run as awaitChecks returns it (and checksNotStarted reads it). */
 const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
 
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, conflicted = null, ended = null, ignoreIds = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, onRead = null, conflicted = null, ended = null, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
   const started = Date.now();
   // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
   let pause = pollMs;
@@ -764,12 +778,15 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
       readOnce = true;
     }
     state = evaluateChecks(names, runs);
+    // Each reading as it is made (session.mjs validationLoop's `onRead`: whether the head is known red yet).
+    onRead?.(state);
     if (state.done) break;
     if (conflicted && (await conflicted().catch(() => false))) {
       conflict = true;
       break;
     }
     const elapsed = Date.now() - started;
+    if (signal?.aborted) break;
     if ((read || !readOnce) && state.missing.length && elapsed > appearMs && !state.pending.length && runs.length === 0) break; // nothing ran for this head
     // A required check with no run while others reported (with none, appearMs above ends the wait), and `ended` (async,
     // optional, given the runs as returned below) says it will get none: its own workflow runs ended before their jobs

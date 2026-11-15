@@ -1102,7 +1102,8 @@ export class Local {
   async withClaim(issue, fn, { onStop = null, stint = false } = {}) {
     const stintNow = async () => {
       try {
-        return runningStint(await timelineOf(this.repo, issue, this.opts)).key;
+        // Conditional reads: a timeline page unchanged since this loop last read it is a 304, which the rate limit does not count.
+        return runningStint(await timelineOf(this.repo, issue, { ...this.opts, cache: (this.timelines ??= new Map()) })).key;
       } catch (e) {
         throw Object.assign(e, { startFailed: "claim-read" });
       }
@@ -1153,10 +1154,16 @@ export class Local {
       return { exit: "skipped" };
     }
     const after = mine?.holder === this.holder && stint ? await stintNow().catch(() => undefined) : picked;
-    const aside = mine?.holder !== this.holder ? "another local loop claimed it first" : after === undefined ? "its Running stint could not be read back, so a second start cannot be ruled out" : after !== picked ? "its Running stint changed while this start claimed it (another loop queued or picked it again)" : null;
+    if (after === undefined) {
+      // Unread is no answer, as a failed read-back: the claim stays, goes stale, and pausedHere resumes it.
+      log(`#${issue}: its Running stint could not be read back; the claim stays, and this loop resumes the Objective once it is stale`);
+      return { exit: "skipped" };
+    }
+    const aside = mine?.holder !== this.holder ? "another local loop claimed it first" : after !== picked ? "its Running stint changed while this start claimed it (another loop queued or picked it again)" : null;
     if (aside) {
       log(`#${issue}: ${aside}; leaving it alone`);
-      await this.cede(issue, wrote);
+      // The comment this write updated was this machine's own claim (a resume): no other loop's name to wait for.
+      await this.cede(issue, wrote, { own: !!held && (held.holder === this.holder || deadHereHolder(held.holder)) });
       return { exit: "skipped" };
     }
     this.ceded?.delete(issue);
@@ -1205,11 +1212,13 @@ export class Local {
    * Take back a claim this loop wrote and then stepped aside from (withClaim). A comment its write created that still names
    * this loop goes (with different logins, each loop's claim is a comment of its own, never left beside the live one). A
    * comment it updated was another loop's under the same login: it stays for that loop's next heartbeat to write its own
-   * name back, and this loop never resumes the Objective from it (pausedHere).
+   * name back, and this loop never resumes the Objective from it (pausedHere). One that was this machine's own claim
+   * (`own`: a resume's) stays as any paused claim does, for pausedHere to resume once stale, unless another loop's
+   * heartbeat names that loop first.
    */
-  async cede(issue, wrote) {
-    (this.ceded ??= new Set()).add(issue);
+  async cede(issue, wrote, { own = false } = {}) {
     // GitHub gives a comment it creates the same created and updated time; an update moves the updated one on.
+    if (!own) (this.ceded ??= new Set()).add(issue);
     if (!wrote?.id || wrote.created_at !== wrote.updated_at) return;
     const now = await listComments(this.repo, issue, this.opts).catch(() => null);
     const c = now?.find((x) => x.id === wrote.id);

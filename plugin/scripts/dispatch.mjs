@@ -48,6 +48,8 @@ const RELATION_READS = 6;
  * Queued: a start writes its claim within seconds of the Running label, and a live stage keeps it (HEARTBEAT_MS).
  */
 const UNCLAIMED_MS = 5 * 60_000;
+/** A long-lived loop's memory of what its sweep last said of an issue it left alone (said once while it stays so). */
+const UNCLAIMED_SAID = new Map();
 
 /** What a person does about a factory:local Objective no loop came back to for a day. */
 const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
@@ -642,10 +644,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           const stint = runningStint(events);
           const fresh = stint.running && stint.at === since ? await getIssue(repo, n, opts).catch(() => null) : null;
           const shown = (fresh?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-          if (fresh?.state !== "open" || !shown.includes("factory:running") || shown.some((l) => /^factory:(blocked|question|in-review)$/.test(l))) {
-            log(`  #${n}: Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick`);
+          const others = shown.filter((l) => /^factory:(blocked|question|in-review)$/.test(l));
+          if (fresh?.state !== "open" || !shown.includes("factory:running") || others.length) {
+            // Running beside another state stays so until someone changes it: said once per such state, not every tick.
+            const why = others.length && shown.includes("factory:running") ? `labelled factory:running and ${others.join(", ")} at once with no claim; left alone` : "Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick";
+            if (!others.length || UNCLAIMED_SAID.get(n) !== why) log(`  #${n}: ${why}`);
+            if (others.length) UNCLAIMED_SAID.set(n, why);
             continue;
           }
+          UNCLAIMED_SAID.delete(n);
           if (!dryRun) {
             const off = await removeLabel(repo, n, "factory:running", opts).then(
               () => true,

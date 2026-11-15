@@ -453,3 +453,78 @@ test("serve stopped while its dispatch marks a pick that another loop has claime
     await fake.close();
   }
 });
+
+test("a resume whose stint cannot be read back after its claim keeps that claim as its own, and resumes it once stale (#310 re-review)", async () => {
+  const id = machineIdentity();
+  // This machine's earlier serve (its pid gone) paused #7: its claim, same login, an hour stale.
+  const old = `${id.host}:999999:abcdef:${id.machine}:${id.boot}`;
+  let reads = 0;
+  const stale = (body) => body.replace(/heartbeat: \S+/, `heartbeat: ${ago(3600_000)}`);
+  const fake = await fakeGitHub({
+    labels: ["factory:objective", "factory:local", "factory:running"],
+    timeline: runningSince(2 * 3600_000),
+    comments: [{ id: 90, user: { login: "maintainer", type: "User" }, body: stale(`${claimMarker(7)}\n${claimBody(old)}`), created_at: ago(2 * 3600_000), updated_at: ago(3600_000) }],
+    // The stint reads before the claim answer; every one after it fails.
+    hook: (req, p) => {
+      if (req.method === "GET" && p === "/repos/o/r/issues/7/timeline" && ++reads >= 3) return { status: 502 };
+    },
+  });
+  const { loop, started, restore } = await startLoop(fake);
+  try {
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+    assert.equal((await loop.runObjective(7)).exit, "skipped");
+    assert.deepEqual(started, []);
+    const c = claims(fake.state)[0];
+    assert.match(c.body, new RegExp(`holder: ${loop.holder}`), "the claim stays, naming this loop");
+    // Later, the claim stale and GitHub answering: this loop resumes it, rather than leaving it for the day's Block.
+    reads = -1000;
+    c.updated_at = ago(3600_000);
+    c.body = stale(c.body);
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+  } finally {
+    restore();
+    await fake.close();
+  }
+});
+
+test("serve: an issue labelled Running and another state at once, with no claim, is said once, not every tick (#310 re-review)", async () => {
+  const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local", "factory:running", "factory:in-review"], timeline: runningSince(40 * 60_000) });
+  try {
+    const { log } = await serveTicks(fake, { ticks: 3 });
+    assert.equal((log.match(/#7: labelled factory:running and factory:in-review at once with no claim; left alone/g) || []).length, 1, log);
+    assert.deepEqual(labelDeletes(fake.state), []);
+  } finally {
+    await fake.close();
+  }
+});
+
+test("a resume that steps aside on a changed stint leaves its own claim resumable, never set aside for good (#310 re-review)", async () => {
+  const id = machineIdentity();
+  const old = `${id.host}:999999:abcdef:${id.machine}:${id.boot}`;
+  const stale = (body) => body.replace(/heartbeat: \S+/, `heartbeat: ${ago(3600_000)}`);
+  let changed = false;
+  const fake = await fakeGitHub({
+    labels: ["factory:objective", "factory:local", "factory:running"],
+    timeline: runningSince(2 * 3600_000),
+    comments: [{ id: 90, user: { login: "maintainer", type: "User" }, body: stale(`${claimMarker(7)}\n${claimBody(old)}`), created_at: ago(2 * 3600_000), updated_at: ago(3600_000) }],
+    // While the resume's claim write lands, the Objective's stint changes (another loop picked it again).
+    hook: (req, p, state) => {
+      if (req.method === "PATCH" && p === "/repos/o/r/issues/comments/90" && !changed) {
+        changed = true;
+        anotherStint(state);
+      }
+    },
+  });
+  const { loop, started, restore } = await startLoop(fake);
+  try {
+    assert.equal((await loop.runObjective(7)).exit, "skipped");
+    assert.deepEqual(started, []);
+    const c = claims(fake.state)[0];
+    c.updated_at = ago(3600_000);
+    c.body = stale(c.body);
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "this machine's own claim stays resumable");
+  } finally {
+    restore();
+    await fake.close();
+  }
+});

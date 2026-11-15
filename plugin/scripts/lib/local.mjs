@@ -1513,19 +1513,122 @@ const HOME_SEEDS = { "config.toml": "", "managed_config.toml": "", "requirements
  */
 export const copilotHomeFiles = () => ({ "config.json": `${JSON.stringify({ firstLaunchAt: new Date().toISOString() })}\n`, "mcp-config.json": '{"mcpServers":{}}\n' });
 export const ensureHarnessHomes = (harness, env = {}, home = homedir()) => {
+  const place = homePlaces(harness, env, home);
   // And the guarded directories, which srt would otherwise stand in for with a file the harness cannot read as one.
-  for (const d of [...harnessHomes(harness, env, home).filter((p) => !p.endsWith(".json")), ...harnessHomeGuards(harness, env, home, { dirsOnly: true })]) mkdirSync(d, { recursive: true, mode: 0o700 });
+  for (const d of [...harnessHomes(harness, env, home).filter((p) => !p.endsWith(".json")), ...harnessHomeGuards(harness, env, home, { dirsOnly: true })]) ensureStateDir(d, place);
   const seeds = { ...HOME_SEEDS, ...(harness === "copilot" ? copilotHomeFiles() : {}) };
   for (const f of harnessHomeGuards(harness, env, home, { staticOnly: true })) {
     const seed = seeds[basename(f)];
     if (seed === undefined) continue;
+    let at = f;
+    walking(at, () => {
+      for (let hops = 0; lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink() && !resolves(at); hops += 1) at = danglingTarget(at, place, hops);
+    });
+    if (at !== f) ensureStateDir(dirname(at), place);
+    place.check(at);
     try {
-      writeFileSync(f, seed, { flag: "wx", mode: 0o600 });
+      writeFileSync(at, seed, { flag: "wx", mode: 0o600 });
     } catch {
       // there already
     }
   }
 };
+
+/**
+ * Where ensureHarnessHomes may make a directory or a file, by real path: inside the stage's own login folder (stageLogin)
+ * and, for a Claude Code stage, the default `~/.claude` (a second account's folder that links its entries there); never
+ * at or under a credential store or another login (credentialPaths, and every other login's files, one nested in the
+ * stage's own folder included), nor on the stage's own login files; the rest of its own folder is its harness's state. A
+ * link to nothing on the way has its target made there; one that leads anywhere else, a directory on the way that really
+ * lies elsewhere, a file or a loop of links on the way, or a file where a directory belongs, refuses the stage
+ * (`home-link`), naming the path for this machine's log only (local.mjs homeLinkReason is GitHub's).
+ */
+export function homePlaces(harness, env = {}, home = homedir()) {
+  const own = stageLogin(harness, env, home);
+  const roots = [...new Set([...(own ? [own.dir] : []), ...(harness === "claude" ? [join(home, ".claude")] : [])].map(realPlace))];
+  // The stage's own login's entries (credentialPaths `own`: what bears it, or a Codex or Copilot home whole) leave the
+  // refused list, its login files excepted; every other login's stay, one nested in the stage's own folder included.
+  // Every name of it: a default home linked to the folder CLAUDE_CONFIG_DIR or CODEX_HOME names is one login, listed twice.
+  const logins = harnessLogins(home, env, { declared: own ? [own] : [] });
+  const isMine = (l) => !!own && l.harness === own.harness && sameDir(l.dir, own.dir);
+  const ownEntries = new Set(logins.filter(isMine).flatMap((l) => (l.harness === "claude" ? l.bearing : l.files)).map(realPlace));
+  const ownFiles = harness === "claude" ? ownLogin("claude", env, home) : harness === "codex" && own ? [join(own.dir, "auth.json")] : [];
+  const others = logins.filter((l) => !isMine(l)).flatMap((l) => [...l.files, ...l.bearing]);
+  const denied = [...new Set([...credentialPaths(home, env, { own }).map(realPlace).filter((c) => !ownEntries.has(c)), ...others.map(realPlace), ...ownFiles.map(realPlace)])];
+  const where = (real) => (denied.some((c) => within(real, c)) ? "in a credential store or another harness login" : roots.some((r) => within(real, r) || r.startsWith(`${real}/`)) ? null : "outside the harness homes this stage may write");
+  return {
+    // Refused unless `p` really lies where Factory may make it (an ancestor of a home not made yet included). `link`: the
+    // link to nothing whose target `p` is.
+    check(p, link = null) {
+      const real = realPlace(p);
+      const bad = where(real);
+      if (!bad) return;
+      const what = link ? `${link} is a link to ${p}, which does not exist and` : `${p}${real !== resolve(p) ? ` (really ${real})` : ""}`;
+      throw homeLinkError(link || p, link ? p : real, `${what} lies ${bad}; Factory makes nothing there: create it yourself or remove the link`);
+    },
+  };
+}
+const homeLinkError = (link, target, message) => Object.assign(new Error(message), { code: "home-link", link, target });
+/** The links a chain to nothing may take before the stage refuses it (a loop of links never resolves). */
+const HOME_LINK_HOPS = 8;
+const resolves = (p) => {
+  try {
+    statSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** Where `p` really is: its nearest ancestor that resolves, at its real path, and the rest as written (realish goes one up). */
+const realPlace = (p) => {
+  const tail = [];
+  for (let q = resolve(p); ; q = dirname(q)) {
+    try {
+      return join(realpathSync(q), ...tail);
+    } catch {
+      if (q === dirname(q)) return resolve(p);
+      tail.unshift(basename(q));
+    }
+  }
+};
+/** `fn` on the path walk at `p`: a file or a loop of links on the way (ENOTDIR, ELOOP) refuses the stage (`home-link`). */
+const walking = (p, fn) => {
+  try {
+    return fn();
+  } catch (e) {
+    if (e?.code === "ENOTDIR" || e?.code === "ELOOP") throw homeLinkError(p, p, `${p} cannot be made: a path on the way is a file or a loop of links (${e.code}); remove it`);
+    throw e;
+  }
+};
+/** The target of `link`, a link to nothing, where homePlaces allows it. */
+function danglingTarget(link, place, hops) {
+  const target = resolve(dirname(link), readlinkSync(link));
+  if (hops >= HOME_LINK_HOPS) throw homeLinkError(link, target, `${link} is a link to ${target}, a chain of links that never resolves; remove it`);
+  place.check(target, link);
+  return target;
+}
+/** Make the directory `p` and its parents, each checked where it really lies; a link to nothing on the way has its target made (danglingTarget). */
+function ensureStateDir(p, place, hops = 0) {
+  walking(p, () => {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st?.isSymbolicLink() && !resolves(p)) {
+      ensureStateDir(danglingTarget(p, place, hops), place, hops + 1);
+      return;
+    }
+    // There already: a directory, or a link to one. A file there would leave the harness a state folder it cannot use.
+    if (st) {
+      if (!statSync(p).isDirectory()) throw homeLinkError(p, realPlace(p), `${p}${st.isSymbolicLink() ? ` (a link to ${realPlace(p)})` : ""} is no directory, where the harness keeps one; remove it`);
+      return;
+    }
+    if (dirname(p) !== p) ensureStateDir(dirname(p), place, hops);
+    place.check(p);
+    try {
+      mkdirSync(p, { mode: 0o700 });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+  });
+}
 
 /**
  * What in a harness's own state runs code or steers a later session, the developer's own included, and must stay

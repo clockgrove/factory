@@ -355,6 +355,32 @@ for (const [stage, end, how] of [
   });
 }
 
+test("withClaim: Factory's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
+  const { mkdirSync } = await import("node:fs");
+  const { gitPinFile, pinGitDir } = await import("../scripts/lib/local.mjs");
+  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, draft: false, head: { ref: "factory/7" }, labels: [{ name: "factory:review" }] } });
+  try {
+    const loop = Object.assign(await claimLoop(), { harness: "claude", firstSetup: new Map(), children: new Set() });
+    mkdirSync(join(loop.ws(7), "repo", ".git"), { recursive: true });
+    pinGitDir(join(loop.ws(7), "repo"), gitPinFile(loop.ws(7)));
+    loop.harnessFor = async () => ({ ok: true, harness: "claude" });
+    // The real case: the harness home's `plans` a link to nothing (an uncoded throw from the stage's set-up).
+    loop.stageEnv = () => {
+      throw Object.assign(new Error("ENOENT: no such file or directory, mkdir '/h/.claude-two/plans'"), { code: "ENOENT" });
+    };
+    await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
+    assert.ok(!gh.labels.has("factory:blocked"), "resumed once first");
+    await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
+    assert.ok(gh.labels.has("factory:blocked"));
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.match(notice, /Blocked \(review\): Factory's set-up of the review stage failed \(ENOENT: no such file or directory, mkdir '\/h\/\.claude-two\/plans'\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
+    assert.doesNotMatch(notice, /\(work\)|the work stage|draft with what exists/);
+    assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("withClaim: a read-back that fails once is read again; one that never answers keeps the claim for this loop to resume (#167)", async () => {
   // The comments requests of one claim: the check for another holder, upsertComment's own, then the read-back (the 3rd),
   // which fails through all of the client's tries, so the loop's own second read is what answers.

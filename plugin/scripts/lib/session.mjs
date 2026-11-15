@@ -1452,8 +1452,8 @@ export function questionNotice({ at = "", stage = "work", reason, pr = null, ask
  * The Blocked notice's line: the stage, the reason, and what fixes it, which is `fix` when the stage knows better than
  * a push or an edit (objective-trust.mjs AUTHOR_FIX: an untrusted author is fixed by no edit).
  */
-export const blockedLine = ({ issue, pr = null, stage, reason, fix = null }) =>
-  `Blocked (${stage}): ${reason}${pr ? ` — PR #${pr.number} is a draft with what exists.` : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}`;
+export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false }) =>
+  `Blocked (${stage}): ${reason}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}`;
 
 /**
  * Apply an exit to GitHub: card, fallback label, draft state, the one comment,
@@ -1473,11 +1473,13 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
   // One comment per run (not per stage): a second notice must be a new comment so the @mention notifies again.
   const runId = process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || 1}` : String(Date.now());
   if (exit === "blocked") {
+    // Delivered means an open PR out of draft (worker.mjs): the notice says so, since the Block puts it back to draft.
+    const delivered = pr?.draft === false;
     if (pr) await setDraft(repo, pr.number, true, { token }).catch((e) => log(`draft: ${e.message.slice(0, 120)}`));
     await setStateLabel(repo, issue, "blocked", { token });
     await moveCard(project, repo, issue, "Blocked", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
-    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
+    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
     return;
   }

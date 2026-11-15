@@ -69,7 +69,7 @@ Every Objective's sandboxes reach GitHub, the npm and Yarn registries and the ho
 
 ## What you see on the issue
 
-While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker and the review.
+While a job runs, one comment on the issue (edited in place, one per run) carries a bold status line and the phases with clocks: setup, install, harness, each validation pass, reviewer, answer pass, exit. The review starts while the PR's first required-check run is still going: its reviewer line then ends `beside the required checks on <sha>`, and a later line says when the checks ended (`... while the reviewer runs`) or that the stage waits for them after the reviewer. The status line comes from the harness's own event stream, not from its prose: elapsed minutes, turns, tool calls, the sub-agents running and what each was asked to do, when the last event arrived, tokens so far, the last tool it ran. A harness that prints nothing for 30 minutes is killed and retried once, and the line says so. The labels (`factory:running`, `factory:in-review`, `factory:blocked`, `factory:question`) and the board column are the state; the plan comment is the harness's own checklist, ticked as it goes; the PR carries the validation marker (or, while its first required-check run goes on beside the review, the hand-off marker) and the review.
 
 ## An Objective's lifecycle
 
@@ -123,6 +123,8 @@ An agent that supervises the queue for you can wait on it instead of watching lo
 ## Factory merges on its own
 
 Code lands with no human read. The gate is your CI workflow's checks on the reviewed head and the integrated commit, the comment-only reviewer pass, and the merge queue's own re-run where you have one. Set `FACTORY_AUTO_MERGE: false` for ready-for-review PRs instead.
+
+The reviewer reads the PR while its first CI run is still going. A red found then is not a separate fix pass: the answer pass fixes it with the reviewer's comments. A red merge-queue run whose failure is in the PR's own change gets one fix pass too, before any Block (at most two per start of the Objective), so your CI can run a light check on the PR and the full suite only in the merge queue. Without red-check triage (no AI Gateway key) a queue failure counts as the PR's own only when it names a file or test the PR changed. A flaky or infrastructure red in the queue, or one Factory cannot read, is enqueued again once, as any drop; the same failure red again after its fix pass Blocks, naming the failed job and its first failing line.
 
 ## Siblings that touch the same files
 

@@ -2898,7 +2898,8 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * - `quota`: the retry time of a start the vendor's quota refused (the launcher handed the wait over);
  * - `start-retry`: the next try of a stage whose start failed another way (startRetryAt), three strikes then Blocked;
  * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
- * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started.
+ * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started;
+ * - `third-party`: a review stage's wait for a third-party reviewer reaching its bound (third-party-review.mjs).
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
  * On the sandbox route the sweep and the image job arm wakes of their own, whose tick runs the sweep:
@@ -2906,14 +2907,14 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  *   the rest of a run that reached a cap), on every repository.
  * Every wake's tick is a `workflow_dispatch`, so it also ticks the dispatcher.
  */
-export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry"]);
+export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry", "third-party"]);
 /** Every kind a wake job is named for and its tick carries (parseWake reads only these). */
 export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep"]);
 /**
  * The kinds a repository's dispatcher arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
- * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end and
- * the UTC day's turn, which can keep a sleeper up for hours, wait for an event or GitHub's cron backstop there. An
- * unknown visibility counts as private.
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end,
+ * the UTC day's turn, which can keep a sleeper up for hours, and a third-party wait's bound, whose sleeper would bill the
+ * minutes the wait frees, wait for an event or GitHub's cron backstop there. An unknown visibility counts as private.
  */
 export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
 /** The kinds the sweep and the image job arm: `sweep` only, minutes each, so on every repository. */

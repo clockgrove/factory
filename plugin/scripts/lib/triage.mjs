@@ -1013,13 +1013,32 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       return no;
     }
     const runIds = new Set([...actionsJob.values()].map((j) => j.run_id));
+    const jobs = await askJobs({ sha, failedRuns, required, seen, actionsJob });
+    asked.set(sha, jobs);
+    if (!rerunWanted(jobs)) {
+      await record(triageLine({ sha, model, jobs, outcome: "fix pass" }), {});
+      return no;
+    }
+    const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})` }));
+    if (failed?.line) await record(failed.line, {});
+    // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
+    // verdict and failure line, and the refusal.
+    if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, jobs: jobs.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) } };
+    if (failed) return no;
+    await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun" }), { reruns: [sha], sigs: jobs.map((j) => j.sig.id).filter(Boolean) });
+    return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: jobs.map((j) => j.name) };
+  };
+
+  // Each failing job's question (red(), classify()): its log and signature read, the model asked unless the failure
+  // failed on GitHub's side, was already rerun once on the Objective, or names what the PR changes.
+  const askJobs = async ({ sha, failedRuns, required, seen, actionsJob }) => {
     const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
     const names = changedNames(files);
     ask ??= await openDecider({ key, model });
     const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
     const sigs = new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))]));
     const picked = jobsToTriage(failedRuns, required, sigs);
-    const jobs = await Promise.all(
+    return Promise.all(
       picked.map(async (r) => {
         const text = texts.get(r.id);
         const sig = sigs.get(r.id);
@@ -1039,19 +1058,32 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         return { name: r.name, sig, repeat, step, ...v };
       }),
     );
-    asked.set(sha, jobs);
-    if (!rerunWanted(jobs)) {
-      await record(triageLine({ sha, model, jobs, outcome: "fix pass" }), {});
-      return no;
+  };
+
+  // A red on a commit no rerun brings back (the merge queue's, after the queue dropped the PR: session.mjs queueRedOf):
+  // each failing job asked as red() asks it, nothing rerun and no rerun recorded. `flaky` when red() would have rerun
+  // it (rerunWanted); `named` when a failure names a file or test the PR changes; `off` when no model was asked. The
+  // verdicts go to the log and the progress comment.
+  const classify = async ({ sha, failedRuns = [], required = [] }) => {
+    if (!failedRuns.length) return { flaky: false };
+    if (failedRuns.length > MAX_JOBS) {
+      await record(`triage: ${failedRuns.length} failing jobs on ${sha.slice(0, 7)}, more than ${MAX_JOBS}; the change's`, {});
+      return { flaky: false };
     }
-    const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})` }));
-    if (failed?.line) await record(failed.line, {});
-    // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
-    // verdict and failure line, and the refusal.
-    if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, jobs: jobs.map((j) => ({ name: j.name, verdict: j.verdict, confidence: j.confidence, line: j.sig.line, lines: j.sig.lines })) } };
-    if (failed) return no;
-    await record(triageLine({ sha, model, jobs, outcome: "failed jobs rerun" }), { reruns: [sha], sigs: jobs.map((j) => j.sig.id).filter(Boolean) });
-    return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: jobs.map((j) => j.name) };
+    const { notActions, jobs: actionsJob } = await actionsJobs(failedRuns);
+    if (notActions) {
+      await record(`triage: ${notActions} is not an Actions job; the change's`, {});
+      return { flaky: false };
+    }
+    const jobs = await askJobs({ sha, failedRuns, required, seen: await known(), actionsJob });
+    const flaky = rerunWanted(jobs);
+    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : "the change's: fix pass" }), {});
+    return { flaky, jobs, off: false, named: await namesChanged(failedRuns) };
+  };
+  // Whether a failing job's failure names a file, file name or test the PR changes (namesChange).
+  const namesChanged = async (failedRuns) => {
+    const { sigs, names } = await readRed(failedRuns);
+    return failedRuns.some((r) => !!namesChange(sigs.get(r.id), names));
   };
 
   // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
@@ -1101,8 +1133,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) if (!(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sigs.get(r.id), names))) return false;
     return true;
   };
-  if (!decider && !key) return { model, off: code, red: offRed, again, infra };
-  return { model, red, again, infra };
+  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure names what the PR changes.
+  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await namesChanged(r.failedRuns) : false });
+  if (!decider && !key) return { model, off: code, red: offRed, again, infra, classify: offClassify };
+  return { model, red, again, infra, classify };
 }
 
 async function waitRunCompleted(repo, id, { token, timeoutMs = 10 * 60_000, pollMs = 20_000 }) {

@@ -33,6 +33,7 @@ import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { dropOwned } from "./lib/fsafe.mjs";
+import { loopCap, machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -707,7 +708,8 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
  * sandbox the launch job's tick on its own failure, the sweep's own wakes (sweep-wake, image-wake) and the dispatcher's
- * owed image build (image_owed). A workflow rendered before them leaves those waits to GitHub's cron,
+ * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Factory PR
+ * (pull_request_review, filtered to a Bot reviewer), which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
 export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
@@ -733,10 +735,15 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
     ...(jobs["launch-gate"] && !ownWake("sweep") ? ["the sweep's own wake (sweep-wake)"] : []),
     ...(jobs["launch-gate"] && !(ownWake("image") && /cancelled\(\)|always\(\)/.test(String(jobs["image-wake"]?.if || ""))) ? ["the sweep's wake after an image build (image-wake) that runs past a skipped dispatcher"] : []),
     ...(jobs["launch-gate"] && !owedBuild ? ["the dispatcher's owed image build (image_owed)"] : []),
+    ...(thirdPartyNamed(doc, jobs) && !(on?.pull_request_review && /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot'/.test(String(jobs.dispatch?.if || ""))) ? ["a dispatcher tick on a third-party reviewer's review (pull_request_review, from an App only)"] : []),
   ];
   if (!missing.length) return PASS("dispatcher ticks", `a closed issue, a failed launch and the waits only time ends tick the dispatcher on time${jobs["launch-gate"] ? "; the sandbox sweep arms its own wakes and an owed image build runs on the day's first tick" : ""}`);
-  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a review waiting for a third-party reviewer, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
+
+/** Whether the workflow names third-party reviewers: FACTORY_THIRD_PARTY_REVIEWERS in its env block, or `third_party_reviewers` on a step. */
+const thirdPartyNamed = (doc, jobs) =>
+  !!String(doc?.env?.FACTORY_THIRD_PARTY_REVIEWERS ?? "").trim() || Object.values(jobs).some((j) => (j?.steps || []).some((st) => !!String(st?.with?.third_party_reviewers ?? "").trim()));
 
 /**
  * On a private repository the wake jobs sleep only to the short waits (a quota retry, a read retry, the sweep's minutes):
@@ -745,7 +752,7 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  */
 export function longWaitCheck(repoData) {
   if (repoData?.private !== true) return null;
-  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
+  return PASS("long waits", "private repository: a sandbox stage's lease end, the UTC day's turn after daily_usd and a third-party wait's bound fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */
@@ -1356,6 +1363,29 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
+ * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), who holds its slots (pid,
+ * repository, issue and stage), and the machine's load now, with whether loops here hold new starts on it. A budget
+ * setting that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the budget (`env`: this shell's over the workflow's)
+ * and a saturated machine are WARNs. Read only: doctor removes no slot. `home` and `proc` are a test's own.
+ */
+export function machineChecks({ env = process.env, local, home = homedir(), proc = "/proc" }) {
+  if (!local || env.GITHUB_ACTIONS) return [];
+  const budget = machineBudget({ home });
+  const holders = slotHolders(slotsDir(home), { reap: false });
+  const pressure = readPressure({ root: proc });
+  const sat = saturation(pressure);
+  const what = (h) => `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
+  const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
+  const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
+  return [
+    ...(cap > budget.stages ? [WARN("FACTORY_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Factory loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower FACTORY_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
+    budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
+    PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
+    sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
+  ];
+}
+
+/**
  * The hosts the open Objectives' host labels open to their own sandboxes (choice.mjs hostsOf), beyond the hosts every
  * Objective reaches: one PASS naming each Objective with its hosts, or that none has one; a WARN for an Objective whose
  * host label names no host a sandbox can allow (each of its stages Blocks on it). Who applied each label is every
@@ -1507,6 +1537,7 @@ async function main() {
   const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(clone) }) : null;
   results.push(...localLoginChecks({ inputs, env: declared?.ok ? accountEnv(process.env, defaultAccount(declared, inputs.harness)) : process.env, local }));
   results.push(...(await localAccountChecks({ env: process.env, local, checkout: clone })));
+  results.push(...machineChecks({ env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));

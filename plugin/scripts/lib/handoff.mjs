@@ -152,7 +152,8 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
   const own = (list) => (list || []).filter((c) => c && typeof c === "object");
   const extra = own(foundation?.comments);
   const raw = [...own(review?.comments), ...extra];
-  const commented = new Set(raw.map(commentEntry).filter(Boolean));
+  // Only the first pass's comments cover its not-met judgments: a foundation comment on the same entry is another finding.
+  const commented = new Set(own(review?.comments).map(commentEntry).filter(Boolean));
   // On a split part that is not the last, an entry judged deferred (a later part delivers it) gets no comment.
   const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
   let comments = snapComments(

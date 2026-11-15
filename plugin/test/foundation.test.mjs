@@ -79,6 +79,11 @@ test("foundationReview: no call starts with max_usd spent or less than a call's 
   assert.deepEqual(await foundationReview({ model: "m", run, over: () => true, timeout: () => 60_000 }), { review: null, recs: [], stop: "cap" });
   assert.deepEqual(await foundationReview({ model: "m", run, over: () => false, timeout: () => null }), { review: null, recs: [], stop: "time" });
   assert.equal(runs.length, 0);
+  // No time left for the rerun: the pass ends on how its first call ended, not on the time cap.
+  let left = 60_000;
+  const late = await foundationReview({ model: "m", run: async (a) => (runs.push(a), (left = 0), call("", { ok: false, exitCode: 1 })), over: () => false, timeout: () => (left ? left : null) });
+  assert.deepEqual([late.stop, late.recs.length, runs.length], ["missed", 1, 1]);
+  runs.length = 0;
   // The first call spent the cap: its rerun does not start (`over` reads what `run` booked).
   let spent = 0;
   const capped = await foundationReview({ model: "m", run: async (a) => (runs.push(a), (spent += 5), call("", { ok: false, budgetExceeded: true })), over: () => spent >= 5, timeout: () => 60_000 });
@@ -115,6 +120,10 @@ test("reviewPost: the foundation pass's comments go up in the same review, count
   assert.deepEqual([only.placeholder, only.comments.length], [false, 1]);
   assert.equal(reviewPost({ issue: 7, review: met, diff, entries, foundation: parseReview('{"comments": []}') }).placeholder, true);
   assert.throws(() => reviewPost({ issue: 7, review: met, diff, entries, foundation: parseReview("prose") }), /foundation pass's answer held no findings JSON/);
+  // A foundation comment on an entry the first pass judged not met without a comment: both go up.
+  const unmet = { comments: [], acceptance: [{ entry: "B", met: false, path: "src/a.ts", line: 3, evidence: "the limit is gone" }] };
+  const both = reviewPost({ issue: 7, review: unmet, diff, entries: [{ id: "B", text: "b" }], foundation: parseReview('{"comments": [{"path": "src/new.ts", "line": 2, "entry": "B", "body": "foundation review: y"}]}') });
+  assert.deepEqual(both.comments.map((c) => [c.path, c.line, c.body]), [["src/new.ts", 2, "foundation review: y"], ["src/a.ts", 3, "acceptance B: not met. the limit is gone"]]);
 });
 
 test("the review job runs the foundation pass on a trusted foundation Objective only, after the first pass's answer and before the post", () => {

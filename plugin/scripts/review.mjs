@@ -155,7 +155,8 @@ export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, h
  * The foundation pass (foundationPrompt): one reviewer call, rerun once like the first pass when it misses (no answer,
  * or no JSON: handoff.mjs reviewMissed, with no entries to judge; on the fallback reviewer where the harness has one),
  * never after a provider's refusal. Each call starts only with budget and time left: `over()` true (max_usd spent) ends
- * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"`. `run` makes one call ({model, effort,
+ * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"` before the first call (before the
+ * rerun, `missed`: the first call's end is the reason). `run` makes one call ({model, effort,
  * label, timeoutMs}) and books it, so `over()` counts it. Returns {review, recs, stop}: `review` the parsed answer
  * (parseReview) when a call produced one, else null with `stop` saying why (`missed` when every call ran and none did).
  */
@@ -165,7 +166,8 @@ export async function foundationReview({ run, model, effort, fallback = null, ov
   for (const call of [{ model, effort, label: "review-foundation" }, { model: again.model, effort: again.effort, label: again.label.replace(/^review-/, "review-foundation-") }]) {
     if (over()) return { review: null, recs, stop: "cap" };
     const timeoutMs = timeout();
-    if (timeoutMs === null) return { review: null, recs, stop: "time" };
+    // No time for the rerun: the pass ends on how its first call ended, not on the time cap.
+    if (timeoutMs === null) return { review: null, recs, stop: recs.length ? "missed" : "time" };
     const rec = await run({ ...call, timeoutMs });
     recs.push(rec);
     const review = parseReview(rec.finalText || "");

@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -117,11 +117,19 @@ function installedCodex(h) {
   writeFileSync(join(h, ".codex", "packages", "standalone", "install.lock"), "");
   writeFileSync(join(h, "dotfiles", "mcp.toml"), "");
   symlinkSync(join(h, "dotfiles", "mcp.toml"), join(h, ".codex", "mcp.toml"));
+  // Dotfile-managed state: a folder linked from elsewhere, a link to another entry of the home, one to nothing yet.
+  mkdirSync(join(h, "shared", "skills"), { recursive: true });
+  symlinkSync(join(h, "shared", "skills"), join(h, ".codex", "skills"));
+  symlinkSync(join(h, ".codex", "log"), join(h, ".codex", "log-link"));
+  symlinkSync(join(h, "nowhere", "x.toml"), join(h, ".codex", "later.toml"));
+  // Names Codex's profile would read as globs.
+  writeFileSync(join(h, ".codex", "a[b]*.txt"), "");
+  writeFileSync(join(h, ".codex", "nl\nx"), "");
   symlinkSync("releases/1.0.0-x", join(h, ".codex", "packages", "standalone", "current"));
   symlinkSync(join(h, ".codex", "packages", "standalone", "current", "bin", "codex"), join(h, ".local", "bin", "codex"));
   return rel;
 }
-const deniedBy = (args) => [...codexDenied(args).matchAll(/"([^"]+)"="deny"/g)].map((m) => m[1]);
+const deniedBy = (args) => [...codexDenied(args).matchAll(/("(?:[^"\\]|\\.)*")="deny"/g)].map((m) => JSON.parse(m[1]));
 
 test("#269: a Codex stage on another CODEX_HOME reads nothing in ~/.codex but the release its codex runs from", () => {
   const h = fakeHome();
@@ -132,9 +140,16 @@ test("#269: a Codex stage on another CODEX_HOME reads nothing in ~/.codex but th
   for (const args of [codexLocalConfig({ home: h, env }), codexLocalConfig({ home: h, env, credentials })]) {
     const denied = deniedBy(args);
     // What is there, what Codex makes there later (history.jsonl, memories), other releases, a link leading out of it.
-    for (const p of [join(d, "config.toml"), join(d, "auth.json*"), join(d, "sessions"), join(d, "log"), join(d, "history.jsonl"), join(d, "memories"), join(d, "mcp.toml"), join(d, "packages", "standalone", "install.lock"), join(d, "packages", "standalone", "releases", "0.9.0-x")]) assert.ok(denied.includes(p), p);
-    // Codex's sandbox denies where a link leads, so nothing at, above or inside the release, nor the link to it.
-    assert.deepEqual(denied.filter((p) => within(rel, p) || within(p, rel) || p === join(d, "packages", "standalone", "current")), [], "its release stays runnable");
+    for (const p of [join(d, "config.toml"), join(d, "auth.json*"), join(d, "sessions"), join(d, "log"), join(d, "history.jsonl"), join(d, "memories"), join(d, "packages", "standalone", "install.lock"), join(d, "packages", "standalone", "releases", "0.9.0-x")]) assert.ok(denied.includes(p), p);
+    // Nothing at, above or inside the release, so it stays runnable.
+    assert.deepEqual(denied.filter((p) => within(rel, p) || within(p, rel)), [], "its release stays runnable");
+    // Codex's sandbox cannot start with a link among its denied paths: each link goes where it leads, once.
+    assert.deepEqual(denied.filter((p) => lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink()), [], "no link denied by its own name");
+    for (const p of [join(h, "dotfiles", "mcp.toml"), join(h, "shared", "skills"), join(h, "nowhere", "x.toml")]) assert.ok(denied.includes(p), `a link's target: ${p}`);
+    assert.equal(denied.filter((p) => p.startsWith(join(d, "log"))).length, 1, "a link into a denied entry adds nothing");
+    // A name with glob characters is escaped; a control character, which Codex never takes literally, becomes `?`.
+    assert.ok(denied.includes(join(d, "a\\[b\\]\\*.txt")) && !denied.includes(join(d, "a[b]*.txt")));
+    assert.ok(denied.includes(join(d, "nl?x")) && !denied.includes(join(d, "nl\nx")));
     for (const p of [join(h, ".codex-two", "auth.json*"), join(h, ".codex-two", "sessions")]) assert.ok(denied.includes(p), `its own home by its login: ${p}`);
   }
   // No codex on its PATH: ~/.codex whole.
@@ -151,6 +166,21 @@ test("#269: a Codex stage on another CODEX_HOME reads nothing in ~/.codex but th
   const linked = deniedBy(codexLocalConfig({ home: l, env: { CODEX_HOME: join(l, ".codex-two"), PATH: join(l, ".local", "bin") } }));
   assert.equal(linked.length, new Set(linked).size);
   assert.ok(linked.includes(join(l, "codex-real", "config.toml")) && !linked.includes(join(l, "codex-real")));
+});
+
+test("#269: doctor --local warns when a Codex stage on another CODEX_HOME would start codex through a script outside ~/.codex", () => {
+  const h = fakeHome();
+  installedCodex(h);
+  const wrap = join(h, "wrap");
+  mkdirSync(wrap);
+  writeFileSync(join(wrap, "codex"), `#!/bin/sh\nexec ${join(h, ".local", "bin", "codex")} "$@"\n`, { mode: 0o755 });
+  const rows = (env) => localLoginChecks({ inputs: { harness: "codex" }, env, local: true, home: h }).filter((r) => r.name === "codex on PATH");
+  const two = join(h, ".codex-two");
+  const warned = rows({ CODEX_HOME: two, PATH: `${wrap}:${join(h, ".local", "bin")}` });
+  assert.equal(warned.length, 1);
+  assert.ok(warned[0].status === "WARN" && warned[0].detail.includes(join(wrap, "codex")));
+  assert.deepEqual(rows({ CODEX_HOME: two, PATH: join(h, ".local", "bin") }), [], "the installer's link: its release is found");
+  assert.deepEqual(rows({ PATH: wrap }), [], "a default-home stage keeps ~/.codex readable but its login");
 });
 
 test("#260: a login file of the stage's own that links into another login is never its own: denied, refused and named by doctor", () => {

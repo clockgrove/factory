@@ -2,7 +2,7 @@
 // local loop off each other's Objectives, the sandbox the harness and Factory's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir, platform as osPlatform, uptime } from "node:os";
@@ -844,9 +844,36 @@ const codexRelease = (bin) => {
 };
 
 /**
+ * For a Codex stage on another CODEX_HOME while Codex's installer tree is in `~/.codex`: the `codex` on `env`'s PATH when
+ * it is a script (`#!`) outside `~/.codex`, as {bin, real}, else null. Codex's sandbox runs the release it execs, which
+ * such a wrapper hides from codexLocalConfig, so `~/.codex` is denied whole there and the sandbox cannot start.
+ */
+export function codexWrapper(env = process.env, home = homedir()) {
+  const def = join(home, ".codex");
+  if (sameDir(stageLogin("codex", env, home).dir, def) || !existsSync(join(def, "packages"))) return null;
+  const bin = whichPath("codex", env);
+  const real = codexRelease(bin)?.at(-1);
+  if (!real || within(real, realish(def))) return null;
+  const head = Buffer.alloc(2);
+  try {
+    const fd = openSync(real, "r");
+    try {
+      readSync(fd, head, 0, 2, 0);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  return head.toString() === "#!" ? { bin, real } : null;
+}
+
+/**
  * Everything in the folder `home` but the path down to `keep` (inside it): at each level the other entries, plus the names
  * Codex keeps in its home where absent (CODEX_HOME_NAMES), so one made during the stage is denied too. A link is denied
- * (Codex's sandbox denies where it leads) unless it leads into or above `keep`. Unlistable: `home` whole.
+ * where it leads (linkTarget), not by its own name: Codex's sandbox cannot mount over a link and does not start. One that
+ * leads into or above `keep` is left, and so is one whose target another entry already covers. Unlistable: `home` whole.
+ * Each path goes out as Codex's profile reads it (codexDenyPath).
  */
 function codexHomeBut(home, keep) {
   const out = [];
@@ -854,20 +881,42 @@ function codexHomeBut(home, keep) {
   try {
     for (let at = home; at !== keep; ) {
       const next = join(at, relative(at, keep).split("/")[0]);
-      const names = new Set([...readdirSync(at), ...(at === home ? CODEX_HOME_NAMES : [])]);
-      for (const name of names) {
+      for (const name of readdirSync(at)) {
         const p = join(at, name);
         if (p === next) continue;
-        if (lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() && near(realish(p))) continue;
-        out.push(p);
+        if (!lstatSync(p).isSymbolicLink()) out.push(p);
+        else if (!near(linkTarget(p))) out.push(linkTarget(p));
       }
       at = next;
     }
   } catch {
-    return [home];
+    return [codexDenyPath(home)];
   }
-  return out;
+  const kept = [...new Set(out)].filter((p, _, all) => !all.some((q) => q !== p && p.startsWith(`${q}/`)));
+  const listed = new Set(kept);
+  const absent = CODEX_HOME_NAMES.map((n) => join(home, n)).filter((p) => !listed.has(p) && !lstatSync(p, { throwIfNoEntry: false }));
+  return [...kept.map(codexDenyPath), ...absent];
 }
+
+/** Where the link `p` leads, by real path, also when it leads to nothing yet (realish of its target). */
+const linkTarget = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    try {
+      return realish(resolve(dirname(p), readlinkSync(p)));
+    } catch {
+      return p;
+    }
+  }
+};
+
+/**
+ * A path as Codex's profile takes it literally. A path with `*`, `?` or `[` in it is a glob there (ripgrep's syntax), so
+ * every glob character is escaped and a control character, which Codex never matches literally, becomes `?`; any other
+ * path is literal as it is (an escape there would be part of the name).
+ */
+export const codexDenyPath = (p) => (/[*?[\x00-\x1f\x7f]/.test(p) ? p.replace(/[\\*?[\]{}]/g, "\\$&").replace(/[\x00-\x1f\x7f]/g, "?") : p);
 
 /**
  * The login files a `harness` stage runs on: Claude Code's `.credentials.json` and `.claude.json` (CLAUDE_CONFIG_DIR's,

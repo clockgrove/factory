@@ -10,6 +10,9 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
+/** Why a fresh work stage Blocks (cause setup) when its clone's untracked leftovers could not be removed: no local path. */
+export const CLEAN_REFUSED = "local mode: the untracked files an earlier stage left in the Objective's clone could not be removed, so the work stage does not run on them; the local loop's log has the error. Fix it on that machine, then re-apply the Objective's label.";
+
 /** What a continued stage needs unchanged since its pause, by the key its record and the decision use. */
 export const CONTINUE_GUARDS = { branch: "the branch on GitHub", restart: "the newest restart record", running: "the Objective's Running stint", text: "the Objective's text" };
 
@@ -43,8 +46,16 @@ export function pauseRecord({ branch, restart, running, text, harness, env = pro
 const STAGE_DIR = /^usage-[a-z]+-(\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z)$/;
 
 /**
- * The newest stage of this Objective on this machine before the one in `own` (its usage directory), from the stage
- * directories in `ws`: {name, result} (result.json as written, or null for a stage that ended without one), or null.
+ * Whether a stage directory's process ever ran: its result.json, its process record (local.mjs STAGE_RECORD, left by a
+ * stage whose loop was killed) or its log (local.mjs stageRelay: a worker logs before it touches the clone). A directory
+ * with none of them was made by a start that stopped before its process (a stopping serve): it changed nothing.
+ */
+const ran = (dir) => ["result.json", "stage-process.json", "stage.log"].some((f) => lstatSync(join(dir, f), { throwIfNoEntry: false }));
+
+/**
+ * The newest stage of this Objective on this machine before the one in `own` (its usage directory) whose process ran,
+ * from the stage directories in `ws`: {name, result} (result.json as written, or null for a stage that ended without
+ * one), or null.
  */
 export function lastStage(ws, own) {
   let names = [];
@@ -55,7 +66,7 @@ export function lastStage(ws, own) {
   }
   const mine = own ? basename(own) : null;
   const name = names
-    .filter((n) => n !== mine && STAGE_DIR.test(n))
+    .filter((n) => n !== mine && STAGE_DIR.test(n) && ran(join(ws, n)))
     .sort((a, b) => (STAGE_DIR.exec(a)[1] < STAGE_DIR.exec(b)[1] ? 1 : -1))[0];
   if (!name) return null;
   let result = null;
@@ -121,11 +132,14 @@ export async function checkoutHolds(git, branch, pause) {
  * The one decision a local work stage makes as it enters, before its checkout is put on the branch: continue the pause
  * the newest earlier stage recorded, or start fresh. `ws` the Objective's directory and `own` this stage's usage
  * directory; `now()` the guards as they stand (read only when there is a pause to weigh); `holds(pause)` checkoutHolds;
- * `clean()` removes what an abandoned pass left untracked in the clone (lib/local.mjs prepareClone, fresh), run on every
- * fresh entry; `restore(from)` puts the paused stage's session back (session.mjs restoreTranscript) and returns {id,
- * from, reason}. Returns continueDecision's answer, with `session` (restore's) when it continues and the session carries.
+ * on every fresh entry `putOn()` (the checkout on the branch as GitHub has it: outbox.mjs putOn), then `clean()`, which
+ * removes what an abandoned pass left untracked (lib/local.mjs prepareClone, fresh). In that order: a pass that ignored
+ * its own files in a changed .gitignore has them cleaned once putOn has put the branch's .gitignore back. A failure of
+ * either is the caller's to end the stage on. `restore(from)` puts the paused stage's session back (session.mjs
+ * restoreTranscript) and returns {id, from, reason}. Returns continueDecision's answer, with `session` (restore's) when it
+ * continues and the session carries.
  */
-export async function enterStage({ ws, own, now, holds, clean, restore }) {
+export async function enterStage({ ws, own, now, holds, putOn, clean, restore }) {
   const last = lastStage(ws, own);
   let d = { continue: false, from: null, changed: [], reason: null };
   if (pauseOf(last)) {
@@ -142,6 +156,7 @@ export async function enterStage({ ws, own, now, holds, clean, restore }) {
     }
   }
   if (!d.continue) {
+    await putOn();
     await clean();
     return d;
   }
@@ -155,7 +170,7 @@ export async function enterStage({ ws, own, now, holds, clean, restore }) {
  * folders, which are new for every stage (`dirs`: handoff.mjs handoffDirs), restated so a path it remembers is not used.
  */
 export function continuePrompt(dirs) {
-  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Factory's hand-off folders are new for this run and the earlier ones are gone: FACTORY_IN is now ${dirs.in} and FACTORY_OUT is now ${dirs.out}. $FACTORY_IN/plan.md is your plan as Factory last saved it. Keep the current plan in $FACTORY_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $FACTORY_OUT.`;
+  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Factory's hand-off folders are new for this run and the earlier ones are gone: FACTORY_IN is now ${dirs.in} and FACTORY_OUT is now ${dirs.out}. $FACTORY_IN/plan.md is your plan as Factory last saved it. Read $FACTORY_IN/decisions.md again: it holds every maintainer decision, those made since you stopped included. Keep the current plan in $FACTORY_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $FACTORY_OUT.`;
 }
 
 /** The task card for a fresh session on a kept checkout (a continued stage whose session does not carry over). */

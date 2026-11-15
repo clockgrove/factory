@@ -40,7 +40,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
-import { checkoutHolds, continuePrompt, enterStage, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
+import { CLEAN_REFUSED, checkoutHolds, continuePrompt, enterStage, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -383,25 +383,41 @@ async function main() {
   // paused here, on its kept checkout, when the branch on GitHub, the newest restart record, the Running stint and the
   // Objective's text are all as the pause recorded them; else start fresh, its untracked leftovers cleaned in the clone's
   // sandbox (lib/local.mjs prepareClone).
-  const entry = local
-    ? await enterStage({
-        ws: join(usageDir, ".."),
-        own: usageDir,
-        now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
-        holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
-        // Best effort, as at a stage's start: putOn still discards every tracked change.
-        clean: () => prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true }).catch((e) => log(`warning: the clone's leftovers could not be removed: ${String(e?.message || e).slice(0, 200)}`)),
-        restore: (from) => restoreTranscript({ checkout, workDir: join(usageDir, ".."), harness: inputs.harness, only: from }),
-      })
-    : null;
+  // Whatever an earlier stage or run left in a reused checkout (local mode) is discarded (outbox.mjs putOn).
+  const putOn = async () => {
+    const onBranch = await outbox.putOn(resumed ? `refs/remotes/origin/${branch}` : `refs/remotes/origin/${defaultBranch}`);
+    if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
+  };
+  // What an abandoned pass left untracked, once the checkout is on the branch: a clean that fails leaves it, and a
+  // later `git add -A` could push it, so the stage Blocks (setup) rather than run on such a clone.
+  const clean = () =>
+    prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true }).catch((e) => {
+      log(`the clone's leftovers could not be removed: ${String(e?.message || e).slice(0, 200)}`);
+      throw Object.assign(new Error(CLEAN_REFUSED), { code: "clone-clean" });
+    });
+  let entry = null;
+  try {
+    entry = local
+      ? await enterStage({
+          ws: join(usageDir, ".."),
+          own: usageDir,
+          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
+          holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
+          putOn,
+          clean,
+          restore: (from) => restoreTranscript({ checkout, workDir: join(usageDir, ".."), harness: inputs.harness, only: from }),
+        })
+      : await putOn();
+  } catch (e) {
+    if (e?.code !== "clone-clean") throw e;
+    log(e.message);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: e.message, cause: "setup", notify: inputs.notify, stage: "branch" }, token);
+    await finish("blocked", e.message);
+    return;
+  }
   const continued = entry?.continue ? entry : null;
   if (entry?.reason) log(`the paused work pass in ${entry.from} is not continued: ${entry.reason}; starting fresh from the branch`);
   if (continued) log(`continuing the work pass paused in ${continued.from} on its kept checkout${continued.carry ? `, in a fresh session (${continued.carry})` : ""}`);
-  else {
-    // Whatever an earlier stage or run left in a reused checkout (local mode) is discarded (outbox.mjs putOn).
-    const onBranch = await outbox.putOn(resumed ? `refs/remotes/origin/${branch}` : `refs/remotes/origin/${defaultBranch}`);
-    if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
-  }
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
   // Git LFS before any harness: filters set up in the checkout, the branch's objects handed over (outbox.mjs lfsSetup).
   const lfs = await outbox.lfsSetup(resumed ? outbox.expected() : base, { timeoutMs: remainingMs(deadlineAt) });

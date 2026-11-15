@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, enterStage, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
+import { CLEAN_REFUSED, CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, enterStage, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
 import { UsageLimitReached, runHarness } from "../scripts/lib/harness.mjs";
 import { claudeProject, gitPinFile, pinGitDir, prepareClone } from "../scripts/lib/local.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
@@ -42,6 +42,9 @@ function pausedClone(root) {
   writeFileSync(join(clone, "node_modules", "dep", "index.js"), "x\n");
   return { clone, git, pushed };
 }
+
+/** outbox.mjs putOn's own command: the checkout forced onto the branch at `ref`. */
+const putOn = (clone, ref) => execFileSync("sh", ["-c", 'git -C "$1" rebase --quit >/dev/null 2>&1; exec git -C "$1" checkout -q -f -B "$2" "$3"', "sh", clone, "factory/7", ref], { env: GIT_ENV });
 
 /** The four guards as they stand, and the harness and login, as worker.mjs reads them now. */
 const guardsNow = (over = {}) => ({ branch: "a".repeat(40), restart: "2026-11-14T01:00:00.000Z", running: "2026-11-14T01:05:00Z", text: "f".repeat(64), harness: "claude", login: loginOf("claude"), ...over });
@@ -136,6 +139,7 @@ test("all four guards unchanged: the stage continues on the kept tree, nothing c
       own,
       now: async () => ({ ...now, login: loginOf("claude") }),
       holds: (pause) => checkoutHolds((args) => exec("git", ["-C", clone, ...args], { env: GIT_ENV }), "factory/7", pause),
+      putOn: async () => assert.fail("the kept tree is not put on the branch"),
       clean: async () => (cleaned += 1),
       restore: (from) => restoreTranscript({ checkout: clone, workDir: ws, harness: "claude", only: from }),
     });
@@ -167,6 +171,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     assert.equal(call.args[call.args.indexOf("--resume") + 1], id);
     assert.ok(call.prompt.includes(`FACTORY_IN is now ${dirs.in}`) && call.prompt.includes(`FACTORY_OUT is now ${dirs.out}`), "the new hand-off folders restated");
     assert.match(call.prompt, /plan\.md.*exit\.json/s, "it ends with a current plan and exit record of its own");
+    assert.match(call.prompt, /Read \$FACTORY_IN\/decisions\.md again: it holds every maintainer decision, those made since you stopped included/);
     assert.ok(Math.abs(rec.usd - 0.25) < 1e-9, `the resumed pass counts its own share, not the session's total: ${rec.usd}`);
   } finally {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
@@ -187,6 +192,7 @@ test("any guard changed since the pause: the stage starts fresh, says which, and
       own: join(root, `usage-work-${STAMP(2)}`),
       now: async () => ({ ...now, [key]: value }),
       holds: async () => "",
+      putOn: async () => putOn(clone, pushed),
       clean: () => prepareClone(clone, [], run, { fresh: true }),
       restore: async () => (restored += 1),
     });
@@ -209,9 +215,15 @@ test("nothing to continue (no pause, a review's or a send-back's end, a later st
   const cases = {
     "no earlier stage": async () => {},
     "a stage that paused with no record (a review stage, a fix pass, a send-back)": (ws) => pausedStage(ws, 1, { pause: null }),
-    "a later stage after the pause, ended without a record": async (ws) => {
+    "a later stage after the pause, whose process ran and ended without a record": async (ws) => {
       await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
       mkdirSync(join(ws, `usage-work-${STAMP(2)}`));
+      writeFileSync(join(ws, `usage-work-${STAMP(2)}`, "stage.log"), "doctor: PASS\n");
+    },
+    "a later stage after the pause, its loop killed while it ran": async (ws) => {
+      await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
+      mkdirSync(join(ws, `usage-work-${STAMP(2)}`));
+      writeFileSync(join(ws, `usage-work-${STAMP(2)}`, "stage-process.json"), "{}");
     },
     "a later review stage after the pause": async (ws) => {
       await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
@@ -224,7 +236,7 @@ test("nothing to continue (no pause, a review's or a send-back's end, a later st
     await make(ws);
     let read = 0;
     let cleaned = 0;
-    const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(3)}`), now: async () => (read += 1, guardsNow()), holds: async () => "", clean: async () => (cleaned += 1), restore: async () => assert.fail("nothing restored") });
+    const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(3)}`), now: async () => (read += 1, guardsNow()), holds: async () => "", putOn: async () => {}, clean: async () => (cleaned += 1), restore: async () => assert.fail("nothing restored") });
     assert.deepEqual(entry, { continue: false, from: null, changed: [], reason: null }, what);
     assert.equal(read, 0, `${what}: no GitHub read for it`);
     assert.equal(cleaned, 1, `${what}: cleaned as every fresh start`);
@@ -240,7 +252,7 @@ test("nothing to continue (no pause, a review's or a send-back's end, a later st
     const ws = mkdtempSync(join(tmpdir(), "cont-held-"));
     await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
     let cleaned = 0;
-    const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow(), holds: async () => "", clean: async () => (cleaned += 1), restore: async () => assert.fail("nothing restored"), ...opts });
+    const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow(), holds: async () => "", putOn: async () => {}, clean: async () => (cleaned += 1), restore: async () => assert.fail("nothing restored"), ...opts });
     assert.equal(entry.continue, false, what);
     assert.equal(entry.reason, reason);
     assert.equal(cleaned, 1);
@@ -287,10 +299,62 @@ test("a continued stage whose session does not carry over: no restore, and the t
   const home = mkdtempSync(join(tmpdir(), "cont-codex-home-"));
   const pause = pauseRecord({ ...guardsNow(), harness: "codex", env: { CODEX_HOME: join(home, "a") } });
   await pausedStage(ws, 1, { pause });
-  const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow({ harness: "codex", login: loginOf("codex", { CODEX_HOME: join(home, "b") }) }), holds: async () => "", clean: async () => assert.fail("the kept tree is not cleaned"), restore: async () => assert.fail("a Codex thread never resumes under another login") });
+  const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow({ harness: "codex", login: loginOf("codex", { CODEX_HOME: join(home, "b") }) }), holds: async () => "", putOn: async () => assert.fail("the kept tree is not put on the branch"), clean: async () => assert.fail("the kept tree is not cleaned"), restore: async () => assert.fail("a Codex thread never resumes under another login") });
   assert.equal(entry.continue, true);
   assert.equal(entry.session, undefined);
   const card = keptPrompt("# Task card\n");
   assert.ok(card.startsWith("# Task card\n\n---\n\n"), "the whole card first, so it splits as every card does");
   assert.match(card, /Its work is still in this checkout/);
+});
+
+test("a fresh entry puts the checkout on the branch before it cleans: files the abandoned pass hid in its own .gitignore are removed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cont-leak-"));
+  const { clone, git, pushed } = pausedClone(root);
+  // The abandoned pass ignored its own planted files: an untracked clean before putOn keeps them.
+  writeFileSync(join(clone, ".gitignore"), "node_modules/\n*.gen\nleak/\n");
+  mkdirSync(join(clone, "leak"));
+  writeFileSync(join(clone, "leak", "planted.txt"), "x\n");
+  await pausedStage(root, 1, { pause: pauseRecord(guardsNow({ branch: pushed })) });
+  const order = [];
+  const run = (inner) => exec(inner[0], inner.slice(1), { env: GIT_ENV });
+  const entry = await enterStage({
+    ws: root,
+    own: join(root, `usage-work-${STAMP(2)}`),
+    now: async () => guardsNow({ branch: "c".repeat(40) }),
+    holds: async () => "",
+    putOn: async () => (order.push("putOn"), putOn(clone, pushed)),
+    clean: async () => (order.push("clean"), prepareClone(clone, [], run, { fresh: true })),
+    restore: async () => assert.fail("nothing restored"),
+  });
+  assert.equal(entry.continue, false);
+  assert.deepEqual(order, ["putOn", "clean"]);
+  assert.equal(readFileSync(join(clone, ".gitignore"), "utf8"), "node_modules/\n*.gen\n", "the branch's .gitignore is back");
+  assert.equal(existsSync(join(clone, "leak", "planted.txt")), false, "nothing for a later git add -A to commit");
+  git("add", "-A");
+  assert.equal(git("status", "--porcelain").trim(), "", "the checkout is the branch exactly");
+});
+
+test("a clean that fails on a fresh entry fails the entry, and the work stage Blocks on it with cause setup and no local path", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "cont-cleanfail-"));
+  await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
+  const refused = Object.assign(new Error(CLEAN_REFUSED), { code: "clone-clean" });
+  // prepareClone's own failure when the clone's sandbox command fails.
+  const failing = () => prepareClone(join(ws, "repo"), [], async () => ({ code: 3, stdout: "", stderr: "refusing" }), { fresh: true });
+  await assert.rejects(failing(), /could not be prepared in its sandbox/);
+  await assert.rejects(enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow({ text: "0".repeat(64) }), holds: async () => "", putOn: async () => {}, clean: () => failing().catch(() => Promise.reject(refused)), restore: async () => assert.fail("nothing restored") }), (e) => e === refused);
+  assert.doesNotMatch(CLEAN_REFUSED, /\/home|\/tmp|\/Users|\.factory\//, "no local path reaches GitHub");
+  // worker.mjs: that failure Blocks the stage with cause setup before any harness, never a crash.
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
+  const at = src.indexOf('if (e?.code !== "clone-clean") throw e;');
+  assert.ok(at > 0 && /cause: "setup"/.test(src.slice(at, at + 400)) && at < src.indexOf("await runHarness("), "Blocked with cause setup before the harness");
+});
+
+test("a stage directory whose process never ran (a stopping serve's start) does not hide the pause before it", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "cont-empty-"));
+  await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
+  mkdirSync(join(ws, `usage-work-${STAMP(2)}`));
+  assert.equal(lastStage(ws, join(ws, `usage-work-${STAMP(3)}`)).name, `usage-work-${STAMP(1)}`);
+  const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(3)}`), now: async () => guardsNow(), holds: async () => "", putOn: async () => assert.fail("kept"), clean: async () => assert.fail("kept"), restore: async () => ({ id: "s", from: `usage-work-${STAMP(1)}`, reason: "" }) });
+  assert.equal(entry.continue, true);
+  assert.equal(entry.from, `usage-work-${STAMP(1)}`);
 });

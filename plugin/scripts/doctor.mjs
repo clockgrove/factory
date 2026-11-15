@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1304,7 +1304,8 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
   if (exposed.length || linked.length) return [...linked.map((l) => WARN("harness logins", `${l.path}: a login file of the ${h} login stages run on, which leads into another login (${l.real}), so its harness would read that login; serve refuses each stage (login-link)`, "make that login's files its own (no link into another login folder)")), ...exposed.map((e) => WARN("harness logins", `${e.path}: a harness login inside the ${h} harness's home ${e.home}, which its outer sandbox can write, so that sandbox can read it`, "move that login out of the harness's home, or point CLAUDE_CONFIG_DIR or CODEX_HOME at a folder of its own"))];
   const found = harnessLogins(home, env).filter((l) => l.files.some((p) => existsSync(p))).map((l) => l.dir);
   const own = h === "copilot" ? [] : ownLogin(h, env, home);
-  return [PASS("harness logins", `${found.length ? found.join(", ") : "none found"}: hidden from every sandbox${own.length ? `; the ${h} stage's own login (${own.join(", ")}) is readable to its harness process only` : ""}`)];
+  const wrapper = h === "codex" ? codexWrapper(env, home) : null;
+  return [...(wrapper ? [WARN("codex on PATH", `${wrapper.bin} is a script (${wrapper.real}), not Codex's own binary: if it runs the release in ${join(home, ".codex")}, Codex's sandbox cannot start on CODEX_HOME ${env.CODEX_HOME}, since that folder is hidden from it whole`, `put the link to Codex's release (${join(home, ".local", "bin", "codex")} from its installer) first on PATH`)] : []), PASS("harness logins", `${found.length ? found.join(", ") : "none found"}: hidden from every sandbox${own.length ? `; the ${h} stage's own login (${own.join(", ")}) is readable to its harness process only` : ""}`)];
 }
 
 /**

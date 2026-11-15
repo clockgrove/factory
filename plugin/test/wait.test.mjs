@@ -19,6 +19,9 @@ const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 const repo = { owner: "acme", name: "widgets", full: "acme/widgets" };
 const OBJ = "factory:objective";
 const T0 = Date.parse("2026-11-14T14:00:00Z");
+/** A printed cursor's event id and queue state. */
+const idOf = (c) => parseCursor(c).id;
+const stateOf = (c) => parseCursor(c).drained;
 
 /** One repository's issues, PRs and issue events; `answer(method, url, headers)` is GitHub's answer as [status, body, headers]. */
 function repoState() {
@@ -110,7 +113,8 @@ test("a Block is told on the poll after it, once, with the newest event as the c
   const r = await waiting(gh, [() => {}, () => gh.state(5, "factory:blocked")], { kinds: WAIT_KINDS.filter((k) => k !== "drained") });
   assert.equal(r.code, 0);
   const last = gh.s.events.at(-1).id;
-  assert.deepEqual(r.lines, [{ event: "blocked", issue: 5, title: "Objective 5", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: String(last) }]);
+  assert.deepEqual(r.lines.map(({ cursor, ...l }) => l), [{ event: "blocked", issue: 5, title: "Objective 5", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at }]);
+  assert.equal(idOf(r.lines[0].cursor), last);
   assert.deepEqual(r.slept, [30_000, 30_000], "a poll every 30 seconds by default");
   // The start reads the newest events; the first poll's read is unchanged (a 304); the next one sees the Block.
   assert.deepEqual(gh.s.seen, ["GET issues/events?per_page=30", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30"]);
@@ -123,8 +127,8 @@ test("Question and In review are told, the state labels coming off are not; with
   const r = await waiting(gh, [() => gh.state(5, "factory:in-review"), () => {}, () => (gh.state(6, "factory:question"), gh.state(5, "factory:running"))], { follow: true, timeoutMs: 100_000, kinds: WAIT_KINDS.filter((k) => k !== "drained") });
   assert.equal(r.code, WAIT_TIMEOUT_EXIT);
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["in-review", 5], ["question", 6], ["timeout", null]]);
-  assert.equal(r.lines[0].cursor, String(gh.s.events[1].id), "the first read's cursor: its newest event");
-  assert.equal(r.lines[1].cursor, String(gh.s.events.at(-1).id), "the label running 5 again is read, not told, and still moves the cursor");
+  assert.equal(idOf(r.lines[0].cursor), gh.s.events[1].id, "the first read's cursor: its newest event");
+  assert.equal(idOf(r.lines[1].cursor), gh.s.events.at(-1).id, "the label running 5 again is read, not told, and still moves the cursor");
   assert.equal(r.lines[2].cursor, r.lines[1].cursor, "the timeout line carries the cursor to go on from");
   assert.deepEqual(r.slept, [30_000, 30_000, 30_000, 10_000], "the last wait ends at the timeout");
 });
@@ -155,7 +159,7 @@ test("--since goes on from a cursor with nothing missed or told twice, paging ba
   for (let i = 0; i < 40; i += 1) gh.event(9, i % 2 ? "unlabeled" : "labeled", "P1");
   const r = await waiting(gh, [], { since: parseCursor(String(cursor)), kinds: ["blocked", "question"] });
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["question", 6]], "the Block at the cursor is not told again; the Question two pages back is");
-  assert.equal(r.lines[0].cursor, String(gh.s.events.at(-1).id));
+  assert.equal(idOf(r.lines[0].cursor), gh.s.events.at(-1).id);
   assert.deepEqual(gh.s.seen, ["GET issues/events?per_page=30", "GET issues/events?per_page=30&page=2"]);
   assert.deepEqual(r.slept, [], "told on the first read");
   const byTime = await waiting(gh, [], { since: parseCursor(told), kinds: ["blocked", "question"] });
@@ -213,7 +217,7 @@ test("drained at the start (#272 review): a drain between the start's reads is t
   };
   const r = await waiting(gh, []);
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
-  assert.match(r.lines[1].cursor, /^\d+d$/, "the cursor says the queue is drained there");
+  assert.equal(stateOf(r.lines[1].cursor), true, "the cursor says the queue is drained there");
 });
 
 test("drained after a restart (#272 review): the cursor carries the queue's state, so a wait started --since it does not tell the same drain again", async () => {
@@ -223,13 +227,13 @@ test("drained after a restart (#272 review): the cursor carries the queue's stat
   const first = await waiting(gh, [() => gh.state(5, "factory:question")]);
   assert.deepEqual(first.lines.map((l) => [l.event, l.issue]), [["question", 5], ["drained", null]]);
   const cursor = first.lines.at(-1).cursor;
-  assert.match(cursor, /^\d+d$/);
+  assert.equal(stateOf(cursor), true);
   // Still drained: a Blocked one closed is told, the drain is not.
   const again = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["closed", "drained"], timeoutMs: 1 });
   assert.deepEqual(again.lines.map((l) => l.event), ["timeout"]);
   const closed = await waiting(gh, [() => gh.event(6, "closed")], { since: parseCursor(again.lines[0].cursor) });
   assert.deepEqual(closed.lines.map((l) => [l.event, l.issue]), [["closed", 6]]);
-  assert.match(closed.lines[0].cursor, /^\d+d$/);
+  assert.equal(stateOf(closed.lines[0].cursor), true);
   // Active again (a new Objective queued) then drained: told, and a cursor from before the queue moved says so.
   gh.issue(8, []);
   const active = await waiting(gh, [() => gh.event(8, "labeled", OBJ), () => gh.state(8, "factory:blocked")], { since: parseCursor(closed.lines[0].cursor) });
@@ -257,10 +261,10 @@ test("a wait whose kinds leave drained out (#285 review) carries no queue state 
   gh.issue(5, [OBJ, "factory:running"]);
   gh.issue(6, [OBJ, "factory:blocked"]);
   const first = await waiting(gh, [() => gh.state(5, "factory:question")]);
-  assert.match(first.lines.at(-1).cursor, /^\d+d$/);
+  assert.equal(stateOf(first.lines.at(-1).cursor), true);
   gh.issue(7, [OBJ, "factory:running"]);
   const review = await waiting(gh, [() => gh.state(7, "factory:in-review")], { since: parseCursor(first.lines.at(-1).cursor), kinds: ["in-review"] });
-  assert.match(review.lines[0].cursor, /^\d+$/, "no state it did not keep current");
+  assert.equal(stateOf(review.lines[0].cursor), null, "no state it did not keep current");
   gh.s.prs["factory/7"] = [{ number: 77, merged_at: "2026-11-14T14:00:30Z" }];
   const drained = await waiting(gh, [() => (gh.state(7, null), gh.event(7, "closed"))], { since: parseCursor(review.lines[0].cursor), kinds: ["drained"] });
   assert.deepEqual(drained.lines.map((l) => l.event), ["drained"]);
@@ -344,7 +348,7 @@ test("a cursor more than WAIT_MAX_PAGES pages back (#285 review): a gap line fir
   gh.state(5, "factory:blocked");
   const r = await waiting(gh, [], { since: parseCursor(cursor), kinds: ["blocked"] });
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["gap", null], ["blocked", 5]]);
-  assert.equal(r.lines[0].cursor, String(gh.s.events.at(-1).id));
+  assert.equal(idOf(r.lines[0].cursor), gh.s.events.at(-1).id);
   assert.equal(gh.s.seen.filter((l) => /issues\/events/.test(l)).length, WAIT_MAX_PAGES);
 });
 
@@ -363,6 +367,29 @@ test("an event GitHub lists late, below an id already read (#285 review), is tol
   assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["in-review", 5], ["blocked", 6], ["timeout", null]]);
 });
 
+test("a restart --since a cursor (#285 review) tells an event GitHub lists late, below the cursor, and nothing already told", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(6, [OBJ, "factory:running"]);
+  gh.event(5, "labeled", "factory:running");
+  const first = await waiting(gh, [() => gh.state(5, "factory:in-review")], { kinds: ["blocked", "in-review"] });
+  assert.deepEqual(first.lines.map((l) => [l.event, l.issue]), [["in-review", 5]]);
+  // After that wait exits, GitHub lists #6's Block, its id below the In review the cursor names.
+  gh.event(6, "labeled", "factory:blocked", gh.s.events.at(-1).id - 3);
+  const again = await waiting(gh, [() => {}], { since: parseCursor(first.lines[0].cursor), follow: true, timeoutMs: 35_000, kinds: ["blocked", "in-review"] });
+  assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 6], ["timeout", null]]);
+});
+
+test("each event is decided on its issue's labels as they were then (#285 review), not as later events in the read left them", async () => {
+  const gh = repoState();
+  gh.issue(5, [OBJ, "factory:running"]);
+  gh.issue(9, ["bug"]);
+  gh.event(5, "labeled", "factory:running");
+  // Between two reads: #5 Blocks, then loses the Objective label; #9, no Objective, gets a state label, then the Objective label.
+  const r = await waiting(gh, [() => (gh.state(5, "factory:blocked"), gh.event(5, "unlabeled", OBJ), gh.event(9, "labeled", "factory:question"), gh.event(9, "labeled", OBJ))], { follow: true, timeoutMs: 35_000, kinds: ["blocked", "question"] });
+  assert.deepEqual(r.lines.map((l) => [l.event, l.issue]), [["blocked", 5], ["timeout", null]]);
+});
+
 test("jsonLine escapes U+2028, U+2029 and U+0085, and parses back to the same value", () => {
   const o = { title: "a\u2028b\u2029c\u0085d" };
   const line = jsonLine(o);
@@ -375,9 +402,12 @@ test("factory wait's command line: issue numbers, a cursor or a time, kinds, --f
   assert.deepEqual(parseArgs(["wait", "--follow", "--since=2026-11-14T14:00:00Z"]), { cmd: "wait", flags: { _: ["wait"], follow: true, since: "2026-11-14T14:00:00Z" } });
   for (const a of ["wait x", "wait --on blocked,done", "wait --since yesterday", "wait --since 2026-11-14T14:00:00", "wait --timeout 0", "wait --follow=1"]) assert.throws(() => parseArgs(a.split(" ")), (e) => e.usage === true, a);
   assert.deepEqual(parseCursor("2026-11-14T14:00:00-08:00"), { at: Date.parse("2026-11-14T22:00:00Z") });
-  assert.deepEqual(parseCursor("36176470266d"), { id: 36176470266, drained: true });
-  assert.deepEqual(parseCursor("36176470266a"), { id: 36176470266, drained: false });
-  assert.deepEqual(parseCursor("36176470266"), { id: 36176470266, drained: null });
+  assert.deepEqual(parseCursor("36176470266d"), { id: 36176470266, drained: true, seen: [36176470266] });
+  assert.deepEqual(parseCursor("36176470266a"), { id: 36176470266, drained: false, seen: [36176470266] });
+  assert.deepEqual(parseCursor("36176470266"), { id: 36176470266, drained: null, seen: [36176470266] });
+  // The ids read below it, each one's distance below the one before in base 36.
+  assert.deepEqual(parseCursor("36176470266d.7,z"), { id: 36176470266, drained: true, seen: [36176470266, 36176470259, 36176470224] });
+  for (const bad of ["36176470266.", "36176470266.0", "36176470266.7,", "36176470266.A"]) assert.equal(parseCursor(bad), null, bad);
   assert.equal(parseCursor("36176470266x"), null);
 });
 
@@ -424,7 +454,8 @@ test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited o
     const lines = told.out.trim().split("\n");
     assert.equal(lines.length, 1, told.out);
     assert.doesNotMatch(told.out, /[\u2028\u2029\u0085]/);
-    assert.deepEqual(JSON.parse(lines[0]), { event: "blocked", issue: 5, title: "Objective 5\u2028second\u2029third\u0085fourth", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: String(gh.s.events.at(-1).id) });
+    assert.deepEqual(JSON.parse(lines[0]), { event: "blocked", issue: 5, title: "Objective 5\u2028second\u2029third\u0085fourth", url: "https://github.com/acme/widgets/issues/5", at: gh.s.events.at(-1).created_at, cursor: JSON.parse(lines[0]).cursor });
+    assert.equal(idOf(JSON.parse(lines[0]).cursor), gh.s.events.at(-1).id);
     assert.ok(gh.s.seen.some((l) => / 304$/.test(l)), gh.s.seen.join("\n"));
     assert.match(told.out + told.err, /rate limit on 127\.0\.0\.1:\d+ is spent until/);
     assert.deepEqual(gh.s.seen.slice(0, 4), ["GET issues/events?per_page=30", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30 304", "GET issues/events?per_page=30"], "one read again after the reset, none before it");
@@ -432,7 +463,7 @@ test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited o
     assert.equal(quiet.code, WAIT_TIMEOUT_EXIT, quiet.out + quiet.err);
     const last = JSON.parse(quiet.out.trim().split("\n").at(-1));
     assert.equal(last.event, "timeout");
-    assert.equal(last.cursor, String(gh.s.events.at(-1).id));
+    assert.equal(idOf(last.cursor), gh.s.events.at(-1).id);
     hang = true;
     const started = Date.now();
     const hung = await run("--since", String(gh.s.events.at(-1).id), "--timeout", "0.5");

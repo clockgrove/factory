@@ -16,8 +16,12 @@ export const WAIT_POLL_MS = 30_000;
 export const WAIT_PAGE = 30;
 /** The most pages one read goes back for a cursor: past it, a `gap` line says events before it may be missing. */
 export const WAIT_MAX_PAGES = 10;
-/** How many of the newest event ids read are kept, so an event GitHub lists late, below one already read, is still told. */
-export const WAIT_SEEN = 200;
+/**
+ * How far back, from the newest event read, the ids read are kept (and carried on the cursor), so an event GitHub lists
+ * late, below one already read, is still told, after a restart too; at most WAIT_SEEN of them.
+ */
+export const WAIT_LOOKBACK_MS = 5 * 60_000;
+export const WAIT_SEEN = 100;
 
 const STATE_KINDS = { "factory:blocked": "blocked", "factory:question": "question", "factory:in-review": "in-review" };
 const STATE_LABELS = new Set(["factory:running", ...Object.keys(STATE_KINDS)]);
@@ -25,21 +29,37 @@ const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string"
 
 /**
  * A `--since` cursor: the `cursor` of a line `factory wait` printed, an event id with the watched queue's state there
- * when it was known (`d` drained, `a` not), as {id, drained}; or a time GitHub's events are compared with as {at} (ms),
- * the state unknown. Null for anything else.
+ * when it was known (`d` drained, `a` not) and the other ids read within WAIT_LOOKBACK_MS of it (after a `.`, each one's
+ * distance below the one before, base 36), as {id, drained, seen} (`seen` with the id itself); or a time GitHub's events
+ * are compared with as {at} (ms), the state unknown. Null for anything else.
  */
 export function parseCursor(text) {
   const s = String(text ?? "").trim();
-  const m = /^(\d+)([ad]?)$/.exec(s);
-  if (m) return Number.isSafeInteger(Number(m[1])) ? { id: Number(m[1]), drained: m[2] ? m[2] === "d" : null } : null;
+  const m = /^(\d+)([ad]?)(?:\.([0-9a-z]+(?:,[0-9a-z]+)*))?$/.exec(s);
+  if (m) {
+    const id = Number(m[1]);
+    if (!Number.isSafeInteger(id)) return null;
+    const seen = [id];
+    for (const d of m[3] ? m[3].split(",") : []) {
+      const below = seen.at(-1) - parseInt(d, 36);
+      if (!(below > 0 && below < seen.at(-1))) return null;
+      seen.push(below);
+    }
+    return { id, drained: m[2] ? m[2] === "d" : null, seen };
+  }
   // A time with its zone, so the cursor means the same on every machine.
   if (!/^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:?\d\d)$/.test(s)) return null;
   const at = Date.parse(s);
   return Number.isFinite(at) ? { at } : null;
 }
 
-/** A cursor as a line prints it, which --since takes back: with the queue's state at it, when known. */
-export const cursorText = (c, drained = null) => (c.id !== undefined ? `${c.id}${drained === true ? "d" : drained === false ? "a" : ""}` : new Date(c.at).toISOString());
+/** A cursor as a line prints it, which --since takes back: with the queue's state at it, when known, and `seen`, the other ids read. */
+export function cursorText(c, drained = null, seen = []) {
+  if (c.id === undefined) return new Date(c.at).toISOString();
+  const below = [...seen].filter((id) => id < c.id).sort((a, b) => b - a);
+  const steps = below.map((id, k) => ((k ? below[k - 1] : c.id) - id).toString(36));
+  return `${c.id}${drained === true ? "d" : drained === false ? "a" : ""}${steps.length ? `.${steps.join(",")}` : ""}`;
+}
 
 /**
  * One event as the line `factory wait` prints: JSON, with the line and paragraph separators (U+2028, U+2029) and NEL
@@ -136,11 +156,11 @@ export function drainedOf(open, watched = null) {
  * only while every event on a page is new (a resume after a long gap), at most WAIT_MAX_PAGES (`gap` when the cursor
  * was not reached). Deduplicated by id, since events arriving while pages are read shift older ones onto the next page.
  * With `seen` (ids already read, at most WAIT_SEEN), an unseen event at or below the cursor but within the ids kept is
- * new too: GitHub listed it after a newer one was read. `read` is every id read. A cursor newer than every event of the
+ * new too: GitHub listed it after a newer one was read. `read` is every event read. A cursor newer than every event of the
  * repository is no cursor of it: an error with code `cursor-elsewhere`.
  */
 export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
-  const floor = seen?.size ? Math.min(...seen) : Infinity;
+  const floor = seen?.size ? Math.min(...seen.keys()) : Infinity;
   const isNew = (e) => (cursor.id !== undefined ? e.id > cursor.id || (e.id > floor && !seen.has(e.id)) : Date.parse(e.created_at) > cursor.at);
   const found = new Map();
   const read = [];
@@ -152,7 +172,7 @@ export async function eventsAfter(repo, cursor, { opts, cache, seen = null }) {
     }
     let reached = list.length < WAIT_PAGE;
     for (const e of list) {
-      read.push(e.id);
+      read.push(e);
       if (isNew(e)) found.set(e.id, e);
       else reached = true;
     }
@@ -193,14 +213,20 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
   let cursor = since;
   // Carried on only by a wait that keeps it current: one whose kinds leave drained out never reads it again.
   let wasDrained = kinds.includes("drained") ? (since?.drained ?? null) : null;
-  // The newest event ids read, at most WAIT_SEEN; empty until the first read, so a cursor alone decides it.
-  const seen = new Set();
-  const remember = (ids) => {
-    for (const id of ids) seen.add(id);
-    if (seen.size > WAIT_SEEN) for (const id of [...seen].sort((a, b) => a - b).slice(0, seen.size - WAIT_SEEN)) seen.delete(id);
+  // The ids read within WAIT_LOOKBACK_MS of the newest one read (id -> its time, null until read here), at most
+  // WAIT_SEEN: the cursor's own, so a restart from it tells an event GitHub lists late as this wait would.
+  const seen = new Map((since?.seen ?? []).map((id) => [id, null]));
+  const remember = (events) => {
+    for (const e of events) seen.set(e.id, Date.parse(e.created_at));
+    const times = [...seen.values()].filter(Number.isFinite);
+    // Ids rise with creation time: the window starts at the oldest id read within it.
+    const top = Math.max(...times);
+    const from = Math.min(...[...seen].filter(([, t]) => t >= top - WAIT_LOOKBACK_MS).map(([id]) => id));
+    const keep = new Set([...seen.keys()].filter((id) => !(id < from)).sort((a, b) => b - a).slice(0, WAIT_SEEN));
+    for (const id of [...seen.keys()]) if (!keep.has(id)) seen.delete(id);
   };
   const at = () => new Date(now()).toISOString();
-  const text = () => (cursor ? cursorText(cursor, wasDrained) : null);
+  const text = () => (cursor ? cursorText(cursor, wasDrained, seen.keys()) : null);
   // A read cut off at the deadline ends as a timeout; any other failure gets its line, with the cursor to go on from.
   const failed = (e) => {
     if (opts?.signal?.aborted) {
@@ -217,7 +243,7 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
       // The cursor to go on from as soon as it is read, so a timeout or failure in the checks below still prints it.
       cursor = start;
       wasDrained = null;
-      remember(page.map((e) => e.id));
+      remember(page);
       // The queue's state at the cursor, when no event came between the two event reads (the second then a 304); else
       // it stays unknown, so a drain the events after the cursor make is told, never taken as the state at the start.
       if (kinds.includes("drained")) {
@@ -258,10 +284,12 @@ export async function waitQueue(repo, { opts, objectiveLabel = "factory:objectiv
     let moved = false;
     let active = false;
     const asOf = issuesAsOf(events);
-    for (const e of events) {
-      if (watched && !watched.has(e.issue?.number)) continue;
+    for (const ev of events) {
+      if (watched && !watched.has(ev.issue?.number)) continue;
+      // Every decision on the issue as it was right after the event, never as later events left it.
+      const e = { ...ev, issue: asOf.get(ev.id) ?? ev.issue };
       if (movesQueue(e, objectiveLabel)) moved = true;
-      if (activates({ ...e, issue: asOf.get(e.id) ?? e.issue }, objectiveLabel)) active = true;
+      if (activates(e, objectiveLabel)) active = true;
       let kind = eventKind(e, objectiveLabel);
       if (!kind) continue;
       let pr;

@@ -445,7 +445,7 @@ test("the App token's mint carries RATE_LIMIT_SPENT and the reset", async () => 
     const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
     const script = `import { mintInstallationToken } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "app-token.mjs")).href)};
       try { await mintInstallationToken({ appId: "1", privateKey: process.env.KEY, owner: "o", repo: "r" }); } catch (e) { process.stdout.write(JSON.stringify({ code: e.code, resetAt: e.resetAt, status: e.status })); }`;
-    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, KEY: key }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, KEY: key }, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (c) => (out += c));
     child.stderr.on("data", (c) => (out += c));

@@ -421,7 +421,7 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
   const run = (resume, label) => {
     const tracker = harnessActivity();
     live.push(tracker);
-    return runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label, onLine: tracker.feed, onResume: tracker.since });
+    return runHarness({ harness: "codex", model, prompt: "p", maxUsd: 0, resume, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label, onLine: tracker.feed, onResume: tracker.since });
   };
   const shown = () => live.at(-1).snapshot().tokens;
   const turn = (input, cached) => ({ unit: "turn", input, cached, written: 0 });
@@ -644,6 +644,6 @@ test("copilot follow-ups: the session's running total is recorded and bounds a r
   assert.equal((await exitRecord({ text: '{"exit":"delivered"}', harness: "copilot", deadlineAt: Date.now() + 3600_000, maxUsd: 25, unmetered: true })).record.exit, "delivered");
   assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
   // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never an unmetered one.
-  const floor = await runHarness({ harness: "copilot", prompt: "p", maxUsd: 0.29, cwd: tmpdir(), env: {}, timeoutMs: 1000, label: "work-1" });
+  const floor = await runHarness({ harness: "copilot", prompt: "p", maxUsd: 0.29, cwd: tmpdir(), env: { HOME: process.env.HOME }, timeoutMs: 1000, label: "work-1" });
   assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, unmeteredRun(floor)], [true, 0, false, "dollar cap reached", false]);
 });

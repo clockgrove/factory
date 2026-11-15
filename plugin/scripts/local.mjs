@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Factory local mode: the same worker and reviewer the Action runs, on a developer's own box.
-//   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--dir CLONE] [--wait]
+//   node scripts/local.mjs run <issue> [--repo OWNER/NAME] [--checkout CLONE] [--wait]
 //   node scripts/local.mjs review <pr> [--wait]      (a review re-run, as re-applying factory:review does on Actions)
-//   node scripts/local.mjs serve [--repo OWNER/NAME] [--dir CLONE] [--once] [--all] [--interval SECONDS (30)]
+//   node scripts/local.mjs serve [--repo OWNER/NAME] [--checkout CLONE] [--once] [--all] [--interval SECONDS (30)]
 //   node scripts/local.mjs issue <issue> | deliver <issue> | post-review <pr> <findings.json>   (a session's route)
 //   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
 //   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
@@ -27,8 +27,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, organizationVariableNames, repoOf, repositoryVariables, rest, setStateLabel, transientError, upsertComment } from "./lib/github.mjs";
-import { MACHINE_SETTINGS, MODEL_SETTINGS, holdSecrets, ignoredLines, input, layerLines, log, logTo, machineSettings, organizationVariablesLine, redactSecrets, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -130,7 +130,7 @@ const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
  * Each command's arguments and flags: a flag is `bool` (takes no value), or takes one value named as usage shows it, a
  * positive number where `number` is set. An argument named `issue` or `pr` is a positive whole number.
  */
-const WHERE = { repo: { value: "OWNER/NAME" }, dir: { value: "CLONE" } };
+const WHERE = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" } };
 export const COMMANDS = {
   run: { args: ["issue"], flags: { ...WHERE, wait: "bool" }, about: "one Objective, from the stage its state calls for (with --wait, to merged)" },
   serve: { args: [], flags: { ...WHERE, once: "bool", all: "bool", interval: { value: "SECONDS", number: true } }, about: "a loop: the dispatcher's rules every --interval seconds (30)" },
@@ -162,34 +162,8 @@ export function parseArgs(argv) {
   const fail = (why) => Object.assign(new Error(`${why}\n${usage(cmd)}`), { usage: true });
   if (!cmd) throw fail(argv[0] === undefined ? "no command" : `unknown command ${JSON.stringify(argv[0])}`);
   const spec = COMMANDS[cmd];
-  const flags = { _: [cmd] };
-  for (let i = 1; i < argv.length; i += 1) {
-    const a = argv[i];
-    if (!a.startsWith("-")) {
-      flags._.push(a);
-      continue;
-    }
-    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
-    const kind = m && Object.hasOwn(spec.flags, m[1]) ? spec.flags[m[1]] : null;
-    if (!kind) throw fail(`unknown flag ${a} for ${cmd}`);
-    const key = m[1];
-    if (kind === "bool") {
-      if (m[2] !== undefined) throw fail(`--${key} takes no value`);
-      flags[key] = true;
-      continue;
-    }
-    let value = m[2];
-    if (value === undefined) {
-      value = argv[i + 1];
-      if (value === undefined || value.startsWith("-")) throw fail(`--${key} needs a value`);
-      i += 1;
-    }
-    if (kind.number) {
-      const n = Number(value);
-      if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${key} needs a positive number, not ${JSON.stringify(value)}`);
-      flags[key] = n;
-    } else flags[key] = value;
-  }
+  const flags = readFlags(argv.slice(1), spec.flags, fail);
+  flags._.unshift(cmd);
   const given = flags._.slice(1);
   if (given.length < spec.args.length || (given.length > spec.args.length && !spec.more)) throw fail(given.length < spec.args.length ? `missing <${spec.args[given.length]}>` : `unexpected argument ${JSON.stringify(given[spec.args.length])}`);
   given.forEach((arg, i) => {
@@ -293,9 +267,10 @@ export function repoFromRemote(url) {
  * Why local mode cannot start here, one line each. `outer` is lib/local.mjs outerProbe: Copilot runs locally only inside
  * the outer sandbox, since its own sandbox applies its file policy only best-effort, so on a host where that does not
  * start (macOS, or Linux without what its sandbox's network needs) local Copilot is refused before any claim.
- * `wf` is the workflow's settings and `env` this shell's, which wins (as in baseEnv); `os` is the platform.
+ * `wf` is the workflow's settings and `env` this shell's, which wins (as in baseEnv); `os` is the platform; `account` the
+ * one the loop starts on (lib/accounts.mjs), whose probe result outerProbe keeps apart from every other account's.
  */
-export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform() } = {}) {
+export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform(), account = null } = {}) {
   const problems = [];
   for (const bin of ["git", "gh"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
   if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
@@ -307,7 +282,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
   if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
-  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length }));
+  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length, account, env: account ? accountEnv(env, account) : env }));
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (${LOCAL_TOKEN_PERMISSIONS}) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
@@ -315,9 +290,10 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
 /**
  * Why one harness cannot run here, one line each: the loop's own at its start (preflight), and another an Objective's
  * harness label names before its first stage on this machine (Local.harnessFor). `sandboxStarts`: whether srt's sandbox
- * starts here (preflight's own check), without which Copilot's outer sandbox is not probed.
+ * starts here (preflight's own check), without which Copilot's outer sandbox is not probed. `account`: the one the
+ * harness runs on, for outerProbe; `env` that account's (lib/accounts.mjs accountEnv), which the probe runs on.
  */
-export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true } = {}) {
+export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true, account = null, env: given = process.env } = {}) {
   const problems = [];
   if (!["claude", "codex", "copilot"].includes(harness)) return [`unknown harness ${harness}`];
   if (!onPath(harness)) problems.push(`${harness} is not on PATH`);
@@ -329,8 +305,8 @@ export function harnessProblems(harness, copilotToken, { outer = outerProbe, san
     // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
     if (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && sandboxStarts)) {
       // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
-      const { COPILOT_HOME: _own, ...env } = process.env;
-      const o = outer("copilot", { env });
+      const { COPILOT_HOME: _own, ...env } = given;
+      const o = outer("copilot", { env, account });
       if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
     }
   }
@@ -343,16 +319,6 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
-/**
- * A thrown error as a Blocked reason may carry it, which this machine's log has whole: a system error (Node's, with its
- * `syscall`: a file or process call, whose message names the path, an account's folder or token file included) by its
- * code and call alone; any other by its message, the home directory shortened to `~`.
- */
-export const postedError = (e, home = homedir()) => {
-  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
-  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
-  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; the local loop's log names the path` : `${code}; the local loop's log names the path`;
-};
 /** The Copilot token a stage on `account` runs on: a declared account's file alone, else copilotToken(). */
 const copilotTokenOf = (account) => (account?.declared ? accountToken(account) : copilotToken());
 /**
@@ -543,7 +509,7 @@ export class Local {
     process.env.FACTORY_LOCAL = "1";
     if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
     // Canonical, so every sandbox path derived from it is real (lib/local.mjs refuses one that resolves elsewhere).
-    this.dev = realpathSync(sh("git", ["-C", resolve(flags.dir || process.cwd()), "rev-parse", "--show-toplevel"]));
+    this.dev = realpathSync(sh("git", ["-C", resolve(flags.checkout || process.cwd()), "rev-parse", "--show-toplevel"]));
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
     if (!this.repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
     this.repo = repoOf(this.repoFull);
@@ -580,7 +546,7 @@ export class Local {
     this.startAccount = accounts.ok ? defaultAccount(accounts, this.harness) : implicitAccount(this.harness);
     this.copilotToken = this.harness === "copilot" ? copilotTokenOf(this.startAccount) : "";
     const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/factory/accounts.json): ${p.why}`);
-    problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf }));
+    problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf, account: this.startAccount }));
     // The Factory App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
     // notice token over its IPC channel (stage()), and nothing else, env or file, carries the key or the token.
     const startEnv = accountEnv(process.env, this.startAccount);
@@ -807,7 +773,7 @@ export class Local {
     this.ready ??= new Set([key(this.startAccount ?? implicitAccount(this.harness))]);
     if (this.ready.has(key(account))) return [];
     const env = accountEnv(process.env, account);
-    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "");
+    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "", { account, env });
     const app = localApp(env, homedir(), harness).problem;
     const gateway = gatewayKeyProblem(env, homedir(), harness);
     for (const p of [app, gateway]) if (p) problems.push(p);
@@ -987,7 +953,7 @@ export class Local {
     // Whether the harness runs in it on this host: Claude Code on Linux, Codex where its own sandbox starts inside it (probed
     // once per host and version, lib/local.mjs outerProbe), Copilot where its sandbox's network starts inside it (probed the
     // same way). Said once when it does not.
-    const outer = outerProbe(harness, { domains, env: { ...host, ...extra } });
+    const outer = outerProbe(harness, { domains, env: { ...host, ...extra }, account });
     const outerOn = outer.on;
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).
@@ -2846,7 +2812,7 @@ function sessionToken(repoFull) {
 
 /** The clone a session command (`issue`, `deliver`, `post-review`) runs in: its top directory, repository and token. */
 function sessionClone(flags) {
-  const dir = realpathSync(sh("git", ["-C", resolve(flags.dir || process.cwd()), "rev-parse", "--show-toplevel"]));
+  const dir = realpathSync(sh("git", ["-C", resolve(flags.checkout || process.cwd()), "rev-parse", "--show-toplevel"]));
   const repoFull = flags.repo || repoFromRemote(sh("git", ["-C", dir, "remote", "get-url", "origin"]));
   if (!repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
   return { dir, repoFull, repo: repoOf(repoFull), opts: { token: sessionToken(repoFull) } };
@@ -3270,7 +3236,7 @@ async function postFindings(prNumber, file, flags) {
  * Stdout carries only the events; log lines go to stderr.
  */
 async function waitForQueue(flags) {
-  const repoFull = flags.repo || repoFromRemote(sh("git", ["-C", resolve(flags.dir || process.cwd()), "remote", "get-url", "origin"]));
+  const repoFull = flags.repo || repoFromRemote(sh("git", ["-C", resolve(flags.checkout || process.cwd()), "remote", "get-url", "origin"]));
   if (!repoFull) throw new Error("no GitHub origin remote; pass --repo OWNER/NAME");
   // Stdout is the events, one JSON line each; Factory's log lines (a retry, a rate limit's wait) go to stderr.
   logTo(process.stderr);

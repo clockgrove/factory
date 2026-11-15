@@ -92,7 +92,7 @@ if (split) setTimeout(() => { add(0.5); fs.writeFileSync(process.env.FAKE_STATE 
 
 /** Run `script` (an ES module body) as its own process: one stage, with its own spend and session state. */
 function stageProcess(script, env) {
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let err = "";
   child.stdout.on("data", (c) => (out += c));
@@ -114,7 +114,7 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
     process.env.FACTORY_LOCAL = "1";
     const progress = progressReporter(repoOf("owner/repo"), 7, { token: () => "t" }, { stage: "work", runId: "1", harness: "codex" });
     delete process.env.FACTORY_LOCAL;
-    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: process.env.FAKE_STATE, env: { PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, label: "work-1" });
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: process.env.FAKE_STATE, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: process.env.FAKE_STATE }, timeoutMs: 60_000, label: "work-1" });
     await progress("validation");
     process.stdout.write("written " + rec.usd + "\\n");
     setInterval(() => {}, 1000);
@@ -175,7 +175,7 @@ async function stages(plan) {
     delete process.env.FACTORY_LOCAL;
     await progress("harness");
     const local = how.startsWith("term") ? { FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], clone: null }), FAKE_LINGER: "60000" } : {};
-    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how.startsWith("term") ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
+    const pass = () => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root, FAKE_SPLIT: how === "mid" || how.startsWith("term") ? "1" : "0", ...local }, timeoutMs: 60_000, eventsFile: join(usageDir, "events.jsonl"), label: "work-1" });
     const run = pass();
     if (how === "mid" || how.startsWith("term")) {
       const until = Date.now() + 10_000;
@@ -473,7 +473,7 @@ test("a Claude session resumed after a killed stage starts from the lower of the
     process.env.FACTORY_LOCAL = "1";
     const r = await restoreTranscript({ checkout: "/c", workDir: ${JSON.stringify(ws)}, harness: "claude" });
     delete process.env.FACTORY_LOCAL;
-    const rec = await runHarness({ harness: "claude", model: "claude-sonnet-4-5", prompt: "p", maxUsd: 0, resume: r.id, cwd: ${JSON.stringify(root)}, env: { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, timeoutMs: 60_000, label: "work-1" });
+    const rec = await runHarness({ harness: "claude", model: "claude-sonnet-4-5", prompt: "p", maxUsd: 0, resume: r.id, cwd: ${JSON.stringify(root)}, env: { HOME: process.env.HOME, PATH: process.env.PATH, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, timeoutMs: 60_000, label: "work-1" });
     console.log(JSON.stringify({ resumed: r.id, usd: rec.usd }));
   `;
   const s = stageProcess(script, { CLAUDE_CONFIG_DIR: join(root, "config"), PATH: `${join(root, "bin")}:${process.env.PATH}` });

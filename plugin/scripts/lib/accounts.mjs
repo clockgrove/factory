@@ -201,9 +201,11 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
   const own = [accountsFile(home), gatewayKeyFile(home), ...(appKey ? [real(resolve(appKey))] : [])].filter(Boolean);
   // Each also by the file itself (its device and inode), whatever its name is spelled: on a case-insensitive file system
   // (macOS) `Accounts.json` or `TOKENS/acme/app` is that file under another name, which no path comparison catches.
-  const ownFiles = [...own, ...filesIn(join(keyDir, "tokens"))].map(statQuiet).filter(Boolean);
+  // Listed once, and only when an account declares a token file.
+  let ownFiles;
   const isOwn = (f) => {
     const st = statQuiet(f);
+    ownFiles ??= [...own, ...filesIn(join(keyDir, "tokens"))].map(statQuiet).filter(Boolean);
     return !!st && ownFiles.some((o) => o.dev === st.dev && o.ino === st.ino);
   };
   for (const a of all.filter((x) => x.tokenFile)) {
@@ -483,13 +485,41 @@ const tokenText = (file) => {
     return null;
   }
 };
-/** Every path in `dir` and its subfolders (none when it cannot be read); links are listed, never followed into. */
+/** At most this many entries are listed under ~/.config/factory/tokens (filesIn). */
+const FILES_IN_MAX = 10_000;
+/**
+ * Every path in `dir` and its subfolders, as Factory reads them: its real folders first, then what a link to a folder
+ * leads to (a token under `tokens/acme`, a link to another folder, is read through it). Each folder is entered once, by
+ * its device and inode, so a link to `.` or two links to one tree cost nothing more; the listing stops at FILES_IN_MAX
+ * entries, so a link out of ~/.config/factory (to `/`) costs at most that, after every real folder is listed. A folder
+ * that cannot be read lists nothing of its own, the rest still listed.
+ */
 const filesIn = (dir) => {
-  try {
-    return readdirSync(dir, { recursive: true }).map((f) => join(dir, f));
-  } catch {
-    return [];
-  }
+  const out = [];
+  const seen = new Set();
+  const links = [];
+  const enter = (d) => {
+    if (out.length >= FILES_IN_MAX) return;
+    const st = statQuiet(d);
+    if (!st?.isDirectory() || seen.has(`${st.dev}:${st.ino}`)) return;
+    seen.add(`${st.dev}:${st.ino}`);
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (out.length >= FILES_IN_MAX) return;
+      const p = join(d, e.name);
+      out.push(p);
+      if (e.isDirectory()) enter(p);
+      else if (e.isSymbolicLink()) links.push(p);
+    }
+  };
+  enter(dir);
+  while (links.length && out.length < FILES_IN_MAX) enter(links.shift());
+  return out;
 };
 /** statSync, or null when the path is gone (a folder removed between its realpath and here) or cannot be read. */
 const statQuiet = (p) => {

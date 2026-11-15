@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Local, STAGE_RECORD, liveStage, parseArgs, reapLeftRuns, stageFor } from "../scripts/local.mjs";
+import { Local, STAGE_RECORD, liveStage, parseArgs, reapLeftRuns, stageFor, usage as usageText } from "../scripts/local.mjs";
 import { GROUP_RECORD, bootId, boottimeSeconds, groupMembers, groupRecordName, holdsMark, lstartSeconds, processRecord, sameProcess, startTime, statFields } from "../scripts/lib/proc.mjs";
 
 const scripts = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
@@ -256,6 +256,10 @@ test("the command line is checked before anything runs", () => {
   assert.deepEqual(parseArgs(["run", "--wait", "12"]), { cmd: "run", flags: { _: ["run", "12"], wait: true } });
   assert.deepEqual(parseArgs(["serve", "--interval", "5", "--once", "--all"]), { cmd: "serve", flags: { _: ["serve"], interval: 5, once: true, all: true } });
   assert.deepEqual(parseArgs(["deliver", "4", "--out=/x", "--repo", "o/r"]), { cmd: "deliver", flags: { _: ["deliver", "4"], out: "/x", repo: "o/r" } });
+  // The clone's flag is doctor's name, --checkout; --dir is read as it (#324).
+  for (const flag of ["--checkout", "--dir"]) assert.deepEqual(parseArgs(["serve", flag, "/c"]), { cmd: "serve", flags: { _: ["serve"], checkout: "/c" } }, flag);
+  assert.match(usageText("serve"), /\[--checkout CLONE\]/);
+  assert.doesNotMatch(usageText(), /--dir/);
 });
 
 test("factory and factory-db answer --help and refuse a bad flag before doing anything", { skip: process.platform === "win32" }, () => {

@@ -171,7 +171,7 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(next, "stdout.jsonl")
   const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
   process.env.PATH = `${bin}:${saved.PATH}`;
   process.env.CODEX_HOME = home;
-  const run = (resume, label) => runHarness({ harness: "codex", model: MODEL, prompt: "p", maxUsd: 0, resume, cwd: work, env: { PATH: process.env.PATH, CODEX_HOME: home }, timeoutMs: 60_000, label });
+  const run = (resume, label) => runHarness({ harness: "codex", model: MODEL, prompt: "p", maxUsd: 0, resume, cwd: work, env: { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: home }, timeoutMs: 60_000, label });
   return { work, home, pass, stream, run, saved };
 }
 const putBack = (saved) => {

@@ -11,6 +11,7 @@
 // The action declares no defaults of its own, so an empty `with:` value falls
 // through to the env block rather than overriding it with "".
 import { appendFileSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 
 /**
  * Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's
@@ -372,6 +373,46 @@ export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOK
 /** A name that carries one of Factory's own service keys: the bare name, or the input under FACTORY_ or FACTORY_INPUT_. */
 export const isFactorySecret = (k) => FACTORY_SECRET_KEYS.some((n) => k === n || k === `FACTORY_${n}` || k === `FACTORY_INPUT_${n}`);
 
+/** Other names a command-line flag answers to: `--dir` is `--checkout`, the clone's flag on every command that takes one. */
+export const FLAG_ALIASES = { dir: "checkout" };
+
+/**
+ * A command line checked against its flags (`spec`: name → `bool`, which takes no value, or {value, number?}, which
+ * takes one, a positive number where `number` is set), FLAG_ALIASES read as their names: {_: arguments, flag: value}.
+ * Throws `fail(why)` for an unknown flag, a value given to a bool, or a missing or non-numeric value.
+ */
+export function readFlags(argv, spec, fail) {
+  const flags = { _: [] };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!a.startsWith("-")) {
+      flags._.push(a);
+      continue;
+    }
+    const m = /^--([a-z-]+)(?:=(.*))?$/s.exec(a);
+    const key = m && Object.hasOwn(FLAG_ALIASES, m[1]) ? FLAG_ALIASES[m[1]] : m?.[1];
+    const kind = m && Object.hasOwn(spec, key) ? spec[key] : null;
+    if (!kind) throw fail(`unknown flag ${a}`);
+    if (kind === "bool") {
+      if (m[2] !== undefined) throw fail(`--${m[1]} takes no value`);
+      flags[key] = true;
+      continue;
+    }
+    let value = m[2];
+    if (value === undefined) {
+      value = argv[i + 1];
+      if (value === undefined || value.startsWith("-")) throw fail(`--${m[1]} needs a value`);
+      i += 1;
+    }
+    if (kind.number) {
+      const n = Number(value);
+      if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${m[1]} needs a positive number, not ${JSON.stringify(value)}`);
+      flags[key] = n;
+    } else flags[key] = value;
+  }
+  return flags;
+}
+
 /** Parse `--name value`, `--name=value` and bare `--flag` into {name: value}. Names use underscores. */
 export function parseArgs(argv) {
   const out = { _: [] };
@@ -523,6 +564,68 @@ export const logTo = (stream) => {
   LOG_STREAM = stream;
 };
 export const log = (...parts) => (LOG_STREAM ?? process.stdout).write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
+
+/**
+ * A thrown error as a Blocked reason may carry it, which `log` (this process's log: the local loop's, or a stage's) has
+ * whole: a system error (Node's, with its `syscall`: a file or process call, whose message names the path, an account's
+ * folder or token file included) by its code and call alone; any other by its message, the home directory shortened to
+ * `~`.
+ */
+export const postedError = (e, { home = homedir(), log = "the local loop's log" } = {}) => {
+  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
+  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
+  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; ${log} names the path` : `${code}; ${log} names the path`;
+};
+
+/**
+ * What a failed git command said, for a log line or a Blocked reason: each `error:` or `fatal:` line with the paths git
+ * lists under it (five at most), not its closing line ("Aborting" names no cause). A line with none of those: the first
+ * line. Credentials in a URL and GitHub tokens are masked; at most 300 characters.
+ */
+export function gitError(stderr) {
+  const lines = String(stderr ?? "").split("\n").map((l) => l.replace(/\s+$/, "")).filter(Boolean);
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^(error|fatal): /.test(lines[i])) continue;
+    const head = lines[i];
+    const paths = [];
+    while (i + 1 < lines.length && /^\s/.test(lines[i + 1])) paths.push(lines[++i].trim());
+    const shown = paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` (+${paths.length - 5} more)` : "");
+    blocks.push(shown ? `${head} ${shown}` : head);
+  }
+  const text = (blocks.length ? blocks.join("; ") : lines[0] ?? "").replace(/(\w+:\/\/)[^\s/@'"]+@/g, "$1***@").replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, "***");
+  return text.slice(0, 300);
+}
+
+/**
+ * `text` with every absolute path on this machine replaced by `<path>` (a clone, a temp, home or account folder, inside
+ * the home directory or out of it), a `file:` URL included. A path in quotes is replaced up to its closing quote, spaces
+ * and commas in it included (`'/srv/my repo/.git/index.lock'`); one outside quotes ends at a space, comma, colon or
+ * bracket. A path git prints relative to the clone stays, and so does any other URL, its credentials masked.
+ */
+export const withoutLocalPaths = (text) =>
+  String(text ?? "").replace(
+    /(['"`])((?:file:\/\/|~(?=\/)|\/(?!\/))(?:(?!\1)[^\n])*)\1|file:\/\/[^\s'"`]*|([a-z][a-z0-9+.-]*:\/\/)([^\s'"`]*)|(^|[\s'"`(=:,[])(?:~(?=\/)|\/(?!\/))[^\s'"`)\],;:]*/gi,
+    (m, quote, _path, scheme, rest, lead) => (quote ? `${quote}<path>${quote}` : scheme ? `${scheme}${rest.replace(/^[^\s/@]+@/, "***@")}` : lead === undefined ? "<path>" : `${lead}<path>`),
+  );
+
+/** The log a Blocked reason points to: this machine's (local mode), or the job's (a runner, a cloud sandbox stage). */
+export const logName = (env = process.env) => (env.FACTORY_LOCAL === "1" || !env.GITHUB_ACTIONS ? "this machine's log" : "the job log");
+
+/**
+ * A command Factory ran that failed (`r`: exec's {code, signal, stderr}), as an error a Blocked reason may carry, on
+ * every route: `what`, the exit, and the command's cause (gitError: its `error:` and `fatal:` lines, else its first line)
+ * with every absolute path on this machine replaced (withoutLocalPaths), so a person reading the Block sees why. The
+ * output's last lines, paths included, go to this process's log.
+ */
+export function commandFailed(what, r, fields = {}) {
+  const exit = r?.code ?? r?.signal ?? null;
+  const said = `${what}${exit === null ? "" : ` (exit ${exit})`}`;
+  const lines = String(r?.stderr ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length) log(`${said}: ${lines.slice(-5).join(" | ").slice(0, 1000)}`);
+  const cause = withoutLocalPaths(gitError(r?.stderr)).slice(0, 300);
+  return Object.assign(new Error(`${said}${cause ? `: ${cause}` : ""}; ${logName()} has its output`), fields);
+}
 
 /**
  * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its

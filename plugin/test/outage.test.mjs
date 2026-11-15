@@ -221,7 +221,7 @@ test("runHarness: a pass this machine's network cut off is no death: once the pr
       (req) => (req.origin === "https://chatgpt.com" && ++probes < 3 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
       async ({ lines }) => {
         waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
         const c = calls();
         assert.equal(c.length, 2, "the cut-off pass, then its run after the network came back");
         assert.ok(c[1].args.includes("resume") && c[1].args.includes("00000000-0000-0000-0000-0000000000a1"), c[1].args.join(" "));
@@ -243,7 +243,7 @@ test("runHarness: without the outage wait (a process that does not wait outages 
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
   try {
-    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
     assert.equal(calls().length, 1);
     assert.equal(rec.ok, false);
   } finally {
@@ -384,7 +384,7 @@ test("runHarness: a pass that fails on its own after each outage runs again at m
       (req) => (req.origin === "https://chatgpt.com" && ++probes % 2 === 1 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
       async () => {
         waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
         assert.equal(calls().length, 1 + OUTAGE.passReruns, "the first run and two more, then its failure stands");
         assert.equal(rec.ok, false);
         assert.equal(rec.lostToOutage, OUTAGE.passReruns);
@@ -423,7 +423,7 @@ test("runHarness: a cut-off run that leaves no budget for another counts its spe
         waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
         const one = parseUsage("codex", SPENT_RUN, "gpt-6.1-sol", 1);
         assert.ok(one.usd > 0);
-        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: one.usd / 2, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: one.usd / 2, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
         assert.equal(calls().length, 1, "no budget left to run it again");
         assert.equal(rec.budgetExceeded, true);
         assert.equal(rec.usd, one.usd, "the run's dollars once");

@@ -1,6 +1,6 @@
 // Temp directories Factory makes (lib/fsafe.mjs): each is removed when its holder is done, and a killed holder's
 // leftover is cleared by the next sweep, never one a live process still holds.
-import { DEVELOPER_ENV } from "./temp.mjs";
+import { DEVELOPER_ENV, DEVELOPER_ENV_PREFIX } from "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
@@ -21,10 +21,18 @@ test("the test files run in a temp root of their own, held by their process", ()
 
 test("#305: the test files run on a home of their own in that root, with no harness login or credential of the shell", () => {
   assert.equal(homedir(), realpathSync(join(tmpdir(), "home")), "os.homedir(), and so ~/.config/factory, is the fake home's");
-  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "FACTORY_LOCAL_APP_KEY", "XDG_CONFIG_HOME"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "XDG_CONFIG_HOME"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
   // What the code under test starts sees the same.
   const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify([require('os').homedir(), process.env.CLAUDE_CONFIG_DIR ?? null]))"], { encoding: "utf8" });
   assert.deepEqual(JSON.parse(child.stdout), [homedir(), null]);
+});
+
+test("#318: no credential, SSH agent or local-mode setting of the shell reaches a test file", () => {
+  const shell = { VERCEL_TOKEN: "v", FACTORY_APP_TOKEN: "a", FACTORY_READ_TOKEN: "r", FACTORY_CODEX_GATEWAY_KEY: "g", FACTORY_INPUT_CODEX_API_KEY: "k", FACTORY_INPUT_CODEX_GATEWAY_KEY: "i", SSH_AUTH_SOCK: "/s", FACTORY_LOCAL: "1", FACTORY_LOCAL_TOKEN: "t", FACTORY_LOCAL_SANDBOX: "{}", FACTORY_LOCAL_MAX_CONCURRENT: "9" };
+  const code = `await import(${JSON.stringify(join(import.meta.dirname, "temp.mjs"))}); process.stdout.write(JSON.stringify(${JSON.stringify(Object.keys(shell))}.filter((k) => k in process.env)));`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, ...shell }, encoding: "utf8" });
+  assert.deepEqual(JSON.parse(r.stdout || "null"), [], r.stderr);
+  assert.ok(!("FACTORY_LOCAL_DB" in process.env) && !DEVELOPER_ENV.includes("FACTORY_LOCAL_DB") && DEVELOPER_ENV_PREFIX.test("FACTORY_LOCAL_DB"), "by prefix, not by name");
 });
 
 test("ownedTemp records its holder beside the directory; dropOwned removes both", () => {

@@ -19,7 +19,7 @@ import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, 
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
-import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
+import { CODEX_GATEWAY_ENV, FACTORY_CONTROL_KEYS, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
@@ -55,12 +55,9 @@ export const SHELL_SECRET_KEYS = [...MODEL_SECRET_KEYS, ...RUNNER_SECRET_KEYS, .
  */
 export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((k) => !(FACTORY_SECRET_KEYS.includes(k) && shellSecrets.includes(k)));
 
-/**
- * Factory's own control variables (#119): a stage's identity and launcher plumbing (launch.mjs, stage.mjs), the bot it
- * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
- * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
- */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_AUTO_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_LOCAL_AUTO_ACCOUNT", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
+/** inputs.mjs FACTORY_CONTROL_KEYS, which scrubbedEnv removes from every child. */
+export { FACTORY_CONTROL_KEYS };
+
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,

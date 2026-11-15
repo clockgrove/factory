@@ -189,9 +189,9 @@ test("a usage limit holds its account on GitHub until its reset: Factory's App w
     assert.equal(later.avoidUntil("claude-3", now + 30 * 60_000), now + H, "a no-reset limit is passed over for an hour");
     // Past the reset: free again.
     assert.equal((await readHolds(REPO, { token: "t" }, { now: now + 3 * H + 1, actions: true })).store.until("claude-2", now + 3 * H + 1), null);
-    // An hour past its end a record is forgotten, and the next write deletes its comment.
+    // An hour past its end a hold is forgotten (a guess a day: #332), and the next write deletes its comment.
     await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: now + 9 * H, now: now + 5 * H }, { token: "t" }, { actions: true });
-    assert.deepEqual(issue.comments.map((c) => JSON.parse(/\{.*\}/.exec(c.body)[0]).account), ["claude"], "only the new one is left");
+    assert.deepEqual(issue.comments.map((c) => JSON.parse(/\{.*\}/.exec(c.body)[0]).account), ["claude-3", "claude"], "the guess and the new hold are left");
   });
 });
 
@@ -624,4 +624,19 @@ test("a limit with no reset and every other account held or passed over Blocks o
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
     assert.match(src, /LIMIT\.moves = stageMoves\(\{ local, limits, pinned: acct\.pinned \}\);/, script);
   }
+});
+
+test("a guess on the holds issue is kept a day past its end, so a limit again within that day counts on; one a day past its end is deleted, as a hold an hour past its end is (#332)", async () => {
+  setSelf(BOT);
+  const t = Date.now();
+  const recent = { account: "claude", until: t - 2 * H, at: t - 3 * H, guess: true, streak: 1 };
+  const old = { account: "claude-2", until: t - 25 * H, at: t - 26 * H, guess: true, streak: 1 };
+  const hold = { account: "claude-3", until: t - 2 * H, at: t - 3 * H };
+  await withGitHub({ issues: [holdsIssue([holdComment(1, recent), holdComment(2, old), holdComment(3, hold)])] }, async (_reads, st) => {
+    const { until } = await writeHold(REPO, { kind: "spent", harness: "claude", account: "claude", now: t }, { token: "t" });
+    assert.equal(until, t + 4 * H, "the second guess in a row: four hours");
+    const ids = st.issues[0].comments.map((c) => c.id);
+    assert.ok(ids.includes(1), "the recent guess is kept");
+    assert.ok(!ids.includes(2) && !ids.includes(3), "the day-old guess and the hour-old hold are deleted");
+  });
 });

@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -974,7 +974,7 @@ test("#332: on, with every other account held or passed over, a limit with no re
       const blocks = gh.blocked();
       assert.equal(blocks.length, 1, "one Block");
       const at = (ms) => new Date(ms).toISOString().replaceAll(".", "\\.");
-      assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\.`));
+      assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\. Re-apply \`factory:objective\` once a Claude Code account is free again\\.`));
       assert.match(blocks[0].body, /"cause":"provider-quota"/);
       assert.equal(loop.offline?.has(8) ?? false, false, "not kept paused");
       assert.deepEqual(await loop.pausedHere(new Map()), [], "nothing resumes it");
@@ -1036,6 +1036,50 @@ test("#332: a Codex stage's limit feeds the same holds: with no reset, a guess a
       assert.equal(loop.holds.until("cy", t), t + 180 * MIN);
       assert.equal(loop.freeAccounts("codex", "none").length, 0);
       assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#332: a guess is remembered a day past its end, so a limit again within that day counts on (1, 4, then 24 hours) and an account out for weeks is retried less and less; a day later it starts again at an hour", async () => {
+  const { GUESS_FORGET_MS, HOLD_FORGET_MS } = await import("../scripts/lib/holds.mjs");
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t = Date.now();
+  const holds = accountHolds({ dir });
+  assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t }), t + 60 * MIN);
+  // The guess ended two hours ago, past a hold's hour of memory: the next limit there is the second in a row.
+  const second = t + 60 * MIN + 2 * 60 * MIN;
+  assert.ok(second - (t + 60 * MIN) > HOLD_FORGET_MS);
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: second }), second + 240 * MIN, "four hours, in every serve");
+  const third = second + 240 * MIN + 20 * 60 * MIN;
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: third }), third + 1440 * MIN);
+  // A day and more past the last guess's end, it is forgotten (its file too): the count starts again.
+  const later = third + 1440 * MIN + GUESS_FORGET_MS + MIN;
+  assert.equal(accountHolds({ dir }).spent({ harness: "copilot", account: "seat", now: later }), later + 60 * MIN);
+  assert.equal(readdirSync(dir).filter((f) => f.startsWith("seat.")).length, 1, "the forgotten guesses' files are removed");
+  // A hold with a reset is still forgotten an hour past its end: its back-off count starts again.
+  holds.limit({ harness: "claude", account: "beta", reset: t + MIN, now: t });
+  assert.equal(holds.limit({ harness: "claude", account: "beta", reset: t + 2 * HOLD_FORGET_MS, now: t + 2 * HOLD_FORGET_MS }), t + 2 * HOLD_FORGET_MS + 2 * MIN);
+});
+
+test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {
+  const { localBaseEnv } = await import("../scripts/lib/local.mjs");
+  const { FACTORY_CONTROL_KEYS } = await import("../scripts/lib/inputs.mjs");
+  const shell = { PATH: "/bin", FACTORY_STAGE_AUTO_ACCOUNT: "1", FACTORY_STAGE_ACCOUNT: "beta", DATABASE_URL: "postgres://x" };
+  const base = localBaseEnv(shell, ["FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_STAGE_ACCOUNT", "DATABASE_URL"]);
+  assert.equal(base.DATABASE_URL, "postgres://x");
+  for (const k of FACTORY_CONTROL_KEYS) assert.ok(!(k in base), k);
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const off = serveOn(h, () => t);
+      await off.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, usageLimit: { harness: "claude", reset: null, since: new Date(t).toISOString(), noReset: true } });
+      assert.equal(off.holds.avoidUntil("alpha", t), null, "no guess");
+      assert.equal(gh.blocked().length, 1, "Blocked, as with no move");
+      assert.match(gh.blocked()[0].body, /Re-apply `factory:objective` once a Claude Code account is free again\./);
     });
   } finally {
     gh.restore();

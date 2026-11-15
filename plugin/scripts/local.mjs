@@ -1711,17 +1711,19 @@ export class Local {
     const now = (this.clock ?? Date.now)();
     const account = result.account || l.harness;
     const hold = result.hold ?? this.holdOf(implicitAccount(l.harness));
-    const end = this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null });
-    log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
-    if (this.auto && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
+    // Only a serve with automatic choice on keeps a guess (a stage this serve did not pick for cannot end here: its env
+    // never says so, accounts.mjs STAGE_AUTO_ENV); one with it off Blocks the stage as on any no-reset limit.
+    const end = this.auto ? this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null }) : null;
+    if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
+    if (end !== null && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
     const h = HARNESS_NAMES[l.harness] || l.harness;
     const states = this.accountStates(l.harness);
-    const reason = `${h} account \`${account}\` reached its usage limit or quota with no reset reported, and no other ${h} account on this machine is free${states.length ? `: ${states.join("; ")}` : ""}. Re-apply the label once one has reset.`;
+    const reason = `${h} account \`${account}\` reached its usage limit or quota with no reset reported, and no other ${h} account on this machine is free${states.length ? `: ${states.join("; ")}` : ""}.`;
     this.offline?.delete(issue);
     this.lapsed?.delete(issue);
     log(`#${issue}: Blocking it: ${reason}`);
     try {
-      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota" });
+      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota", fix: `Re-apply \`factory:objective\` once a ${h} account is free again.` });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);

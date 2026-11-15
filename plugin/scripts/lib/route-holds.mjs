@@ -1,18 +1,18 @@
-// Usage-limit holds per account on GitHub Actions and the cloud sandbox, and automatic account choice there (#268). Local
-// mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so the same
-// records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own holds issue
-// (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
+// Usage-limit holds per account on GitHub Actions and the cloud sandbox, and automatic account choice there (#268).
+// Local mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so
+// the same records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own
+// holds issue (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
 // findRecordIssue; normally one, two only after a race at the first limit until a writer moves the newer one's records
 // over and retires it). Only comments by Factory's own login there count (isSelf), and only as written: a record is
 // never edited, so one edited since (its updated_at is not its created_at: a person who can edit comments did it) holds
-// nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one who
-// unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at once
-// each add theirs and lose none; a writer deletes the records forgotten (HOLD_FORGET_MS after their end). A reader makes
-// one labelled issues query (a miss is "no holds") and lists that issue's comments; only a writer searches Factory's own
-// issues past the label before it opens the issue, on its first limit. Only a stage whose harness has more than one
-// account and the setting on reads or writes anything: with FACTORY_AUTO_ACCOUNT off, or one account, nothing here runs
-// and every stage runs exactly as before. The records hold no secret: a harness, an account's name, times, a count and
-// the limit's window.
+// nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one
+// who unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at
+// once each add theirs and lose none; a writer deletes the records forgotten (holds.mjs forgotten: an hour after a
+// hold's end, a day after a guess's). A reader makes one labelled issues query (a miss is "no holds") and lists that
+// issue's comments; only a writer searches Factory's own issues past the label before it opens the issue, on its first
+// limit. Only a stage whose harness has more than one account and the setting on reads or writes anything: with
+// FACTORY_AUTO_ACCOUNT off, or one account, nothing here runs and every stage runs exactly as before. The records hold
+// no secret: a harness, an account's name, times, a count and the limit's window.
 //
 // Hold semantics are holds.mjs's own (accountHolds over these records): a limit holds its account until the provider's
 // reset, with the back-off floor for a provider that refuses again past its reset; a usage limit with no reset reported
@@ -24,7 +24,7 @@ import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
-import { HOLD_FORGET_MS, accountHolds, heldRecord } from "./holds.mjs";
+import { accountHolds, forgotten as forgottenAt, heldRecord } from "./holds.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf, selfLogin } from "./logic.mjs";
 
@@ -51,7 +51,7 @@ const rawRecord = (c) => {
 
 /**
  * The holds recorded on issue `number` at `now`: {records (heldRecord's), forgotten (ids of Factory's own record comments
- * a writer deletes: past HOLD_FORGET_MS, or edited since written, which count for nothing)}.
+ * a writer deletes: forgotten (holds.mjs), or edited since written, which count for nothing)}.
  */
 async function recordsOn(repo, number, opts, now) {
   const records = [];
@@ -66,7 +66,7 @@ async function recordsOn(repo, number, opts, now) {
       if (!v) continue;
       const r = heldRecord(v, now);
       if (r) records.push(r);
-      else if (Number.isSafeInteger(v.until) && now - v.until > HOLD_FORGET_MS) forgotten.push(c.id);
+      else if (Number.isSafeInteger(v.until) && forgottenAt(v, now)) forgotten.push(c.id);
     }
   }
   return { records, forgotten };

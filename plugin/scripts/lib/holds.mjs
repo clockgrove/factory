@@ -19,6 +19,14 @@ import { writeNew } from "./fsafe.mjs";
 export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
 /** A hold that ended this long ago is forgotten, its back-off streak with it, and its file removed. */
 export const HOLD_FORGET_MS = 60 * 60_000;
+/**
+ * A no-reset limit's guess (accountHolds.spent), and a served pass's record that can end one, is kept this long past its
+ * end: a second such limit within a day of the first guess's end counts on (1, 4, then 24 hours), so an account out
+ * for longer (a monthly quota) is retried less and less often rather than every hour or two (#332).
+ */
+export const GUESS_FORGET_MS = 24 * 60 * 60_000;
+/** Whether record `r` is forgotten at `now`: HOLD_FORGET_MS past its end, GUESS_FORGET_MS for a guess or a served pass's. */
+export const forgotten = (r, now) => now - r.until > (r.guess === true || r.served === true ? GUESS_FORGET_MS : HOLD_FORGET_MS);
 /** The longest a hold lasts past now: a week's window and a day more. A record naming a later end is held to it. */
 export const HOLD_MAX_MS = 8 * 24 * 60 * 60_000;
 /**
@@ -65,12 +73,12 @@ const clamped = (r, now) => ({ ...r, until: Math.min(r.until, now + HOLD_MAX_MS)
 /**
  * A record kept somewhere other than this machine's files (route-holds.mjs: GitHub Actions and the cloud sandbox keep
  * theirs on GitHub, #268), checked as a file's is and held to this clock: the record, or null when it is none, its key is
- * no account's, or it is forgotten (its hold ended HOLD_FORGET_MS ago).
+ * no account's, or it is forgotten (`forgotten`).
  */
 export function heldRecord(v, now) {
   if (typeof v?.account !== "string" || !KEY.test(v.account)) return null;
   const r = recordOf(v, v.account);
-  return r && now - r.until <= HOLD_FORGET_MS ? clamped(r, now) : null;
+  return r && !forgotten(r, now) ? clamped(r, now) : null;
 }
 
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
@@ -78,8 +86,8 @@ const ours = (st, uid) => !!st && !st.isSymbolicLink() && (uid === undefined || 
 
 /**
  * The records in `dir`, read leniently (an unreadable or foreign file is left out, never thrown on). A record forgotten
- * (its hold ended HOLD_FORGET_MS ago) is removed, as is a writer's temp file older than that (a killed writer's), and a
- * stage-start record not written for START_FORGET_MS (an account no longer declared, a login no serve runs on now).
+ * (`forgotten`) is removed, as is a writer's temp file older than HOLD_FORGET_MS (a killed writer's), and a stage-start
+ * record not written for START_FORGET_MS (an account no longer declared, a login no serve runs on now).
  */
 function readDir(dir, now, uid) {
   let names;
@@ -107,7 +115,7 @@ function readDir(dir, now, uid) {
       if (!m || st.size > MAX_BYTES || st.nlink !== 1) continue;
       const r = recordOf(JSON.parse(readFileSync(file, "utf8")), m[1]);
       if (!r) continue;
-      if (now - r.until > HOLD_FORGET_MS) rmSync(file, { force: true });
+      if (forgotten(r, now)) rmSync(file, { force: true });
       else out.push(clamped(r, now));
     } catch {
       // gone under the read (another serve forgot it), or not JSON: left out
@@ -124,7 +132,7 @@ function readDir(dir, now, uid) {
  * stand for, {until, streak, at} (their own count, apart from the back-off's), or null; null with no record.
  */
 function fold(records, account, now) {
-  const mine = records.filter((r) => r.account === account && now - r.until <= HOLD_FORGET_MS);
+  const mine = records.filter((r) => r.account === account && !forgotten(r, now));
   if (!mine.length) return null;
   const newestOf = (list) => (list.length ? list.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a)) : null);
   const hard = mine.filter((r) => !r.guess);
@@ -184,7 +192,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
   let kept = dir ? [] : [...seed];
   const starts = new Map();
   const records = (now) => {
-    kept = kept.filter((r) => now - r.until <= HOLD_FORGET_MS);
+    kept = kept.filter((r) => !forgotten(r, now));
     return dir ? [...kept, ...readDir(dir, now, uid)] : kept;
   };
   const put = (r) => {

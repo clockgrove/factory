@@ -50,6 +50,7 @@ import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -1386,6 +1387,9 @@ export class Local {
   async review(issue, prNumber, { wait = false, reruns = 0 } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
     log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
+    // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back; --wait,
+    // with no serve to do it, does the same here, and then follows the review as before.
+    if (wait && review.exit === "waiting") return (await this.thirdPartyWait(issue, prNumber)) ? this.review(issue, prNumber, { wait, reruns }) : review;
     if (wait && review.exit === "delivered") {
       // A maintainer commented during the review: it re-applied the label instead of arming the merge. Run it again,
       // at most twice here; after that the label stays and the next serve tick (or a `review` run) takes it.
@@ -1398,6 +1402,33 @@ export class Local {
       if ((await this.followMerge(issue, prNumber)) === "next") return { ...review, next: true };
     }
     return review;
+  }
+
+  /**
+   * --wait, a review stage that ended waiting for a third-party reviewer: what serve's dispatcher does for it
+   * (third-party-review.mjs waitState), read once a minute: true once the review label is back on (that review of the
+   * head exists, or the bound has passed), false when there is nothing to wait for (no record for the PR's head, the PR
+   * closed, a review asked for since) or this loop is stopping. `gh` is for tests.
+   */
+  async thirdPartyWait(issue, prNumber, { pollMs = THIRD_PARTY_POLL_MS, gh = { getPr, listComments, addLabels } } = {}) {
+    const reads = new Map();
+    while (!this.stopping) {
+      const pr = await gh.getPr(this.repo, prNumber, this.opts).catch(() => null);
+      const comments = pr ? await gh.listComments(this.repo, prNumber, this.opts).catch(() => null) : null;
+      if (pr && comments) {
+        const state = await waitState({ repo: this.repo, issue, pr, wait: waitOf(comments, issue), opts: this.opts, now: (this.clock ?? Date.now)(), reads });
+        if (!state || state.stale) return false;
+        if (state.resume) {
+          const back = await gh.addLabels(this.repo, prNumber, [REVIEW_LABEL], this.opts).then(() => true, (e) => log(`#${issue}: the review label could not be put back (${String(e?.message || e).slice(0, 120)}); trying again`));
+          if (back) {
+            log(`#${issue}: PR #${prNumber}: the third-party wait is over (${state.resume}); the review goes on`);
+            return true;
+          }
+        }
+      }
+      await this.pause(pollMs);
+    }
+    return false;
   }
 
   /** One Objective, start to delivered review (and, with `wait`, to merged). */
@@ -1775,7 +1806,7 @@ export class Local {
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, thirdPartyReads: (this.thirdPartyReads ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;

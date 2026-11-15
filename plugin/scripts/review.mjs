@@ -79,8 +79,8 @@ import {
   stoppedEnd,
   unreadNow,
 } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stageStopSignal, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
-import { exitUnaddressed, thirdPartyStep } from "./lib/third-party-review.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { clearWait, exitUnaddressed, thirdPartyStep } from "./lib/third-party-review.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -932,9 +932,29 @@ async function main() {
     }
   };
   // The repository's third-party reviewers (third-party-review.mjs): each one's review of the head Factory's reviewer
-  // read is waited for, within a bound and never past half the stage's time left, before the answer pass; without one
-  // in time the stage goes on and the progress says so. Not when the cap is spent: no answer pass runs then.
-  const thirdParty = await thirdPartyStep({ repo, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, leftMs: remainingMs(deadlineAt), progress, ...token, signal: stageStopSignal() });
+  // read comes before the answer pass, within a bound; without one in time the stage goes on and the progress says so.
+  // Not when the cap is spent: no answer pass runs then. A review still to come is not waited for here: the stage
+  // records the wait on the PR and ends `waiting`, its label off, holding no slot or runner; the dispatcher puts the
+  // label back once that review exists or the bound has passed, and that review stage, with Factory's own review
+  // already posted (reviewsCover), runs no reviewer pass and goes on from here.
+  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, ...token });
+  if (third.wait) {
+    // A stop's end stands; otherwise the label comes off, or the wait would hold nothing to start the review again.
+    await holdIfStopped();
+    const off = await removeLabel(repo, pr.number, REVIEW_LABEL, token).then(
+      () => true,
+      (e) => (log(`review label: ${e.message.slice(0, 120)}`), false),
+    );
+    if (off) {
+      const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+      log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
+      await finish("waiting", reason);
+      return;
+    }
+    await clearWait({ repo, issue, prNumber: pr.number, ...token });
+    await progress(`third-party review: the review label could not be taken off, so this stage goes on without ${third.wait.missing.join(", ")}`);
+  }
+  const thirdParty = third.logins;
   // Factory's placeholder (no finding of its own) still leaves a named reviewer's comments to answer. The foundation pass
   // posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open comments too.
   const noneOwn = placeholder && !alreadyReviewed;

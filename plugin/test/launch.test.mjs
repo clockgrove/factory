@@ -209,8 +209,8 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   // A workflow rendered before the fix reads `steps.f.outputs.issue`: the Action has that name too, the same value.
   const action = parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs;
   assert.equal(action.issue.value, action.issue_number.value, "installed workflows get one launch group per Objective without a re-render");
-  assert.deepEqual(Object.keys(runner.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "check_suite", "workflow_run"]);
-  assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "check_suite", "workflow_run"]);
+  assert.deepEqual(Object.keys(runner.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "pull_request_review", "check_suite", "workflow_run"]);
+  assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "pull_request_review", "check_suite", "workflow_run"]);
   assert.deepEqual(doc.on.workflow_run.workflows, ["Quality"]);
   assert.equal(doc.env.FACTORY_SANDBOX, "vercel");
   assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" }, "the job token reads and ticks the dispatcher; every other write is the App's");

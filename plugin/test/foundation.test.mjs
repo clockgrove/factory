@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
-import { reviewPost } from "../scripts/lib/handoff.mjs";
+import { reviewPost, reviewsCover } from "../scripts/lib/handoff.mjs";
 import { parseReview } from "../scripts/lib/logic.mjs";
 import { FOUNDATION_AGENT, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
 import { AGENT_DIRS, agentModel } from "../scripts/lib/checkout.mjs";
@@ -114,7 +114,7 @@ test("reviewPost: the foundation pass's comments go up in the same review, count
   const post = reviewPost({ issue: 7, review, diff, entries, foundation });
   assert.deepEqual(post.comments.map((c) => [c.path, c.line]), [["src/a.ts", 3], ["src/new.ts", 2]]);
   assert.equal(post.placeholder, false);
-  assert.equal(post.body.split("\n")[1], "Factory reviewer: one comment-only review of two passes, 2 comment(s); the foundation pass checked the shared contracts the diff changes against their callers and raised 1.");
+  assert.deepEqual(post.body.split("\n").slice(0, 3), ["<!-- factory:7:review -->", "<!-- factory:7:foundation -->", "Factory reviewer: one comment-only review of two passes, 2 comment(s); the foundation pass checked the shared contracts the diff changes against their callers and raised 1."]);
   assert.equal(reviewPost({ issue: 7, review, diff, entries }).body.split("\n")[1], "Factory reviewer: one comment-only pass, 1 comment(s).");
   // Only foundation findings: no placeholder stands in, the foundation comment is what the answer pass answers.
   const met = { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] };
@@ -133,10 +133,10 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   const run = src.indexOf("async function run()");
   const at = (s) => src.indexOf(s, run);
   assert.ok(at("const foundation = !!chosen.foundation;") > at("await choiceGate("), "the mark from the trusted choice");
-  const pass = at("if (foundation && !alreadyReviewed) {");
+  const pass = at("if (foundationDue) {");
   assert.ok(pass > at("const answer = alreadyReviewed ? reviewRec : reviewAnswer(") && pass > at("if (!answer) {"), "after the first pass has a review");
   assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })") > pass, "posted with the first pass's comments");
-  const block = src.slice(pass, at("const post = alreadyReviewed ? null : reviewPost("));
+  const block = src.slice(pass, at("const post = !alreadyReviewed"));
   assert.match(block, /over: \(\) => over\(\) \|\| overBudget,/, "max_usd: the job's own cap");
   assert.match(block, /maxUsd: Math\.max\(0, inputs\.maxUsd - sumSpend\(records\)\),/, "each call capped at what is left");
   assert.match(block, /mark\(rec, rec\);\n\s+records\.push\(rec\);/, "each call booked before the next check");
@@ -215,4 +215,38 @@ test("post-review reads the session file once, whatever the order of its keys", 
   // Not one JSON value (a fenced answer): read as the review job reads one, with no foundation pass in it.
   assert.equal(reviewPostFor({ issue: 7, text: "```json\n{" + first + "}\n```", file: "f.json", diff, entries }).placeholder, true);
   assert.throws(() => reviewPostFor({ issue: 7, text: `{${pass}}`, file: "f.json", diff, entries, foundation: true }), /f\.json holds no reviewer JSON; nothing posted/, "the first pass is still required");
+});
+
+test("a PR reviewed before the foundation label gets the foundation pass alone at its next review stage, as its own review", () => {
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const entries = [{ id: "A", text: "a" }];
+  const bot = (body) => ({ body, author_association: "MEMBER", user: { login: "kirk" } });
+  // The first review stage ran before the label: one pass, no foundation marker.
+  const plain = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] }, diff, entries });
+  assert.doesNotMatch(plain.body, /factory:7:foundation/);
+  assert.deepEqual(reviewsCover([bot(plain.body)], 7), { reviewed: true, foundation: false }, "the next stage: reviewed, the foundation pass due");
+  // That stage posts the foundation pass alone: its own review, both markers, no acceptance judged again.
+  const alone = reviewPost({ issue: 7, review: null, diff, foundation: parseReview('{"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}') });
+  assert.deepEqual(alone.body.split("\n"), ["<!-- factory:7:review -->", "<!-- factory:7:foundation -->", "Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), 1 comment(s); it checked the shared contracts the diff changes against their callers."]);
+  assert.deepEqual([alone.placeholder, alone.comments.map((c) => c.body), alone.unjudged], [false, ["foundation review: z"], []]);
+  assert.deepEqual(reviewsCover([bot(plain.body), bot(alone.body)], 7), { reviewed: true, foundation: true }, "and the stage after: nothing due");
+  const empty = reviewPost({ issue: 7, review: null, diff, foundation: parseReview('{"comments": []}') });
+  assert.equal(empty.placeholder, true, "nothing found: the placeholder records the pass");
+  assert.deepEqual(reviewsCover([bot(empty.body)], 7).foundation, true);
+  // Markers count only from Factory or someone who can push; another issue's do not.
+  assert.deepEqual(reviewsCover([{ ...bot(alone.body), author_association: "NONE", user: { login: "stranger" } }], 7), { reviewed: false, foundation: false });
+  assert.deepEqual(reviewsCover([bot(alone.body)], 8), { reviewed: false, foundation: false });
+  assert.throws(() => reviewPost({ issue: 7, review: null, diff }), /no pass answered/);
+  // The review job: the pass is due on a trusted foundation Objective whose reviews lack the marker, reviewed or not; on
+  // an already reviewed PR it is posted alone; the earlier review's open comments are still answered.
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "review.mjs"), "utf8");
+  assert.match(src, /const covered = reviewsCover\(await rest\(`repos\/\$\{repo\.full\}\/pulls\/\$\{pr\.number\}\/reviews\?per_page=100`, \{ \.\.\.token, paginate: true \}\), issue\);\n\s+const alreadyReviewed = covered\.reviewed;\n\s+const foundationDue = foundation && !covered\.foundation;/);
+  assert.match(src, /\n  if \(foundationDue\) \{\n/);
+  assert.doesNotMatch(src, /foundation && !alreadyReviewed/);
+  assert.match(src, /: found\n\s+\? reviewPost\(\{ issue, review: null, diff, foundation: found\.review \}\)\n\s+: null;/);
+  assert.match(src, /const toAnswer = placeholder && !alreadyReviewed \? \[\] : await unaddressedReviewComments\(/);
+  // The worker's rebase keeps a review only when it covers a foundation Objective's foundation pass.
+  const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");
+  assert.ok(worker.indexOf("const foundation = !!chosen.foundation;") > worker.indexOf("await choiceGate("));
+  assert.match(worker, /let reviewed = !!cover\?\.reviewed && \(!foundation \|\| cover\.foundation\);/);
 });

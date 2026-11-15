@@ -32,7 +32,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -555,8 +555,12 @@ async function main() {
     await finish("blocked", reason);
     return;
   }
-  const alreadyReviewed = (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true })).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
-  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; validating and merging without a second pass`);
+  // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. A PR
+  // reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
+  const covered = reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }), issue);
+  const alreadyReviewed = covered.reviewed;
+  const foundationDue = foundation && !covered.foundation;
+  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; ${foundationDue ? "the foundation pass runs alone, then " : ""}validating and merging without a second pass`);
 
   // Factory's git runs only in its own mirror (lib/outbox.mjs): the branch reaches the agent's checkout as a bundle, and
   // every git command there runs in the agent's sandbox (on Actions, as the agent uid). What this stage answers for
@@ -849,7 +853,7 @@ async function main() {
   // A foundation Objective's second pass (foundationReview): its comments go up in the same review as the first pass's.
   // Without an answer from it nothing is posted, as for the first pass, so a later run reviews the PR again whole.
   let found = null;
-  if (foundation && !alreadyReviewed) {
+  if (foundationDue) {
     log("foundation Objective: the foundation pass checks the shared contracts the diff changes against their callers");
     await progress("reviewer foundation pass");
     const foundationLive = liveActivity(progress, { harness: inputs.harness, model: inputs.reviewerModel });
@@ -894,7 +898,11 @@ async function main() {
     }
     log(`foundation pass: ${found.review.comments.length} comment(s)`);
   }
-  const post = alreadyReviewed ? null : reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null });
+  const post = !alreadyReviewed
+    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })
+    : found
+      ? reviewPost({ issue, review: null, diff, foundation: found.review })
+      : null;
   if (post?.unjudged.length) log(`reviewer left ${post.unjudged.length} of ${entries.length} acceptance entr${entries.length === 1 ? "y" : "ies"} unjudged: ${post.unjudged.join(", ")}`);
   const comments = post ? post.comments : [];
   const placeholder = !!post?.placeholder;
@@ -913,7 +921,8 @@ async function main() {
       return null;
     }
   };
-  const toAnswer = placeholder ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
+  // The foundation pass alone with nothing found: the earlier review's comments may still be open, so they are read.
+  const toAnswer = placeholder && !alreadyReviewed ? [] : await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds() });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   let answering = toAnswer.length > 0 || answerQuestion;

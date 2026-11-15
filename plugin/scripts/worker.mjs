@@ -20,7 +20,7 @@ import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -32,7 +32,7 @@ import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
-import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, reviewsCover, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -314,6 +314,8 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // A foundation Objective (`factory:foundation`): its rebased PR keeps its review only when that covers the foundation pass.
+  const foundation = !!chosen.foundation;
   progress.ran(ranWith(inputs, chosenLabels));
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
@@ -835,7 +837,10 @@ async function main() {
     // then add) so the review job fires now.
     // Only Factory's own clean rebase keeps the review: a head the harness made (a conflict resolved, a validation fix)
     // goes back to the reviewer, and nothing of it is recorded mergeable.
-    let reviewed = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => [])).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))) : false;
+    // A foundation Objective's review covers the foundation pass too (handoff.mjs reviewsCover): one reviewed before the
+    // label goes back to the review job, which runs that pass alone.
+    const cover = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => []), issue) : null;
+    let reviewed = !!cover?.reviewed && (!foundation || cover.foundation);
     // A maintainer's comment no pass has read (a change asked for after the review) has not reached the code: no merge.
     // The review job runs instead (relabel below) and its answer pass applies it. Unreadable comments Block.
     if (rebaseMode && reviewed) {

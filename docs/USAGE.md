@@ -52,7 +52,7 @@ Label an Objective `factory:foundation` when later work builds on what it adds: 
 - **One review:** its findings are line-tied comments in the same comment-only review as the usual pass's, and the worker's answer pass answers them all. The review body counts them.
 - **Within `max_usd`:** the pass is one more call on the reviewer model, as its own `foundation-reviewer` agent definition, so a foundation review costs about one more reviewer call. It starts only with budget and time left; at the cap or the time cap the stage Blocks before it, and nothing is posted, as for the usual pass. A call that fails is run once more; when neither answers, nothing is posted and the Objective Blocks with how each call ended.
 - **Trusted like the harness and model labels:** it counts only when the person who last applied it can push or is a maintainer the workflow names; otherwise the Objective Blocks naming the label.
-- **Not an edit:** it changes only the review, so adding or removing it after the plan Blocks nothing; the review reads it when it starts. An Objective without it is reviewed in one pass.
+- **Not an edit:** it changes only the review, so adding or removing it after the plan Blocks nothing; the review reads it when it starts. A PR reviewed before the label was added gets the foundation pass alone, as its own review, at its next review stage (re-apply `factory:review`, or the rebase or resume that brings one). Add it before the PR is delivered: a PR already waiting for its checks to merge merges on its earlier review. An Objective without it is reviewed in one pass.
 
 ## What you see on the issue
 

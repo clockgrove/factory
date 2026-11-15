@@ -5,7 +5,7 @@
 // has one account, named after it, which runs exactly as local mode always ran. Every declared login is hidden from
 // every sandbox but its own stage's (local.mjs harnessLogins reads this file), and every account is checked at every
 // load: a bad one Blocks the stage, naming the account alone. Paths and tokens never leave this machine's process.
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { SHARED_TMP, factoryKeyDir, gatewayKeyFile, harnessLogins, keyDirExposedBy } from "./local.mjs";
@@ -114,9 +114,9 @@ export const sandboxRoots = (dev, home = homedir(), os = osPlatform()) => [...(d
  * - a folder in or around another account's, another harness login (local.mjs harnessLogins), ~/.config/factory or a
  *   directory a sandbox may write (`roots`, sandboxRoots);
  * - a token file outside ~/.config/factory, one of Factory's own secrets there (this file, the AI Gateway key, a
- *   repository's GitHub token, the App's key), or one that breaks the rules for secrets (local.mjs localApp): no
- *   regular file, a second hard link, group or world bits, empty or blank, or a ~/.config/factory a harness home or
- *   login holds;
+ *   repository's GitHub token, the App's key; by path or by the file itself, however its name is spelled), or one
+ *   that breaks the rules for secrets (local.mjs localApp): no regular file, a second hard link, group or world bits,
+ *   empty or blank, or a ~/.config/factory a harness home or login holds;
  * - a harness whose variable in serve's own environment (`env`: CLAUDE_CONFIG_DIR, CODEX_HOME) names a folder no account
  *   declares and no search finds: a stage's env then names its account's folder instead, and that one would go unhidden.
  * The whole file is refused (readDeclaration) when it, or ~/.config/factory, breaks the rules for secrets or cannot be
@@ -199,11 +199,18 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
   // repositories' GitHub tokens and the App's private key (FACTORY_LOCAL_APP_KEY, by its real path).
   const appKey = String(env.FACTORY_LOCAL_APP_KEY || "").trim().replace(/^~(?=\/)/, home);
   const own = [accountsFile(home), gatewayKeyFile(home), ...(appKey ? [real(resolve(appKey))] : [])].filter(Boolean);
+  // Each also by the file itself (its device and inode), whatever its name is spelled: on a case-insensitive file system
+  // (macOS) `Accounts.json` or `TOKENS/acme/app` is that file under another name, which no path comparison catches.
+  const ownFiles = [...own, ...filesIn(join(keyDir, "tokens"))].map(statQuiet).filter(Boolean);
+  const isOwn = (f) => {
+    const st = statQuiet(f);
+    return !!st && ownFiles.some((o) => o.dev === st.dev && o.ino === st.ino);
+  };
   for (const a of all.filter((x) => x.tokenFile)) {
     if (keyReal !== keyDir) bad(a.name, "~/.config/factory is not a real directory (a link): the sandboxes deny that literal path");
     else if (!a.tokenFile.startsWith(`${keyDir}/`)) bad(a.name, "its token file is not under ~/.config/factory, which no sandbox can read; move it there, don't copy it");
     else if (exposed) bad(a.name, "~/.config/factory is inside a harness home or login, which that harness's sandbox can read");
-    else if (own.includes(a.tokenFile) || within(a.tokenFile, join(keyDir, "tokens"))) bad(a.name, "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)");
+    else if (own.includes(a.tokenFile) || within(a.tokenFile, join(keyDir, "tokens")) || isOwn(a.tokenFile)) bad(a.name, "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)");
     else {
       const st = statQuiet(a.tokenFile);
       if (!st) bad(a.name, "its token file does not exist; Factory never makes one");
@@ -254,6 +261,14 @@ const tokenText = (file) => {
     return readFileSync(file, "utf8").trim();
   } catch {
     return null;
+  }
+};
+/** Every path in `dir` and its subfolders (none when it cannot be read); links are listed, never followed into. */
+const filesIn = (dir) => {
+  try {
+    return readdirSync(dir, { recursive: true }).map((f) => join(dir, f));
+  } catch {
+    return [];
   }
 };
 /** statSync, or null when the path is gone (a folder removed between its realpath and here) or cannot be read. */

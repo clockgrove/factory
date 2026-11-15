@@ -1,3 +1,4 @@
+import "../../plugin/test/temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { declaredRepos, plannedRepos } from "../../plugin/scripts/lib/one-repo.mjs";

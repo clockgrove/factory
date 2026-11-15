@@ -226,17 +226,27 @@ export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
   if (!opened.ok) return opened;
   const parsed = { ...chose, hosts: opened.hosts };
   if (!parsed.labels.length && !foundation) return { ...parsed, foundation: false };
+  const refused = await labelsVouched(repo, issue, [...parsed.labels, ...(foundation ? [foundation] : [])], opts, gh, "Factory does not run on its choice");
+  if (refused) return { ok: false, labels: parsed.labels, reason: refused, fix: CHOICE_FIX };
+  return { ...parsed, foundation: !!foundation };
+}
+
+/**
+ * Why Factory does not act on one of `labels`, or null when each one's latest `labeled` event on the issue's timeline is
+ * by a person who can push or a pinned maintainer: one timeline read for all of them. The reason names the label and
+ * ends `so <what>`. `gh` (labelers, permission) is a test's own.
+ */
+export async function labelsVouched(repo, issue, labels, opts, gh = {}, what = "Factory does not act on it") {
   const read = { labelers: labelersOf, permission: collaboratorPermission, ...gh };
-  const vouched = [...parsed.labels, ...(foundation ? [foundation] : [])];
-  const by = await read.labelers(repo, issue, vouched, opts);
-  for (const label of vouched) {
+  const by = await read.labelers(repo, issue, labels, opts);
+  for (const label of labels) {
     const a = by?.[label]?.actor;
     // The REST timeline's actor, in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches.
     const actor = a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null;
-    if (!actor) return { ok: false, labels: parsed.labels, reason: `who applied \`${label}\` could not be read from the issue's timeline, so Factory does not run on its choice`, fix: CHOICE_FIX };
-    if (!(await vouches(repo, actor, opts, read))) return { ok: false, labels: parsed.labels, reason: `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so Factory does not run on its choice`, fix: CHOICE_FIX };
+    if (!actor) return `who applied \`${label}\` could not be read from the issue's timeline, so ${what}`;
+    if (!(await vouches(repo, actor, opts, read))) return `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`;
   }
-  return { ...parsed, foundation: !!foundation };
+  return null;
 }
 
 /**
@@ -254,8 +264,8 @@ export async function foundationTrusted(repo, issue, names, opts, gh = {}) {
 /**
  * The inputs an Objective runs on before any stage starts (the launcher, the local loop): its labels read now,
  * choiceTrusted, then choice.mjs chosenInputs over `args` and `env` (`gateway`: whether Codex has the AI Gateway key, when
- * `env` no longer holds it). {ok, inputs, labels, hosts} or {ok: false, reason, fix}: `hosts` those its approved host
- * labels open (local mode's loop sets the stage's sandboxes up with them).
+ * `env` no longer holds it). {ok, inputs, labels, hosts, names} or {ok: false, reason, fix}: `hosts` those its approved
+ * host labels open (local mode's loop sets the stage's sandboxes up with them), `names` every label the read found.
  * `gh` (issue, labelers, permission) is a test's own.
  */
 export async function objectiveInputs({ repo, issue, args = {}, env = process.env, opts, gateway, gh = {} }) {
@@ -263,7 +273,7 @@ export async function objectiveInputs({ repo, issue, args = {}, env = process.en
   const t = await choiceTrusted(repo, issue, names, opts, gh);
   if (!t.ok) return t;
   const c = chosenInputs({ args, env, choice: t.choice, gateway });
-  return c.ok ? { ...c, labels: t.labels, hosts: t.hosts } : c;
+  return c.ok ? { ...c, labels: t.labels, hosts: t.hosts, names } : c;
 }
 
 /**

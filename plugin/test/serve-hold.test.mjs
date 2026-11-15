@@ -764,7 +764,8 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
     loop.clock = () => t;
     const paused = async () => ({ exit: "paused", stage: "review", code: 0, usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(since).toISOString() } });
     assert.equal((await loop.withClaim(7, paused)).exit, "paused");
-    assert.equal(gh.comments.length, 1, "the claim stays");
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
+    assert.equal(gh.comments.filter((c) => c.body.startsWith("<!-- factory:7:account-limit -->")).length, 1, "and the pause notice (#265)");
     assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
     assert.equal(loop.limitUntil({ key: "claude", shared: true }), reset, "no stage starts on claude until the reset");

@@ -6,7 +6,7 @@ import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsS
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir, platform as osPlatform, uptime } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
 import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
@@ -110,9 +110,10 @@ export const factoryKeyDir = (home = homedir()) => join(home, ".config", "factor
 export const gatewayKeyFile = (home = homedir()) => join(factoryKeyDir(home), "ai-gateway-key");
 
 /**
- * The `harness` home that equals or holds ~/.config/factory, or null. The outer sandbox leaves the harness's own homes
- * readable (#2551), so such a home would expose every key file there: the App's key (localApp) and the AI Gateway key
- * (triage.mjs triageKeyState, and serve's start).
+ * The `harness` home, or any harness login folder on the machine (harnessLogins: a stage may run on any of them), that
+ * equals or holds ~/.config/factory, or null. The outer sandbox leaves the harness's own homes readable (#2551), so such
+ * a home would expose every key file there: the App's key (localApp) and the AI Gateway key (triage.mjs
+ * triageKeyState, and serve's start).
  */
 export function keyDirExposedBy(harness, env = process.env, home = homedir()) {
   if (!harness) return null;
@@ -125,7 +126,7 @@ export function keyDirExposedBy(harness, env = process.env, home = homedir()) {
   };
   const literal = factoryKeyDir(home);
   const holds = (h) => literal === h || literal.startsWith(`${h}/`);
-  return harnessHomes(harness, env, home).find((h) => holds(h) || holds(real(h))) || null;
+  return [...harnessHomes(harness, env, home), ...harnessLogins(home, env).map((l) => l.dir)].find((h) => holds(h) || holds(real(h))) || null;
 }
 
 /**
@@ -663,7 +664,215 @@ export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.c
  * The harness CLI itself runs outside the sandbox, so its own login keeps working.
  */
 export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/factory"];
-export const credentialPaths = (home = homedir()) => CREDENTIAL_PATHS.map((p) => join(home, p));
+
+/** Claude Code's `.claude.json`: in CLAUDE_CONFIG_DIR when that is set, else in the home directory. */
+export const claudeJson = (env = {}, home = homedir()) => join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+
+const isFolder = (p) => {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+/** A path's real location, also for an absent file (its folder's real path): what a sandbox that follows links denies. */
+export const realish = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    try {
+      return join(realpathSync(dirname(p)), basename(p));
+    } catch {
+      return p;
+    }
+  }
+};
+
+/**
+ * Every harness login on this machine's disk, as [{harness, dir, files, bearing, standard}]. `files`: its login (Claude
+ * Code's `.credentials.json` and `.claude.json`, a Codex or Copilot home whole). `bearing`: what of it holds that login or
+ * its traces, denied when the folder cannot go whole: Claude Code's login files with `.claude.json`'s backups
+ * (`.claude.json.backup*`, `backups`) and its `sessions`; Codex's `auth.json*` and `sessions`; a Copilot home whole.
+ * `standard` marks the default homes. Found by name and existence only (directory listings, lstat), never by reading a
+ * file. It covers: the default homes (`~/.claude` with `~/.claude.json`, `~/.codex`, `~/.copilot`,
+ * `~/.config/github-copilot`); every `~/.claude-*`, `~/.codex-*` and `~/.copilot-*` folder (a login made there during a
+ * stage is hidden too, since the deny is in place before its file exists); and the folders CLAUDE_CONFIG_DIR, CODEX_HOME and COPILOT_HOME name in `env`.
+ * That is enough for every login a stage can run on: a stage runs on the home directory and the CLAUDE_CONFIG_DIR or
+ * CODEX_HOME of Factory's own environment (stageLogin), and Copilot's home is Factory's. A login kept elsewhere under
+ * another name and named in no variable is out of its reach, and so is one the system keeps outside the disk (Claude
+ * Code's on macOS is in the Keychain): `declared` ([{harness, dir}], the accounts #259 declares) adds folders.
+ */
+export function harnessLogins(home = homedir(), env = process.env, { declared = [] } = {}) {
+  const byDir = new Map();
+  const add = (harness, dir, files, bearing, standard = false) => {
+    const d = resolve(dir);
+    const l = byDir.get(d) || { harness, dir: d, files: [], bearing: [], standard };
+    l.files = [...new Set([...l.files, ...files(d)])];
+    l.bearing = [...new Set([...l.bearing, ...l.files, ...bearing(d)])];
+    l.standard ||= standard;
+    byDir.set(d, l);
+  };
+  const list = (d) => {
+    try {
+      return readdirSync(d).sort();
+    } catch {
+      return [];
+    }
+  };
+  const names = list(home);
+  const folders = (prefix) => names.filter((n) => n.startsWith(prefix)).map((n) => join(home, n)).filter(isFolder);
+  const named = (d, prefix) => list(d).filter((n) => n.startsWith(prefix)).map((n) => join(d, n));
+  const claudeFiles = (d) => [join(d, ".credentials.json"), join(d, ".claude.json")];
+  const claudeBearing = (d) => [...named(d, ".claude.json.backup"), join(d, "backups"), join(d, "sessions")];
+  const codexBearing = (d) => [...new Set([join(d, "auth.json"), ...named(d, "auth.json")])].concat(join(d, "sessions"));
+  const whole = (d) => [d];
+  const none = () => [];
+  // The default Claude Code login keeps its `.claude.json`, and that file's older backups, in the home directory itself.
+  add("claude", join(home, ".claude"), (d) => [join(d, ".credentials.json"), join(home, ".claude.json")], (d) => [...named(home, ".claude.json.backup"), ...claudeBearing(d)], true);
+  for (const d of folders(".claude-")) add("claude", d, claudeFiles, claudeBearing);
+  if (env.CLAUDE_CONFIG_DIR) add("claude", env.CLAUDE_CONFIG_DIR, claudeFiles, claudeBearing);
+  add("codex", join(home, ".codex"), whole, codexBearing, true);
+  for (const d of folders(".codex-")) add("codex", d, whole, codexBearing);
+  if (env.CODEX_HOME) add("codex", env.CODEX_HOME, whole, codexBearing);
+  add("copilot", join(home, ".copilot"), whole, none, true);
+  add("copilot", join(home, ".config", "github-copilot"), whole, none, true);
+  for (const d of folders(".copilot-")) add("copilot", d, whole, none);
+  if (env.COPILOT_HOME) add("copilot", env.COPILOT_HOME, whole, none);
+  for (const { harness, dir } of declared) if (dir && ![...byDir.values()].some((l) => l.harness === harness && sameDir(l.dir, dir))) add(harness, dir, harness === "claude" ? claudeFiles : whole, harness === "claude" ? claudeBearing : harness === "codex" ? codexBearing : none);
+  // A Codex login denied file by file is still its `files` (the home) where nothing of it is shared: see credentialPaths.
+  for (const l of byDir.values()) if (l.harness === "codex") l.bearing = l.bearing.filter((p) => p !== l.dir);
+  return [...byDir.values()];
+}
+
+/**
+ * The login folder a `harness` stage runs on ({harness, dir}), or null: CLAUDE_CONFIG_DIR, else `~/.claude`; CODEX_HOME,
+ * else `~/.codex`; the stage's Copilot home, which Factory makes and which holds no login (its token is in its env).
+ */
+export function stageLogin(harness, env = {}, home = homedir()) {
+  const dir = harness === "claude" ? env.CLAUDE_CONFIG_DIR || join(home, ".claude") : harness === "codex" ? env.CODEX_HOME || join(home, ".codex") : harness === "copilot" ? env.COPILOT_HOME || null : null;
+  return dir ? { harness, dir: resolve(dir) } : null;
+}
+
+const sameDir = (a, b) => resolve(a) === resolve(b) || realish(a) === realish(b);
+const within = (p, d) => p === d || p.startsWith(`${d}/`);
+
+/** The links at the top of a folder, as [{link, real}] (lstat, then the real path they lead to). */
+const topLinks = (dir) => {
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    // absent until its harness first runs
+  }
+  return names.map((n) => join(dir, n)).filter((p) => lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink()).map((link) => ({ link, real: realish(link) }));
+};
+
+/**
+ * The credential stores no sandboxed command and no file tool may read, the one list every sandbox kind denies:
+ * CREDENTIAL_PATHS under `home`, and every harness login on the machine (harnessLogins), decided on real paths. `own`
+ * ({harness, dir}: the login the stage runs on, stageLogin): what of it bears the login (Claude Code's login files, their
+ * backups and sessions; a Codex home), since its harness keeps other state there its commands use; only its own harness
+ * process reads it (harnessOuterSettings). Another login folder goes whole, with what bears its login outside it (the
+ * default `~/.claude.json`). Two keep their shared state: the default `~/.claude` when the stage is no Claude Code one, or
+ * when a Claude Code stage's own folder links its entries to the same names there (a second account sharing the first's
+ * settings, skills and projects); then what bears its login is denied. The default Codex and Copilot homes go whole, as
+ * they always did. Each path is also denied where it really is, and a link at the top of the stage's own folder (which
+ * its outer sandbox reads and writes) that leads to a denied path, or above one, is denied by that name too.
+ * Serve makes it once per stage and hands it to the stage (FACTORY_LOCAL_SANDBOX `credentials`) and to the harness's
+ * outer sandbox, so each sandbox kind denies the same list.
+ */
+export function credentialPaths(home = homedir(), env = process.env, { own = null, declared = [] } = {}) {
+  const out = CREDENTIAL_PATHS.map((p) => join(home, p));
+  const mine = (l) => !!own && l.harness === own.harness && sameDir(l.dir, own.dir);
+  const links = own ? topLinks(own.dir) : [];
+  // The second-account layout: a top-level entry of the stage's own folder linking to the same name in the default folder.
+  const def = join(home, ".claude");
+  const sharesDefault = own?.harness === "claude" && links.some(({ link, real }) => real === realish(join(def, basename(link))));
+  const whole = (l) => [l.dir, ...l.bearing.filter((p) => !within(p, l.dir))];
+  for (const l of harnessLogins(home, env, { declared: [...declared, ...(own ? [own] : [])] })) {
+    let paths;
+    if (mine(l)) paths = l.harness === "claude" ? l.bearing : l.files;
+    else if (l.harness === "claude" && l.standard) paths = own?.harness === "claude" && !sharesDefault ? whole(l) : l.bearing;
+    else paths = l.standard ? l.files : whole(l);
+    for (const p of paths) out.push(p, realish(p));
+    // A login file that links elsewhere is denied where it really is.
+    for (const f of l.files) out.push(realish(f));
+  }
+  const denied = [...new Set(out)];
+  for (const { link, real } of links) {
+    for (const d of denied) {
+      if (within(real, d)) out.push(link);
+      else if (d.startsWith(`${real}/`)) out.push(join(link, relative(real, d)));
+    }
+  }
+  // One entry per tree: a path under another denied one adds nothing.
+  const all = [...new Set(out)];
+  return all.filter((p) => !all.some((q) => q !== p && p.startsWith(`${q}/`)));
+}
+
+/**
+ * Codex's own sandbox: a Codex home in `paths` (the stage's own, `dir`, or the default `~/.codex`) by what bears its login
+ * (`auth.json*`, `sessions`), since Codex starts a helper kept in its home and its installer puts its release in
+ * `~/.codex`, which its sandbox must still run.
+ */
+export const codexLoginFiles = (paths, dir, home = homedir()) => paths.flatMap((p) => (sameDir(p, dir) || sameDir(p, join(home, ".codex")) ? [join(p, "auth.json*"), join(p, "sessions")] : [p]));
+
+/**
+ * The login files a `harness` stage runs on: Claude Code's `.credentials.json` and `.claude.json` (CLAUDE_CONFIG_DIR's,
+ * else the default ones), the Codex home, the stage's Copilot home.
+ */
+export function ownLogin(harness, env = {}, home = homedir()) {
+  if (harness === "claude") return [join(env.CLAUDE_CONFIG_DIR || join(home, ".claude"), ".credentials.json"), claudeJson(env, home)];
+  if (harness === "codex") return [env.CODEX_HOME || join(home, ".codex")];
+  if (harness === "copilot") return env.COPILOT_HOME ? [env.COPILOT_HOME] : [];
+  return [];
+}
+
+/** The real folders and login files of every login but the stage's own: no path of its own login may lead there. */
+const otherLogins = (harness, env, home) => {
+  const own = stageLogin(harness, env, home);
+  const others = harnessLogins(home, env).filter((l) => !(own && l.harness === harness && sameDir(l.dir, own.dir)));
+  return { dirs: others.map((l) => realish(l.dir)), files: others.flatMap((l) => l.files.map(realish)) };
+};
+
+/**
+ * Each login file of the `harness` stage's own that really is another login's (a link from its folder into another login
+ * folder, or to another login's file), as [{path, real}]. Its harness process would read that login: serve refuses the
+ * stage and doctor --local warns, naming the path on this machine only.
+ */
+export function ownLoginProblems(harness, env = process.env, home = homedir()) {
+  const { dirs, files } = otherLogins(harness, env, home);
+  return ownLogin(harness, env, home).map((path) => ({ path, real: realish(path) })).filter(({ path, real }) => real !== resolve(path) && (files.includes(real) || dirs.some((d) => within(real, d))));
+}
+
+/**
+ * The paths the `harness` stage's own process reads in its outer sandbox: what bears its own login (credentialPaths
+ * `own`), by real path, never one that really is another login's (ownLoginProblems).
+ */
+const ownLoginTest = (harness, env, home) => {
+  const own = stageLogin(harness, env, home);
+  const l = own && harnessLogins(home, env, { declared: [own] }).find((x) => x.harness === harness && sameDir(x.dir, own.dir));
+  const bad = new Set(ownLoginProblems(harness, env, home).map((p) => p.real));
+  const set = new Set((l ? (harness === "claude" ? l.bearing : l.files) : []).map(realish).filter((p) => !bad.has(p)));
+  return (p) => set.has(realish(p));
+};
+
+/**
+ * The other harness login folders (harnessLogins) inside a home of the `harness` stage's own (harnessHomes), which its outer
+ * sandbox can write and so rename: a deny by path there does not hold. [{path, home}]; doctor --local names each.
+ */
+export function loginsExposedBy(harness, env = process.env, home = homedir()) {
+  const own = stageLogin(harness, env, home);
+  if (!own) return [];
+  const homes = harnessHomes(harness, env, home).filter((h) => !h.endsWith(".json")).flatMap((h) => [...new Set([resolve(h), realish(h)])]);
+  const out = [];
+  for (const l of harnessLogins(home, env)) {
+    if (l.harness === harness && sameDir(l.dir, own.dir)) continue;
+    const h = homes.find((d) => within(l.dir, d) || within(realish(l.dir), d));
+    if (h) out.push({ path: l.dir, home: h });
+  }
+  return out;
+}
 
 /**
  * A clone's git internals Factory itself runs or reads (hooks, config, commondir, info/attributes, whose filters run in
@@ -835,7 +1044,7 @@ export const CLAUDE_SECRET_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"
  * directory and `addDirs` (acceptEdits). Local mode, the Actions runner and the cloud sandbox VM
  * use it alike (claudeRunnerSettings).
  */
-export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), readOnly = [], writable = [], readable = [], secrets = credentialPaths(home), secretEnv = CLAUDE_SECRET_ENV, ripgrep = null } = {}) {
+export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, home = homedir(), env = process.env, credentials = null, readOnly = [], writable = [], readable = [], secrets = credentials ?? credentialPaths(home, env, { own: stageLogin("claude", env, home) }), secretEnv = CLAUDE_SECRET_ENV, ripgrep = null } = {}) {
   // readOnly: Factory's own helpers inside a writable directory (factory-db in the usage dir): no write, no edit.
   const guards = [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly];
   return {
@@ -931,7 +1140,7 @@ const tq = JSON.stringify;
  * own login stays readable to Codex itself, which runs outside the sandbox: the profile denies the login file,
  * not ~/.codex, where Codex keeps the sandbox helper it starts.
  */
-export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], secretEnv = [], secrets = CREDENTIAL_PATHS.map((p) => join(home, p === ".codex" ? ".codex/auth.json*" : p)), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
+export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), env = process.env, credentials = null, readOnly = [], secretEnv = [], secrets = codexLoginFiles(credentials ?? credentialPaths(home, env, { own: stageLogin("codex", env, home) }), stageLogin("codex", env, home).dir, home), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
   // /proc: no command reads a process outside Codex's sandbox: each runs in a user namespace of its own without
   // CAP_SYS_PTRACE, so the kernel refuses the read, and where bubblewrap can mount a fresh /proc it has its own PID
   // namespace too. Locally the profile denies /proc as well. On a runner it does not (`denyProc` false): under a systemd
@@ -985,7 +1194,7 @@ export const codexShellExclude = (names) => `shell_environment_policy.exclude=[$
  * limited to `domains`. Copilot reads this policy only from its home directory, so the developer's own
  * ~/.copilot is never touched.
  */
-export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), readOnly = [], readable = [], denied = null, alsoDenied = [], platform = osPlatform() } = {}) {
+export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), env = process.env, readOnly = [], readable = [], denied = null, alsoDenied = [], platform = osPlatform() } = {}) {
   return {
     sandbox: {
       enabled: true,
@@ -1007,7 +1216,7 @@ export function copilotLocalSettings({ domains = LOCAL_DOMAINS, clone = null, ad
         // `readable`: paths outside these that a runner's commands read (copilot-runner.mjs: the agent's read-only GitHub
         // login); `denied`: a runner's own list (none there: that login is for its commands); `alsoDenied`: more paths beside
         // the credential stores (local mode on Linux: Copilot's own TMPDIR, copilotPrivateTmp).
-        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home).filter(isDir) : credentialPaths(home))), ...alsoDenied] },
+        filesystem: { readwritePaths: [...addDirs, ...(clone ? [join(clone, ".git")] : [])], readonlyPaths: [...new Set([...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...readable])], deniedPaths: [...(denied ?? (platform === "linux" ? credentialPaths(home, env).filter(isDir) : credentialPaths(home, env))), ...alsoDenied] },
         network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: sandboxHosts(domains) },
       },
     },
@@ -1038,10 +1247,10 @@ export function copilotTmpdir(local, env = {}) {
 }
 
 /** Settings for `srt`, which runs Factory's own shell commands (setup, install, validation) on a model-edited tree. */
-export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), readOnly = [], ripgrep = null } = {}) {
+export function srtSettings({ domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = process.env, credentials = credentialPaths(home, env), readOnly = [], ripgrep = null } = {}) {
   return {
     network: { allowedDomains: [...new Set(domains)], deniedDomains: [] },
-    filesystem: { denyRead: [...credentialPaths(home), "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP] },
+    filesystem: { denyRead: [...credentials, "/proc"], allowWrite: writable, denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP] },
     // Linux: the scan that leaves a nested checkout's .git writable (nestedGitScanScript).
     ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}),
   };
@@ -1073,7 +1282,7 @@ export const HARNESS_API_DOMAINS = {
 
 /** A harness CLI's own state (its login, settings, sessions), which it reads and writes; Copilot's home is Factory's. */
 export function harnessHomes(harness, env = {}, home = homedir()) {
-  if (harness === "claude") return [env.CLAUDE_CONFIG_DIR || join(home, ".claude"), join(home, ".claude.json")];
+  if (harness === "claude") return [env.CLAUDE_CONFIG_DIR || join(home, ".claude"), claudeJson(env, home)];
   if (harness === "codex") return [env.CODEX_HOME || join(home, ".codex")];
   if (harness === "copilot") return env.COPILOT_HOME ? [env.COPILOT_HOME] : [];
   return [];
@@ -1166,10 +1375,13 @@ const versionOf = (cmd) => {
  * Factory lets Copilot write there.
  */
 export const copilotCacheHome = (env = {}, home = homedir(), platform = osPlatform()) => env.COPILOT_CACHE_HOME || (platform === "darwin" ? join(home, "Library", "Caches", "copilot") : join(env.XDG_CACHE_HOME || join(home, ".cache"), "copilot"));
-/** sandboxedVersion's srt settings: no network, no writes but Copilot's unpacking, credential stores unreadable. */
+/**
+ * sandboxedVersion's srt settings: no network, no writes but Copilot's unpacking, credential stores unreadable. Copilot's
+ * home (COPILOT_HOME) is the stage's, which Factory makes and which holds no login (its token is in its environment).
+ */
 export const versionSettings = (harness, env = {}, home = homedir()) => ({
   network: { allowedDomains: [], deniedDomains: [] },
-  filesystem: { denyRead: [...credentialPaths(home), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: [] },
+  filesystem: { denyRead: [...credentialPaths(home, harness === "copilot" ? { ...env, COPILOT_HOME: "" } : env), "/proc"], allowRead: harnessInstall(whichPath(harness, env) || harness, home), allowWrite: harness === "copilot" ? [copilotCacheHome(env, home)] : [], denyWrite: [] },
 });
 
 /**
@@ -1437,10 +1649,10 @@ export function harnessHomeGuards(harness, env = {}, home = homedir(), { dirsOnl
   if (!g) return [];
   const d = harnessStateDir(harness, env, home);
   if (!d) return [];
-  const fixed = [...g.dirs.map((f) => join(d, f)), ...(dirsOnly ? [] : [...g.files.map((f) => join(d, f)), ...(harness === "claude" ? [join(home, ".claude.json")] : [])])];
+  const fixed = [...g.dirs.map((f) => join(d, f)), ...(dirsOnly ? [] : [...g.files.map((f) => join(d, f)), ...(harness === "claude" ? [claudeJson(env, home)] : [])])];
   if (dirsOnly || staticOnly) return fixed;
   const named = new Set([...g.dirs, ...g.files]);
-  const others = entries(d).filter((n) => !named.has(n) && !writableName(harness, n)).map((n) => join(d, n));
+  const others = entries(d).filter((n) => !named.has(n) && !writableName(harness, n)).map((n) => join(d, n)).filter((p) => !fixed.includes(p));
   if (harness === "claude" && clone && linkableProject(clone)) return [...fixed, ...others, join(d, "projects")];
   const mine = clone ? claudeProject(clone) : null;
   const own = harness === "claude" ? entries(join(d, "projects")).filter((n) => n !== mine && !(mine?.length > 200 && n.startsWith(mine.slice(0, 200)))).map((n) => join(d, "projects", n)) : harness === "codex" ? codexSessionGuards(join(d, "sessions"), now) : [];
@@ -1518,15 +1730,18 @@ export function hostSockets(env = {}, uid = process.getuid?.() ?? 0, { roots = S
  * `projectDir`: the directory claudeProjectLink links the clone's Claude Code project to, writable here (Claude Code only).
  * `bwrapPath`: the bubblewrap srt runs (Copilot: writeBwrapTun's wrapper).
  * `ripgrep`: nestedGitScanScript's path (writeNestedGitScan).
+ * `credentials`: the list serve made for the stage (credentialPaths), less the stage's own login, which its harness reads;
+ * without it, made here from `env`.
  * `relaySocketDir`: the directory of the stage's gateway relay socket, as serve made it (worker-relay.mjs handSocketDir;
  * null for a stage that relays nothing, which then reaches no socket directory at all): the one socket directory that
  * stays reachable inside, for the forwarder Factory's bwrap shim starts in each command's sandbox
  * (relay-shim.mjs); never writable.
  */
-export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, readOnly = [], install = [], projectDir = null, bwrapPath = null, relaySocketDir = null, ripgrep = null } = {}) {
+export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writable = [], clone = null, home = homedir(), env = {}, credentials = null, readOnly = [], install = [], projectDir = null, bwrapPath = null, relaySocketDir = null, ripgrep = null } = {}) {
   const own = harnessHomes(harness, env, home);
-  const isOwn = (p) => own.some((o) => p === o || p.startsWith(`${o}/`));
-  // ~/.claude.json holds the developer's MCP servers: read-only, not a writable path.
+  // Every login on the machine is denied but the one this stage runs on (ownLogin), which its harness reads and refreshes.
+  const isOwn = ownLoginTest(harness, env, home);
+  // .claude.json holds the developer's MCP servers: read-only, not a writable path.
   const guards = harnessHomeGuards(harness, env, home, { clone });
   const writableOwn = own.filter((p) => !guards.includes(p));
   return {
@@ -1534,7 +1749,7 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
     // install: the harness's own release directory, readable where a credential store holds it (Codex's installer puts
     // it in ~/.codex, denied when CODEX_HOME is elsewhere).
     filesystem: {
-      denyRead: [...credentialPaths(home).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
+      denyRead: [...(credentials ?? credentialPaths(home, env, { own: stageLogin(harness, env, home) })).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
       denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install],
@@ -1568,7 +1783,7 @@ export function localSandbox(env = {}) {
     }
     if (real !== null && real !== d) throw new Error(`local sandbox directory ${d} now resolves to ${real}; refusing to run`);
   }
-  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, claudeEnv: s.claudeEnv || null, ripgrep: s.ripgrep || null, readable: s.readable || [], addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null };
+  return { gitId: s.gitId || null, gitPin: s.gitPin || null, gitBin: s.gitBin || null, bwrapBin: s.bwrapBin || null, copilotTmp: s.copilotTmp || null, toolchain: s.toolchain || null, claudeEnv: s.claudeEnv || null, ripgrep: s.ripgrep || null, readable: s.readable || [], addDirs: s.addDirs || [], cacheDirs: s.cacheDirs || [], readDirs: s.readDirs || [], domains: s.domains || LOCAL_DOMAINS, clone: s.clone || null, readOnly: s.readOnly || [], claudeDir: s.claudeDir || null, credentials: Array.isArray(s.credentials) ? s.credentials : null };
 }
 
 /**

@@ -323,7 +323,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const plugin = pluginDir ? ["--plugin-dir", join(pluginDir, "plugin"), "--agents", join(pluginDir, "agents.json")] : [];
       // The package caches are writable to shell commands only, never added directories, whose CLAUDE.md would load.
       const caches = local?.cacheDirs || [];
-      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, readOnly: local.readOnly, writable: caches, readable: local.readable || [], secretEnv: hidden, ripgrep: local.ripgrep || null }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
+      const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, credentials: local.credentials, readOnly: local.readOnly, writable: caches, readable: local.readable || [], secretEnv: hidden, ripgrep: local.ripgrep || null }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
       const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
@@ -341,7 +341,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // on a runner its CODEX_HOME is made afresh before every start (codex-runner.mjs), and stays out as well.
       // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included. Only
       // where there is no agent uid and no local sandbox (a developer's /factory:factory-run --here) are permissions skipped.
-      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, readOnly: local.readOnly, secretEnv: hidden })] : runner ? ["--ignore-user-config", ...codexRunnerConfig({ runner, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
+      const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, credentials: local.credentials, readOnly: local.readOnly, secretEnv: hidden })] : runner ? ["--ignore-user-config", ...codexRunnerConfig({ runner, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
       args.push("--json", ...perms, "--skip-git-repo-check");
       // Through the Vercel AI Gateway (`gateway`, codexGatewayOf): its provider, and the model as `openai/<id>` on a
       // resume too, which otherwise falls back to the configured default (a bare id) and changes the thread's model
@@ -1349,7 +1349,7 @@ export async function codexRelayProbe({ relay, runner, local, outer, env = proce
     const [cmd, args] = runnerLaunch(runner, "codex", ["sandbox", ...codexRunnerConfig({ runner, secretEnv: [] }), ...probe], shimPath);
     r = await run(cmd, args, { cwd: runner.clone, env: { ...scrubbedEnv(env), ...codexRunnerEnv(runner) }, agentExtra: ["CODEX_HOME"], timeoutMs: 120_000 }).catch((e) => ({ code: null, stdout: "", stderr: e.message }));
   } else {
-    const codex = ["codex", "sandbox", ...codexLocalConfig({ domains: local?.domains, clone: local?.clone, addDirs: local?.addDirs || [], readOnly: local?.readOnly || [] }), ...probe];
+    const codex = ["codex", "sandbox", ...codexLocalConfig({ domains: local?.domains, clone: local?.clone, addDirs: local?.addDirs || [], credentials: local?.credentials || null, readOnly: local?.readOnly || [] }), ...probe];
     // A fresh CODEX_HOME of its own in the stage's temp directory: `codex sandbox` needs no login, and the developer's
     // config (which local mode's outer sandbox guards) is none of the probe's business.
     const home = join(env.TMPDIR || tmpdir(), `codex-relay-probe-${process.pid}`);

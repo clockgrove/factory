@@ -4,7 +4,7 @@
 //   node scripts/doctor.mjs --repo OWNER/NAME [--json] [--checkout DIR] [--probe] [--local]
 // Runs from the plugin (`/factory doctor`) and, through jobChecks(), as the first
 // step of every worker job, where a FAIL Blocks the Objective with that line.
-import { platform } from "node:os";
+import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessOuterSettings, localBaseEnv, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -1289,6 +1289,25 @@ export function workflowSourceChecks(working, committed) {
 }
 
 /**
+ * Local mode: the harness logins on this machine (local.mjs harnessLogins), each hidden from every sandbox but the one a
+ * stage runs on, which only its own harness process reads. A WARN names each other login inside a home of the harness's
+ * (loginsExposedBy): its outer sandbox can write there, so a deny by path does not hold; and each login file of the
+ * stage's own that leads into another login (ownLoginProblems), for which serve refuses the stage. Paths are named on this machine
+ * only, never in an Actions log.
+ */
+export function localLoginChecks({ inputs, env = process.env, local, home = homedir() }) {
+  if (!local || env.GITHUB_ACTIONS) return [];
+  const h = inputs.harness;
+  // A Copilot stage's home is one Factory makes for the Objective, which holds no login.
+  const exposed = h === "copilot" ? [] : loginsExposedBy(h, env, home);
+  const linked = h === "copilot" ? [] : ownLoginProblems(h, env, home);
+  if (exposed.length || linked.length) return [...linked.map((l) => WARN("harness logins", `${l.path}: a login file of the ${h} login stages run on, which leads into another login (${l.real}), so its harness would read that login; serve refuses each stage (login-link)`, "make that login's files its own (no link into another login folder)")), ...exposed.map((e) => WARN("harness logins", `${e.path}: a harness login inside the ${h} harness's home ${e.home}, which its outer sandbox can write, so that sandbox can read it`, "move that login out of the harness's home, or point CLAUDE_CONFIG_DIR or CODEX_HOME at a folder of its own"))];
+  const found = harnessLogins(home, env).filter((l) => l.files.some((p) => existsSync(p))).map((l) => l.dir);
+  const own = h === "copilot" ? [] : ownLogin(h, env, home);
+  return [PASS("harness logins", `${found.length ? found.join(", ") : "none found"}: hidden from every sandbox${own.length ? `; the ${h} stage's own login (${own.join(", ")}) is readable to its harness process only` : ""}`)];
+}
+
+/**
  * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
  * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
  * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
@@ -1354,6 +1373,7 @@ async function main() {
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
+  results.push(...localLoginChecks({ inputs, env: process.env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));

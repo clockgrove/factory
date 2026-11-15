@@ -17,7 +17,7 @@ import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, member
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
-import { commandFailed, heldSecrets, log, secretForms } from "./inputs.mjs";
+import { commandFailed, gitError, heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 
@@ -46,26 +46,6 @@ export async function secretScan(git, range, held = heldSecrets(), maxBytes = SE
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-
-/**
- * What a failed git command said, for a log line or a Blocked reason: each `error:` or `fatal:` line with the paths git
- * lists under it (five at most), not its closing line ("Aborting" names no cause). A line with none of those: the first
- * line. Credentials in a URL and GitHub tokens are masked; at most 300 characters.
- */
-export function gitError(stderr) {
-  const lines = String(stderr ?? "").split("\n").map((l) => l.replace(/\s+$/, "")).filter(Boolean);
-  const blocks = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!/^(error|fatal): /.test(lines[i])) continue;
-    const head = lines[i];
-    const paths = [];
-    while (i + 1 < lines.length && /^\s/.test(lines[i + 1])) paths.push(lines[++i].trim());
-    const shown = paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` (+${paths.length - 5} more)` : "");
-    blocks.push(shown ? `${head} ${shown}` : head);
-  }
-  const text = (blocks.length ? blocks.join("; ") : lines[0] ?? "").replace(/(\w+:\/\/)[^\s/@'"]+@/g, "$1***@").replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, "***");
-  return text.slice(0, 300);
-}
 
 /**
  * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
@@ -580,7 +560,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (!(await lfsVersion())) return { used: true, ok: false, reason: "this repository's .gitattributes uses Git LFS and git-lfs is not installed here (install git-lfs on the runner or machine)", warning: "" };
     const endpoint = lfsEndpoint(remote);
     const setup = await box.agentGit(["lfs", "install", "--local", "--force"]);
-    if (setup.code !== 0) return { used: true, ok: false, reason: `git lfs install failed in the checkout: ${String(setup.stderr).trim().split("\n").at(-1)?.slice(0, 160)}`, warning: "" };
+    if (setup.code !== 0) return { used: true, ok: false, reason: commandFailed("git lfs install failed in the checkout", setup).message, warning: "" };
     if (endpoint) await box.agentGit(["config", `lfs.${endpoint}.access`, "basic"]);
     return { used: true, ok: true, reason: "", warning: await handOver(await workingSet(head), { timeoutMs }) };
   };

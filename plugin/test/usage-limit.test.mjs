@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
@@ -74,7 +74,7 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 const prompt = fs.readFileSync(0, "utf8");
 const n = fs.existsSync(${JSON.stringify(log)}) ? fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length : 0;
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt }) + "\\n");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt, home: require("node:os").homedir() }) + "\\n");
 if (n < ${limited}) { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "limit.jsonl"))}, "utf8")); process.exit(1); }
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "ok.jsonl"))}, "utf8"));
 `, { mode: 0o755 });
@@ -98,16 +98,17 @@ async function inStage(bin, start, fn) {
   }
 }
 
-const pass = (bin, extra = {}) => ({ harness: "claude", model: "claude-fable-5-2", prompt: "the task", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 24 * 60 * 60_000, label: "work-1", ...extra });
+const pass = (bin, extra = {}) => ({ harness: "claude", model: "claude-fable-5-2", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 24 * 60 * 60_000, label: "work-1", ...extra });
 
 test("runHarness, real, fake claude: a reset within the stage's in-place bound is waited for, then the pass runs again from its session on the same model", async () => {
   const { bin, calls } = fakeClaude();
   // Ten minutes before the reset; a local stage waits fifteen in place.
   await inStage(bin, Date.parse(RESET) - 10 * 60_000, async ({ waits, now }) => {
     waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness(pass(bin, { env: { HOME: process.env.HOME, PATH: process.env.PATH } }));
+    const rec = await runHarness(pass(bin));
     const c = calls();
     assert.equal(c.length, 2);
+    assert.ok(c.every((x) => x.home === homedir()), "#318: the harness runs on the test's fake home");
     assert.ok(c.every((x) => x.args[x.args.indexOf("--model") + 1] === "claude-fable-5-2"), "the same model both times");
     assert.equal(c[1].args[c[1].args.indexOf("--resume") + 1], "00000000-0000-0000-0000-000000000254");
     assert.equal(c[1].prompt, LIMIT_PASS_PROMPT);
@@ -310,7 +311,7 @@ const path = require("node:path");
 const args = process.argv.slice(2);
 const prompt = fs.readFileSync(0, "utf8");
 const n = fs.existsSync(${JSON.stringify(log)}) ? fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length : 0;
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt }) + "\\n");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt, home: require("node:os").homedir() }) + "\\n");
 if (n < ${limited}) {
   const dir = path.join(process.env.CODEX_HOME, "sessions", "2026", "11", "14");
   fs.mkdirSync(dir, { recursive: true });
@@ -326,15 +327,16 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "ok.jsonl"))}, "
   return { bin, home, calls };
 }
 
-const codexPass = (f, extra = {}) => ({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: f.bin, env: { PATH: process.env.PATH, CODEX_HOME: f.home }, timeoutMs: 24 * 60 * 60_000, label: "work-1", ...extra });
+const codexPass = (f, extra = {}) => ({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: f.bin, env: { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: f.home }, timeoutMs: 24 * 60 * 60_000, label: "work-1", ...extra });
 
 test("runHarness, real, fake codex: a reset within the stage's in-place bound is waited for, then the thread resumes on the same model", async () => {
   const f = fakeCodex();
   await inStage(f.bin, Date.parse(RESET) - 10 * 60_000, async ({ now }) => {
     waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness(codexPass(f, { env: { PATH: process.env.PATH, CODEX_HOME: f.home } }));
+    const rec = await runHarness(codexPass(f, { env: { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: f.home } }));
     const c = f.calls();
     assert.equal(c.length, 2);
+    assert.ok(c.every((x) => x.home === homedir()), "#318: the harness runs on the test's fake home");
     assert.deepEqual(c[0].args.slice(0, 1), ["exec"]);
     assert.equal(c[0].args[c[0].args.indexOf("-m") + 1], "gpt-6.1-sol");
     assert.deepEqual(c[1].args.slice(0, 3), ["exec", "resume", CODEX_THREAD], "the same thread, so the same model");

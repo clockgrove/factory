@@ -337,8 +337,11 @@ process.stdout.write(JSON.stringify(out));
 async function agentIo(op, dir, names, env, input, profile = "command") {
   const [cmd, args] = backend(env).sandbox[profile]([process.execPath, "-e", AGENT_IO, op, dir, ...names], env);
   const r = await exec(cmd, args, { env, input, timeoutMs: 120_000, maxBytes: 16 * 1024 * 1024 });
-  // Never the folder or the output in the error, which a Block may carry: both name a path on this machine.
-  if (r.code !== 0) throw commandFailed(`the hand-off's ${op} in the agent's sandbox failed`, r);
+  // The folder in the log alone: it is a path on this machine, which a Block never carries (commandFailed).
+  if (r.code !== 0) {
+    log(`the hand-off's ${op} in ${dir} failed`);
+    throw commandFailed(`the hand-off's ${op} in the agent's sandbox failed`, r);
+  }
   return JSON.parse(String(r.stdout).trim() || "{}");
 }
 

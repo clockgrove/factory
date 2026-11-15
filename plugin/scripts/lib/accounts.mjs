@@ -265,14 +265,21 @@ const tokenText = (file) => {
     return null;
   }
 };
+/** At most this many entries are listed under ~/.config/factory/tokens (filesIn). */
+const FILES_IN_MAX = 10_000;
 /**
- * Every path in `dir` and its subfolders. Only a real directory is descended into: a link is listed, never followed (a
- * link to `.` or to a large tree costs one entry), and a folder that cannot be read lists nothing of its own, the rest
- * still listed.
+ * Every path in `dir` and its subfolders, as Factory reads them: a link to a folder is followed (a token under
+ * `tokens/acme`, a link to another folder, is read through it), but each folder is entered once, by its device and
+ * inode, so a link to `.` or two links to one tree cost nothing more; and the listing stops at FILES_IN_MAX entries. A
+ * folder that cannot be read lists nothing of its own, the rest still listed.
  */
 const filesIn = (dir) => {
   const out = [];
+  const seen = new Set();
   const walk = (d) => {
+    const st = statQuiet(d);
+    if (!st?.isDirectory() || seen.has(`${st.dev}:${st.ino}`)) return;
+    seen.add(`${st.dev}:${st.ino}`);
     let entries;
     try {
       entries = readdirSync(d, { withFileTypes: true });
@@ -280,9 +287,10 @@ const filesIn = (dir) => {
       return;
     }
     for (const e of entries) {
+      if (out.length >= FILES_IN_MAX) return;
       const p = join(d, e.name);
       out.push(p);
-      if (e.isDirectory()) walk(p);
+      if (e.isDirectory() || e.isSymbolicLink()) walk(p);
     }
   };
   walk(dir);

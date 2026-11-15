@@ -327,16 +327,49 @@ export const postedError = (e, { home = homedir(), log = "the local loop's log" 
 };
 
 /**
- * A command Factory ran that failed (`r`: exec's {code, signal, stderr}), as an error a Blocked reason may carry: `what`
- * and the exit alone, never the command's output, which can name a path on this machine (a clone, a temp or account
- * folder, inside the home directory or out of it). The output's last line goes to this process's log instead.
+ * What a failed git command said, for a log line or a Blocked reason: each `error:` or `fatal:` line with the paths git
+ * lists under it (five at most), not its closing line ("Aborting" names no cause). A line with none of those: the first
+ * line. Credentials in a URL and GitHub tokens are masked; at most 300 characters.
+ */
+export function gitError(stderr) {
+  const lines = String(stderr ?? "").split("\n").map((l) => l.replace(/\s+$/, "")).filter(Boolean);
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^(error|fatal): /.test(lines[i])) continue;
+    const head = lines[i];
+    const paths = [];
+    while (i + 1 < lines.length && /^\s/.test(lines[i + 1])) paths.push(lines[++i].trim());
+    const shown = paths.slice(0, 5).join(", ") + (paths.length > 5 ? ` (+${paths.length - 5} more)` : "");
+    blocks.push(shown ? `${head} ${shown}` : head);
+  }
+  const text = (blocks.length ? blocks.join("; ") : lines[0] ?? "").replace(/(\w+:\/\/)[^\s/@'"]+@/g, "$1***@").replace(/\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})/g, "***");
+  return text.slice(0, 300);
+}
+
+/**
+ * `text` with every absolute path on this machine replaced by `<path>` (a clone, a temp, home or account folder, inside
+ * the home directory or out of it). A path git prints relative to the clone stays, and so does a URL, its credentials
+ * masked.
+ */
+export const withoutLocalPaths = (text) =>
+  String(text ?? "").replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s'"`]*)|(^|[\s'"`(=:,[])(?:~(?=\/)|\/(?!\/))[^\s'"`)\],;:]*/gi, (m, scheme, rest, lead) => (scheme ? `${scheme}${rest.replace(/^[^\s/@]+@/, "***@")}` : `${lead}<path>`));
+
+/** The log a Blocked reason points to: this machine's (local mode), or the job's (a runner, a cloud sandbox stage). */
+export const logName = (env = process.env) => (env.FACTORY_LOCAL === "1" || !env.GITHUB_ACTIONS ? "this machine's log" : "the job log");
+
+/**
+ * A command Factory ran that failed (`r`: exec's {code, signal, stderr}), as an error a Blocked reason may carry, on
+ * every route: `what`, the exit, and the command's cause (gitError: its `error:` and `fatal:` lines, else its first line)
+ * with every absolute path on this machine replaced (withoutLocalPaths), so a person reading the Block sees why. The
+ * output's last lines, paths included, go to this process's log.
  */
 export function commandFailed(what, r, fields = {}) {
   const exit = r?.code ?? r?.signal ?? null;
   const said = `${what}${exit === null ? "" : ` (exit ${exit})`}`;
-  const out = String(r?.stderr ?? "").trim().split("\n").at(-1)?.slice(0, 300) || "";
-  log(`${said}${out ? `: ${out}` : ""}`);
-  return Object.assign(new Error(`${said}; the log on this machine has its output`), fields);
+  const lines = String(r?.stderr ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length) log(`${said}: ${lines.slice(-5).join(" | ").slice(0, 1000)}`);
+  const cause = withoutLocalPaths(gitError(r?.stderr)).slice(0, 300);
+  return Object.assign(new Error(`${said}${cause ? `: ${cause}` : ""}; ${logName()} has its output`), fields);
 }
 
 /**

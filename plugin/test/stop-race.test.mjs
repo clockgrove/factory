@@ -5,7 +5,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -30,7 +30,7 @@ setTimeout(() => {}, 60000);
 
 /** Run `script` (an ES module body) in its own process; resolves with its last stdout line as JSON. */
 async function stage(script, root, timeoutMs = 90_000) {
-  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), GITHUB_API_URL: "https://github.test" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex"), GITHUB_API_URL: "https://github.test" }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let err = "";
   child.stdout.on("data", (c) => (out += c));
@@ -47,6 +47,13 @@ async function stage(script, root, timeoutMs = 90_000) {
   }
   return { code, json, out, err };
 }
+
+test("#318: a stage process the tests start runs on the test's fake home, never the real one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-race-home-"));
+  const r = await stage(`process.stdout.write(JSON.stringify({ home: (await import("node:os")).homedir() }) + "\\n");`, root);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json.home, homedir());
+});
 
 // A fetch fake for a child process: GitHub calls recorded; `issue` the Objective's labels; `hang` paths never answer.
 const FETCH = (issueLabels, hang = "") => `

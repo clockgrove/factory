@@ -485,7 +485,7 @@ test("#305: Factory's own secrets are recognised by the file itself, however its
   assert.deepEqual(one(join(keys, "copilot-a")), [], "a token file of its own still passes");
 });
 
-test("#318: Factory's own GitHub tokens are listed without following a link: a loop of links finishes fast and still finds them", () => {
+test("#318: a loop of links under Factory's own GitHub tokens finishes fast and still finds them", () => {
   const h = fakeHome();
   const keys = join(h, ".config", "factory");
   mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
@@ -502,6 +502,20 @@ process.stdout.write(JSON.stringify(loadAccounts({ home: ${JSON.stringify(h)}, e
   assert.equal(r.status, 0, `the check finished: ${r.signal || r.stderr}`);
   assert.ok(Date.now() - t0 < 10_000, "and fast");
   assert.deepEqual(JSON.parse(r.stdout).map((p) => p.account), ["gh"], "the token behind the loop is still Factory's own");
+});
+
+test("#318: a token Factory reads through a folder link under tokens/ is still one of its own secrets", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  mkdirSync(join(keys, "store", "acme"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(keys, "tokens"), { mode: 0o700 });
+  writeFileSync(join(keys, "store", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  // tokens/acme/app, which Factory reads as acme/app's token, is store/acme/app.
+  symlinkSync(join(keys, "store", "acme"), join(keys, "tokens", "acme"));
+  // And two links back up the tree, which a walk that follows links enters once.
+  symlinkSync(".", join(keys, "tokens", "loop-a"));
+  symlinkSync(keys, join(keys, "store", "acme", "up"));
+  assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "store", "acme", "app") }] }), [["gh", "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
 });
 
 test("#318: a folder of Factory's tokens that cannot be read costs that folder alone", { skip: process.getuid?.() === 0 }, () => {
@@ -585,7 +599,7 @@ test("#305, the real path: a stage's set-up failing in an account folder outside
   assert.ok(lines.some((l) => l.includes(acct)), "this machine's log has the whole error");
 });
 
-test("#318: a clone that cannot be prepared Blocks with a fixed reason, never the set-up's output naming a path outside the home; the log has it", { skip: process.platform === "win32" }, async () => {
+test("#318: a clone that cannot be prepared Blocks with git's cause, never a path outside the home; the log has the path", { skip: process.platform === "win32" }, async () => {
   const { logTo } = await import("../scripts/lib/inputs.mjs");
   const { exec } = await import("../scripts/lib/proc.mjs");
   const { prepareClone } = await import("../scripts/lib/local.mjs");
@@ -624,8 +638,8 @@ test("#318: a clone that cannot be prepared Blocks with a fixed reason, never th
   }
   assert.equal(blocked.length, 2);
   for (const [, , reason] of blocked) {
-    assert.match(reason, /the clone could not be prepared in its sandbox \(exit 3\); the log on this machine has its output/);
-    assert.ok(!reason.includes(outside) && !reason.includes("srv-") && !reason.includes("index.lock"), `no path, no output: ${reason}`);
+    assert.match(reason, /the clone could not be prepared in its sandbox \(exit 3\): fatal: Unable to create '<path>': File exists\.; (this machine's|the job) log has its output/, "git's cause, its path replaced");
+    assert.ok(!reason.includes(outside) && !reason.includes("srv-"), `no path: ${reason}`);
   }
   assert.ok(lines.some((l) => l.includes(`${outside}/.git/index.lock`)), "this machine's log has the output");
 });

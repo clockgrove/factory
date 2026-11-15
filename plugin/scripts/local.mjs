@@ -272,7 +272,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
   if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
-  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length, account }));
+  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length, account, env: account ? accountEnv(env, account) : env }));
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
@@ -281,9 +281,9 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
  * Why one harness cannot run here, one line each: the loop's own at its start (preflight), and another an Objective's
  * harness label names before its first stage on this machine (Local.harnessFor). `sandboxStarts`: whether srt's sandbox
  * starts here (preflight's own check), without which Copilot's outer sandbox is not probed. `account`: the one the
- * harness runs on, for outerProbe.
+ * harness runs on, for outerProbe; `env` that account's (lib/accounts.mjs accountEnv), which the probe runs on.
  */
-export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true, account = null } = {}) {
+export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true, account = null, env: given = process.env } = {}) {
   const problems = [];
   if (!["claude", "codex", "copilot"].includes(harness)) return [`unknown harness ${harness}`];
   if (!onPath(harness)) problems.push(`${harness} is not on PATH`);
@@ -295,7 +295,7 @@ export function harnessProblems(harness, copilotToken, { outer = outerProbe, san
     // Probed only where it can start at all; off Linux outerProbe answers without starting anything.
     if (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && sandboxStarts)) {
       // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
-      const { COPILOT_HOME: _own, ...env } = process.env;
+      const { COPILOT_HOME: _own, ...env } = given;
       const o = outer("copilot", { env, account });
       if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
     }
@@ -648,7 +648,7 @@ export class Local {
     this.ready ??= new Set([key(this.startAccount ?? implicitAccount(this.harness))]);
     if (this.ready.has(key(account))) return [];
     const env = accountEnv(process.env, account);
-    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "", { account });
+    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "", { account, env });
     const app = localApp(env, homedir(), harness).problem;
     const gateway = gatewayKeyProblem(env, homedir(), harness);
     for (const p of [app, gateway]) if (p) problems.push(p);

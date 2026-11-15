@@ -89,7 +89,7 @@ process.exit(1);
     const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
     assert.equal(rec.refusal?.code, "codex_byok_restricted_by_api_credit_promo");
     assert.equal(crashed(rec), false);
-    const asked = await exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: null, canResume: false }, cwd: bin, env: { PATH: process.env.PATH }, deadlineAt: Date.now() + 600_000, maxUsd: 0 });
+    const asked = await exitRecord({ text: undefined, harness: "codex", model: "gpt-6.1-sol", session: { id: null, canResume: false }, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, deadlineAt: Date.now() + 600_000, maxUsd: 0 });
     assert.equal(asked.record.exit, "blocked");
     assert.match(asked.record.reason, /^codex was refused by its provider \(HTTP 400/);
     assert.equal(asked.usage.length, 1);

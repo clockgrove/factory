@@ -496,10 +496,11 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   const name = appSlug ? `${appSlug}[bot]` : login || "factory[bot]";
   const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
   // In the agent's sandbox (backend.mjs sandbox.git): Factory runs no git on the host in the agent's checkout.
-  const sandboxGit = async (_, args) => {
+  // `ok`: the exit codes that are an answer, not a failure (5: `--unset-all` of a key the checkout does not have).
+  const sandboxGit = async (_, args, { ok = [0] } = {}) => {
     const r = await exec(...backend(env).sandbox.git(["git", "-C", checkout, ...args], env), { env });
-    // Its arguments and output can name a path on this machine (a hooks folder, the credential helper): the log has them.
-    if (r.code !== 0) {
+    // Its arguments can name a path on this machine (a hooks folder, the credential helper): the log has them.
+    if (!ok.includes(r.code)) {
       log(`git ${args.join(" ")} in the checkout failed`);
       throw commandFailed(`git ${args[0]} in the checkout failed`, r);
     }
@@ -514,7 +515,7 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   await sandboxGit(checkout, ["config", "--replace-all", `credential.${GITHUB_HELPER_SCOPE}.helper`, ""]);
   // On Actions the agent's read-only helper; locally none (Factory's own git gets the token by env config, openAccess).
   if (credentialHelper) await sandboxGit(checkout, ["config", "--add", `credential.${GITHUB_HELPER_SCOPE}.helper`, credentialHelper]);
-  await sandboxGit(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"]).catch(() => {});
+  await sandboxGit(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"], { ok: [0, 5] }).catch(() => {});
   // The job refuses a commit on a protected path; Factory's push refuses it again (outbox.mjs).
   // A rule keeps a leading `/` (root-anchored, logic.mjs protectedCovers); `./` is dropped.
   const rules = protectedList.map((p) => p.replace(/^\.\//, "")).filter((p) => p.replace(/^\/+/, ""));

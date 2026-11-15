@@ -772,6 +772,8 @@ export const progressRunId = (env = process.env) =>
 /** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
+export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`factory:host:\` labels).` : "");
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 
@@ -812,7 +814,9 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
     const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
-    return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
+    // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
+    const hosts = hostsLine(ran?.hosts);
+    return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
   };
   /**
    * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. The
@@ -1362,9 +1366,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     harness,
     harnessVersion,
     model: merged.model ?? model ?? null,
-    // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default) and the harness
-    // and model labels that chose them (none: the repository's defaults).
-    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [] } } : {}),
+    // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
+    // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
+    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,

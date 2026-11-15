@@ -736,20 +736,25 @@ export const deniedHostsOf = (v) => [...new Set((Array.isArray(v) ? v : []).filt
 const allowedBy = (host, domains) => domains.some((d) => d === host || (typeof d === "string" && d.startsWith("*.") && host.endsWith(d.slice(1))));
 
 /**
- * The fix line of a Block whose worker named the hosts its sandbox denied: allow them in FACTORY_LOCAL_DOMAINS (local
- * mode) or the `allowed_domains` input (`route` "runner": Claude Code on Actions or in a cloud sandbox), then re-apply
- * the label. Hosts the sandboxes already allow (`domains`) are left out, since allowing them again fixes
- * nothing; null when none is left, so the Block keeps the generic fix.
+ * The fix line of a Block whose worker named the hosts its sandbox denied. For this Objective alone: a person who can
+ * push applies a `factory:host:<host>` label for each (choice.mjs HOST_PREFIX; a host too long for GitHub's 50-character
+ * label limit is left to the setting), then re-applies the label. For every Objective: FACTORY_LOCAL_DOMAINS (local
+ * mode) or the `allowed_domains` input (`route` "runner": Actions or a cloud sandbox). Hosts the sandboxes already allow
+ * (`domains`) are left out, since allowing them again fixes nothing; null when none is left, so the Block keeps the
+ * generic fix.
  */
 export function deniedHostsFix(hosts, domains = [], route = "local") {
   const left = deniedHostsOf(hosts).filter((h) => !allowedBy(h, domains));
   if (!left.length) return null;
   const them = left.length === 1 ? "it" : "them";
-  const named = left.map((h) => `\`${h}\``).join(", ");
-  // On Actions and in a cloud sandbox, Claude Code's or Codex's sandbox: the workflow's `allowed_domains` input
-  // (harness.mjs claudeRunner, codexRunner).
-  if (route === "runner") return `The harness's sandbox denied ${named}. If the Objective needs ${them}, add ${them} to the Factory workflow's \`allowed_domains\` input (or \`FACTORY_ALLOWED_DOMAINS\` in its env block), then re-apply \`factory:objective\`.`;
-  return `The local sandbox denied ${named}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
+  const tick = (h) => `\`${h}\``;
+  const labels = left.map((h) => `factory:host:${h}`).filter((l) => l.length <= 50);
+  const short = labels.length < left.length ? " (the rest are too long for a label)" : "";
+  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then re-applies \`factory:objective\`. To open ${them} to every Objective, ` : "";
+  // On Actions and in a cloud sandbox, each harness's sandbox: the workflow's `allowed_domains` input (harness.mjs
+  // claudeRunner, codexRunner, copilotRunner).
+  const setting = route === "runner" ? "the Factory workflow's `allowed_domains` input (or `FACTORY_ALLOWED_DOMAINS` in its env block)" : "`FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts)";
+  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then re-apply \`factory:objective\`.`;
 }
 
 /**
@@ -2225,11 +2230,12 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
  */
 /**
  * The progress comment's harness line: the stage's harness and its own model (the worker's, or the reviewer's), and with
- * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default) and the harness and model
- * labels that chose them (`labels`, none on the repository's defaults).
+ * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default), the harness, model and
+ * host labels that chose them (`labels`, none on the repository's defaults) and, when its host labels open any, those
+ * hosts (`hosts`).
  */
 export const harnessMarker = (harness, model = "", ran = null) =>
-  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [] } : {}) })} -->`;
+  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}) })} -->`;
 const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
 /** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
 export function spendOf(body) {

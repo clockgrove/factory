@@ -2,7 +2,7 @@
 // local loop off each other's Objectives, the sandbox the harness and Factory's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir, platform as osPlatform, uptime } from "node:os";
@@ -811,11 +811,112 @@ export function credentialPaths(home = homedir(), env = process.env, { own = nul
 }
 
 /**
- * Codex's own sandbox: a Codex home in `paths` (the stage's own, `dir`, or the default `~/.codex`) by what bears its login
- * (`auth.json*`, `sessions`), since Codex starts a helper kept in its home and its installer puts its release in
- * `~/.codex`, which its sandbox must still run.
+ * Codex's own sandbox, for each path in `paths`: the stage's own Codex home (`dir`) by what bears its login (`auth.json*`,
+ * `sessions`), since Codex starts a helper kept there; a path holding the release Codex runs from (`release`,
+ * codexRelease: its installer puts it in `~/.codex`, and its sandbox execs that binary) by everything in it but that
+ * release (codexHomeBut); any other path whole.
  */
-export const codexLoginFiles = (paths, dir, home = homedir()) => paths.flatMap((p) => (sameDir(p, dir) || sameDir(p, join(home, ".codex")) ? [join(p, "auth.json*"), join(p, "sessions")] : [p]));
+export const codexLoginFiles = (paths, dir, release = null) => [
+  // A home and its real path give the same list once: the profile is a TOML table, which takes each key once.
+  ...new Set(
+    paths.flatMap((p) => {
+      if (sameDir(p, dir)) return [join(p, "auth.json*"), join(p, "sessions")];
+      const real = realish(p);
+      const keep = release?.find((k) => k.startsWith(`${real}/`));
+      return keep ? codexHomeBut(real, keep) : [p];
+    }),
+  ),
+];
+
+/**
+ * Where the Codex binary `bin` runs from, by real path, as the folders that may be kept readable, widest first: its
+ * release folder (above `bin/`), its own folder, the binary itself. Null when `bin` is not there.
+ */
+const codexRelease = (bin) => {
+  let real;
+  try {
+    real = realpathSync(bin);
+  } catch {
+    return null;
+  }
+  const own = dirname(real);
+  return [...(basename(own) === "bin" ? [dirname(own)] : []), own, real];
+};
+
+/**
+ * For a Codex stage on another CODEX_HOME while Codex's installer tree is in `~/.codex`: the `codex` on `env`'s PATH when
+ * it is a script (`#!`) outside `~/.codex`, as {bin, real}, else null. Codex's sandbox runs the release it execs, which
+ * such a wrapper hides from codexLocalConfig, so `~/.codex` is denied whole there and the sandbox cannot start.
+ */
+export function codexWrapper(env = process.env, home = homedir()) {
+  const def = join(home, ".codex");
+  if (sameDir(stageLogin("codex", env, home).dir, def) || !existsSync(join(def, "packages"))) return null;
+  const bin = whichPath("codex", env);
+  const real = codexRelease(bin)?.at(-1);
+  if (!real || within(real, realish(def))) return null;
+  const head = Buffer.alloc(2);
+  try {
+    const fd = openSync(real, "r");
+    try {
+      readSync(fd, head, 0, 2, 0);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+  return head.toString() === "#!" ? { bin, real } : null;
+}
+
+/**
+ * Everything in the folder `home` but the path down to `keep` (inside it): at each level the other entries, plus the names
+ * Codex keeps in its home where absent (CODEX_HOME_NAMES), so one made during the stage is denied too. A link is denied
+ * where it leads (linkTarget), not by its own name: Codex's sandbox cannot mount over a link and does not start. One that
+ * leads into or above `keep` is left, and so is one whose target another entry already covers. Unlistable: `home` whole.
+ * Each path goes out as Codex's profile reads it (codexDenyPath).
+ */
+function codexHomeBut(home, keep) {
+  const out = [];
+  const near = (p) => within(p, keep) || keep.startsWith(`${p}/`);
+  try {
+    for (let at = home; at !== keep; ) {
+      const next = join(at, relative(at, keep).split("/")[0]);
+      for (const name of readdirSync(at)) {
+        const p = join(at, name);
+        if (p === next) continue;
+        if (!lstatSync(p).isSymbolicLink()) out.push(p);
+        else if (!near(linkTarget(p))) out.push(linkTarget(p));
+      }
+      at = next;
+    }
+  } catch {
+    return [codexDenyPath(home)];
+  }
+  const kept = [...new Set(out)].filter((p, _, all) => !all.some((q) => q !== p && p.startsWith(`${q}/`)));
+  const listed = new Set(kept);
+  const absent = CODEX_HOME_NAMES.map((n) => join(home, n)).filter((p) => !listed.has(p) && !lstatSync(p, { throwIfNoEntry: false }));
+  return [...kept.map(codexDenyPath), ...absent];
+}
+
+/** Where the link `p` leads, by real path, also when it leads to nothing yet (realish of its target). */
+const linkTarget = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    try {
+      return realish(resolve(dirname(p), readlinkSync(p)));
+    } catch {
+      return p;
+    }
+  }
+};
+
+/**
+ * A path as Codex's profile takes it literally. A path with `*`, `?` or `[` in it is a glob there (ripgrep's syntax), so
+ * every glob character is escaped and a control character, which Codex never matches literally, becomes `?`; any other
+ * path is literal as it is (an escape there would be part of the name).
+ */
+export const codexDenyPath = (p) => (/[*?[\x00-\x1f\x7f]/.test(p) ? p.replace(/[\\*?[\]{}]/g, "\\$&").replace(/[\x00-\x1f\x7f]/g, "?") : p);
 
 /**
  * The login files a `harness` stage runs on: Claude Code's `.credentials.json` and `.claude.json` (CLAUDE_CONFIG_DIR's,
@@ -1092,8 +1193,8 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable,
 
 /**
  * The hosts a runner's sandboxed commands may reach: LOCAL_DOMAINS plus the `allowed_domains` input (the Actions and
- * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space. An entry is a host name or
- * `*.` and one; anything else is dropped.
+ * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space, plus `hosts`, the stage's
+ * Objective's own (openedStageHosts). An entry is a host name or `*.` and one; anything else is dropped.
  */
 const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
@@ -1103,9 +1204,23 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-export function runnerDomains(value = "") {
-  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry)])];
+/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+export function runnerDomains(value = "", hosts = []) {
+  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }
+
+/**
+ * The hosts this stage's Objective opens with its `factory:host:` labels (choice.mjs hostsOf), once the stage's choice
+ * check has passed (worker.mjs, review.mjs: openStageHosts). A runner's sandboxes add them to `allowed_domains`
+ * (harness.mjs claudeRunner, codexRunner, copilotRunner); a stage process works one Objective, and nothing else sets
+ * them, so no other Objective's sandbox ever gets them. Local mode's loop opens them itself (Local.stageEnv).
+ */
+let stageHosts = [];
+export const openStageHosts = (hosts = []) => {
+  stageHosts = [...new Set(hosts.filter(isSandboxHost))];
+};
+export const openedStageHosts = () => stageHosts;
 
 /** The `allowed_domains` entries runnerDomains drops (doctor names each). */
 export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !hostEntry(d));
@@ -1138,9 +1253,10 @@ const tq = JSON.stringify;
  * its hooks and config not), credential stores unreadable, network through Codex's proxy limited to `domains`,
  * no approval prompts and no escalation, and the model API keys kept out of the commands' environment. Codex's
  * own login stays readable to Codex itself, which runs outside the sandbox: the profile denies the login file,
- * not ~/.codex, where Codex keeps the sandbox helper it starts.
+ * not its home, where Codex keeps the sandbox helper it starts. Any other Codex home is denied whole but the release
+ * the `codex` on `env`'s PATH runs from, which the sandbox execs (codexLoginFiles).
  */
-export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), env = process.env, credentials = null, readOnly = [], secretEnv = [], secrets = codexLoginFiles(credentials ?? credentialPaths(home, env, { own: stageLogin("codex", env, home) }), stageLogin("codex", env, home).dir, home), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
+export function codexLocalConfig({ domains = LOCAL_DOMAINS, clone = null, addDirs = [], home = homedir(), env = process.env, credentials = null, readOnly = [], secretEnv = [], secrets = codexLoginFiles(credentials ?? credentialPaths(home, env, { own: stageLogin("codex", env, home) }), stageLogin("codex", env, home).dir, codexRelease(whichPath("codex", env))), exists = (p) => !!lstatSync(p, { throwIfNoEntry: false }), commandEnv = null, denyProc = true } = {}) {
   // /proc: no command reads a process outside Codex's sandbox: each runs in a user namespace of its own without
   // CAP_SYS_PTRACE, so the kernel refuses the read, and where bubblewrap can mount a fresh /proc it has its own PID
   // namespace too. Locally the profile denies /proc as well. On a runner it does not (`denyProc` false): under a systemd
@@ -1670,6 +1786,8 @@ const HOME_WRITABLE = {
   // Copilot (1.0.107): its sessions, which a later stage resumes, and its logs. Its home is the Objective's own.
   copilot: ["session-state", "logs", /^session-store\.db(-wal|-shm|-journal)?$/],
 };
+/** The names Codex keeps in its home, its login (`auth.json*`) and prompt history (`history.jsonl`) with them. */
+const CODEX_HOME_NAMES = [...HOME_GUARDS.codex.files, ...HOME_GUARDS.codex.dirs, ...HOME_WRITABLE.codex.filter((n) => typeof n === "string"), "auth.json*", "history.jsonl"];
 const writableName = (harness, name) => /\.lock$|\.tmp\b|^\.tmp/.test(name) || (HOME_WRITABLE[harness] || []).some((w) => (typeof w === "string" ? w === name : w.test(name)));
 const harnessStateDir = (harness, env, home) => (harness === "claude" ? env.CLAUDE_CONFIG_DIR || join(home, ".claude") : harness === "codex" ? env.CODEX_HOME || join(home, ".codex") : harness === "copilot" ? env.COPILOT_HOME || null : null);
 const entries = (d) => {

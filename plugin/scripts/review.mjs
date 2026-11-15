@@ -25,7 +25,7 @@ import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
-import { refusalExit } from "./lib/local.mjs";
+import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -477,6 +477,9 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
+  openStageHosts(chosen.hosts);
+  if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
   progress.ran(ranWith(inputs, chosenLabels));
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.

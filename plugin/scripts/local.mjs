@@ -62,6 +62,12 @@ export const PIN_RETRY_MS = 10 * 60_000;
 export const SWITCH_GAP_MS = 30 * 60_000;
 /** The env name a serve that started again on a new release (restartOn) learns when it last switched from. */
 const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
+/** The env name that tells a serve started again on a new release where it came from, for a failure at its start (main). */
+const SWITCHED_FROM_ENV = "FACTORY_SERVE_SWITCHED_FROM";
+const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
+delete process.env[SWITCHED_FROM_ENV];
+/** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
+export const SETTINGS_EVERY_MS = 3 * 60_000;
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
@@ -1775,9 +1781,15 @@ export class Local {
    */
   async refreshSettings() {
     if (!this.settingsBranch) return;
-    const now = await committedWorkflowNow(this.dev, this.settingsBranch);
-    // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
-    if (now.unfetched) return;
+    // Fetched every SETTINGS_EVERY_MS; each tick between takes what the last read brought.
+    if (Date.now() - (this.settingsReadAt ?? 0) >= (this.settingsEveryMs ?? SETTINGS_EVERY_MS)) {
+      this.settingsReadAt = Date.now();
+      const read = await committedWorkflowNow(this.dev, this.settingsBranch, { token: this.token });
+      // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
+      if (!read.unfetched) this.settingsRead = read;
+    }
+    const now = this.settingsRead;
+    if (!now) return;
     if (now.error) {
       if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
       this.settingsError = now.error;
@@ -1836,11 +1848,9 @@ export class Local {
     if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
     if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
     if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
-    // The gap holds back a switch to another pin than the last one tried; that one is tried again after PIN_RETRY_MS.
-    if (!this.repin && ref !== this.switchedRef && Date.now() - this.switchedAt < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    // Counted from the last switch this process made (restartOn), never from a try that did not switch.
+    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
     if (!this.repin) {
-      this.switchedAt = Date.now();
-      this.switchedRef = ref;
       log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
       const r = (this.repin = { ref, state: "fetching" });
       r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
@@ -1851,8 +1861,8 @@ export class Local {
           r.state = "ready";
         })
         .catch((e) => {
-          // An older commit than this one: never taken by itself, nor tried again until the pin changes.
-          r.state = e?.code === "older" ? "refused" : "failed";
+          // An older commit than this one, or a SHA not on Factory's main: never tried again until the pin changes.
+          r.state = e?.code === "older" || e?.code === "refused" ? "refused" : "failed";
           r.retryAt = Date.now() + PIN_RETRY_MS;
           if (this.repin !== r) return;
           if (r.state === "refused") log(`${String(e.message).slice(0, 300)}; serve keeps running ${name}`);
@@ -1871,7 +1881,9 @@ export class Local {
    * Start serve again on the release `r` names, in this same process (process.execve): its pid, its terminal and its
    * front end stay. The new loop takes up the claims this one leaves (paused work, a stage that lapsed) at once, as a
    * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. The checkout is checked
-   * once more first (checkoutProblem): one changed since its fetch is not run, and is fetched afresh later. Where the
+   * once more first, without git (checkoutProblem: every file's SHA-256 against the manifest taken at its fetch): one
+   * changed since is not run, and is fetched afresh later. If the new release fails at its start, it says it switched
+   * from here (main). Where the
    * process cannot be replaced, says how to restart instead and goes on with the release it runs. Returns false when it
    * did not restart.
    */
@@ -1882,7 +1894,7 @@ export class Local {
       log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
       return false;
     }
-    const problem = checkoutProblem(r.checkout, this.releaseOpts);
+    const problem = checkoutProblem(r.checkout);
     if (problem) {
       r.state = "failed";
       r.retryAt = Date.now() + PIN_RETRY_MS;
@@ -1890,7 +1902,7 @@ export class Local {
       return false;
     }
     log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
-    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()) };
+    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()), [SWITCHED_FROM_ENV]: this.factory?.root || "" };
     // The new release's skills and agents, from beside its own scripts.
     delete env.FACTORY_PLUGIN_ROOT;
     try {
@@ -2528,6 +2540,8 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] local: ${e.message}\n`);
+    // Right after a switch to a new pinned release (restartOn): say so, and how to go back.
+    if (SWITCHED_FROM) process.stderr.write(`[factory] local: serve stopped at the start of the release it switched to, ${PLUGIN_ROOT}, from ${SWITCHED_FROM}; start serve from ${join(SWITCHED_FROM, "plugin", "bin", "factory")} to run that one again\n`);
     process.exit(1);
   });
 }

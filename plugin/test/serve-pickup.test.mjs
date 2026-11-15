@@ -3,7 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,43 +141,72 @@ test("releaseCheckout: this shell's git config and GIT_* variables can neither r
   }
 });
 
-test("checkoutProblem: a checkout changed after its fetch is caught however the change hides, and its own git config runs nothing", async () => {
+test("checkoutProblem: every file is hashed against the manifest taken at the fetch, so no change hides behind git, and no git runs", async () => {
   const fx = factoryRepo();
   fx.release("9.9.9");
   const home = mkdtempSync(join(tmpdir(), "home-"));
   const fresh = () => releaseCheckout("v9.9.9", { home, url: fx.url });
   const loop = (c) => join(c.dir, "plugin", "scripts", "local.mjs");
+  const evil = (c) => writeFileSync(loop(c), 'console.log("evil");\n');
   let c = await fresh();
-  writeFileSync(loop(c), "planted\n");
-  assert.equal(checkoutProblem(c, { home }), "a tracked file changed");
+  assert.equal(checkoutProblem(c), null);
+  evil(c);
+  assert.equal(checkoutProblem(c), "plugin/scripts/local.mjs changed", "a plain edit");
   c = await fresh();
   git(c.dir, "update-index", "--skip-worktree", "plugin/scripts/local.mjs");
-  writeFileSync(loop(c), "planted\n");
-  assert.equal(checkoutProblem(c, { home }), "a tracked file is flagged to hide its changes");
+  evil(c);
+  assert.notEqual(checkoutProblem(c), null, "skip-worktree");
+  // A replace ref that makes git read another commit in HEAD's place.
   c = await fresh();
-  git(c.dir, "update-index", "--assume-unchanged", "plugin/scripts/local.mjs");
-  assert.equal(checkoutProblem(c, { home }), "a tracked file is flagged to hide its changes");
+  evil(c);
+  git(c.dir, "add", "-A");
+  git(c.dir, "replace", c.commit, git(c.dir, "commit-tree", git(c.dir, "write-tree"), "-p", c.commit, "-m", "evil"));
+  assert.notEqual(checkoutProblem(c), null, "replace ref");
+  // core.worktree pointing git at a pristine copy.
   c = await fresh();
-  mkdirSync(join(c.dir, ".git", "info"), { recursive: true });
+  const pristine = mkdtempSync(join(tmpdir(), "pristine-"));
+  cpSync(c.dir, pristine, { recursive: true });
+  evil(c);
+  git(c.dir, "config", "core.worktree", pristine);
+  assert.notEqual(checkoutProblem(c), null, "core.worktree");
+  // A .git file pointing at a pristine repository elsewhere.
+  c = await fresh();
+  const elsewhere = mkdtempSync(join(tmpdir(), "elsewhere-"));
+  cpSync(c.dir, elsewhere, { recursive: true });
+  rmSync(join(c.dir, ".git"), { recursive: true });
+  writeFileSync(join(c.dir, ".git"), `gitdir: ${elsewhere}/.git\n`);
+  assert.notEqual(checkoutProblem(c), null, "gitfile");
+  // A same-size change with its times put back, which git's stat cache can miss.
+  c = await fresh();
+  const st = statSync(loop(c));
+  const text = readFileSync(loop(c), "utf8");
+  const same = text.replace("pid", "PID");
+  assert.ok(same !== text && same.length === text.length);
+  writeFileSync(loop(c), same);
+  utimesSync(loop(c), st.atime, st.mtime);
+  assert.equal(checkoutProblem(c), "plugin/scripts/local.mjs changed", "same size, same times");
+  // A clean filter its config names, with a file added and ignored: the filter never runs, the file is seen.
+  c = await fresh();
+  const marker = join(home, "filter-ran");
+  const filter = join(home, "filter.sh");
+  writeFileSync(filter, `#!/bin/sh\ntouch ${marker}\ncat\n`, { mode: 0o755 });
+  git(c.dir, "config", "filter.x.clean", filter);
+  writeFileSync(join(c.dir, ".git", "info", "attributes"), "* filter=x\n");
+  assert.match(checkoutProblem(c), /^\.git\/(config|info\/attributes) (changed|was added)$/);
+  assert.equal(existsSync(marker), false, "no filter ran");
+  c = await fresh();
   writeFileSync(join(c.dir, ".git", "info", "exclude"), "extra.mjs\n");
   writeFileSync(join(c.dir, "plugin", "scripts", "extra.mjs"), "planted\n");
-  assert.equal(checkoutProblem(c, { home }), "a file was added", "an ignored file too");
-  c = await fresh();
-  const other = git(fx.work, "commit-tree", `${c.commit}^{tree}`, "-m", "other");
-  git(c.dir, "fetch", "-q", fx.work, other);
-  git(c.dir, "-c", "advice.detachedHead=false", "checkout", "-q", other);
-  assert.equal(checkoutProblem(c, { home }), "its HEAD is not the commit fetched");
-  // A file monitor or hook its .git/config names: never run.
-  c = await fresh();
-  const marker = join(home, "ran");
-  writeFileSync(join(c.dir, "monitor.sh"), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
-  git(c.dir, "config", "core.fsmonitor", join(c.dir, "monitor.sh"));
-  checkoutProblem(c, { home });
-  assert.equal(existsSync(marker), false);
+  assert.match(checkoutProblem(c), /extra\.mjs was added|\.git\/info\/exclude changed/);
 });
 
-test("pruneReleases: the newest three checkouts stay, and the one serve runs or any live serve runs whatever its age; a fetch under way stays", () => {
+test("pruneReleases: the newest three checkouts stay, and the one serve runs or any live serve runs whatever its age; a fetch under way stays; a ~/.cache behind a link too", () => {
+  for (const linked of [false, true]) pruneCase(linked);
+});
+
+function pruneCase(linked) {
   const home = mkdtempSync(join(tmpdir(), "home-"));
+  if (linked) symlinkSync(mkdtempSync(join(tmpdir(), "cache-")), join(home, ".cache"));
   const root = releasesDir(home);
   const names = ["v1.0.0-a", "v1.0.1-b", "v1.0.2-c", "v1.0.3-d", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"];
   names.forEach((n, i) => {
@@ -196,7 +226,7 @@ test("pruneReleases: the newest three checkouts stay, and the one serve runs or 
   }
   assert.deepEqual(readdirSync(root).sort(), [".home", ".in-use", "v1.0.0-a", "v1.0.1-b", "v1.0.4-e", "v1.0.5-f", "v1.0.6-g", "v1.0.7-h.part"]);
   assert.deepEqual(readdirSync(join(root, ".in-use")), [String(other.pid)], "a dead process's name goes");
-});
+}
 
 test("startProblem: the new release's loop is tried with nothing of this shell's env", async () => {
   const fx = factoryRepo();
@@ -327,6 +357,8 @@ async function serveOver(ad, { wf, factory, atTick, paused = () => [], stubs = (
   const loop = Object.assign(Object.create(Local.prototype), {
     dev: ad.dev,
     settingsBranch: "main",
+    // Every tick fetches, so a push between two ticks is seen at the next.
+    settingsEveryMs: 0,
     pins: ["v0.9.30"],
     harness: "claude",
     factory,
@@ -463,12 +495,13 @@ test("serve: a pin it does not follow is said once and changes nothing: a branch
 
 test("committedWorkflowNow: a running serve reads the default branch's workflow as pushed since, and leaves the developer's own refs and FETCH_HEAD alone", async () => {
   const ad = adopter({ FACTORY_MODEL: "m1" });
-  assert.deepEqual(await committedWorkflowNow(ad.dev, "main"), { wf: { FACTORY_MODEL: "m1" }, pins: ["v0.9.30"], branch: "main", error: null });
+  const settingsOf = ({ text: _text, ...rest }) => rest;
+  assert.deepEqual(settingsOf(await committedWorkflowNow(ad.dev, "main")), { wf: { FACTORY_MODEL: "m1" }, pins: ["v0.9.30"], branch: "main", error: null });
   ad.push({ FACTORY_MODEL: "m2" }, "v0.9.31");
   // The developer's clone has not seen the push.
   git(ad.dev, "update-ref", "refs/remotes/origin/main", "HEAD~1");
   const theirs = git(ad.dev, "rev-parse", "refs/remotes/origin/main");
-  assert.deepEqual(await committedWorkflowNow(ad.dev, "main"), { wf: { FACTORY_MODEL: "m2" }, pins: ["v0.9.31"], branch: "main", error: null });
+  assert.deepEqual(settingsOf(await committedWorkflowNow(ad.dev, "main")), { wf: { FACTORY_MODEL: "m2" }, pins: ["v0.9.31"], branch: "main", error: null });
   assert.equal(git(ad.dev, "rev-parse", "refs/remotes/origin/main"), theirs, "origin's ref moves only on the developer's own fetch");
   assert.equal(existsSync(join(ad.dev, ".git", "FETCH_HEAD")), false, "no FETCH_HEAD for a `git pull` to merge");
   // Offline: nothing read, never an older commit's settings (refreshSettings keeps what it has).
@@ -520,11 +553,30 @@ test("followPin: a new switch waits until 30 minutes after the last, and a SHA b
     assert.equal(await loop.followPin(1), true, "past the gap: the switch starts and holds new stages");
     await loop.repin.fetch;
     assert.equal(loop.repin.state, "ready");
-    // A failed try of the same pin is tried again after ten minutes, not held back by the gap.
+    // A failed try is tried again after ten minutes: only a switch counts toward the gap.
     loop.repin = { ref: "v9.9.9", state: "failed", retryAt: Date.now() - 1 };
-    loop.switchedAt = Date.now() - 11 * 60_000;
     assert.equal(await loop.followPin(1), true, "the same pin is tried again");
     await loop.repin.fetch;
+    // A mistyped pin that fails, then the right one: taken at once, no gap.
+    loop.repin = null;
+    loop.pins = ["v9.9.99"];
+    await loop.followPin(0);
+    await loop.repin.fetch;
+    assert.equal(loop.repin.state, "failed");
+    loop.pins = ["v9.9.9"];
+    assert.equal(await loop.followPin(1), true, "the corrected pin starts at once");
+    await loop.repin.fetch;
+    assert.equal(loop.repin.state, "ready");
+    assert.equal(lines.filter((l) => /switched releases less than/.test(l)).length, 1, "the gap was said only for the real switch");
+    // A full SHA that is not on Factory's main: refused until the pin changes, never fetched again every ten minutes.
+    loop.pins = ["0123456789abcdef0123456789abcdef01234567"];
+    await loop.followPin(0);
+    await loop.repin.fetch;
+    assert.equal(loop.repin.state, "refused");
+    loop.repin.retryAt = Date.now() - 1;
+    const tried = loop.repin;
+    assert.equal(await loop.followPin(0), false);
+    assert.equal(loop.repin, tried, "not tried again");
     // A SHA before the commit serve runs: refused, said once, and no stage waits for it.
     loop.factory = { version: "9.9.9", commit: newer, root: "/f", release: true };
     loop.pins = [older];
@@ -537,4 +589,71 @@ test("followPin: a new switch waits until 30 minutes after the last, and a SHA b
   } finally {
     process.stdout.write = write;
   }
+});
+
+/** A web server that takes connections and never answers: a stalled host. */
+async function stalledHost() {
+  const socks = [];
+  const server = createNetServer((sock) => {
+    socks.push(sock);
+    sock.on("data", () => {});
+  });
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  return { url: `http://127.0.0.1:${server.address().port}/factory.git`, close: () => (socks.forEach((x) => x.destroy()), new Promise((ok) => server.close(ok))) };
+}
+
+test("a stalled fetch ends at its timeout, every git process with it: a release fetch fails and is tried again, a settings read is unfetched", async () => {
+  const host = await stalledHost();
+  try {
+    const home = mkdtempSync(join(tmpdir(), "home-"));
+    const t0 = Date.now();
+    await assert.rejects(releaseCheckout("v9.9.9", { home, url: host.url, timeoutMs: 2000 }), /fetching v9\.9\.9/);
+    assert.ok(Date.now() - t0 < 20_000, "ended near its timeout");
+    const dev = mkdtempSync(join(tmpdir(), "dev-"));
+    execFileSync("git", ["init", "-q", dev]);
+    git(dev, "remote", "add", "origin", host.url);
+    const t1 = Date.now();
+    assert.equal((await committedWorkflowNow(dev, "main", { timeoutMs: 2000 })).unfetched, true);
+    assert.ok(Date.now() - t1 < 20_000, "ended near its timeout");
+  } finally {
+    await host.close();
+  }
+});
+
+test("refreshSettings: the default branch is fetched every few minutes, and never with the developer's credential helper", async () => {
+  const ad = adopter({ FACTORY_MODEL: "m1" });
+  const loop = Object.assign(Object.create(Local.prototype), { dev: ad.dev, settingsBranch: "main", wf: { FACTORY_MODEL: "m1" }, token: "t" });
+  const quiet = process.stdout.write;
+  process.stdout.write = () => true;
+  try {
+    await loop.refreshSettings();
+    ad.push({ FACTORY_MODEL: "m2" }, "v0.9.30");
+    await loop.refreshSettings();
+    assert.equal(loop.wf.FACTORY_MODEL, "m1", "a tick soon after the last read takes what it brought");
+    loop.settingsReadAt -= 3 * 60_000;
+    await loop.refreshSettings();
+    assert.equal(loop.wf.FACTORY_MODEL, "m2", "a few minutes on, fetched again");
+  } finally {
+    process.stdout.write = quiet;
+  }
+  // A host that asks for credentials: the developer's helper in their clone is never run.
+  const asks = createServer((req, res) => res.writeHead(401, { "www-authenticate": 'Basic realm="x"' }).end());
+  await new Promise((ok) => asks.listen(0, "127.0.0.1", ok));
+  try {
+    const marker = join(ad.dev, "..", "helper-ran");
+    const helper = join(ad.dev, "..", "helper.sh");
+    writeFileSync(helper, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+    git(ad.dev, "config", "credential.helper", helper);
+    git(ad.dev, "remote", "set-url", "origin", `http://127.0.0.1:${asks.address().port}/r.git`);
+    assert.equal((await committedWorkflowNow(ad.dev, "main", { token: "t", timeoutMs: 10_000 })).unfetched, true);
+    assert.equal(existsSync(marker), false);
+  } finally {
+    await new Promise((ok) => asks.close(ok));
+  }
+});
+
+test("a serve that stops at the start of the release it switched to says so, and how to go back", () => {
+  const r = spawnSync(process.execPath, [LOCAL_MJS, "serve", "--dir", join(tmpdir(), "no-such-clone")], { encoding: "utf8", env: { ...process.env, FACTORY_SERVE_SWITCHED_FROM: "/old/factory" }, timeout: 30_000 });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /serve stopped at the start of the release it switched to, .* from \/old\/factory; start serve from \/old\/factory\/plugin\/bin\/factory to run that one again/);
 });

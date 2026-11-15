@@ -2,8 +2,8 @@
 // take at a stage boundary instead of a restart (#276): which checkout of Factory this process runs, whether a pin is
 // one serve follows, and a verified checkout of that release to run from.
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,7 +42,9 @@ export function runningFactory(root = OWN_ROOT, version = FACTORY_VERSION, home 
   } catch {
     commit = null;
   }
-  const atTag = !!commit && git(["rev-parse", "--verify", "-q", `refs/tags/v${version}^{commit}`]) === commit && git(["status", "--porcelain", "--untracked-files=no"]) === "";
+  // A checkout serve fetched is a release as it stands (checked against its manifest before serve ran it): no `git status`
+  // there, which would run a filter its config names in this process.
+  const atTag = !fetched && !!commit && git(["rev-parse", "--verify", "-q", `refs/tags/v${version}^{commit}`]) === commit && git(["status", "--porcelain", "--untracked-files=no"]) === "";
   return { version, commit, root, release: !!commit && (fetched || atTag) };
 }
 
@@ -90,16 +92,23 @@ function releaseGitEnv(home) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
   return { ...env, HOME: own, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_SMUDGE: "1" };
 }
-const GIT_SAFE = ["-c", "credential.helper=", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"];
-const defaultGit = (home) => (cwd, args) => exec("git", [...GIT_SAFE, ...args], { cwd, env: releaseGitEnv(home), timeoutMs: 5 * 60_000 });
+/**
+ * No helper, hook or file monitor; a transfer slower than a byte a second for a minute ends (http.lowSpeed*), and so does
+ * the whole command at its timeout, with every process it started (`group`: git-remote-https keeps the pipe open past
+ * git itself), so a stalled fetch fails and is tried again, never hangs.
+ */
+export const GIT_SAFE = ["-c", "credential.helper=", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"];
+const defaultGit =
+  (home, timeoutMs = 5 * 60_000) =>
+  (cwd, args) =>
+    exec("git", [...GIT_SAFE, ...args], { cwd, env: releaseGitEnv(home), timeoutMs, group: true });
 
 /**
- * Why the checkout serve fetched for a release (releaseCheckout's {dir, commit, ref}) is no longer exactly that release,
- * or null: HEAD the commit it was fetched at, every tracked file plain (no assume-unchanged or skip-worktree flag that
- * would hide a change), no change to one, no file added (ignored ones included), the loop present, and a tag's
- * plugin.json naming that release. Synchronous: run again right before serve starts on it (Local.restartOn).
+ * Why the checkout at `dir`, just fetched, is not exactly `ref` of Factory, or null: HEAD the commit fetched, every
+ * tracked file plain (no assume-unchanged or skip-worktree flag), none changed, none added (ignored ones included), and a
+ * tag's plugin.json naming that release. Run on a checkout serve made a moment ago with a config of its own.
  */
-export function checkoutProblem({ dir, commit, ref }, { home = homedir() } = {}) {
+function fetchedProblem({ dir, commit, ref }, home) {
   const git = (args) => spawnSync("git", ["-C", dir, ...GIT_SAFE, ...args], { encoding: "utf8", timeout: 60_000, env: releaseGitEnv(home), stdio: ["ignore", "pipe", "ignore"] });
   const out = (args) => {
     const r = git(args);
@@ -118,6 +127,45 @@ export function checkoutProblem({ dir, commit, ref }, { home = homedir() } = {})
     return "its plugin.json does not read";
   }
   return null;
+}
+
+/**
+ * Every entry under `dir`, its .git included, by relative path: a file's mode and SHA-256, a link's target, a directory,
+ * or another kind. Read with no git, so nothing the checkout's own config names runs.
+ */
+export function treeManifest(dir) {
+  const out = {};
+  const walk = (rel) => {
+    for (const name of readdirSync(join(dir, rel)).sort()) {
+      const path = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(join(dir, path));
+      if (st.isDirectory()) {
+        out[path] = "dir";
+        walk(path);
+      } else if (st.isSymbolicLink()) out[path] = `link ${readlinkSync(join(dir, path))}`;
+      else if (st.isFile()) out[path] = `file ${(st.mode & 0o777).toString(8)} ${createHash("sha256").update(readFileSync(join(dir, path))).digest("hex")}`;
+      else out[path] = "other";
+    }
+  };
+  walk("");
+  return out;
+}
+
+/**
+ * Why the checkout serve fetched (releaseCheckout's {dir, manifest}) is no longer what it fetched, or null: every entry
+ * hashed again and compared with the manifest serve took at its fetch and kept in its own memory, which no sandbox reaches.
+ * Run right before serve starts on it (Local.restartOn).
+ */
+export function checkoutProblem({ dir, manifest }) {
+  let now;
+  try {
+    now = treeManifest(dir);
+  } catch (e) {
+    return `it cannot be read (${e.code || e.message})`;
+  }
+  for (const [path, entry] of Object.entries(manifest || {})) if (now[path] !== entry) return `${path} ${now[path] === undefined ? "is gone" : "changed"}`;
+  const added = Object.keys(now).find((path) => !(path in (manifest || {})));
+  return added ? `${added} was added` : null;
 }
 
 /** Where each live serve on this machine names the release checkout it runs from (markInUse), one file per process. */
@@ -177,21 +225,31 @@ export function pruneReleases(home = homedir(), keep = []) {
   } catch {
     return;
   }
-  const kept = new Set([...keep, ...inUse(home)].map((d) => resolve(d)));
-  const entries = names.map((n) => ({ dir: join(root, n), part: n.endsWith(".part"), at: statSync(join(root, n), { throwIfNoEntry: false })?.mtimeMs ?? 0 }));
+  // Real paths on both sides: a home or ~/.cache behind a link names the same checkouts.
+  const real = (d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return resolve(d);
+    }
+  };
+  const kept = new Set([...keep, ...inUse(home)].map(real));
+  const base = real(root);
+  const entries = names.map((n) => ({ dir: join(base, n), part: n.endsWith(".part"), at: statSync(join(base, n), { throwIfNoEntry: false })?.mtimeMs ?? 0 }));
   const done = entries.filter((e) => !e.part).sort((a, b) => b.at - a.at);
   const gone = [...done.slice(RELEASES_KEPT), ...entries.filter((e) => e.part && Date.now() - e.at > 60 * 60_000)];
-  for (const e of gone) if (!kept.has(resolve(e.dir))) rmSync(e.dir, { recursive: true, force: true });
+  for (const e of gone) if (!kept.has(real(e.dir))) rmSync(e.dir, { recursive: true, force: true });
 }
 
 /**
  * A fresh checkout of Factory at `ref` (a release tag or a full SHA the workflow names, pinDecision), fetched from
  * Factory's own repository only, into a new directory of releasesDir each time: nothing kept from an earlier fetch is
  * trusted. A tag's one commit; for a SHA, Factory's main, which must contain it and the commit serve runs (`running`), so
- * serve never moves back to an earlier one by itself. Throws with what failed (`code` "older" for a downgrade); the
- * checkouts past the newest few go (pruneReleases). {dir, commit, ref, version}.
+ * serve never moves back to an earlier one by itself. Throws with what failed (`code` "older" for a downgrade, "refused"
+ * for a SHA not on main: neither is tried again until the pin changes); the checkouts past the newest few go
+ * (pruneReleases). {dir, commit, ref, version, manifest} (treeManifest, taken once the checkout is verified).
  */
-export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_URL, git = defaultGit(home), running = null } = {}) {
+export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_URL, timeoutMs = 5 * 60_000, git = defaultGit(home, timeoutMs), running = null } = {}) {
   const tag = RELEASE_TAG.test(ref);
   if (!tag && !COMMIT.test(ref)) throw new Error(`clockgrove/factory@${ref} is neither a release tag nor a full commit SHA`);
   const root = releasesDir(home);
@@ -209,17 +267,20 @@ export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_UR
     if (tag) await must(part, ["fetch", "-q", "--no-tags", "--depth", "1", "origin", `+refs/tags/${ref}:refs/tags/${ref}`], `fetching ${ref} from ${url}`);
     else {
       await must(part, ["fetch", "-q", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], `fetching main from ${url}`);
-      if ((await git(part, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"])).code !== 0) throw new Error(`${ref} is not a commit on ${url}'s main`);
+      // Not there at all, or not on main: not taken until the pin changes (a fetch of all of main each time would follow).
+      if ((await git(part, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"])).code !== 0) throw Object.assign(new Error(`clockgrove/factory@${ref} is not a commit on ${url}'s main`), { code: "refused" });
       if (!running?.commit || (await git(part, ["merge-base", "--is-ancestor", running.commit, ref])).code !== 0) throw Object.assign(new Error(`clockgrove/factory@${ref}: ${DOWNGRADE_LINE} (it does not come after ${running?.commit ? running.commit.slice(0, 7) : "the commit serve runs"} on Factory's main)`), { code: "older" });
     }
     const commit = String((await must(part, ["rev-parse", "--verify", tag ? `refs/tags/${ref}^{commit}` : `${ref}^{commit}`], `resolving ${ref}`)).stdout).trim();
     await must(part, ["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit], `checking out ${ref}`);
-    const problem = checkoutProblem({ dir: part, commit, ref }, { home });
+    const problem = fetchedProblem({ dir: part, commit, ref }, home);
     if (problem) throw new Error(`the checkout of ${ref} is not ${tag ? "that release" : "that commit"}: ${problem}`);
     renameSync(part, dir);
     const { version } = JSON.parse(readFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), "utf8"));
+    // Its manifest, kept in this process only: what restartOn checks the checkout against before it runs it.
+    const manifest = treeManifest(dir);
     pruneReleases(home, [dir, ...(running?.root ? [running.root] : [])]);
-    return { dir, commit, ref, version };
+    return { dir, commit, ref, version, manifest };
   } finally {
     rmSync(part, { recursive: true, force: true });
   }

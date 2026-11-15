@@ -27,8 +27,10 @@ const CLAIM_SKEW_MS = 2 * 60_000;
 export const claimMarker = (issue) => marker(issue, "local");
 
 /**
- * Factory's own code on this machine that a serve may run (lib/release.mjs releasesDir), when it is there: no sandbox may
- * write it, named in every one's write denials as well as left out of what each may write.
+ * Factory's own code on this machine that a serve may run (lib/release.mjs releasesDir): no sandbox may write it. Every
+ * sandbox only writes where it is told to, so this is already out of reach; it is named in each one's write denials too,
+ * so a later widening of what a sandbox may write cannot take it in. Named only when it is there: a sandbox cannot bind
+ * a path that does not exist, and none can create it (none may write ~/.cache/factory).
  */
 export const factoryCodeDirs = (home = homedir()) => [releasesDir(home)].filter((d) => existsSync(d));
 
@@ -2107,18 +2109,22 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
 const committedWorkflow = (text, branch) => (text === null ? { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text });
 
 /**
- * The same read for a running `serve`, at each tick (#276): the default branch serve found at its start, fetched now,
+ * The same read for a running `serve`, every few minutes (#276): the default branch serve found at its start, fetched now,
  * without blocking the loop's event loop while git talks to GitHub. A fetch that fails (offline) reads nothing:
  * `unfetched`, and serve keeps the settings it has, never an older commit's. The developer works in this clone
  * meanwhile, so the fetch writes only a ref of serve's own (refs/factory/serve/<branch>; --refmap= keeps git from
  * moving origin's ref with it) and no FETCH_HEAD: their own fetch never meets serve's lock on origin's ref, and their
  * `git pull` never merges what serve fetched. `git(args)` resolves to {code, stdout}.
  */
-export async function committedWorkflowNow(dir, branch, { git = (args) => exec("git", ["-C", dir, ...args], { timeoutMs: 60_000 }) } = {}) {
+export async function committedWorkflowNow(dir, branch, { token = "", timeoutMs = 60_000, git = (args) => exec("git", ["-C", dir, ...args], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs, group: true }) } = {}) {
   const own = `refs/factory/serve/${branch}`;
-  const fetched = await git(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
+  // serve's own token for GitHub, never the developer's credential helper; no maintenance run in their clone; a stalled
+  // transfer ends (http.lowSpeed*), and at the timeout the whole command does, every process it started included.
+  const helper = '!f() { echo username=x-access-token; echo "password=$FACTORY_LOCAL_TOKEN"; }; f';
+  const safe = ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=60"];
+  const fetched = await git([...safe, "fetch", "-q", "--no-tags", "--no-auto-maintenance", "--no-write-fetch-head", "--refmap=", "origin", `+refs/heads/${branch}:${own}`]).catch(() => null);
   if (fetched?.code !== 0) return { wf: {}, pins: [], branch, error: `origin/${branch} could not be fetched`, unfetched: true };
-  const r = await git(["show", `${own}:.github/workflows/factory.yml`]).catch(() => null);
+  const r = await git(["-c", "core.fsmonitor=", "show", `${own}:.github/workflows/factory.yml`]).catch(() => null);
   return committedWorkflow(r?.code === 0 ? String(r.stdout) : null, branch);
 }
 

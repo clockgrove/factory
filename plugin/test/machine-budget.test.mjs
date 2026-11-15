@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PRESSURE, defaultStages, loopCap, machineBudget, machineRoom, readPressure, saturation, slotHolders, slotsDir, takeSlot } from "../scripts/lib/machine.mjs";
 import { machineChecks } from "../scripts/doctor.mjs";
 import { Local } from "../scripts/local.mjs";
-import { bootId } from "../scripts/lib/proc.mjs";
+import { bootId, startTime } from "../scripts/lib/proc.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -43,12 +43,13 @@ test("machineBudget: the machine's own setting, else a quarter of its threads an
   assert.equal(loopCap("nope", 5), 5);
 });
 
-test("readPressure and saturation: Linux PSI where present, else load per CPU thread; MemAvailable and memory PSI", () => {
-  // The Clockgrove box on 2026-11-15 at 00:43: CPU pressure 11%, 24 GB available: saturated on CPU.
-  const box = readPressure({ root: proc({ cpu: 11, mem: 0, load: 23.5, availGb: 24 }), cpus: 24 });
-  assert.deepEqual([box.cpuPsi, box.memPsi, box.load, box.memAvailable], [11, 0, 23.5, 24 * GB]);
+test("readPressure and saturation: Linux CPU PSI over a minute where present, else load per CPU thread; MemAvailable and memory PSI", () => {
+  // CPU is judged on PSI's avg60: a busy box idles at 9-13% on avg10, which swings across any threshold tick to tick.
+  const box = readPressure({ root: proc({ cpu: 15, cpu10: 4, mem: 0, load: 23.5, availGb: 24 }), cpus: 24 });
+  assert.deepEqual([box.cpuPsi, box.memPsi, box.load, box.memAvailable], [15, 0, 23.5, 24 * GB]);
   assert.equal(saturation(box).code, "cpu");
-  assert.match(saturation(box).why, /CPU pressure 11% \(at least 10%\)/);
+  assert.match(saturation(box).why, /CPU pressure 15% over a minute \(at least 15%\)/);
+  assert.equal(saturation(readPressure({ root: proc({ cpu: 11, cpu10: 50, mem: 0 }), cpus: 24 })), null, "a 10-second spike over a calm minute holds nothing");
   assert.equal(saturation(readPressure({ root: proc({ cpu: 3, mem: 0, load: 23.5 }), cpus: 24 })), null, "with PSI, the load average is not judged");
   // No PSI: the load average against the CPU threads.
   const noPsi = (load) => readPressure({ root: proc({ cpu: null, mem: null, load }), cpus: 24 });
@@ -110,6 +111,40 @@ test("slots: processes share the budget, and a holder killed with SIGKILL frees 
   }
 });
 
+test("slots: loops taking the last slot at once leave exactly one of them holding it (#309)", async () => {
+  const lib = pathToFileURL(join(here, "..", "scripts", "lib", "machine.mjs")).href;
+  for (let round = 0; round < 6; round += 1) {
+    const dir = slotsDir(home());
+    // Each racer waits for one shared moment, then takes a slot of a budget of 1.
+    const at = Date.now() + 700;
+    const racers = await Promise.all(
+      Array.from({ length: 5 }, () => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", `import { takeSlot } from ${JSON.stringify(lib)}; while (Date.now() < ${at}); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: 1 }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
+        return new Promise((ok) => {
+          let out = "";
+          child.stdout.on("data", (c) => ((out += c), out.includes("\n") && ok({ child, taken: out.startsWith("taken") })));
+        });
+      }),
+    );
+    try {
+      const taken = racers.filter((r) => r.taken);
+      assert.equal(taken.length, 1, `round ${round}: one racer keeps the slot`);
+      assert.deepEqual(slotHolders(dir).map((h) => h.pid), [taken[0].child.pid]);
+    } finally {
+      for (const r of racers) await killed(r.child);
+    }
+  }
+});
+
+test("slots: without a boot id, a recorded start time that differs from the pid's own means the holder is gone", () => {
+  const dir = slotsDir(home());
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "1-reused.json"), JSON.stringify({ pid: process.pid, start: "1", boot: null, repo: "o/a" }));
+  writeFileSync(join(dir, "2-same.json"), JSON.stringify({ pid: process.pid, start: startTime(process.pid), boot: null, repo: "o/b" }));
+  assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/b"]);
+  assert.deepEqual(readdirSync(dir), ["2-same.json"]);
+});
+
 test("slots: a record from another boot, or a pid now running another process, holds nothing", () => {
   const dir = slotsDir(home());
   mkdirSync(dir, { recursive: true });
@@ -133,7 +168,7 @@ test("slots: a record from another boot, or a pid now running another process, h
  * A GitHub for several repositories' Objectives, Queued until a dispatch labels them: `issues` is {"o/a": [1, 2]}. A
  * label write lands on the issue, so the next listing shows it Running.
  */
-async function fakeGitHub(issues) {
+async function fakeGitHub(issues, { onList = () => {} } = {}) {
   const labels = new Map();
   for (const [repo, ns] of Object.entries(issues)) for (const n of ns) labels.set(`${repo}#${n}`, new Set(["factory:objective"]));
   const issue = (repo, n) => ({ number: n, title: "t", body: "", state: "open", labels: [...labels.get(`${repo}#${n}`)].map((name) => ({ name })), updated_at: new Date().toISOString() });
@@ -148,6 +183,7 @@ async function fakeGitHub(issues) {
       const repo = m?.[1];
       if (m && !m[2] && req.method === "GET") {
         const want = url.searchParams.get("labels");
+        if (want === "factory:objective") onList();
         return send(200, (issues[repo] || []).map((n) => issue(repo, n)).filter((i) => !want || i.labels.some((l) => l.name === want)));
       }
       const set = m?.[2] ? labels.get(`${repo}#${m[2]}`) : null;
@@ -165,8 +201,8 @@ async function fakeGitHub(issues) {
 }
 
 /** A loop (fixtures/budget-loop.mjs) for `repo` in its own process: its output lines, and `until(fn)` to wait on them. */
-function loopProcess({ repo, homeDir, procDir, api }) {
-  const child = spawn(process.execPath, [join(here, "fixtures", "budget-loop.mjs")], { env: { ...process.env, HOME: homeDir, LOOP_REPO: repo, LOOP_PROC: procDir, GITHUB_API_URL: api, FACTORY_LOCAL_MAX_CONCURRENT: "" }, stdio: ["ignore", "pipe", "pipe"] });
+function loopProcess({ repo, homeDir, procDir, api, cap = "" }) {
+  const child = spawn(process.execPath, [join(here, "fixtures", "budget-loop.mjs")], { env: { ...process.env, HOME: homeDir, LOOP_REPO: repo, LOOP_PROC: procDir, GITHUB_API_URL: api, FACTORY_LOCAL_MAX_CONCURRENT: cap }, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
   const waiters = new Set();
   const onData = (c) => {
@@ -196,10 +232,12 @@ test("serve: two loops of two repositories share one machine budget; a killed lo
   const homeDir = home(3);
   const procDir = proc({});
   const gh = await fakeGitHub({ "o/a": [1, 2], "o/b": [1, 2, 3] });
-  const a = loopProcess({ repo: "o/a", homeDir, procDir, api: gh.url });
+  // o/a's own cap (8) is above the budget: its start line names the cap it runs at, the budget's.
+  const a = loopProcess({ repo: "o/a", homeDir, procDir, api: gh.url, cap: "8" });
   let b = null;
   try {
     await a.until(() => a.started() === 2, "o/a to start both its Objectives");
+    assert.ok(a.lines.some((l) => /this loop: at most 3, the budget \(FACTORY_LOCAL_MAX_CONCURRENT 8 is above it\)/.test(l)), "the start line states the cap the loop runs at");
     b = loopProcess({ repo: "o/b", homeDir, procDir, api: gh.url });
     await b.until(() => b.started() === 1, "o/b to start one");
     const from = b.ticks();
@@ -228,7 +266,7 @@ test("serve: a saturated machine holds new starts, said in the tick line, but a 
     await c.until(() => c.ticks() >= from + 3, "three more ticks");
     assert.equal(c.started(), 1, "nothing more starts while the machine is saturated");
     const held = c.lines.filter((l) => /tick: /.test(l)).slice(-1)[0];
-    assert.match(held, /the machine is saturated: CPU pressure 50% \(at least 10%\)/);
+    assert.match(held, /the machine is saturated: CPU pressure 50% over a minute \(at least 15%\)/);
     assert.equal(held.match(/saturated/g).length, 1, "said once in the line");
     fakeProc(procDir, { cpu: 1 });
     await c.until(() => c.started() === 3, "the rest once the load falls");
@@ -238,7 +276,7 @@ test("serve: a saturated machine holds new starts, said in the tick line, but a 
   }
 });
 
-test("run and review hold one slot of the machine's budget while they run, whatever the machine holds (#309)", () => {
+test("run and review hold one slot of the machine's budget for each stage while it runs, whatever the machine holds, and none after it (#309)", async () => {
   const homeDir = home(1);
   const dir = slotsDir(homeDir);
   const other = takeSlot({ dir, budget: 1, holder: { repo: "o/x", issue: 4 } });
@@ -246,15 +284,62 @@ test("run and review hold one slot of the machine's budget while they run, whate
   const write = process.stdout.write;
   process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
   try {
-    const loop = Object.assign(Object.create(Local.prototype), { repoFull: "o/r", wf: {}, machine: { home: homeDir, proc: proc({}) } });
-    const slot = loop.holdSlot({ issue: 12, stage: "run", cmd: "run" });
-    assert.deepEqual(slotHolders(dir).map((h) => [h.repo, h.issue, h.cmd ?? null]).sort(), [["o/r", 12, "run"], ["o/x", 4, null]]);
+    const during = [];
+    const loop = Object.assign(Object.create(Local.prototype), {
+      repoFull: "o/r",
+      wf: {},
+      solo: "run",
+      machine: { home: homeDir, proc: proc({}) },
+      startStage: async (issue, name) => {
+        during.push(slotHolders(dir).map((h) => [h.repo, h.issue, h.stage ?? null, h.cmd ?? null]).sort());
+        return { exit: "delivered", stage: name };
+      },
+    });
+    await loop.stage(12, "work", "worker.mjs", []);
+    assert.deepEqual(during, [[["o/r", 12, "work", "run"], ["o/x", 4, null, null]]], "the stage holds a slot while it runs");
     assert.ok(lines.some((l) => /#12: the machine's budget is full \(1 of 1 stage\(s\) held on this machine\); one stage starts, as this loop holds none/.test(l)));
-    slot.release();
-    assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/x"]);
+    assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/x"], "and none once it ends: following the PR to its merge holds no slot");
+    await assert.rejects(loop.stage.call(Object.assign(loop, { startStage: async () => { throw new Error("no clone"); } }), 12, "review", "review.mjs", []), /no clone/);
+    assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/x"], "a stage that fails to start lets its slot go");
   } finally {
     process.stdout.write = write;
     other.release();
+  }
+});
+
+test("serve: a review starts as soon as its slot is taken, never held idle through the dispatch (#309)", async () => {
+  const homeDir = home(3);
+  let reviewing = false;
+  let seenAtList = null;
+  const gh = await fakeGitHub({ "o/r": [1] }, { onList: () => (seenAtList ??= reviewing) });
+  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL };
+  Object.assign(process.env, { GITHUB_API_URL: gh.url, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" });
+  try {
+    const loop = Object.assign(Object.create(Local.prototype), {
+      repo: { owner: "o", name: "r", full: "o/r" },
+      repoFull: "o/r",
+      token: "t",
+      notice: null,
+      wf: {},
+      opts: { token: "t" },
+      children: new Set(),
+      machine: { home: homeDir, proc: proc({}) },
+      baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "9" }),
+      cleanup: async () => {},
+      pausedHere: async () => [],
+      pendingReviews: async () => [{ issue: 5, pr: 9, labels: [] }],
+      withClaim: (n, fn) => fn(),
+      review: async () => {
+        reviewing = true;
+        return { exit: "delivered" };
+      },
+      runObjective: async () => ({ exit: "delivered" }),
+    });
+    await loop.serve({ once: true });
+    assert.equal(seenAtList, true, "the review was running when the dispatcher read the Objectives");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+    await gh.close();
   }
 });
 
@@ -268,7 +353,14 @@ test("doctor --local: the machine's budget, who holds its slots, and its load (#
     assert.match(by["machine budget"].detail, /^4 stage\(s\) at once on this machine, shared by every Factory loop here \(.*machine\.json\)$/);
     assert.equal(by["machine slots"].detail, `1 of 4 held: pid ${h.child.pid} o/a #7 work`);
     assert.equal(by["machine load"].status, "WARN");
-    assert.match(by["machine load"].detail, /^CPU pressure 30%, memory pressure 0%, 12\.0 GB memory available: saturated/);
+    assert.match(by["machine load"].detail, /^CPU pressure 30% over a minute, memory pressure 0%, 12\.0 GB memory available: saturated/);
+    assert.equal(by.FACTORY_LOCAL_MAX_CONCURRENT, undefined, "no cap set: no warning");
+    const over = machineChecks({ env: { FACTORY_LOCAL_MAX_CONCURRENT: "8" }, local: true, home: homeDir, proc: proc({}) });
+    const warn = over.find((r) => r.name === "FACTORY_LOCAL_MAX_CONCURRENT");
+    assert.equal(warn?.status, "WARN", "a loop cap above the budget is named");
+    assert.match(warn.detail, /^8 is above this machine's stage budget of 4/);
+    assert.ok(warn.fix.includes(join(homeDir, ".cache", "factory", "machine.json")), "the fix names machine.json");
+    assert.equal(machineChecks({ env: { FACTORY_LOCAL_MAX_CONCURRENT: "4" }, local: true, home: homeDir, proc: proc({}) }).some((r) => r.name === "FACTORY_LOCAL_MAX_CONCURRENT"), false);
     assert.deepEqual(machineChecks({ env: { GITHUB_ACTIONS: "true" }, local: true, home: homeDir }), [], "not inside a job");
     const bad = machineChecks({ env: {}, local: true, home: home("x"), proc: proc({}) });
     assert.equal(bad[0].status, "WARN");

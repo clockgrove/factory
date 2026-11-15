@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } fr
 import { availableParallelism, homedir, loadavg, totalmem } from "node:os";
 import { join } from "node:path";
 import { writeNew } from "./fsafe.mjs";
-import { processRecord, sameProcess } from "./proc.mjs";
+import { processRecord, sameProcess, startTime } from "./proc.mjs";
 
 const GB = 2 ** 30;
 
@@ -63,13 +63,21 @@ const alive = (pid) => {
   }
 };
 
-/** Whether a slot's holder is gone: proc.mjs sameProcess, and where that cannot tell, whether its pid runs at all. */
+/**
+ * Whether a slot's holder is gone: proc.mjs sameProcess; where that cannot tell (no boot id), whether its pid runs at all
+ * and, when both start times read, whether that pid started when the record says.
+ */
 const holderGone = (rec) => {
   const same = sameProcess(rec);
   if (same !== null) return !same;
   const pid = Number(rec?.pid);
-  return !Number.isInteger(pid) || pid <= 1 || !alive(pid);
+  if (!Number.isInteger(pid) || pid <= 1 || !alive(pid)) return true;
+  const now = startTime(pid);
+  return !!now && /^\d+$/.test(String(rec.start ?? "")) && now !== String(rec.start);
 };
+
+/** The order slots were taken in: their precise time, then their file name, so every reader orders them alike. */
+const takenOrder = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
 
 /**
  * The slots held on this machine now: each live holder's record with its `file`. A record whose holder is gone is
@@ -114,7 +122,7 @@ export function slotHolders(dir = slotsDir(), { reap = true } = {}) {
     }
     out.push({ ...rec, file });
   }
-  return out.sort((a, b) => String(a.since).localeCompare(String(b.since)));
+  return out.sort(takenOrder);
 }
 
 let self = null;
@@ -130,19 +138,25 @@ const writeSlot = (dir, name, rec) => {
 
 /**
  * Take one slot of the machine's budget for this process: a slot handle, or null when the budget is full. The slot is
- * written first and the live slots counted after, so of two loops that take the last slot at once, neither holds more
- * than the budget (both may let go, and take it on a later tick). `force`: taken whatever the count (a loop holding no
- * slot always runs one stage). `holder`: what it runs, {repo, issue, stage, cmd}.
+ * written first and the live slots counted after; when they are over the budget, the slot stays only if it is among the
+ * `budget` taken first (`at`, the time it was taken to the microsecond, then its file name). Loops that take the last
+ * slot at once all order the slots alike, so one of them keeps it and the others let go. `force`: taken whatever the
+ * count (a loop holding no slot always runs one stage). `holder`: what it runs, {repo, issue, stage, cmd}.
  */
 export function takeSlot({ dir = slotsDir(), budget, force = false, holder = {} }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const name = `${process.pid}-${randomBytes(6).toString("hex")}.json`;
-  let rec = { ...selfRecord(), ...holder, since: new Date().toISOString() };
+  // `at`: this machine's clock in milliseconds with microseconds (performance's), so two takes in one millisecond order.
+  let rec = { ...selfRecord(), ...holder, since: new Date().toISOString(), at: performance.timeOrigin + performance.now() };
   writeSlot(dir, name, rec);
   const file = join(dir, name);
-  if (!force && slotHolders(dir).length > budget) {
-    rmSync(file, { force: true });
-    return null;
+  if (!force) {
+    const live = slotHolders(dir);
+    const rank = live.findIndex((h) => h.file === file);
+    if (live.length > budget && (rank < 0 || rank >= budget)) {
+      rmSync(file, { force: true });
+      return null;
+    }
   }
   return {
     file,
@@ -162,16 +176,18 @@ export function takeSlot({ dir = slotsDir(), budget, force = false, holder = {} 
 }
 
 /**
- * When the machine counts as saturated, so a loop holds new starts: CPU pressure (Linux PSI, `some` avg10, percent of
- * time a runnable task waited for a CPU) at or above `cpuPsi`; without PSI, the 1-minute load average at or above `load`
- * per CPU thread; memory pressure (PSI `some` avg10) at or above `memPsi`; or less than `memAvailable` bytes of memory
- * available (Linux MemAvailable).
+ * When the machine counts as saturated, so a loop holds new starts: CPU pressure (Linux PSI, `some` avg60, percent of
+ * time a runnable task waited for a CPU over the last minute) at or above `cpuPsi`; without PSI, the 1-minute load
+ * average at or above `load` per CPU thread; memory pressure (PSI `some` avg10) at or above `memPsi`; or less than
+ * `memAvailable` bytes of memory available (Linux MemAvailable). CPU is judged on the minute, since a busy machine's
+ * 10-second CPU pressure swings across any threshold from one tick to the next.
  */
-export const PRESSURE = Object.freeze({ cpuPsi: 10, load: 0.9, memPsi: 10, memAvailable: 4 * GB });
+export const PRESSURE = Object.freeze({ cpuPsi: 15, load: 0.9, memPsi: 10, memAvailable: 4 * GB });
 
-const avg10 = (file) => {
+/** A PSI file's `some` line's average over `window` (avg10 or avg60), a percent; null when it cannot be read. */
+const psiSome = (file, window) => {
   try {
-    const m = /^some avg10=(\d+(?:\.\d+)?)/m.exec(readFileSync(file, "utf8"));
+    const m = new RegExp(`^some .*\\b${window}=(\\d+(?:\\.\\d+)?)`, "m").exec(readFileSync(file, "utf8"));
     return m ? Number(m[1]) : null;
   } catch {
     return null;
@@ -180,7 +196,8 @@ const avg10 = (file) => {
 
 /**
  * The machine's load now, read from `root` (Linux's /proc; a test's own directory laid out the same):
- * `{cpuPsi, memPsi, load, cpus, memAvailable}`, each null where it cannot be read. Without a loadavg file there, the
+ * `{cpuPsi, memPsi, load, cpus, memAvailable}` (cpuPsi CPU pressure's avg60, memPsi memory pressure's avg10), each null
+ * where it cannot be read. Without a loadavg file there, the
  * load is Node's (macOS); MemAvailable is read on Linux only, so elsewhere memory is not judged.
  */
 export function readPressure({ root = "/proc", cpus = availableParallelism() } = {}) {
@@ -197,7 +214,7 @@ export function readPressure({ root = "/proc", cpus = availableParallelism() } =
   } catch {
     // not Linux
   }
-  return { cpuPsi: avg10(join(root, "pressure", "cpu")), memPsi: avg10(join(root, "pressure", "memory")), load: Number.isFinite(load) ? load : null, cpus, memAvailable };
+  return { cpuPsi: psiSome(join(root, "pressure", "cpu"), "avg60"), memPsi: psiSome(join(root, "pressure", "memory"), "avg10"), load: Number.isFinite(load) ? load : null, cpus, memAvailable };
 }
 
 const pct = (n) => `${Number(n.toFixed(1))}%`;
@@ -205,7 +222,7 @@ const gb = (n) => `${(n / GB).toFixed(1)} GB`;
 
 /** The machine's load as one line, for the tick line and doctor. */
 export function pressureLine(p) {
-  const cpu = p.cpuPsi !== null ? `CPU pressure ${pct(p.cpuPsi)}` : p.load !== null ? `load ${p.load.toFixed(1)} on ${p.cpus} CPU threads` : "CPU load unknown";
+  const cpu = p.cpuPsi !== null ? `CPU pressure ${pct(p.cpuPsi)} over a minute` : p.load !== null ? `load ${p.load.toFixed(1)} on ${p.cpus} CPU threads` : "CPU load unknown";
   const mem = [p.memPsi !== null ? `memory pressure ${pct(p.memPsi)}` : "", p.memAvailable !== null ? `${gb(p.memAvailable)} memory available` : ""].filter(Boolean).join(", ");
   return mem ? `${cpu}, ${mem}` : cpu;
 }
@@ -213,7 +230,7 @@ export function pressureLine(p) {
 /** Why the machine is saturated by PRESSURE (`limits`), `{code: "cpu" | "memory", why}`, or null when it is not. */
 export function saturation(p, limits = PRESSURE) {
   if (p.cpuPsi !== null ? p.cpuPsi >= limits.cpuPsi : p.load !== null && p.load >= limits.load * p.cpus) {
-    return { code: "cpu", why: p.cpuPsi !== null ? `CPU pressure ${pct(p.cpuPsi)} (at least ${limits.cpuPsi}%)` : `load ${p.load.toFixed(1)} on ${p.cpus} CPU threads (at least ${limits.load} per thread)` };
+    return { code: "cpu", why: p.cpuPsi !== null ? `CPU pressure ${pct(p.cpuPsi)} over a minute (at least ${limits.cpuPsi}%)` : `load ${p.load.toFixed(1)} on ${p.cpus} CPU threads (at least ${limits.load} per thread)` };
   }
   if (p.memPsi !== null && p.memPsi >= limits.memPsi) return { code: "memory", why: `memory pressure ${pct(p.memPsi)} (at least ${limits.memPsi}%)` };
   if (p.memAvailable !== null && p.memAvailable < limits.memAvailable) return { code: "memory", why: `${gb(p.memAvailable)} memory available (under ${gb(limits.memAvailable)})` };

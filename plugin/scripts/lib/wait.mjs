@@ -80,12 +80,14 @@ export function movesQueue(e, objectiveLabel) {
 }
 
 /**
- * Whether an event puts an Objective back to work (Queued, Running or In review): its Objective label on, a Blocked or
- * Question label off, the Running or In review label on, the draft label off, or a reopen. A drain told before it can
+ * Whether an event puts an Objective back to work (Queued, Running or In review), on an issue open, no draft and
+ * carrying the Objective label as read: its Objective label on, a Blocked or Question label off, the Running or In
+ * review label on, the draft label off, or a reopen. A drain told before it can
  * then be told again, even when the read after it finds the queue drained once more.
  */
 export function activates(e, objectiveLabel) {
-  if (!e?.issue || e.issue.pull_request) return false;
+  // Only on an Objective that can run: a closed, draft or stopped one's labels coming off (the Done pass's tidy) resume nothing.
+  if (!e?.issue || e.issue.pull_request || e.issue.state !== "open" || isDraft(e.issue) || !names(e.issue).includes(objectiveLabel)) return false;
   const label = e.label?.name;
   if (e.event === "labeled") return label === objectiveLabel || label === "factory:running" || label === "factory:in-review";
   if (e.event === "unlabeled") return label === "factory:blocked" || label === "factory:question" || label === DRAFT_LABEL;

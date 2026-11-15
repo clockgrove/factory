@@ -243,6 +243,9 @@ test("drained again within one read (#285 review): an Objective back to work and
   // Both steps happen between two reads: #6 re-queued, run and Blocked again while #5 has Blocked.
   const r = await waiting(gh, [() => gh.state(5, "factory:blocked"), () => (gh.state(6, null), gh.state(6, "factory:running"), gh.state(6, "factory:blocked")), () => gh.event(5, "closed")], { follow: true, timeoutMs: 125_000, kinds: ["drained"] });
   assert.deepEqual(r.lines.map((l) => l.event), ["drained", "drained", "timeout"], "the close of a Blocked one is no new drain");
+  // The Done pass's tidy of a closed Blocked one (its state label off) resumes nothing: no drain again.
+  const tidy = await waiting(gh, [() => (gh.event(6, "closed"), gh.event(6, "unlabeled", "factory:blocked"))], { since: parseCursor(r.lines.at(-1).cursor), follow: true, timeoutMs: 35_000, kinds: ["drained"] });
+  assert.deepEqual(tidy.lines.map((l) => l.event), ["timeout"]);
 });
 
 test("a wait whose kinds leave drained out (#285 review) carries no queue state on its cursor, so a later wait tells the drain", async () => {

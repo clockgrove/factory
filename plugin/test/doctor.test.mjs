@@ -241,6 +241,60 @@ test("doctor without --checkout takes the settings from the default branch's wor
   }
 });
 
+test("doctor and serve warn when the installed plugin is older than the release the workflow pins, and say how to update (#299)", async () => {
+  const { githubChecks, pluginVersionCheck } = await import("../scripts/doctor.mjs");
+  const { committedWorkflowEnv } = await import("../scripts/lib/local.mjs");
+  const { pluginLine } = await import("../scripts/local.mjs");
+  const { FACTORY_VERSION } = await import("../scripts/lib/inputs.mjs");
+  const [maj, min, pat] = FACTORY_VERSION.split(".").map(Number);
+  const newer = `v${maj}.${min}.${pat + 1}`;
+  const flow = (ref) => `on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${ref}\n`;
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  let pinned = newer;
+  globalThis.fetch = async (url) => {
+    const path = new URL(String(url)).pathname;
+    const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
+    if (path === "/repos/o/r") return json(200, { default_branch: "main" });
+    if (path === "/repos/o/r/contents/.github/workflows/factory.yml") return new Response(flow(pinned), { status: 200 });
+    if (path === "/repos/o/r/rulesets") return json(200, []);
+    if (path === "/graphql") return json(200, { data: {} });
+    return json(404, { message: "Not Found" });
+  };
+  const inputs = { repo: "o/r", objectiveLabel: "factory:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
+  const env = { GITHUB_WORKSPACE: mkdtempSync(join(tmpdir(), "ws-")) };
+  const row = async (job) => (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env, job })).filter((c) => c.name === "plugin version");
+  try {
+    const [old] = await row(false);
+    assert.equal(old.status, "WARN");
+    assert.equal(old.detail, `the installed plugin is v${FACTORY_VERSION}, older than clockgrove/factory@${newer}, which the workflow pins: a session's skills and local mode's stages run the older release`);
+    assert.match(old.fix, /claude plugin update factory@clockgrove/);
+    assert.match(old.fix, /codex plugin add factory@clockgrove/);
+    assert.match(old.fix, /copilot plugin update factory@clockgrove/);
+    assert.deepEqual(await row(true), [], "a job's plugin is the Action it pins");
+    pinned = `v${FACTORY_VERSION}`;
+    assert.equal((await row(false))[0].status, "PASS");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+  // By the numbers, not the text: v0.9.30 is newer than v0.9.4; a commit or a floating tag is no release to compare.
+  assert.equal(pluginVersionCheck(flow("v0.9.30"), "0.9.4").status, "WARN");
+  assert.equal(pluginVersionCheck(flow("v0.9.4"), "0.9.30").status, "PASS");
+  assert.equal(pluginVersionCheck(flow("v1.0.0"), "0.10.2").status, "WARN");
+  assert.equal(pluginVersionCheck(flow("v0.9"), "0.9.4"), null);
+  assert.equal(pluginVersionCheck(flow("0123456789abcdef0123456789abcdef01234567"), "0.9.4"), null);
+  // serve's start: the default branch's committed workflow, read through git.
+  const git = (text) => (args) => (args[0] === "show" ? (text === null ? { status: 128, stdout: "" } : { status: 0, stdout: text }) : args[0] === "ls-remote" ? { status: 0, stdout: "ref: refs/heads/main\tHEAD\n" } : { status: 0, stdout: "" });
+  const line = pluginLine(committedWorkflowEnv("/clone", { git: git(flow(newer)) }));
+  assert.match(line, new RegExp(`^the installed plugin is v${FACTORY_VERSION.replace(/\./g, "\\.")}, older than clockgrove/factory@${newer.replace(/\./g, "\\.")}`));
+  assert.match(line, /; update the plugin, then start a new session: /);
+  assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(flow(`v${FACTORY_VERSION}`)) })), null);
+  assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(null) })), null, "no workflow on the default branch: nothing to compare");
+});
+
 test("mintInstallationToken reads a personal account from the installation and stops requiring projects there; an organization's still needs it (#199)", () => {
   const lib = join(import.meta.dirname, "..", "scripts", "lib", "app-token.mjs");
   const script = `

@@ -1097,7 +1097,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       // after that rerun.
       const isInfra = async (runs) => !!runs?.length && !!(await triage?.infra?.({ sha, failedRuns: runs }).catch(() => false));
       const infra = a.rerun ? (await isInfra(before)) && (await isInfra(r.failedRuns)) : !!a.already && (await isInfra(before));
-      return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command };
+      // The rerun's own red, when one was made: it can fail another way than the red the fix pass had (a checkout that
+      // got through, then a test), and a fresh worker pass is handed that one.
+      return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command, ...(a.rerun ? { rerunRed: { fromChecks: true, sha, failedRuns: r.failedRuns, failed: { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } } } : {}) };
     }
     // A required check whose job GitHub never started (no step, no runner: a billing lock, a spending limit, a runner
     // label nothing serves) is infrastructure no change can fix: no triage, no rerun, no fix pass; the stage Blocks.
@@ -1128,6 +1130,26 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       }
     }
     return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, refusal: triaged, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
+  };
+  /**
+   * What a red hands a fix pass: for one the required checks found, each failing job's whole log, whether the default
+   * branch's latest run of the same job fails with the same signature, and the diff since the PR's last green head
+   * (reds.mjs); the failures in the ask; the lead a Block quotes (each failing job's own failure lines first, its
+   * signature as triage reads it) and the tail after it.
+   */
+  const redOf = async (v) => {
+    const failed = v.failed;
+    const detail = v.fromChecks && v.failedRuns?.length && !failed.timedOut ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null }).catch((e) => {
+      log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
+      return null;
+    }) : null;
+    const failures = detail?.jobs.length
+      ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
+      : v.failures?.length
+        ? v.failures
+        : [failed];
+    const lead = failureLead((detail?.jobs || []).filter((j) => !j.aggregate).map((j) => ({ name: j.name, line: j.sig.line, lines: j.sig.lines }))) || failureLead(v.refusal?.jobs);
+    return { detail, failures, lead, tail: leadDetail(lead, failed.output) };
   };
   // A red's part of a fix pass's ask: each failing command or job, its exit, its whole output's file, the evidence and
   // its tail (one 6000-character window shared by the failures; each full log is on disk), and the diff since the PR's
@@ -1218,7 +1240,14 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         if (onPhase) await onPhase(`${label}: ${said}`);
         if (!denied) {
           freshHeads.set(head, v.unchanged);
-          const ended = await fixPass(lastFix, { fresh: true });
+          // The red as it stands after the head's rerun, when one was made: the fresh pass and the Block quote that one.
+          let red = lastFix;
+          if (v.rerunRed?.failedRuns?.length) {
+            const now = await redOf(v.rerunRed);
+            red = { ...lastFix, ...now, rec: lastFix.rec };
+            lastLead = now.lead || lastLead;
+          }
+          const ended = await fixPass(red, { fresh: true });
           if (ended) return ended;
           continue;
         }
@@ -1250,12 +1279,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     last = v;
     if (v.green) return { green: true, passes, lastOutput: "", usage };
     const failed = v.failed;
-    // A red the required checks found: each failing job's whole log, whether the default branch's latest run of the same
-    // job fails with the same signature, and the diff since the PR's last green head (reds.mjs).
-    const detail = v.fromChecks && v.failedRuns?.length && !failed.timedOut ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null }).catch((e) => {
-      log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
-      return null;
-    }) : null;
+    const { detail, failures, lead, tail } = await redOf(v);
     // Every failing job fails the same way on the default branch: not this change's, so no fix pass; handed back.
     if (allOnBase(detail)) {
       const reason = baseFailureReason(detail);
@@ -1263,16 +1287,6 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (onPhase) await onPhase(`${label} pass ${passes} red: ${reason}; handed back, no fix run`);
       return { green: false, passes, lastOutput: failed.output.slice(-6000), command: failed.command, usage, baseFailure: reason };
     }
-    const failures = [
-      ...(detail?.jobs.length
-        ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
-        : v.failures?.length
-          ? v.failures
-          : [failed]),
-    ];
-    // What a Block quotes: each failing job's own failure lines first (its signature, as triage reads it), then the tail.
-    const lead = failureLead((detail?.jobs || []).filter((j) => !j.aggregate).map((j) => ({ name: j.name, line: j.sig.line, lines: j.sig.lines }))) || failureLead(v.refusal?.jobs);
-    const tail = leadDetail(lead, failed.output);
     lastLead = lead;
     log(`${label} pass ${passes} red: ${failures.map((f) => `${f.command}${f.timedOut ? " (timed out)" : ""}`).join("; ")}`);
     // The head validated (the checks' or the checkout's) is a merge Factory made and pushed itself: its red is not the

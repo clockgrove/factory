@@ -2,6 +2,7 @@
 // this suite, run at once, and other checkouts' suites. A port a test closes and only then hands on can be taken in
 // between by any process that asks the kernel for one.
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createServer } from "node:net";
 import { randomInt } from "node:crypto";
 
@@ -28,25 +29,44 @@ function ephemeralLow() {
   }
 }
 
+/** `server` listening on `at` (a port and host, or a Unix socket name), or null when that is taken. */
+async function listenOn(server, ...at) {
+  return new Promise((resolve) => {
+    server.once("error", () => resolve(null));
+    server.listen(...at, () => resolve(server));
+  });
+}
+
+/**
+ * Reserve loopback `port` among the callers of this module, in any process of this machine: {release} while no one
+ * else holds it, else null. A Unix socket named for the port, held: in Linux's abstract namespace, so it goes with the
+ * process however that ends.
+ */
+export async function reservePort(port) {
+  const name = process.platform === "linux" ? `\0factory-test-port-${port}` : join("/tmp", `factory-test-port-${port}.sock`);
+  const lock = await listenOn(createServer((socket) => socket.destroy()), name);
+  return lock && { release: () => new Promise((r) => lock.close(r)) };
+}
+
 /**
  * A free loopback port, from 20000 up to the kernel's ephemeral range, for a listener the code under test binds by
- * number on this machine's own network: no listen(0) or outgoing connection of any process is handed a port there, so
- * only a listener that names this very number could take it before the code under test does.
+ * number on this machine's own network, reserved until `release()` (reservePort): no listen(0) or outgoing connection of
+ * any process is handed a port there, and no other caller of this helper gets it while it is reserved. Only a listener
+ * that names this very number unasked could take it before the code under test does.
  */
 export async function unhandedPort() {
   const low = ephemeralLow();
   if (low <= 20000) throw new Error(`this machine hands out ports from ${low}: no port below its range is left for the test`);
   for (let tries = 0; tries < 50; tries++) {
     const port = randomInt(20000, low);
-    const probe = createServer();
-    const free = await new Promise((resolve) => {
-      probe.once("error", () => resolve(false));
-      probe.listen(port, "127.0.0.1", () => resolve(true));
-    });
-    if (free) {
+    const held = await reservePort(port);
+    if (!held) continue;
+    const probe = await listenOn(createServer(), port, "127.0.0.1");
+    if (probe) {
       await new Promise((r) => probe.close(r));
-      return port;
+      return { port, release: held.release };
     }
+    await held.release();
   }
   throw new Error(`no free loopback port between 20000 and ${low}`);
 }

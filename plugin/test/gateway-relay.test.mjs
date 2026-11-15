@@ -474,8 +474,9 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   assert.ok(Buffer.byteLength(join(localRelayDir(usageDir), "relay-0123456789ab.sock")) > UNIX_SOCKET_PATH_MAX);
   const shell = { [RELAYED_NAME]: KEY };
   // The stand-in shares this machine's network, where the relay's pick for a namespace of the command's own could be a
-  // port another process holds (the forwarder then cannot listen and the call fails): one no process is handed instead.
-  const port = await unhandedPort();
+  // port another process holds (the forwarder then cannot listen and the call fails): one no process is handed instead,
+  // reserved against every other run of this test until it ends.
+  const { port, release } = await unhandedPort();
   const open = async (o) => Object.assign(await openRelay({ ...o, origin: gw.origin, lookupDelaysMs: [1] }), { port, url: `http://127.0.0.1:${port}` });
   let opened = null;
   try {
@@ -512,6 +513,7 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   } finally {
     if (opened?.relay) await closeWorkerRelay(opened.relay);
     await gw.close();
+    await release();
     rmSync(root, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1711,14 +1713,15 @@ const gate = () => {
 };
 
 test("a blip never shuts the relay: one, three or six clients' retries through one blip, or three clients' through two; each failed attempt is booked, and the next call is relayed (#163)", async () => {
-  // At 1:20: the AI SDK's waits of 2 s and 4 s are 100 ms and 200 ms, a blip of about four seconds is 220 ms, and the
-  // minute a run of unknown costs must last before it shuts the relay is 3 s.
+  // At 1:20: the AI SDK's waits of 2 s and 4 s are 100 ms and 200 ms. A blip of about four seconds fails each client's
+  // first two tries, its retries' third gets through: counted by try, not by the clock, so a loaded machine's late try
+  // still meets the blip it was sent into.
   assert.deepEqual([UNKNOWN_STREAK_SHUT, UNKNOWN_WINDOW_MS, UNKNOWN_STAGE_SHUT, FAST_ERROR_MS], [6, 60_000, 6, 3_000]);
-  let downUntil = 0;
+  let blipTries = 0;
   let failed = 0;
   const gw = await fakeGateway({
-    [LANG]: () => {
-      if (Date.now() < downUntil) {
+    [LANG]: (body) => {
+      if (JSON.parse(body || "{}").attempt < blipTries) {
         failed += 1;
         return edge502;
       }
@@ -1735,13 +1738,19 @@ test("a blip never shuts the relay: one, three or six clients' retries through o
       [3, 2],
     ]) {
       failed = 0;
-      const r = await openRelay({ key: KEY, dir: join(dir, `${clients}-${blips}`), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: UNKNOWN_WINDOW_MS / 20 });
+      // The minute a run of unknown costs must last before it shuts the relay, as in a stage: a blip's retries never last it.
+      const r = await openRelay({ key: KEY, dir: join(dir, `${clients}-${blips}`), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1], unknownWindowMs: UNKNOWN_WINDOW_MS });
       opened.push(r);
       r.beginPass(25);
       const once = () => call(r.socketPath, { token: r.token, path: LANG });
       for (let b = 0; b < blips; b++) {
-        downUntil = Date.now() + 220;
-        const finals = await Promise.all(Array.from({ length: clients }, () => retrying(once, [100, 200])));
+        blipTries = 2;
+        const client = () => {
+          let attempt = 0;
+          return retrying(() => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ attempt: attempt++ }) }), [100, 200]);
+        };
+        const finals = await Promise.all(Array.from({ length: clients }, client));
+        blipTries = 0;
         assert.deepEqual(finals.map((x) => x.status), Array.from({ length: clients }, () => 200), `${clients} client(s) rode blip ${b + 1} out`);
         assert.equal((await once()).status, 200, "the next call is relayed");
       }
@@ -2001,16 +2010,18 @@ test("a pass's end waits for the lookups a bounded time: an estimate still stand
 });
 
 test("a failure that ran long upstream is booked at least $1.00, and counts toward the stage's six; a fast error status does not (#163)", async () => {
+  // The relay reads a call's time upstream on this clock, which only a slow answer moves: no load makes a fast one slow.
+  let upstreamNow = 0;
   const gw = await fakeGateway({
     [LANG]: async (body) => {
       const mode = JSON.parse(body || "{}").mode;
-      if (mode === "slow") await sleep(150);
+      if (mode === "slow") upstreamNow += 1000;
       return { status: 500, body: { error: { type: "internal_server_error", message: "x" } } };
     },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-slow-"));
   // A fast error status within 100 ms here, a slow failure past 100 ms (3 s and 30 s in a stage).
-  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 100, callLog: join(dir, "usage", CALL_LOG) });
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 100, upstreamClock: () => upstreamNow, callLog: join(dir, "usage", CALL_LOG) });
   const go = (mode) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
   try {
     assert.deepEqual([SLOW_FAILURE_MS, SLOW_UNKNOWN_FLOOR_USD], [30_000, 1]);
@@ -2067,17 +2078,18 @@ test("with a cap, a failed call holds the turn for another's record a bounded ti
 
 test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run counts it, never the stage's six; a slow one counts (#163)", async () => {
   assert.deepEqual([408, 409, 500, 502, 503, 504, 529, 400, 402, 424, 499].map(FAST_ERROR_STATUS), [true, true, true, true, true, true, true, false, false, false, false]);
+  // The relay reads a call's time upstream on this clock, which only a slow answer moves: no load makes a fast one slow.
+  let upstreamNow = 0;
   const gw = await fakeGateway({
     [LANG]: async (body) => {
       const { status, slow } = JSON.parse(body || "{}");
-      if (slow) await sleep(600);
+      if (slow) upstreamNow += 1000;
       return { status, body: { error: { message: "x" } } };
     },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-fast4xx-"));
-  // A fast error status within 500 ms here (3 s in a stage): a loaded machine's answer at once still is one, and a slow
-  // one, held past it, never is.
-  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 500 });
+  // A fast error status within 100 ms here (3 s in a stage).
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, upstreamClock: () => upstreamNow });
   const go = (status, slow = false) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ status, slow }) });
   try {
     r.beginPass(100);

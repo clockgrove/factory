@@ -14,8 +14,8 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession } from "./usage.mjs";
-import { OUTAGE, githubOrigin, networkBack, passCutOff, waitingOutages } from "./network.mjs";
+import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
+import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
@@ -842,9 +842,72 @@ export const passesRunning = () => RUNNING;
  * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
  * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
  * stands and the stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
- * harnessShell). A pass this machine's network cut off runs again once the network is back (below), as one record.
+ * harnessShell). A pass this machine's network cut off runs again once the network is back (runCutOff), as one record.
+ * A pass that ended on its subscription's usage limit (usage.mjs usageLimited) is no death, and no other model runs it,
+ * since every model of the subscription draws on the same limit. In a stage (a process that waits outages out) whose
+ * harness reported the reset, the pass waits for it in place when the reset (plus LIMIT.slackMs) falls within the stage's
+ * in-place bound (network.mjs waitBound: fifteen minutes locally, the deadline elsewhere) with LIMIT.minRunMs of its wall
+ * clock left after it, then runs again, from its session when it has one, at most LIMIT.waits times. Otherwise it throws
+ * UsageLimitReached and the stage ends on it (session.mjs usageLimitExit: paused locally until the reset, a
+ * `provider-quota` Block elsewhere). With no reset reported, or outside a stage, the refusal is returned and Blocks as any
+ * refusal does.
  */
 export async function runHarness(opts) {
+  const startedAt = Date.now();
+  const limited = [];
+  let rec = await runCutOff(opts);
+  for (;;) {
+    const r = rec.refusal;
+    if (!usageLimited(r) || !Number.isFinite(r.resetAt) || !waitingOutages()) break;
+    const now = OUTAGE.now();
+    const end = Math.max(r.resetAt, now) + LIMIT.slackMs;
+    const bound = waitBound(now);
+    const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - (end - now) : Infinity;
+    // Nothing left of the dollar cap to run it again with: the pass ends at the cap (a cap of 0 would run uncapped).
+    const spent = [...limited, rec].reduce((s, x) => s + (Number.isFinite(x.usd) ? Math.max(0, x.usd) : 0), 0);
+    if (opts.maxUsd > 0 && opts.maxUsd - spent <= 0) {
+      rec = { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" };
+      break;
+    }
+    if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
+    log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${new Date(r.resetAt).toISOString()}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
+    while (OUTAGE.now() < end) {
+      await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
+      // A stop meanwhile: the stop writes the stage's end (session.mjs stopStage), and nothing more runs.
+      if (stopping()) await parked();
+    }
+    limited.push(rec);
+    const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
+    rec = await runCutOff({ ...opts, maxUsd: opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: LIMIT_PASS_PROMPT } : {}) });
+  }
+  return limited.length ? joinLost(limited, rec, { limit: true }) : rec;
+}
+
+/**
+ * How runHarness waits out a subscription's usage limit: `slackMs` past the reported reset (the provider's clock), at
+ * most `waits` waits for one pass, and at least `minRunMs` of the pass's wall clock left after the wait.
+ */
+export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000 };
+
+/** What a pass that waited out its usage limit is told when its session runs again. */
+export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
+
+/** The code on the error runHarness throws for a usage limit it does not wait for in place (session.mjs usageLimitExit). */
+export const USAGE_LIMIT = "USAGE_LIMIT";
+
+/**
+ * A pass that ended on its subscription's usage limit, reset at `resetAt` (ms), past what the stage waits for in place:
+ * the stage ends on it (session.mjs usageLimitExit). `refusal` is usage.mjs providerRefusal's; `since` (ms) when met.
+ */
+export class UsageLimitReached extends Error {
+  constructor(refusal, { since, label }) {
+    super(`${label}: ${refusal.harness} reached its subscription's usage limit (${refusalFields(refusal)}), which resets at ${new Date(refusal.resetAt).toISOString()}`);
+    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since });
+  }
+}
+
+/** runHarness's pass with its reruns after this machine's network cut it off. */
+async function runCutOff(opts) {
   const startedAt = Date.now();
   const lost = [];
   let rec = await runResumable(opts);
@@ -909,11 +972,12 @@ async function outageCut(rec, { harness, env }) {
 }
 
 /**
- * The record of a pass that ran again after the network cut it off (`lost`, its earlier runs): the last run's outcome,
- * every run's dollars, tokens, turns and credits (usage.mjs mergeUsage), its relayed key spend and sub-agent threads,
- * from the first run's start. `lostToOutage` counts the runs cut off.
+ * The record of a pass that ran again after the network cut it off (`lost`, its earlier runs), or with `limit` after it
+ * waited out its usage limit: the last run's outcome, every run's dollars, tokens, turns and credits (usage.mjs
+ * mergeUsage), its relayed key spend and sub-agent threads, from the first run's start. `lostToOutage` (or `limitWaits`)
+ * counts the earlier runs.
  */
-export function joinLost(lost, rec) {
+export function joinLost(lost, rec, { limit = false } = {}) {
   const all = [...lost, rec];
   const m = mergeUsage(all);
   const keyed = all.filter((r) => typeof r.workerKeyUsd === "number");
@@ -931,8 +995,8 @@ export function joinLost(lost, rec) {
     ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
     ...(subs.length ? { subAgents: subs } : {}),
     started: lost[0].started ?? rec.started,
-    lostToOutage: lost.length,
-    basis: `${rec.basis}; with ${lost.length} earlier run${lost.length === 1 ? "" : "s"} of this pass cut off by this machine's network`,
+    ...(limit ? { limitWaits: lost.length } : { lostToOutage: lost.length }),
+    basis: `${rec.basis}; with ${lost.length} earlier run${lost.length === 1 ? "" : "s"} of this pass ${limit ? "ended at its subscription's usage limit" : "cut off by this machine's network"}`,
   };
 }
 

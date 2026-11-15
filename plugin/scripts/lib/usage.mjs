@@ -135,9 +135,17 @@ export function jsonLines(text) {
  * Error types and codes that no retry can pass, whatever the status: an exhausted quota or billing (OpenAI's
  * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit), a rejected key, and the Vercel AI
  * Gateway's budget (`quota_for_entity_exceeded`, HTTP 402), credits (`insufficient_funds`, 402) and payment-method
- * (`customer_verification_required`, 403) types, which decide a gateway body that carries no status.
+ * (`customer_verification_required`, 403) types, which decide a gateway body that carries no status. A subscription's
+ * usage limit (`usage_limit_reached`, a 429) is in it too: a retry on any model of the same subscription meets it again.
  */
-const REFUSED_KINDS = new Set(["insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
+const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
+/** The kinds that are a subscription's usage limit: it resets at a known moment (usageReset), unlike a quota or billing refusal. */
+export const USAGE_LIMIT_KINDS = new Set(["usage_limit_reached"]);
+/** Whether a refusal (providerRefusal) is a subscription's usage limit. */
+export const usageLimited = (r) => !!r && (USAGE_LIMIT_KINDS.has(r.type) || USAGE_LIMIT_KINDS.has(r.code));
+/** An epoch time in seconds or ms as ms; null when it is no positive number. */
+const epochMs = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : null);
+
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -189,15 +197,28 @@ export function rotatedPin(harness, events) {
  *             ({status, error: {type, code, message}}), or the AI Gateway's bare body ({error: {type, message}}, no
  *             status: decided by its type); a message that is not a JSON object is prose: null
  *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
+ * A usage limit (usageLimited) carries `resetAt` (ms) when the harness reported the reset as structure:
+ *   claude  : the result's `api_error` is the code (`usage_limit_reached`); the reset is the API error message's
+ *             `api_error_params.rate_limit_info.resetsAt`, else the last `rate_limit_event` whose status is `rejected`,
+ *             of the error's own window (`rateLimitType`, kept as `limitType`) when it names one
+ *   codex   : Codex reports its usage limit as prose only, so it is not read as one
+ *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
 export function providerRefusal(harness, events) {
   let r = null;
+  let reset = null;
   if (harness === "claude") {
     const res = [...events].reverse().find((e) => e?.type === "result");
     const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
     const status = num(res?.api_error_status) ?? num(api?.api_error_status);
     if (res?.is_error !== true || status === null) return null;
-    r = { status, type: str(api?.error), code: null, message: str(res.result) };
+    r = { status, type: str(api?.error), code: str(res.api_error) ?? str(api?.api_error), message: str(res.result) };
+    // The limit's window (`rateLimitType`, e.g. five_hour) as the API error names it; the fallback reset is that window's.
+    const info = api?.api_error_params?.rate_limit_info;
+    const limitType = str(info?.rateLimitType);
+    const rejected = [...events].reverse().find((e) => e?.type === "rate_limit_event" && e.rate_limit_info?.status === "rejected" && (!limitType || e.rate_limit_info.rateLimitType === limitType));
+    reset = epochMs(info?.resetsAt) ?? epochMs(rejected?.rate_limit_info?.resetsAt);
+    if (limitType && USAGE_LIMIT_KINDS.has(r.code)) r.limitType = limitType;
   } else if (harness === "codex") {
     r = codexError(events);
     if (!r) return null;
@@ -208,7 +229,8 @@ export function providerRefusal(harness, events) {
   } else return null;
   const kind = REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
   const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
-  return refused ? { harness, ...r } : null;
+  if (!refused) return null;
+  return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
 /**

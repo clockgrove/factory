@@ -188,6 +188,12 @@ export function waitOutages({ until = () => Infinity } = {}) {
 /** Whether this process waits outages out now: on, and not stopped (stopWaiting). */
 export const waitingOutages = () => MODE !== null && !STOPPED;
 
+/**
+ * The latest moment (ms) this process waits in place for something that began at `since` (waitOutages's `until`), or
+ * null when it does not wait. A harness's usage limit with a known reset is waited for within it (harness.mjs runHarness).
+ */
+export const waitBound = (since = OUTAGE.now()) => (waitingOutages() ? MODE.until(since) : null);
+
 /** Whether this process waited outages out and has stopped (stopWaiting): a request that cannot leave fails at once. */
 export const stoppedWaiting = () => MODE !== null && STOPPED;
 

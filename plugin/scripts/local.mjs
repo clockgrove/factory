@@ -42,6 +42,7 @@ import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handover
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
+import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
@@ -52,6 +53,9 @@ import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
+/** The least a usage-limit hold lasts past now, by how many such pauses on one harness came in a row (Local.limitPaused). */
+export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
+
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
 /** After a failed start, this loop holds the Objective this long, doubling per failure up to the cap (Local.unstart). */
@@ -843,6 +847,14 @@ export class Local {
       await this.block(issue, name, runs.reason, { fix: runs.fix });
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // That harness's usage limit is spent (a stage here met it, limitPaused): no stage starts on it until the reset. The
+    // Objective pauses as that stage did, and pausedHere resumes it after the reset.
+    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(runs.harness) : null;
+    if (until !== null) {
+      rmSync(usageDir, { recursive: true, force: true });
+      this.saidLimit(runs.harness, until);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+    }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. Removed when the stage ends or fails to
@@ -913,7 +925,7 @@ export class Local {
           // no record: the child failed before writing one
         }
         dropStage();
-        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}) });
+        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
       });
     });
   }
@@ -1122,6 +1134,7 @@ export class Local {
    * the Objective with the bound counted afresh.
    */
   outagePaused(issue, result) {
+    if (result?.usageLimit) return this.limitPaused(issue, result);
     const o = result?.outage || {};
     const at = Date.parse(o.since);
     const own = Number.isFinite(at) ? at : (this.clock ?? Date.now)();
@@ -1133,6 +1146,62 @@ export class Local {
     this.lapsed?.delete(issue);
     const what = Number.isFinite(reset) ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
+  }
+
+  /**
+   * A stage that ended `paused` on its harness's usage limit (session.mjs usageLimitExit): the reset it names
+   * (`result.usageLimit`: harness, reset, since) is kept in this loop's memory, for the Objective (pausedHere resumes it
+   * after the reset, with no bound: the reset is known) and for the harness (no stage starts on it until then, stage).
+   * No lapse is counted; the claim stays. A provider that refuses again past the reset it stated (or states one no
+   * more than LIMIT_BACKOFF_MS's last ahead) is not taken at its word every tick: the hold is at least now plus a backoff
+   * that grows with each such pause in a row on that harness (2, 5, 10, then 15 minutes), and a reset further out than
+   * that starts the count again. A stage `stage` held before it ran (`held`) counts nothing.
+   */
+  limitPaused(issue, result) {
+    const l = result.usageLimit;
+    const now = (this.clock ?? Date.now)();
+    const stated = Date.parse(l.reset);
+    const since = Date.parse(l.since);
+    let reset = Number.isFinite(stated) ? stated : now;
+    if (!l.held && l.harness) {
+      const streak = (this.limitStreak ??= new Map());
+      const n = reset - now > LIMIT_BACKOFF_MS.at(-1) ? 0 : (streak.get(l.harness) ?? 0) + 1;
+      streak.set(l.harness, n);
+      if (n) reset = Math.max(reset, now + LIMIT_BACKOFF_MS[Math.min(n, LIMIT_BACKOFF_MS.length) - 1]);
+    }
+    (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset });
+    if (l.harness && reset > (this.limits?.get(l.harness) ?? 0)) (this.limits ??= new Map()).set(l.harness, reset);
+    this.lapsed?.delete(issue);
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${l.harness}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
+  }
+
+  /** The reset (ms) of `harness`'s usage limit when a stage here met it and the reset is still ahead, else null. */
+  limitUntil(harness) {
+    const at = this.limits?.get(harness);
+    return at !== undefined && at > (this.clock ?? Date.now)() ? at : null;
+  }
+
+  /**
+   * Why an Objective with these labels starts nothing now, or null: its harness (its harness label, choice.mjs choiceOf,
+   * else the loop's) has its usage limit spent (limitUntil). Read on labels the caller already holds (the dispatcher's
+   * listing, pendingReviews' read), never a read of its own; each harness's hold is said once (saidLimit).
+   */
+  limitHold(labels) {
+    if (!this.limits?.size) return null;
+    const c = choiceOf(labels || []);
+    const harness = (c.ok && c.choice.harness) || this.harness;
+    const until = this.limitUntil(harness);
+    if (until === null) return null;
+    this.saidLimit(harness, until);
+    return `${harness}'s usage limit is spent until ${new Date(until).toISOString()}`;
+  }
+
+  /** The log line that no stage starts on `harness` until its usage limit's reset (`until`, ms): once per reset. */
+  saidLimit(harness, until) {
+    const key = `${harness}@${until}`;
+    if ((this.limitSaid ??= new Set()).has(key)) return;
+    this.limitSaid.add(key);
+    log(`${harness}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${harness} until then`);
   }
 
   /**
@@ -1162,6 +1231,8 @@ export class Local {
       // reset has passed, with no probe (GitHub answers while the limit is spent).
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
+        // Paused on a usage limit (limitPaused: its hold, the backoff floor included) or GitHub's spent rate limit:
+        // resumed once its reset has passed, with no probe.
         const now = (this.clock ?? Date.now)();
         if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
@@ -1212,7 +1283,7 @@ export class Local {
   async resume(issue) {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
-    if (off && now - off.since >= OUTAGE.blockMs) {
+    if (off && !off.harness && now - off.since >= OUTAGE.blockMs) {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = !off.origin || (await probeHost(off.origin)) === null;
       const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
@@ -1520,7 +1591,7 @@ export class Local {
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
-      out.push({ issue, pr: pr.number });
+      out.push({ issue, pr: pr.number, labels: data.labels || [] });
     }
     return out;
   }
@@ -1642,13 +1713,16 @@ export class Local {
         running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
-      const reviews = pending.slice(0, Math.max(0, limit - running.size));
+      // A harness whose usage limit is spent (limitPaused): no review and no new work on it starts until its reset, said
+      // once; work on any other harness goes on. Each Objective's harness is its harness label, else the loop's.
+      const free = pending.filter((r) => !this.limitHold(r.labels));
+      const reviews = free.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1673,7 +1747,7 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (pending.length > reviews.length) log(`${pending.length - reviews.length} review(s) wait for a free slot on this box`);
+      if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
       log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       for (const r of reviews) running.set(r.issue, track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));

@@ -78,8 +78,15 @@ export function reviewMissed({ ok = true, review, entries = [] }) {
 export const reviewProduced = (rec, review) => !!rec?.ok && !!review?.parsed;
 
 /**
+ * Whether a reviewer pass that missed (reviewMissed) gets its one rerun (reviewRetry): not after a provider's refusal,
+ * which no rerun passes (a subscription's usage limit meets the fallback model too, since every model of the subscription
+ * draws on it), and not with less than a call's minimum time left (`retryTimeout` null: reviewCallTimeout).
+ */
+export const reviewRerun = ({ missed, refusal, retryTimeout }) => !!missed && !refusal && retryTimeout !== null;
+
+/**
  * The one rerun of a pass that missed (reviewMissed), in a fresh session: on the harness's fallback reviewer where it
- * has one (Claude's: Fable's quota can run out mid-day), else on the same model and effort. Every harness gets it.
+ * has one (Claude's: Opus 5.5 at xhigh), else on the same model and effort. Every harness gets it.
  */
 export function reviewRetry({ model, effort, fallback = null }) {
   return fallback ? { model: fallback.model, effort: fallback.effort, label: "review-fallback" } : { model, effort, label: "review-retry" };

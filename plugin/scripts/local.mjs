@@ -316,6 +316,16 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/**
+ * A thrown error as a Blocked reason may carry it, which this machine's log has whole: a system error (Node's, with its
+ * `syscall`: a file or process call, whose message names the path, an account's folder or token file included) by its
+ * code and call alone; any other by its message, the home directory shortened to `~`.
+ */
+export const postedError = (e, home = homedir()) => {
+  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
+  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
+  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; the local loop's log names the path` : `${code}; the local loop's log names the path`;
+};
 /** The Copilot token a stage on `account` runs on: a declared account's file alone, else copilotToken(). */
 const copilotTokenOf = (account) => (account?.declared ? accountToken(account) : copilotToken());
 /**
@@ -1281,13 +1291,15 @@ export class Local {
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
    * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
    * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. A throw names
-   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work. The
-   * count is this loop's memory: another serve on the machine resumes the Objective afresh.
+   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work; and
+   * the error as postedError has it. The count is this loop's memory: another serve on the machine resumes the
+   * Objective afresh.
    */
   async lapse(issue, result, failure) {
     const stage = result?.stage || failure?.stageSetup || "local";
-    const error = `(${String(failure?.message || failure).slice(0, 200)})`;
-    const what = !failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed ${error}` : `Factory's local loop threw ${error}`;
+    // This machine's log gets the whole error; GitHub gets it as postedError has it.
+    const said = (error) => (!failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed (${error})` : `Factory's local loop threw (${error})`);
+    const what = said(String(failure?.message || failure).slice(0, 200));
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
     if (!lapsed.has(issue)) {
@@ -1298,7 +1310,7 @@ export class Local {
     lapsed.delete(issue);
     log(`#${issue}: ${what} again; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${what} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -1561,15 +1573,16 @@ export class Local {
    * logged and the Objective goes back to Queued, its claim dropped, rather than sitting Running for the dispatcher to
    * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS), so a
    * machine-level fault (disk full, a broken sandbox) neither Blocks every queued Objective in turn nor relabels them
-   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error (cause `setup`).
+   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error as postedError has it
+   * (cause `setup`).
    * When the claim could not be read, or was another loop's, who holds it is unknown: nothing changes now, and after the
    * backoff this loop reads the claim again (recheckStarts). Only an Objective still labelled Running is un-marked or
    * Blocked; otherwise, or on a failed read, the claim stays, goes stale and this loop resumes it (pausedHere).
    */
   async unstart(issue, e) {
     const out = { code: null, exit: null, usd: null, usageDir: null, startFailed: e.startFailed };
-    const error = String(e?.message || e).replaceAll(homedir(), "~").slice(0, 300);
-    log(`#${issue}: could not start (${e.startFailed}): ${error}`);
+    log(`#${issue}: could not start (${e.startFailed}): ${String(e?.message || e).slice(0, 300)}`);
+    const error = postedError(e).slice(0, 300);
     const failures = (this.startFailures ??= new Map());
     const count = (failures.get(issue)?.count ?? 0) + 1;
     const unknown = e.startFailed === "claim-read" || !!e.othersClaim;

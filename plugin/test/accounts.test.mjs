@@ -467,3 +467,86 @@ test("#263 with #287: a Codex stage on a declared account, with Codex's release 
   for (const p of [join(h, "work", "claude-a"), join(h, "work", "claude-b"), join(h, ".codex")]) assert.ok(covered(outer, p), `outer: ${p}`);
   assert.ok(!covered(outer, join(h, "work", "codex-a", "auth.json")), "its own login, for the harness process");
 });
+
+test("#305: Factory's own secrets are recognised by the file itself, however its name is spelled", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  const own = "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)";
+  const one = (token_file) => problems(h, { copilot: [{ name: "gh", token_file }] });
+  // On a case-insensitive file system (macOS) `AI-Gateway-Key` is the key itself. Linux's are case-sensitive: a second
+  // name for the same file stands in for that other spelling.
+  writeFileSync(gatewayKeyFile(h), "vck_dummy\n", { mode: 0o600 });
+  linkSync(gatewayKeyFile(h), join(keys, "AI-Gateway-Key"));
+  assert.deepEqual(one(join(keys, "AI-Gateway-Key")), [["gh", own]], "the AI Gateway key");
+  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
+  assert.deepEqual(one(join(keys, "TOKENS-acme-app")), [["gh", own]], "a repository's GitHub token");
+  assert.deepEqual(one(join(keys, "copilot-a")), [], "a token file of its own still passes");
+});
+
+test("#305: the outer probe builds Codex's profile from the stage's account env, never serve's", { skip: process.platform !== "linux" }, async () => {
+  const { runOuterProbe } = await import("../scripts/lib/local.mjs");
+  const h = fakeHome();
+  declare(h, good(h));
+  // srt stands where the outer sandbox would: it records the command it was given and runs nothing.
+  const bin = join(h, "bin");
+  const seen = join(h, "srt-args");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "srt"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${seen}"\n`, { mode: 0o755 });
+  const omega = defaultAccount(loadAccounts({ home: h, env: {} }), "codex");
+  runOuterProbe("codex", { env: accountEnv({ PATH: `${bin}:${process.env.PATH}` }, omega, h), home: h });
+  const profile = readFileSync(seen, "utf8").split("\n").find((a) => a.startsWith("permissions.factory="));
+  const denies = (p) => profile.includes(`${JSON.stringify(p)}="deny"`);
+  assert.ok(denies(join(h, "work", "codex-a", "auth.json*")), "the account's own login files, as its stage's profile denies them");
+  assert.ok(!denies(join(h, "work", "codex-a")), "not the account's whole home, which Codex runs on");
+});
+
+test("#305, the real path: a stage's set-up failing in an account folder outside the home posts no path; the log has the whole error", { skip: process.platform !== "linux" || process.getuid() === 0 }, async () => {
+  const { logTo } = await import("../scripts/lib/inputs.mjs");
+  const h = fakeHome();
+  // An account outside the home directory, which Factory cannot write: the harness's own folders cannot be made in it.
+  const acct = join(realpathSync(mkdtempSync(join(tmpdir(), "outside-"))), "claude-x");
+  mkdirSync(acct, { mode: 0o700 });
+  declare(h, { claude: [{ name: "x", home: acct }] });
+  const { local } = await fakeLoop(h);
+  Object.assign(local, { repoFull: "acme/app", repo: { owner: "acme", name: "app", full: "acme/app" }, opts: { token: "t" } });
+  local.harnessFor = async () => ({ ok: true, harness: "claude", account: local.accountFor("claude") });
+  local.limitUntil = () => null;
+  const blocked = [];
+  // The Block is where the test ends each path: nothing after it reaches GitHub.
+  local.block = async (...a) => {
+    blocked.push(a);
+    throw new Error("the test's own end");
+  };
+  const lines = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/issues\/8$/.test(String(url))) return new Response(JSON.stringify({ number: 8, labels: [{ name: "factory:running" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    throw new Error(`unexpected ${url}`);
+  };
+  chmodSync(acct, 0o500);
+  logTo({ write: (s) => lines.push(s) });
+  try {
+    const failed = await withHome(h, {}, () => local.stage(8, "work", "worker.mjs", []).then(() => assert.fail("the set-up should fail"), (e) => e));
+    assert.equal(failed.code, "EACCES");
+    assert.ok(failed.message.includes(acct), "the error itself names the account's folder");
+    await withHome(h, {}, async () => {
+      // A review stage's set-up failing twice (lapse), and a work stage's start failing a third time (unstart).
+      await local.lapse(8, null, failed);
+      await local.lapse(8, null, failed);
+      local.startFailures = new Map([[8, { count: 2, retryAt: 0 }]]);
+      await local.unstart(8, Object.assign(failed, { startFailed: "work" }));
+    });
+  } finally {
+    logTo(null);
+    globalThis.fetch = real;
+    chmodSync(acct, 0o700);
+  }
+  assert.equal(blocked.length, 2);
+  for (const [, , reason] of blocked) {
+    assert.match(reason, /EACCES from (mkdir|open); the local loop's log names the path/);
+    assert.ok(!reason.includes(acct) && !reason.includes("outside-"), `no path: ${reason}`);
+  }
+  assert.ok(lines.some((l) => l.includes(acct)), "this machine's log has the whole error");
+});

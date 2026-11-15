@@ -364,16 +364,17 @@ test("withClaim: Factory's set-up of the review stage failing after the PR was d
     mkdirSync(join(loop.ws(7), "repo", ".git"), { recursive: true });
     pinGitDir(join(loop.ws(7), "repo"), gitPinFile(loop.ws(7)));
     loop.harnessFor = async () => ({ ok: true, harness: "claude" });
-    // The real case: the harness home's `plans` a link to nothing (an uncoded throw from the stage's set-up).
-    loop.stageEnv = () => {
-      throw Object.assign(new Error("ENOENT: no such file or directory, mkdir '/h/.claude-two/plans'"), { code: "ENOENT" });
-    };
+    // The real case: the harness home's `plans` in a folder that is gone (an uncoded throw from the stage's set-up), here
+    // an account's folder outside the home directory (#305).
+    const gone = join(tmpdir(), "gone-account", "plans");
+    loop.stageEnv = () => mkdirSync(gone);
     await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
     assert.ok(!gh.labels.has("factory:blocked"), "resumed once first");
     await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
     assert.ok(gh.labels.has("factory:blocked"));
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /Blocked \(review\): Factory's set-up of the review stage failed \(ENOENT: no such file or directory, mkdir '\/h\/\.claude-two\/plans'\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
+    assert.match(notice, /Blocked \(review\): Factory's set-up of the review stage failed \(ENOENT from mkdir; the local loop's log names the path\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
+    assert.ok(!notice.includes("gone-account"), "no path of this machine's set-up");
     assert.doesNotMatch(notice, /\(work\)|the work stage|draft with what exists/);
     assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
   } finally {
@@ -440,7 +441,8 @@ test("runObjective: a failed start goes back to Queued and is held for a doublin
     let starts = 0;
     loop.stage = async () => {
       starts += 1;
-      if (loop.fail) throw Object.assign(new Error("ENOSPC: no space left on device, mkdir"), { code: "ENOSPC" });
+      // A system error as Node throws it: its message names the path; GitHub gets its code and call (#305).
+      if (loop.fail) throw Object.assign(new Error("ENOSPC: no space left on device, mkdir '/srv/accounts/claude-x/hooks'"), { errno: -28, code: "ENOSPC", syscall: "mkdir", path: "/srv/accounts/claude-x/hooks" });
       return { code: 0, exit: "blocked", usd: 0 };
     };
     loop.fail = true;
@@ -469,7 +471,8 @@ test("runObjective: a failed start goes back to Queued and is held for a doublin
     assert.equal(r.exit, "blocked");
     assert.ok(gh.labels.has("factory:blocked"));
     assert.equal(posted().length, 1);
-    assert.match(posted()[0], /could not start on this machine 3 times in a row \(work, ENOSPC\): ENOSPC: no space left on device/);
+    assert.match(posted()[0], /could not start on this machine 3 times in a row \(work, ENOSPC\): ENOSPC from mkdir; the local loop's log names the path\./);
+    assert.ok(!posted()[0].includes("/srv/accounts"), "no path of this machine's set-up");
     assert.match(posted()[0], /<!-- factory:block \{"cause":"setup"\} -->/);
     assert.deepEqual(loop.startHolds(), {}, "the Block ends the count");
     // A start that succeeds clears an earlier failure.

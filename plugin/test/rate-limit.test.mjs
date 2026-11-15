@@ -31,8 +31,10 @@ const spent = (resetMs, status = 403) => json({ message: "API rate limit exceede
  * in `seen`. Log lines are in `lines`.
  */
 async function faked(answer, fn, { token = false } = {}) {
-  const saved = { fetch: globalThis.fetch, api: process.env.GITHUB_API_URL, retry: { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random }, outage: { sleep: OUTAGE.sleep, now: OUTAGE.now, random: OUTAGE.random } };
+  const saved = { fetch: globalThis.fetch, api: process.env.GITHUB_API_URL, graphqlUrl: process.env.GITHUB_GRAPHQL_URL, retry: { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random }, outage: { sleep: OUTAGE.sleep, now: OUTAGE.now, random: OUTAGE.random } };
+  // Both: a runner sets GITHUB_GRAPHQL_URL to GitHub's own, which GraphQL calls would otherwise reach.
   process.env.GITHUB_API_URL = "https://api.github.test";
+  process.env.GITHUB_GRAPHQL_URL = "https://api.github.test/graphql";
   let t = Date.parse("2026-11-14T08:47:00Z");
   const held = [];
   const sleep = (ms) => new Promise((resolve) => held.push({ ms, resolve }));
@@ -65,8 +67,10 @@ async function faked(answer, fn, { token = false } = {}) {
     globalThis.fetch = saved.fetch;
     Object.assign(RETRY, saved.retry);
     Object.assign(OUTAGE, saved.outage);
-    if (saved.api === undefined) delete process.env.GITHUB_API_URL;
-    else process.env.GITHUB_API_URL = saved.api;
+    for (const [k, v] of [["GITHUB_API_URL", saved.api], ["GITHUB_GRAPHQL_URL", saved.graphqlUrl]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 }
 

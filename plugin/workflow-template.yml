@@ -121,7 +121,7 @@ jobs:
     steps:
       - uses: {{action}}
         id: f
-        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: dispatch, issue: "${{ inputs.issue }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
   queue-watch:
     # The PRs the merge pass left in the merge queue: this job reads each entry every 30 s until it leaves the queue,
     # then ticks the dispatcher, whose merge pass re-enqueues a dropped PR once, then Blocks. The tick is this job's own
@@ -141,7 +141,7 @@ jobs:
     steps:
       - uses: {{action}}
         id: w
-        with: { mode: watch, pr: "${{ needs.dispatch.outputs.queue_watch }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: watch, pr: "${{ needs.dispatch.outputs.queue_watch }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - name: Dispatch tick (a watched PR left the queue or stalled there, or the watch's time is up)
         if: steps.w.outputs.tick == 'true'
         env: { GH_TOKEN: "${{ github.token }}", GH_REPO: "${{ github.repository }}" } # no checkout here: gh names the repository from GH_REPO
@@ -180,19 +180,20 @@ jobs:
     if: needs.dispatch.outputs.count != '' && needs.dispatch.outputs.count != '0'
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
-    strategy: { max-parallel: {{max_concurrent}}, fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } }
+    strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } } # the dispatcher picks at most max_concurrent less the ones running, a repository variable's included
     permissions: { contents: read, issues: write, actions: write } # actions: write for the tick at the end and triage's rerun of failed CI jobs
     concurrency: { group: "factory-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
     steps:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }} # the repository's variables: each FACTORY_<NAME> one sets that setting over the env block (docs/INSTALL.md, Settings in layers)
           mode: work
           issue: ${{ matrix.issue }}
           harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
@@ -227,12 +228,13 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: account, harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }}
           mode: review
           pr: ${{ github.event.pull_request.number }}
           harness: ${{ inputs.harness }}
@@ -270,10 +272,11 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }}
           mode: launch
           issue: ${{ matrix.issue }}
           harness: ${{ inputs.harness }} # empty falls through to FACTORY_HARNESS
@@ -320,7 +323,7 @@ jobs:
     steps:
       - uses: {{action}}
         id: f
-        with: { mode: gate, app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: gate, app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
   launch-event:
     name: launch (${{ needs.launch-gate.outputs.issue }})
     needs: launch-gate
@@ -335,10 +338,11 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}" }
+        with: { mode: account, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }}
           mode: launch
           account: ${{ steps.account.outputs.account }}
           app_id: ${{ secrets.FACTORY_APP_ID }}
@@ -404,6 +408,7 @@ jobs:
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }}
           mode: image
           image_owed: ${{ needs.dispatch.outputs.image_owed }}
           app_id: ${{ secrets.FACTORY_APP_ID }}
@@ -437,6 +442,7 @@ jobs:
       - uses: {{action}}
         id: f
         with:
+          vars: ${{ toJSON(vars) }}
           mode: sweep
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}

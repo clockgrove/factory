@@ -99,7 +99,7 @@ inputs:
     description: 'Reviewers outside Factory whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to 20 minutes for each one''s review of the head Factory''s reviewer read, then its answer pass handles their line comments as it handles Factory''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
     required: false
   harness_version:
-    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the repository's harness only; another harness an Objective's label chooses installs its latest.
+    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (FACTORY_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.
     required: false
   allowed_domains:
     description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `factory:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
@@ -172,6 +172,9 @@ inputs:
     required: false
   drift_model:
     description: The decision model the drift advisory asks (an AI Gateway decision model id); `baseten/elephant-1` when empty.
+    required: false
+  vars:
+    description: 'The repository''s variables as JSON, `${{ toJSON(vars) }}` (every `uses:` step of the workflow template passes it). Each `FACTORY_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
     required: false
   github_token:
     description: 'The job''s GITHUB_TOKEN; Factory reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'
@@ -299,18 +302,26 @@ runs:
       if: inputs.mode != 'dispatch' && inputs.mode != 'launch' && inputs.mode != 'gate' && inputs.mode != 'image' && inputs.mode != 'watch' && inputs.mode != 'account'
       shell: bash
       # The harness comes from the Objective's harness label when it names one, else `with:` when given, else the
-      # workflow's FACTORY_HARNESS env block (visible to composite steps at runtime), else claude: the same precedence as
-      # lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version: lib/choice.mjs harnessVersionFor.
+      # repository's FACTORY_HARNESS variable, else the workflow's FACTORY_HARNESS env block (visible to composite steps at
+      # runtime), else claude: the same precedence as lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version:
+      # lib/choice.mjs harnessVersionFor.
       env:
         FACTORY_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
         FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
+        FACTORY_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}
         FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
-        DEFAULT_HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_HARNESS:-claude}}"
-        HARNESS="${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}"
+        # A harness name as lib/inputs.mjs reads it: the outer whitespace trimmed, lower case. A variable's is taken only
+        # when it names a harness, as inputs.mjs takes it (valueProblem); anything else falls through to the workflow's.
+        name() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v" | tr '[:upper:]' '[:lower:]'; }
+        WORKFLOW_HARNESS="$(name "${FACTORY_HARNESS:-}")"; WORKFLOW_HARNESS="${WORKFLOW_HARNESS:-claude}"
+        VARIABLE_HARNESS="$(name "${FACTORY_VARIABLE_HARNESS:-}")"
+        case "$VARIABLE_HARNESS" in claude|codex|copilot) ;; *) VARIABLE_HARNESS="" ;; esac
+        DEFAULT_HARNESS="$(name "${FACTORY_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
+        HARNESS="$(name "${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
         VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
-        # harness_version pins the repository's harness only: another one an Objective's label chose installs its latest.
-        if [ -n "$FACTORY_CHOSEN_HARNESS" ] && [ "$FACTORY_CHOSEN_HARNESS" != "$DEFAULT_HARNESS" ]; then VERSION=latest; fi
+        # harness_version pins the workflow env block's harness only: another one (an Objective's label's, a run's override's, a repository variable's) installs its latest.
+        if [ "$HARNESS" != "$WORKFLOW_HARNESS" ]; then VERSION=latest; fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in
@@ -360,7 +371,8 @@ runs:
       id: run
       shell: bash
       # Inputs reach the scripts as FACTORY_INPUT_*; an empty `with:` value falls
-      # through to the workflow's FACTORY_* env block, then to the script default.
+      # through to the workflow's FACTORY_* env block (a repository variable of the
+      # same name over it, lib/inputs.mjs applyVariables), then to the script default.
       # The Codex key is set here, on this one step, and the script passes it to the
       # harness child only; validation commands and git hooks never see it.
       env:
@@ -407,6 +419,8 @@ runs:
         FACTORY_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
         FACTORY_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
         FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        # The repository's variables (lib/inputs.mjs applyVariables lays them over the env block, then drops this).
+        FACTORY_INPUT_VARS: ${{ inputs.vars }}
         FACTORY_INPUT_SANDBOX: ${{ inputs.sandbox }}
         FACTORY_INPUT_VERCEL_TOKEN: ${{ inputs.vercel_token }}
         FACTORY_INPUT_VERCEL_TEAM_ID: ${{ inputs.vercel_team_id }}

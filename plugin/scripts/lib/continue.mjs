@@ -47,14 +47,17 @@ export function pauseRecord({ branch, restart, running, text, harness, env = pro
 const STAGE_DIR = /^usage-[a-z]+-(\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z)$/;
 
 /**
- * Whether a stage directory's process ever ran: its result.json, its process record (local.mjs STAGE_RECORD, left by a
- * stage whose loop was killed) or its log (local.mjs stageRelay: a worker logs before it touches the clone). A directory
- * with none of them was made by a start that stopped before its process (a stopping serve): it changed nothing.
+ * Whether a stage directory counts as a stage that may have changed the clone. Every one but a work stage's: any other
+ * stage's start cleans the clone before its process runs (local.mjs startStage), so its directory counts from the
+ * moment it exists. A work stage's start leaves the clone alone (its worker decides, enterStage), so its directory
+ * counts once its process ran: its result.json, its process record (local.mjs STAGE_RECORD, left by a stage whose loop
+ * was killed) or its log (local.mjs stageRelay: a worker logs before it touches the clone). A work directory with none
+ * of them was made by a start that stopped before its process (a stopping serve): it changed nothing.
  */
-const ran = (dir) => ["result.json", "stage-process.json", "stage.log"].some((f) => lstatSync(join(dir, f), { throwIfNoEntry: false }));
+const counts = (ws, name) => !name.startsWith("usage-work-") || ["result.json", "stage-process.json", "stage.log"].some((f) => lstatSync(join(ws, name, f), { throwIfNoEntry: false }));
 
 /**
- * The newest stage of this Objective on this machine before the one in `own` (its usage directory) whose process ran,
+ * The newest stage of this Objective on this machine before the one in `own` (its usage directory) that counts,
  * from the stage directories in `ws`: {name, result} (result.json as written, or null for a stage that ended without
  * one), or null.
  */
@@ -67,7 +70,7 @@ export function lastStage(ws, own) {
   }
   const mine = own ? basename(own) : null;
   const name = names
-    .filter((n) => n !== mine && STAGE_DIR.test(n) && ran(join(ws, n)))
+    .filter((n) => n !== mine && STAGE_DIR.test(n) && counts(ws, n))
     .sort((a, b) => (STAGE_DIR.exec(a)[1] < STAGE_DIR.exec(b)[1] ? 1 : -1))[0];
   if (!name) return null;
   let result = null;

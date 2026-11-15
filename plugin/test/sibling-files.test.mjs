@@ -96,6 +96,19 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     if (method === "GET" && (m = /^\/pulls\/(\d+)$/.exec(p))) return json(Object.values(state.prs).find((x) => x.pr.number === Number(m[1]))?.pr ?? {});
     if (method === "GET" && /\/actions\/(workflows\/[^/]+\/)?runs$/.test(p)) return json({ workflow_runs: [] });
     if (method === "GET" && /\/timeline$/.test(p)) return json([]);
+    // The merge pass's reads and its merge (session.mjs mergeReadyOne): the Objective, the PR's review, green CI.
+    if (method === "GET" && (m = /^\/issues\/(\d+)$/.exec(p))) return json(state.issues.find((i) => i.number === Number(m[1])) ?? { message: "Not Found" }, state.issues.some((i) => i.number === Number(m[1])) ? 200 : 404);
+    if (method === "GET" && /^\/pulls\/\d+\/comments$/.test(p)) return json([]);
+    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return json([{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, submitted_at: new Date().toISOString() }]);
+    if (method === "GET" && /\/check-runs$/.test(p)) return json({ total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success", app: { id: 15368 } }] });
+    if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(p)) return json({ statuses: [] });
+    if (method === "GET" && (m = /^\/commits\/([0-9a-f]+)$/.exec(p))) return json({ sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
+    if (method === "PUT" && (m = /^\/pulls\/(\d+)\/merge$/.exec(p))) {
+      const x = Object.values(state.prs).find((y) => y.pr.number === Number(m[1]));
+      Object.assign(x.pr, { state: "closed", merged: true });
+      state.mergedPrs = [...(state.mergedPrs || []), x.pr.number];
+      return json({ merged: true });
+    }
     if (method !== "GET") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
@@ -162,6 +175,21 @@ test("#277: a real dispatcher tick holds the Objective whose plan overlaps an In
   assert.equal(overlap(w, 8).length, 1, "the one comment, edited");
   assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")), overlap(w, 8)[0].body);
   assert.match(overlap(w, 8)[0].body, /no longer waits for #7/);
+});
+
+test("#277: a sibling whose PR this tick merges is no longer waited for: the overlapping pick starts the same tick", async () => {
+  forgetFiles();
+  const prs = PR7();
+  // Reviewed (its review label off), validated and recorded mergeable, CI green: the merge pass merges it this tick.
+  prs[7].pr.labels = [];
+  const record = { id: 777, user: { login: SELF, type: "Bot" }, body: `${marker(7, "mergeable").replace(/ -->$/, "")}:${prs[7].pr.head.sha} -->\nFactory: reviewed and validated.`, created_at: new Date().toISOString() };
+  // #7's known files are its PR's (no plan comment: the merge's check of the text against a plan is not this test's).
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, [], 1)], { comments: { 8: [PLAN(8, SHARED3)], 12: [record] }, prs });
+  const r = await tick(w, { ciChecks: ["ci"] });
+  assert.deepEqual(w.state.mergedPrs, [12], `the merge pass merged #7's PR: ${JSON.stringify(r.merged)}`);
+  assert.deepEqual(r.merged, [7]);
+  assert.deepEqual(r.ready, [8], "not held for a sibling that merged this tick");
+  assert.equal(overlap(w, 8).length, 0);
 });
 
 test("#277: an unchanged queue costs no comment or PR-file reads on the next tick; PRs come from one listing and the review pass's own reads; a fork's branch is no Factory PR", async () => {

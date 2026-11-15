@@ -662,6 +662,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const updated = [];
   const nextParts = [];
   const merged = [];
+  // The In-review Objectives whose PR this tick merged (merged holds the queued ones too).
+  const landed = [];
   // PRs the merge pass left in the merge queue: the queue-watch job reads them until each merges or leaves.
   const queueWatch = [];
   // Each In-review Objective's open PR (null for none) as this pass read it.
@@ -799,6 +801,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           return null;
         });
         if (how === "merged" || how === "queued") merged.push(issue.number);
+        // Merged now (not only queued): no longer a sibling anything waits for this tick.
+        if (how === "merged") landed.push(issue.number);
         if (report.watch) queueWatch.push(open.number);
         if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
@@ -880,7 +884,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   let order = null;
   if (!inputs.issue && picked.ready.length) {
     const waiting = picked.skipped.filter((x) => x.reason === "max_concurrent reached").map((x) => x.number);
-    order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length, prs: prsSeen, autoMerge: !!inputs.autoMerge }, opts, { dryRun, log });
+    order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { dryRun, log });
     if (order.waits.length) {
       const moved = new Set([...order.ready, ...order.waits.map((w) => w.number)]);
       picked.skipped = [...picked.skipped.filter((x) => !moved.has(x.number)), ...order.waits.map((w) => ({ number: w.number, reason: waitReason(w) }))];

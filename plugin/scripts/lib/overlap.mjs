@@ -223,15 +223,16 @@ async function say(repo, n, old, kind, text, opts, log) {
 /**
  * The dispatcher's pass (dispatch.mjs, after selectReady): `ready` the picks and `waiting` the Queued Objectives left
  * out for max_concurrent, both in pick order, with `slots` free; `prs` the open PRs the tick's review pass read, by
- * issue. Reads files only when a slot is free and a sibling is active or two picks could start together; a failed read
+ * issue; `landed` the Objectives whose PR the tick merged. Reads files only when a slot is free and a sibling is active or two picks could start together; a failed read
  * leaves that Objective unknown (it starts, as before). Writes the waiting Objectives' comments unless `dryRun`, each
  * only when its text changed; the started ones' notes wait for the tick's final picks (announceStarts). Returns
  * `{ready, waits, notes, seen}` (siblingOrder; `seen` the comments read, by issue).
  */
-export async function orderSiblings(repo, { issues, statuses = {}, ready, waiting = [], slots, prs = {}, autoMerge = true }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
+export async function orderSiblings(repo, { issues, statuses = {}, ready, waiting = [], slots, prs = {}, autoMerge = true, landed = [] }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
   const byNumber = new Map(issues.map((i) => [i.number, i]));
   const states = activeStates(autoMerge);
-  const active = issues.filter((i) => states.has(stateOf(i, statuses[i.number] ?? null)) && !ready.includes(i.number));
+  // One whose PR this tick merged (`landed`) is still listed In review, but is gone as a sibling.
+  const active = issues.filter((i) => states.has(stateOf(i, statuses[i.number] ?? null)) && !ready.includes(i.number) && !landed.includes(i.number));
   const pool = slots > 0 ? [...ready, ...waiting].slice(0, slots + LOOKAHEAD).map((n) => byNumber.get(n)).filter(Boolean) : [];
   const none = { ready: ready.slice(0, Math.max(0, slots)), waits: [], notes: [], seen: {} };
   // Nothing to compare: no active sibling, and at most one pick can start.

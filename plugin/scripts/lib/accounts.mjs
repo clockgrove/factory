@@ -368,6 +368,32 @@ export function routeAccounts(text) {
 }
 
 /**
+ * The setting that turns on automatic account choice on GitHub Actions and the cloud sandbox (#268): FACTORY_AUTO_ACCOUNT
+ * in the workflow file's env block. It steers which credential a stage runs on, so, like FACTORY_ACCOUNTS, only the
+ * reviewed workflow file sets it, never a repository variable, and local mode has its own (AUTO_ACCOUNT_ENV). `1` is on;
+ * unset, empty or `0` is off. {on, problem}: `problem` names any other value, which leaves it off.
+ */
+export const ROUTE_AUTO_ENV = "FACTORY_AUTO_ACCOUNT";
+export function routeAutoSetting(env = process.env) {
+  const v = String(env[ROUTE_AUTO_ENV] ?? "").trim();
+  if (v === "1") return { on: true, problem: null };
+  if (v === "" || v === "0") return { on: false, problem: null };
+  return { on: false, problem: `${ROUTE_AUTO_ENV} is neither 1 nor 0, so automatic account choice is off` };
+}
+
+/**
+ * The accounts automatic choice picks among for a `harness` stage on GitHub Actions and the cloud sandbox (#268): the
+ * harness's declared names, in order, when the setting is on (routeAutoSetting) and FACTORY_ACCOUNTS declares more than
+ * one for it; else null, and every stage runs on its pin or its harness's default, exactly as with the setting off.
+ */
+export function routeAutoAccounts(env, harness) {
+  if (!routeAutoSetting(env).on) return null;
+  const d = routeAccounts(env.FACTORY_ACCOUNTS);
+  const names = d.ok ? d.accounts[harness] || [] : [];
+  return names.length > 1 ? names : null;
+}
+
+/**
  * The suffix an account's secrets carry: none for the account named after its harness (today's secrets,
  * ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CODEX_API_KEY, FACTORY_CODEX_GATEWAY_KEY, COPILOT_GITHUB_TOKEN), else `_`
  * and the name upper-cased with each hyphen an underscore (`claude-2`: CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2). Account names

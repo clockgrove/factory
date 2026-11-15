@@ -1912,9 +1912,12 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
  * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
  * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
  * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
- * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
+ * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`; with automatic
+ * account choice on there (`goOn`, route-holds.mjs routeLimits `limit`), the limit holds its account first, and with
+ * another account free the stage ends `waiting` and the Objective goes on there, else the Block names the others' first
+ * reset too. A hold that cannot be written Blocks as with the setting off.
  */
-export async function usageLimitExit(e, { local, records, finish, block, pause = null }) {
+export async function usageLimitExit(e, { local, records, finish, block, pause = null, goOn = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
   const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
@@ -1924,7 +1927,13 @@ export async function usageLimitExit(e, { local, records, finish, block, pause =
     await finish("paused", reason, null, usageLimit);
     return;
   }
-  const reason = usageLimitReason(e.refusal);
+  const moved = goOn ? await goOn(e).catch((x) => log(`the usage limit's account hold could not be written (${String(x?.message || x).slice(0, 120)}), so the stage Blocks`) ?? null) : null;
+  if (moved?.goOn) {
+    log(`waiting: ${moved.goOn}`);
+    await finish("waiting", moved.goOn, null, usageLimit);
+    return;
+  }
+  const reason = `${usageLimitReason(e.refusal)}${moved?.note ? ` ${moved.note}` : ""}`;
   log(`blocked: ${reason}`);
   await block(reason, "provider-quota").catch((x) => log(`the usage limit's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", reason, null, usageLimit);

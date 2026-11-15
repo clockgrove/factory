@@ -709,10 +709,10 @@ export function objectiveModels(usage, cost) {
 export const objectiveAccounts = (usage) => [...new Set((usage || []).map((r) => r?.account).filter((a) => typeof a === "string" && ACCOUNT.test(a)))];
 
 /**
- * Each local account's share of an Objective (#266), in the order first seen: `stages` (the stages that ran on it),
- * `usd` (their dollars, null when none was metered) and `limitPauses` (the stages a usage limit paused on it: a
- * result.json that ended `paused` with its `usageLimit`, or a spend line's `limitPaused`). From records that name
- * their account; empty where none does.
+ * Each account's share of an Objective (#266), in the order first seen: `stages` (the stages that ran on it), `usd`
+ * (their dollars, null when none was metered) and `limitPauses` (the stages a usage limit paused on it: a result.json
+ * that ended `paused` with its `usageLimit`, or `waiting` with it to go on on another account on GitHub Actions and the
+ * cloud sandbox, #268; or a spend line's `limitPaused`). From records that name their account; empty where none does.
  */
 export function accountUse(usage) {
   const by = new Map();
@@ -721,7 +721,7 @@ export function accountUse(usage) {
     const a = by.get(r.account) ?? { account: r.account, stages: 0, usd: null, limitPauses: 0 };
     a.stages += 1;
     if (typeof r.usd === "number" && Number.isFinite(r.usd)) a.usd = Math.round(((a.usd ?? 0) + r.usd) * 1e4) / 1e4;
-    if (r.limitPaused === true || (r.exit === "paused" && r.usageLimit && typeof r.usageLimit === "object")) a.limitPauses += 1;
+    if (r.limitPaused === true || ((r.exit === "paused" || r.exit === "waiting") && r.usageLimit && typeof r.usageLimit === "object")) a.limitPauses += 1;
     by.set(r.account, a);
   }
   return [...by.values()];

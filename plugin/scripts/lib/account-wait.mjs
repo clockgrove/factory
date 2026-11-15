@@ -8,6 +8,9 @@
 //   the PR (Factory's own comment, accountWaitMark). The dispatcher's tick puts the label back once one account label or
 //   none is left (accountWaitResume), as after a third-party reviewer's wait (third-party-review.mjs), and the label
 //   starts the review stage again on its route.
+// A stage that met its account's usage limit while automatic account choice has another account free (route-holds.mjs,
+// #268) goes the same way, so the next stage's account step picks that account: the work stage back to Queued or In
+// review, the review's label off and put back at the dispatcher's next tick.
 import { addLabels, findPr, findProject, moveCard, removeLabel, rest, setStateLabel, upsertComment } from "./github.mjs";
 import { REVIEW_LABEL, isSelf, marker } from "./logic.mjs";
 import { accountPin, routeTwoLine } from "./accounts.mjs";
@@ -16,25 +19,27 @@ import { accountPin, routeTwoLine } from "./accounts.mjs";
 export const accountWaitMark = (issue) => marker(issue, "account-wait");
 
 /**
- * Make a stage that met two account labels (`two`) wait, as above: `stage` "review" with its PR (`pr`, the PR or its
- * number), else a work stage, whose Objective goes back to In review when it has an open PR that is no draft (a
- * send-back: the dispatcher sends it again once one label is left, and the stage then goes on with that PR and branch),
- * else to Queued. Returns the line the stage ends with. A failed write throws: the stage then fails as on any write.
+ * Make a stage wait, as above: on two account labels (`two`), or, with `limit` (the line naming the account a usage limit
+ * holds), to go on on another account. `stage` "review" with its PR (`pr`, the PR or its number), else a work stage,
+ * whose Objective goes back to In review when it has an open PR that is no draft (a send-back: the dispatcher sends it
+ * again, and the stage then goes on with that PR and branch), else to Queued. Returns the line the stage ends with. A
+ * failed write throws: the stage then fails as on any write.
  */
-export async function waitOnAccounts({ repo, issue, stage, pr = null, two, opts }) {
-  const line = routeTwoLine(two);
+export async function waitOnAccounts({ repo, issue, stage, pr = null, two = null, limit = null, opts }) {
+  const line = limit || routeTwoLine(two);
   const prNumber = typeof pr === "object" && pr ? pr.number : pr;
   if (stage === "review" && prNumber) {
     // The record first: a label taken off with no record would wait for nothing.
-    await upsertComment(repo, prNumber, accountWaitMark(issue), `Factory: ${line}. The review waits; once one account label or none is left, Factory puts \`${REVIEW_LABEL}\` back on this PR and the review goes on.`, opts);
+    const then = limit ? `The review goes on on another account: Factory puts \`${REVIEW_LABEL}\` back on this PR at its next tick.` : `The review waits; once one account label or none is left, Factory puts \`${REVIEW_LABEL}\` back on this PR and the review goes on.`;
+    await upsertComment(repo, prNumber, accountWaitMark(issue), `Factory: ${line}. ${then}`, opts);
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts);
-    return `${line}; the review waits for one to be left`;
+    return limit ? `${line}; the review goes on on another account` : `${line}; the review waits for one to be left`;
   }
   const open = typeof pr === "object" && pr ? pr : await findPr(repo, `factory/${issue}`, opts).catch(() => null);
   const back = open && open.state !== "closed" && !open.draft ? "In review" : "Queued";
   await setStateLabel(repo, issue, back === "In review" ? "in-review" : null, opts);
   await moveCard(await findProject(repo, opts).catch(() => null), repo, issue, back, opts).catch(() => {});
-  return `${line}; back to ${back} until one is left`;
+  return limit ? `${line}; back to ${back}, to go on on another account` : `${line}; back to ${back} until one is left`;
 }
 
 /** The PR's account-wait record (accountWaitMark, Factory's own comment): {id, at} (its last write), or null. */

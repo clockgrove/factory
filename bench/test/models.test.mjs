@@ -4,7 +4,7 @@ import "../../plugin/test/temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadPrices } from "../lib/cost.mjs";
-import { harnessCell, markdownTable, objectiveModels, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
+import { accountUse, harnessCell, markdownTable, objectiveModels, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
 import { harnessMarker, stageSpendLine } from "../../plugin/scripts/lib/logic.mjs";
 import { localMerge } from "./fixtures/github.mjs";
 
@@ -97,4 +97,7 @@ test("#266: the row gives each local account its stages, dollars and usage-limit
   assert.deepEqual(score(localMerge(64)).accountUse, [], "no account named: none");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", usageLimit: { harness: "claude" } }).parts, { limitPaused: true }, "the spend line marks a usage-limit pause");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, {}, "not an outage's");
+  // On GitHub Actions and the cloud sandbox (#268), a stage that went on on another account is that account's limit pause.
+  assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "waiting", usageLimit: { harness: "claude" } }).parts, { limitPaused: true });
+  assert.deepEqual(accountUse([{ account: "claude-2", usd: 0.5, exit: "waiting", usageLimit: { harness: "claude" } }, { account: "claude-2", usd: 0.2, exit: "waiting" }]), [{ account: "claude-2", stages: 2, usd: 0.7, limitPauses: 1 }]);
 });

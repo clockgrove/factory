@@ -359,7 +359,9 @@ export function stageEnvironment({ inputs, defaults = inputs, env = process.env,
   if (inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
   // The accounts the workflow declares and the one the job's account step picked (#267), whose credential is the only one
   // the launch job holds: the stage checks its labels still pick it (objective-trust.mjs accountGate) and records it.
+  // Automatic account choice (#268): the stage accepts the step's pick and records its usage limits as holds.
   if (env.FACTORY_ACCOUNTS) out.FACTORY_ACCOUNTS = env.FACTORY_ACCOUNTS;
+  if (env.FACTORY_AUTO_ACCOUNT) out.FACTORY_AUTO_ACCOUNT = env.FACTORY_AUTO_ACCOUNT;
   if (env.FACTORY_STAGE_ACCOUNT) out.FACTORY_STAGE_ACCOUNT = env.FACTORY_STAGE_ACCOUNT;
   Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });
   if (pr) out.FACTORY_STAGE_PR = String(pr);

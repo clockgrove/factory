@@ -135,11 +135,11 @@ export function workflowDriftLines(working, committed) {
 
 /**
  * Settings another route reads from the workflow's env block (plugin/workflow-template.yml): the cloud sandbox's size,
- * which setup writes, and the accounts GitHub Actions and the cloud sandbox run on (lib/accounts.mjs routeAccounts; local
- * mode's are this machine's own). Local mode leaves them out of every stage, as any name it does not take, but does not
+ * which setup writes, and the accounts GitHub Actions and the cloud sandbox run on and their automatic choice
+ * (lib/accounts.mjs routeAccounts, routeAutoSetting; local mode's are this machine's own). Local mode leaves them out of every stage, as any name it does not take, but does not
  * warn about them (#179).
  */
-export const OTHER_ROUTE_SETTINGS = new Set(["FACTORY_SANDBOX_VCPUS", "FACTORY_ACCOUNTS"]);
+export const OTHER_ROUTE_SETTINGS = new Set(["FACTORY_SANDBOX_VCPUS", "FACTORY_ACCOUNTS", "FACTORY_AUTO_ACCOUNT"]);
 
 /**
  * A workflow env block (local.mjs workflowEnv) split into the settings Factory takes, the names it drops and warns

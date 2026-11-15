@@ -50,6 +50,9 @@ on:
     workflows:
       - {{ci_workflow}}
     types: [completed]
+# Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below:
+#   FACTORY_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets
+#   FACTORY_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
 env:
   FACTORY_HARNESS: {{harness}} # claude | codex | copilot
   FACTORY_MODEL: {{model}}

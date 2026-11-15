@@ -79,8 +79,8 @@ import {
   stoppedEnd,
   unreadNow,
 } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stageStopSignal, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
-import { exitUnaddressed, thirdPartyStep } from "./lib/third-party-review.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -390,7 +390,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -500,7 +500,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -553,7 +553,7 @@ async function main() {
   // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
   openStageHosts(chosen.hosts);
   if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
-  progress.ran(ranWith(inputs, chosenLabels));
+  progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks
   // with its fix before anything is set up, never a crash at the first harness pass.
   const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");
@@ -932,9 +932,26 @@ async function main() {
     }
   };
   // The repository's third-party reviewers (third-party-review.mjs): each one's review of the head Factory's reviewer
-  // read is waited for, within a bound and never past half the stage's time left, before the answer pass; without one
-  // in time the stage goes on and the progress says so. Not when the cap is spent: no answer pass runs then.
-  const thirdParty = await thirdPartyStep({ repo, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, leftMs: remainingMs(deadlineAt), progress, ...token, signal: stageStopSignal() });
+  // read comes before the answer pass, within a bound; without one in time the stage goes on and the progress says so.
+  // Not when the cap is spent: no answer pass runs then. A review still to come is not waited for here: the stage
+  // records the wait on the PR and ends `waiting`, its label off, holding no slot or runner; the dispatcher puts the
+  // label back once that review exists or the bound has passed, and that review stage, with Factory's own review
+  // already posted (reviewsCover), runs no reviewer pass and goes on from here.
+  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, ...token });
+  if (third.wait) {
+    // A stop's end stands; otherwise the stage ends only where the dispatcher will resume it (third-party-review.mjs waitEnd).
+    await holdIfStopped();
+    const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels: issueData.labels, token });
+    if (ended.ok) {
+      const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+      log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
+      await finish("waiting", reason);
+      return;
+    }
+    await clearWait({ repo, issue, prNumber: pr.number, ...token });
+    await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+  }
+  const thirdParty = third.logins;
   // Factory's placeholder (no finding of its own) still leaves a named reviewer's comments to answer. The foundation pass
   // posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open comments too.
   const noneOwn = placeholder && !alreadyReviewed;

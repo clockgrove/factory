@@ -6,7 +6,7 @@
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
@@ -25,7 +25,8 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { accountEnv, accountToken, defaultAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
+import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -707,7 +708,8 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
  * sandbox the launch job's tick on its own failure, the sweep's own wakes (sweep-wake, image-wake) and the dispatcher's
- * owed image build (image_owed). A workflow rendered before them leaves those waits to GitHub's cron,
+ * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Factory PR
+ * (pull_request_review, filtered to a Bot reviewer), which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
 export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
@@ -733,10 +735,15 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
     ...(jobs["launch-gate"] && !ownWake("sweep") ? ["the sweep's own wake (sweep-wake)"] : []),
     ...(jobs["launch-gate"] && !(ownWake("image") && /cancelled\(\)|always\(\)/.test(String(jobs["image-wake"]?.if || ""))) ? ["the sweep's wake after an image build (image-wake) that runs past a skipped dispatcher"] : []),
     ...(jobs["launch-gate"] && !owedBuild ? ["the dispatcher's owed image build (image_owed)"] : []),
+    ...(thirdPartyNamed(doc, jobs) && !(on?.pull_request_review && /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot'/.test(String(jobs.dispatch?.if || ""))) ? ["a dispatcher tick on a third-party reviewer's review (pull_request_review, from an App only)"] : []),
   ];
   if (!missing.length) return PASS("dispatcher ticks", `a closed issue, a failed launch and the waits only time ends tick the dispatcher on time${jobs["launch-gate"] ? "; the sandbox sweep arms its own wakes and an owed image build runs on the day's first tick" : ""}`);
-  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a review waiting for a third-party reviewer, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
+
+/** Whether the workflow names third-party reviewers: FACTORY_THIRD_PARTY_REVIEWERS in its env block, or `third_party_reviewers` on a step. */
+const thirdPartyNamed = (doc, jobs) =>
+  !!String(doc?.env?.FACTORY_THIRD_PARTY_REVIEWERS ?? "").trim() || Object.values(jobs).some((j) => (j?.steps || []).some((st) => !!String(st?.with?.third_party_reviewers ?? "").trim()));
 
 /**
  * On a private repository the wake jobs sleep only to the short waits (a quota retry, a read retry, the sweep's minutes):
@@ -745,7 +752,7 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  */
 export function longWaitCheck(repoData) {
   if (repoData?.private !== true) return null;
-  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
+  return PASS("long waits", "private repository: a sandbox stage's lease end, the UTC day's turn after daily_usd and a third-party wait's bound fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */
@@ -1405,6 +1412,60 @@ export async function objectiveHostChecks({ inputs, repo, token, list = () => re
 }
 
 /**
+ * Whether a declared account's login works, by its CLI's own login status (exit code only; its output, which can name the
+ * person, is never read): `claude auth status` and `codex login status` on the account's folder. True, false, or null
+ * when the CLI is not on PATH or did not answer.
+ */
+export function cliLoggedIn(account, env = process.env) {
+  const bin = account.harness;
+  if (!whichSync(bin)) return null;
+  const args = bin === "claude" ? ["auth", "status"] : ["login", "status"];
+  const r = spawnSync(bin, args, { env: accountEnv(env, account), stdio: "ignore", timeout: 30_000 });
+  return r.status === 0 ? true : r.status === 1 ? false : null;
+}
+
+/**
+ * Whether a declared Copilot account's token is one GitHub takes (GET /user: 200), with no write anywhere; true, false,
+ * or null when GitHub did not answer. The token never leaves this process but to GitHub.
+ */
+export const copilotTokenWorks = (token) => rest("user", { token }).then(() => true, (e) => (e.status === 401 || e.status === 403 ? false : null));
+
+/**
+ * Local mode: each account this machine declares (lib/accounts.mjs, ~/.config/factory/accounts.json), named by its name
+ * alone, never a path. A declaration serve would refuse is a FAIL per account, with why. Else, per account: its folder
+ * owner-only (a WARN), its login hidden from every sandbox (credentialPaths covers its login files) and in no home another
+ * account's harness may write (loginsExposedBy), and its login working (`loggedIn`, `tokenWorks`: seams for the tests).
+ * Nothing declared: one PASS saying each harness runs on its one login.
+ */
+export async function localAccountChecks({ env = process.env, local, home = homedir(), checkout = null, loggedIn = cliLoggedIn, tokenWorks = copilotTokenWorks }) {
+  if (!local || env.GITHUB_ACTIONS) return [];
+  const loaded = loadAccounts({ home, env, roots: sandboxRoots(checkout, home) });
+  const fix = "fix that entry in ~/.config/factory/accounts.json (docs/LOCAL.md, Accounts); serve refuses to start and each stage Blocks until then";
+  if (!loaded.ok) return loaded.problems.map((p) => FAIL(`account ${p.account}`, p.why, fix));
+  if (!loaded.declared) return [PASS("accounts", "none declared: each harness runs on its one login (claude, codex, copilot)")];
+  const all = Object.values(loaded.accounts).flat();
+  const denied = credentialPaths(home, env);
+  const covered = (p) => denied.some((d) => p === d || p.startsWith(`${d}/`));
+  const logins = harnessLogins(home, env);
+  const out = [];
+  for (const a of all) {
+    const name = `account ${a.name}`;
+    const rows = [];
+    if (a.home && statSync(a.home).mode & 0o077) rows.push(WARN(name, `its ${a.harness === "claude" ? "Claude Code" : "Codex"} folder is open to the group or others`, "chmod 700 that folder"));
+    const login = a.home ? logins.find((l) => l.harness === a.harness && l.dir === a.home) : null;
+    const files = a.tokenFile ? [a.tokenFile] : (login?.files ?? [a.home]);
+    if (!files.every(covered)) rows.push(FAIL(name, "its login is not hidden from every sandbox", "report it: every declared login is on the sandboxes' deny list"));
+    const exposer = all.find((b) => b !== a && b.home && loginsExposedBy(b.harness, accountEnv(env, b, home), home).some((x) => x.path === a.home));
+    if (exposer) rows.push(FAIL(name, `its folder is inside a home account ${exposer.name}'s harness may write, so that harness's sandbox can reach it`, fix));
+    const works = a.tokenFile ? await tokenWorks(accountToken(a)) : loggedIn(a, env);
+    if (works === false) rows.push(FAIL(name, a.tokenFile ? "GitHub refuses its token" : `its ${a.harness} login does not work (not logged in)`, a.tokenFile ? "save a new fine-grained token with the Copilot Requests permission to its file" : `log in on that folder: ${a.harness === "claude" ? "CLAUDE_CONFIG_DIR=<its folder> claude" : "CODEX_HOME=<its folder> codex login"}`));
+    else if (works === null) rows.push(WARN(name, a.tokenFile ? "GitHub did not answer the token check" : `its login was not checked (${a.harness} is not on PATH or did not answer)`, "run doctor --local again"));
+    out.push(...(rows.length ? rows : [PASS(name, `${a.harness}${loaded.accounts[a.harness][0] === a ? ", its default" : ""}: on its own path, hidden from every sandbox, login works`)]));
+  }
+  return out;
+}
+
+/**
  * Local mode with Codex or Copilot: each FACTORY_LOCAL_DOMAINS entry that is no host name (a loopback name, an IP address,
  * host:port) is a WARN. serve leaves it out of their sandbox policies: Copilot drops its whole network policy for a
  * host:port entry (#106), and Codex's proxy ignores the port and admits every port of the host (#108).
@@ -1470,7 +1531,12 @@ async function main() {
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
-  results.push(...localLoginChecks({ inputs, env: process.env, local }));
+  // The login a stage of this harness runs on: its default declared account's, else this shell's (lib/accounts.mjs).
+  // The clone's directory is a root a sandbox writes under only when doctor runs from one (as serve does from its own).
+  const clone = found && !found.noClone ? checkout : null;
+  const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(clone) }) : null;
+  results.push(...localLoginChecks({ inputs, env: declared?.ok ? accountEnv(process.env, defaultAccount(declared, inputs.harness)) : process.env, local }));
+  results.push(...(await localAccountChecks({ env: process.env, local, checkout: clone })));
   results.push(...machineChecks({ env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));

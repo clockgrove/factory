@@ -58,7 +58,7 @@ import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
-import { namedReviewer, thirdPartyComment } from "./third-party-review.mjs";
+import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -1536,6 +1536,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
     // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
     ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
+    // The local account the stage ran on (accounts.mjs), by name only; none on Actions or in a cloud sandbox.
+    ...(ran?.account ? { account: ran.account } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,
@@ -2157,7 +2159,8 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
     const tip = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => (log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); the send-back goes ahead`), null));
     if (tip?.head === record.base) stuck = record;
   }
-  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck };
+  // The PR's third-party wait record (third-party-review.mjs waitOf), read from the same comments.
+  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue) };
 }
 
 /**

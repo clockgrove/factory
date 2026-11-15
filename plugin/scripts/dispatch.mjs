@@ -13,19 +13,20 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
+import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -42,6 +43,14 @@ export async function appToken(inputs) {
 
 /** At most this many blocked-by relation reads at once (GitHub's secondary rate limit counts concurrent requests). */
 const RELATION_READS = 6;
+
+/**
+ * How long a factory:local Objective may stay Running with no claim comment at all before a local loop puts it back to
+ * Queued: a start writes its claim within seconds of the Running label, and a live stage keeps it (HEARTBEAT_MS).
+ */
+const UNCLAIMED_MS = 5 * 60_000;
+/** A long-lived loop's memory of what its sweep last said of an issue it left alone (said once while it stays so). */
+const UNCLAIMED_SAID = new Map();
 
 /** What a person does about a factory:local Objective no loop came back to for a day. */
 const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
@@ -79,10 +88,13 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
 /** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
 const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new Date(resetAt).toISOString()}; no new stage starts until then`;
 
-/** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+/** Whether a dispatcher run on this event may build an owed image: never a pull request's or a review's (pull_request*), whose run reads the workflow from the PR. */
+export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = "this box is full", localHeld = {}, localHold = null, localStopped = {}, failedLaunch = null, recordWrites = null }) {
+/** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -351,15 +363,19 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const readToken = { token: inputs.githubToken || token };
   const vanished = [];
   const paused = [];
+  const unclaimed = [];
   // With a cloud sandbox (FACTORY_SANDBOX) no work job holds an Objective: its sandbox record does (launch.mjs). A
   // Running Objective with no work start since it became Running lost its launch (an event GitHub dropped, a pending
   // launcher a newer one replaced): past a grace for the launch job to start, the sweep names it again.
   const relaunch = [];
+  // `claimed`: the Objectives a claim comment was read on, whatever its time (an unread one counts too).
+  const claimed = new Set();
   // A local loop's hold on an Objective that waits on one (Running, or In review with work owed): "unread" when its
   // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one
   // that a human re-labelled) says nothing now.
   const localWait = async (issue, entered) => {
     const hold = await backend().trigger.localHold(repo, issue.number, opts);
+    if (hold) claimed.add(issue.number);
     return hold && hold.state !== "unread" && entered && Date.parse(hold.heartbeat) < Date.parse(entered) ? null : hold;
   };
   // The Block for an Objective no loop came back to: an expired claim names its holder and goes with the Block, so the
@@ -400,10 +416,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     );
   };
   const unreadReason = (hold, what) => `${what} for over a day and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
-  // In review with its review owed (an open PR, not a draft, labelled factory:review): only a local loop runs that
-  // review, so it waits as a Running one does, counted from the later of its entering In review and the PR's last
-  // factory:review label (a re-review owes a new one). The issue's own time is read first, so an Objective inside its
-  // day costs one read a tick. True when Blocked.
+  // In review with its review owed (an open PR, not a draft, labelled factory:review, or unlabelled with a third-party
+  // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
+  // as a Running one does, counted from the later of its entering In review and the PR's last factory:review label (a
+  // re-review owes a new one) or the wait record's last write. The issue's own time is read first, so an Objective
+  // inside its day costs one read a tick. True when Blocked.
   const reviewLapsed = async (issue) => {
     const n = issue.number;
     const entered = await objectiveLabeledAt(repo, n, "factory:in-review", opts).then((at) => ({ at }), () => null);
@@ -430,13 +447,27 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       return false;
     }
     const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-    if (!pr || pr.draft || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return false;
+    if (!pr || pr.draft) return false;
+    // Unlabelled: owed only when its review stage ended waiting for a third-party reviewer (a loop stopped meanwhile).
+    let waited = null;
+    if (!(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) {
+      const comments = await listComments(repo, pr.number, opts).catch(() => null);
+      if (!comments) {
+        retry(`PR #${pr.number}'s comments`);
+        return false;
+      }
+      waited = waitOf(comments, n);
+      if (!waited) return false;
+    }
     const owed = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts).then((at) => ({ at }), () => null);
     if (!owed) {
       retry(`PR #${pr.number}'s review label time`);
       return false;
     }
-    const since = owed.at && Date.parse(owed.at) > Date.parse(entered.at) ? owed.at : entered.at;
+    // A review label applied since the record's last write: a review took the wait up, so none is owed for it.
+    if (waited && owed.at && Date.parse(owed.at) >= waited.updatedAt) return false;
+    const from = waited ? new Date(waited.updatedAt).toISOString() : owed.at;
+    const since = from && Date.parse(from) > Date.parse(entered.at) ? from : entered.at;
     if (Date.now() - Date.parse(since) < CLAIM_PAUSE_MS || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
       due(n, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
       return false;
@@ -618,9 +649,45 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
           continue;
         }
-        // No claim: a runner job gets 15 minutes to show up. A factory:local Objective waits for a loop on its
-        // machine (one that starts, or a start that failed before its claim), so it gets the day a claim gets.
         const local = hasLocalLabel(issue);
+        // A local loop's own pass (serve, which says whether a stage of it runs on its machine: localLive): a
+        // factory:local Objective Running for UNCLAIMED_MS on GitHub's clock with no claim comment at all, no stage of it
+        // here and none this loop is starting (localHeld) is a start that never wrote its claim (its loop stopped or died
+        // between the Running label and the claim). Every stage runs under a claim, so no machine works it: back to
+        // Queued for the next pick, rather than a day's wait. The listing may be older than GitHub, so it must read so
+        // again: the timeline with no removal of the label since that stint began, and a fresh read of the issue open,
+        // Running and in no other state. Only factory:running comes off; a label that cannot be removed is tried again
+        // next tick.
+        if (localLive && local && !hold && !claimed.has(issue.number) && since && githubNow() - Date.parse(since) >= UNCLAIMED_MS && !localHeld?.[issue.number] && !localLive(issue.number)) {
+          const n = issue.number;
+          const stint = runningStint(events);
+          const fresh = stint.running && stint.at === since ? await getIssue(repo, n, opts).catch(() => null) : null;
+          const shown = (fresh?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+          const others = shown.filter((l) => /^factory:(blocked|question|in-review)$/.test(l));
+          if (fresh?.state !== "open" || !shown.includes("factory:running") || others.length) {
+            // Running beside another state stays so until someone changes it: said once per such state, not every tick.
+            const why = others.length && shown.includes("factory:running") ? `labelled factory:running and ${others.join(", ")} at once with no claim; left alone` : "Running with no claim in the listing, but GitHub no longer shows that stint; left alone this tick";
+            if (!others.length || UNCLAIMED_SAID.get(n) !== why) log(`  #${n}: ${why}`);
+            if (others.length) UNCLAIMED_SAID.set(n, why);
+            continue;
+          }
+          UNCLAIMED_SAID.delete(n);
+          if (!dryRun) {
+            const off = await removeLabel(repo, n, "factory:running", opts).then(
+              () => true,
+              (e) => (log(`  #${n}: Running with no claim, but its label could not be removed (${String(e?.message || e).slice(0, 120)}); next tick tries again`), retry(`#${n}'s Running label`), false),
+            );
+            if (!off) continue;
+            await moveCard(project, repo, n, "Queued", opts).catch(() => {});
+          }
+          unclaimed.push(n);
+          statuses[n] = "Queued";
+          issue.labels = (issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running");
+          log(`  #${n}: Running since ${since} with no claim and no stage on any machine (a start that never wrote its claim); back to Queued`);
+          continue;
+        }
+        // No claim: a runner job gets 15 minutes to show up. Any other factory:local Objective waits for a loop on its
+        // machine, so it gets the day a claim gets.
         if (!hold && since && Date.now() - Date.parse(since) < (local ? CLAIM_PAUSE_MS : 15 * 60_000)) {
           if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
           continue;
@@ -666,6 +733,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const landed = [];
   // PRs the merge pass left in the merge queue: the queue-watch job reads them until each merges or leaves.
   const queueWatch = [];
+  // PRs whose third-party wait ended this tick: their review label went back on.
+  const thirdPartyResumed = [];
   // Each In-review Objective's open PR (null for none) as this pass read it.
   const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
@@ -711,8 +780,35 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread, wait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
+      // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
+      // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
+      // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
+      // serve's review). The bound's end is a wake of its own; the reviewer's review ticks this job by its event.
+      const waiting = !reviewing ? await waitState({ repo, issue: issue.number, pr, wait, opts, now: Date.now(), reads: thirdPartyReads }) : null;
+      // The PR's comments unread: with third-party reviewers named it may be waiting, so nothing else runs on it this tick.
+      if (unread && !reviewing && inputs.thirdPartyReviewers?.length) {
+        retry(`PR #${open.number}'s comments`);
+        continue;
+      }
+      if (waiting?.resume) {
+        if (dryRun) continue;
+        try {
+          await addLabels(repo, open.number, [REVIEW_LABEL], opts);
+          thirdPartyResumed.push(issue.number);
+          log(`  #${issue.number}: PR #${open.number}: ${{ reviewed: `${wait.logins.join(", ")} reviewed ${wait.sha.slice(0, 7)}`, deadline: `the third-party wait for ${wait.logins.join(", ")} has passed its bound`, head: `its head moved from ${wait.sha.slice(0, 7)} during the third-party wait` }[waiting.resume]}; the review goes on`);
+        } catch (e) {
+          log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
+          retry(`#${issue.number}'s review label`);
+        }
+        continue;
+      }
+      if (waiting?.waiting) {
+        due(issue.number, "third-party", waiting.until + WAKE_SLACK_MS);
+        if (waiting.unread) retry(`PR #${open.number}'s review label time`);
+        continue;
+      }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
         const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
@@ -832,7 +928,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const released = [];
   for (const key of Object.keys(localHeld || {})) held[Number(key)] ??= localHeld[key];
   // localHold(issue): the loop's hold read on the listing's own issue (its labels), never picked while it gives a reason
-  // (local.mjs limitHold: the Objective's harness has its usage limit spent).
+  // (local.mjs limitHold: the account the Objective runs on has its usage limit spent).
   if (localHold) for (const issue of wanted) {
     const why = localHold(issue);
     if (why) held[issue.number] ??= why;
@@ -917,17 +1013,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // A local loop's own capacity (local.mjs serve): it starts no more than its machine has room for, so none is labelled
   // Running idle. localSlots: that room as the loop read it; localFull: what holds the rest (the machine's budget or
-  // load, or the loop's own cap). localTake(n): the loop takes the slots of its machine's budget for n picks now, before
+  // load, the loop's own cap, or a switch to a new pinned release). localTake(n): the loop takes the slots of its machine's budget for n picks now, before
   // any is labelled, and answers how many it got (fewer when another loop on the machine took the last ones meanwhile).
   if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
     picked.ready = picked.ready.slice(0, Math.max(0, localSlots));
-    picked.reason = picked.reason || localFull;
+    picked.reason = picked.reason || localFull || `this box is full (FACTORY_LOCAL_MAX_CONCURRENT)`;
   }
   if (localTake && picked.ready.length) {
     const taken = localTake(picked.ready.length);
     if (taken < picked.ready.length) {
       picked.ready = picked.ready.slice(0, Math.max(0, taken));
       picked.reason = picked.reason || "this machine's budget is full: another loop here took its last slots";
+    }
     }
   }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
@@ -1009,8 +1106,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (!dryRun && !inputs.issue) await announceStarts(repo, { started: picked.ready.filter((n) => !sentBack.includes(n)), issues, order }, opts, { log });
   // Mark the picked issues Running now, so the next cron tick does not pick them again
   // before their matrix jobs start; the worker's doctor step re-marks on failure.
+  // A local loop told to stop (localStopping) marks no more: its picks from there on stay Queued, and it returns only
+  // the ones it marked. It is told each one before its write (localMarked), so a dispatch that throws midway still
+  // leaves it the list to put back to Queued (local.mjs serve).
   if (!dryRun) {
-    for (const n of picked.ready) {
+    for (const [i, n] of picked.ready.entries()) {
+      if (localStopping?.()) {
+        picked.ready = picked.ready.slice(0, i);
+        break;
+      }
+      // Named before the write: a write whose answer is lost may still have landed.
+      localMarked?.(n);
       await setStateLabel(repo, n, "running", opts);
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
@@ -1033,7 +1139,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, sentBack, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -1287,9 +1393,10 @@ async function main() {
   setOutput("wake_at", wake?.at ?? "");
   setOutput("wake_kind", wake?.kind ?? "");
   // On the sandbox route, an image build an earlier day left owed runs on this tick (the image job's `if:`): the
-  // first tick of the UTC day, an event's or a wake's (never a pull request's), not GitHub's nightly cron alone.
+  // first tick of the UTC day, an event's or a wake's (never a pull request's or a review's: those runs read the
+  // workflow from the PR), not GitHub's nightly cron alone.
   let owed = false;
-  if (inputs.sandbox && args.dry_run !== "true" && !inputs.issue && eventName !== "pull_request") {
+  if (inputs.sandbox && args.dry_run !== "true" && !inputs.issue && imageTickEvent(eventName)) {
     owed = await imageOwedNow(repoOf(inputs.repo), { refresh: inputs.imageRefresh, dailyMinutes: inputs.imageDailyMinutes }, { token }).catch((e) => {
       log(`the image record could not be read (${String(e.message).slice(0, 120)}); no owed build this tick`);
       return false;

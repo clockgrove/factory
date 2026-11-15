@@ -17,6 +17,7 @@ import { exec } from "./proc.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { releasesDir } from "./release.mjs";
 import { declaredLogins } from "./accounts.mjs";
+import { holdsDir } from "./holds.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -1579,7 +1580,11 @@ export function outerProbeKey(harness, { env = process.env, home = homedir() } =
   }
 }
 
-/** outerProbe's check itself: the harness's own sandbox (Codex) or what it needs (Copilot), inside the outer profile. */
+/**
+ * outerProbe's check itself: the harness's own sandbox (Codex) or what it needs (Copilot), inside the outer profile. All
+ * of it on `env`, the stage's (its account's login, local.mjs stageEnv): Codex's profile denies what a stage on that
+ * login denies.
+ */
 export function runOuterProbe(harness, { domains = LOCAL_DOMAINS, env = process.env, home = homedir() } = {}) {
   const dir = realpathSync(stageTemp("probe-", home));
   try {
@@ -1594,7 +1599,7 @@ export function runOuterProbe(harness, { domains = LOCAL_DOMAINS, env = process.
     // Copilot's own sandbox cannot be started without a model call; what it needs inside the outer one is checked instead.
     const bwrapPath = harness === "copilot" ? writeBwrapTun(join(dir, "bin")) : null;
     writeFileSync(settings, JSON.stringify(harnessOuterSettings({ harness, domains, writable: [work, tmp], clone: work, env, home, install: harnessInstall(whichPath(harness, env) || harness, home), bwrapPath })));
-    const inner = harness === "copilot" ? ["sh", "-c", COPILOT_OUTER_PROBE] : ["codex", "sandbox", ...codexLocalConfig({ domains, clone: work, addDirs: [tmp], home }), "--", "sh", "-c", `echo ok > ${JSON.stringify(join(work, "probe"))}`];
+    const inner = harness === "copilot" ? ["sh", "-c", COPILOT_OUTER_PROBE] : ["codex", "sandbox", ...codexLocalConfig({ domains, clone: work, addDirs: [tmp], home, env }), "--", "sh", "-c", `echo ok > ${JSON.stringify(join(work, "probe"))}`];
     const r = spawnSync("srt", ["-s", settings, "--", "env", `TMPDIR=${tmp}`, ...inner], { cwd: work, env: { ...env, TMPDIR: tmp }, encoding: "utf8", timeout: 120_000 });
     const ok = r.status === 0 && (harness === "copilot" ? /^ok$/m.test(r.stdout || "") : existsSync(join(work, "probe")));
     return { on: ok, why: ok ? "" : `its own sandbox does not start inside it here (${String(r.stderr || r.error?.message || `exit ${r.status}`).trim().split("\n").at(-1)?.slice(0, 200)})` };
@@ -1992,7 +1997,8 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
       denyRead: [...(credentials ?? credentialPaths(home, env, { own: stageLogin(harness, env, home) })).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
-      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home)],
+      // This machine's usage-limit holds (holds.mjs): never in a writable path, and read-only even under a harness home around them.
+      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home), holdsDir(home)],
     },
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.

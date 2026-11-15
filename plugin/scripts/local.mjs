@@ -56,7 +56,7 @@ import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
-import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
+import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, STAGE_AUTO_ENV, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
 import { lastStage } from "./lib/continue.mjs";
 import { accountHolds, holdsDir, windowOf } from "./lib/holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
@@ -76,8 +76,9 @@ const limitName = (harness, account) => (account === harness ? harness : `${harn
  * name; the harness's own name with none declared), its reset (`reset`, ms) and window (`window`, as the harness named
  * it, or null), and `free`, the names of the harness's other accounts free now, each with its label. `note`: a line
  * about the issue's account labels. `auto`: automatic account choice is on (#266), so the loop moves the Objective to a
- * free account itself. `guessed`: every account was held and `reset` is the end of a no-reset limit's guess (holds.mjs
- * spent), an estimate, never called a reset. Account names only: no path, no login, no @mention.
+ * free account itself. `guessed`: `reset` is the end of a no-reset limit's guess (holds.mjs spent), an estimate, never
+ * called a reset: the account's own (#332), or, with none free, the first of every held account's to end. Account names
+ * only: no path, no login, no @mention.
  */
 export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null, auto = false, guessed = false }) {
   const h = HARNESS_NAMES[harness] || harness;
@@ -92,7 +93,9 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
       ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
       : `No other ${h} account on this machine is free now.`;
   const head = guessed
-    ? `Factory: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Factory resumes this Objective on this machine then, or sooner on an account that comes free.`
+    ? free.length
+      ? `Factory: the ${stage} stage paused on a usage limit. ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate.`
+      : `Factory: the ${stage} stage paused on a usage limit. Every ${h} account on this machine is held; ${who} reached its limit with no reset reported, and is passed over until about ${new Date(reset).toISOString()}, an estimate. Factory resumes this Objective on this machine then, or sooner on an account that comes free.`
     : `Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`;
   return [head, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
@@ -1297,6 +1300,9 @@ export class Local {
     let env;
     try {
       env = this.stageEnv(issue, usageDir, clone, stageTmp, script, runs.harness, runs.hosts || [], runs.account ?? null);
+      // Its account chosen automatically (no pin): a usage limit or quota with no reset pauses the stage for this loop to
+      // move the Objective (limitPaused), where it would otherwise Block (#332).
+      if (runs.auto) env[STAGE_AUTO_ENV] = "1";
       // Git locks an interrupted stage left (a reboot, a killed serve) go first, unless a live process may hold them
       // (lib/local.mjs staleGitLocks); then, fresh: what an earlier stage or run left untracked in this reused clone
       // (prepareClone). Not for a work stage: it may continue the pass its usage limit paused on this clone, and decides
@@ -1676,6 +1682,7 @@ export class Local {
    */
   async limitPaused(issue, result) {
     const l = result.usageLimit;
+    if (l.noReset) return this.spentPaused(issue, result);
     const now = (this.clock ?? Date.now)();
     const stated = Date.parse(l.reset);
     const since = Date.parse(l.since);
@@ -1688,6 +1695,55 @@ export class Local {
     const until = l.guessed ? `is passed over until about ${new Date(reset).toISOString()} (no reset was reported)` : `is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit ${until}; the claim stays and this loop resumes it after then`);
     if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null, pinned: !!result.pinned, ...(l.guessed ? { guessed: true } : {}) });
+  }
+
+  /**
+   * A stage whose account automatic choice picked that ended `paused` on a usage limit or quota with no reset reported
+   * (session.mjs usageLimitExit `noReset`, #332): the account is passed over for a guessed while (holds.mjs spent), in
+   * every serve here. With another account of the harness free (freeAccounts), the Objective stays paused as on a known
+   * reset, until the guess's end, and pausedHere moves it to a free one at the next tick (movesEarly): never back to the
+   * account it left, which the guess holds. Each stage makes one such move at most, and each move holds the account it
+   * leaves, so an Objective's moves end once every account is held: with none free, it Blocks once (`provider-quota`)
+   * naming each account's state, and the claim goes.
+   */
+  async spentPaused(issue, result) {
+    const l = result.usageLimit;
+    const now = (this.clock ?? Date.now)();
+    const account = result.account || l.harness;
+    const hold = result.hold ?? this.holdOf(implicitAccount(l.harness));
+    const end = this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null });
+    log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
+    if (this.auto && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
+    const h = HARNESS_NAMES[l.harness] || l.harness;
+    const states = this.accountStates(l.harness);
+    const reason = `${h} account \`${account}\` reached its usage limit or quota with no reset reported, and no other ${h} account on this machine is free${states.length ? `: ${states.join("; ")}` : ""}. Re-apply the label once one has reset.`;
+    this.offline?.delete(issue);
+    this.lapsed?.delete(issue);
+    log(`#${issue}: Blocking it: ${reason}`);
+    try {
+      await this.block(issue, result?.stage || "work", reason, { cause: "provider-quota" });
+      await dropClaim(this.repo, issue, this.holder, this.opts);
+    } catch (e) {
+      log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
+    }
+  }
+
+  /** Each declared account of `harness` as a Block names it: held until its reset, passed over until a guess's end, unready here, or free. */
+  accountStates(harness) {
+    let list;
+    try {
+      list = harnessAccounts(this.loadedAccounts(), harness);
+    } catch {
+      return [];
+    }
+    return list.map((a) => {
+      const hold = this.holdOf(a);
+      const hard = this.limitUntil(hold);
+      const any = this.limitUntil(hold, { guess: true });
+      if (any !== null && any !== hard) return `\`${a.name}\` passed over until about ${new Date(any).toISOString()} (no reset reported)`;
+      if (hard !== null) return `\`${a.name}\` held until ${new Date(hard).toISOString()}`;
+      return this.knownUnready(a) ? `\`${a.name}\` cannot run here` : `\`${a.name}\` free`;
+    });
   }
 
   /**

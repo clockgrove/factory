@@ -255,6 +255,19 @@ export function autoAccountSetting(env = process.env) {
 }
 
 /**
+ * What serve sets, `1`, on a work or review stage whose account its automatic choice picked (no pin, #332): a usage
+ * limit or quota with no reset reported then ends the stage `paused` for serve to move the Objective to a free account
+ * (local.mjs limitPaused), where it would otherwise Block. A control key: no harness child sees it.
+ */
+export const STAGE_AUTO_ENV = "FACTORY_STAGE_AUTO_ACCOUNT";
+/**
+ * harness.mjs LIMIT.moves for a stage: whether automatic account choice picked its account, so a limit with no reset
+ * ends it for the route to move the Objective. Locally, serve says so (STAGE_AUTO_ENV); on GitHub Actions and the cloud
+ * sandbox, a stage with automatic choice on (`limits`, route-holds.mjs routeLimits) and no pin.
+ */
+export const stageMoves = ({ local, limits = null, pinned = false, env = process.env }) => (local ? env[STAGE_AUTO_ENV] === "1" : !!limits && !pinned);
+
+/**
  * The account a stage with no account label starts on when automatic choice is on (#266), from `list` (harnessAccounts,
  * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones: `prefer` (a
  * name: the account the Objective's last stage paused on, whose session carries over there); else the one whose latest

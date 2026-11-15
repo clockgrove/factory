@@ -3,8 +3,11 @@
 
 import { parseToml } from "./toml.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { refusalFields, usageLimited } from "./usage.mjs";
+import { refusalCause, refusalFields, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
+
+/** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
+export { refusalCause };
 
 // ---------------------------------------------------------------- validation commands
 
@@ -687,22 +690,6 @@ export function blockCauseOf(body) {
   } catch {
     return null;
   }
-}
-
-/** Provider error types and codes (usage.mjs REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
-const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota"]);
-const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
-
-/**
- * A provider refusal's cause (usage.mjs providerRefusal): the AI Gateway's budget or credits, the provider's quota or
- * billing (those kinds, or HTTP 402), else a setup gap (a key, an authorization, a payment method, a request the
- * settings make).
- */
-export function refusalCause(r) {
-  const kinds = [r?.type, r?.code];
-  if (kinds.some((k) => GATEWAY_BUDGET_KINDS.has(k))) return "gateway-budget";
-  if (kinds.some((k) => PROVIDER_QUOTA_KINDS.has(k)) || r?.status === 402) return "provider-quota";
-  return "setup";
 }
 
 /**

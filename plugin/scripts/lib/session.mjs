@@ -53,7 +53,7 @@ import {
   transientError,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
@@ -74,7 +74,7 @@ import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalFields, transcriptTotal } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
@@ -1583,9 +1583,9 @@ export function keyBreakdown(records, workerKey = null) {
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
-  // rollout): the provider's structured refusal on a pass (logic.mjs refusalCause), never its prose. A local serve keeps
-  // automatic account choice off that account for a while.
-  const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find((r) => r && refusalCause(r) === "provider-quota" && !Number.isFinite(r.resetAt)) : null;
+  // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
+  // choice passes that account over for a while.
+  const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1903,24 +1903,27 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
 }
 
 /**
- * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
- * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
+ * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place,
+ * or a usage limit or quota with no reset reported that moves the Objective to another account, `resetAt` null), which
+ * is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
  * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
- * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
- * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
- * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
- * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`; with automatic
- * account choice on there (`goOn`, route-holds.mjs routeLimits `limit`), the limit holds its account first, and with
- * another account free the stage ends `waiting` and the Objective goes on there, else the Block names the others' first
- * reset too. A hold that cannot be written Blocks as with the setting off.
+ * (`usageLimit`: harness, reset (null with none reported, then `noReset`), since, and `continue`, the work pass's `pause`
+ * record for the next work stage to weigh: continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no
+ * stage on that account until the reset (or its guess's end) and resumes the Objective after it, or on a free account
+ * before then; a no-reset limit with none free it Blocks (local.mjs limitPaused). On any other route nothing resumes a
+ * stage, so it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`; with
+ * automatic account choice on there (`goOn`, route-holds.mjs routeLimits `limit`), the limit holds its account first (a
+ * guess with no reset), and with another account free the stage ends `waiting` and the Objective goes on there, else
+ * the Block names the others' holds too. A hold that cannot be written Blocks as with the setting off.
  */
 export async function usageLimitExit(e, { local, records, finish, block, pause = null, goOn = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
+  const noReset = !Number.isFinite(e.resetAt);
+  const usageLimit = { harness: e.refusal.harness, reset: noReset ? null : new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(noReset ? { noReset: true } : {}), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
-    const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
-    log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);
+    const reason = noReset ? `${e.refusal.harness} reached its usage limit or quota (${refusalFields(e.refusal)}) with no reset reported` : `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
+    log(`paused: ${reason}; the claim stays, and serve ${noReset ? "moves the Objective to a free account" : "resumes the stage after the reset"}`);
     await finish("paused", reason, null, usageLimit);
     return;
   }
@@ -1930,7 +1933,7 @@ export async function usageLimitExit(e, { local, records, finish, block, pause =
     await finish("waiting", moved.goOn, null, usageLimit);
     return;
   }
-  const reason = `${usageLimitReason(e.refusal)}${moved?.note ? ` ${moved.note}` : ""}`;
+  const reason = `${noReset ? refusalReason(e.refusal) : usageLimitReason(e.refusal)}${moved?.note ? ` ${moved.note}` : ""}`;
   log(`blocked: ${reason}`);
   await block(reason, "provider-quota").catch((x) => log(`the usage limit's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", reason, null, usageLimit);

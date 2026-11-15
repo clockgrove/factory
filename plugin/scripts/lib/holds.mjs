@@ -22,9 +22,10 @@ export const HOLD_FORGET_MS = 60 * 60_000;
 /** The longest a hold lasts past now: a week's window and a day more. A record naming a later end is held to it. */
 export const HOLD_MAX_MS = 8 * 24 * 60 * 60_000;
 /**
- * How long automatic account choice (#266) avoids an account whose usage limit Blocked a stage with no reset reported
- * (Copilot's always, Codex's when its rollout holds no snapshot: accountHolds.spent), by how many in a row: 1, 4, then 24
- * hours. Nothing else holds on it: with no reset known, such a limit Blocks as it always did.
+ * How long automatic account choice (#266) avoids an account that met its usage limit or quota with no reset reported
+ * (Copilot's always, Codex's when its snapshot names none: accountHolds.spent), by how many in a row: 1, 4, then 24
+ * hours. Nothing else holds on it: with the setting off, or the Objective pinned, such a limit Blocks; with it on, the
+ * Objective moves to a free account (#332), and Blocks only when none is free.
  */
 export const SPENT_GUESS_MS = [1, 4, 24].map((h) => h * 60 * 60_000);
 /** A stage-start record (accountHolds.started) of an account no stage started on this long is removed. */
@@ -157,7 +158,7 @@ const START = (key) => `${key}.started.json`;
  *   the streak ends (its hold, if any, stays) when that start is after the newest record's, and a guess (`spent`) made
  *   before that start is over.
  * - `limitedAt(account, now)`: when a stage last met the account's usage limit (ms), while its records are kept; else null.
- * - `spent({harness, account, now, window})`: a stage on the account was Blocked on its usage limit with no reset reported.
+ * - `spent({harness, account, now, window})`: a stage on the account met its usage limit or quota with no reset reported.
  *   Only automatic account choice (#266) weighs it (`avoidUntil`), for SPENT_GUESS_MS by how many in a row, until a pass
  *   on the account is served; `until` and `held`'s holds never include it. Returns the guess's end.
  * - `avoidUntil(account, now)`: `until`, or the guess's end when that is later; null when neither is ahead.

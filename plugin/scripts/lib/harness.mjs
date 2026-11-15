@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
 import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -60,7 +60,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_AUTO_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_LOCAL_AUTO_ACCOUNT", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_AUTO_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_LOCAL_AUTO_ACCOUNT", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -862,8 +862,9 @@ export const passesRunning = () => RUNNING;
  * in-place bound (network.mjs waitBound: fifteen minutes locally, the deadline elsewhere) with LIMIT.minRunMs of its wall
  * clock left after it, then runs again, from its session when it has one, at most LIMIT.waits times. Otherwise it throws
  * UsageLimitReached and the stage ends on it (session.mjs usageLimitExit: paused locally until the reset, a
- * `provider-quota` Block elsewhere). With no reset reported, or outside a stage, the refusal is returned and Blocks as any
- * refusal does.
+ * `provider-quota` Block elsewhere). A usage limit or quota with no reset reported (usage.mjs noResetLimit) ends the
+ * stage the same way, at once, when LIMIT.moves (automatic account choice picked the stage's account, #332); else, or
+ * outside a stage, the refusal is returned and Blocks as any refusal does.
  */
 export async function runHarness(opts) {
   const startedAt = Date.now();
@@ -871,6 +872,8 @@ export async function runHarness(opts) {
   let rec = await runCutOff(opts);
   for (;;) {
     const r = rec.refusal;
+    // No reset to wait for: the stage ends here, and its route moves the Objective to a free account or Blocks (#332).
+    if (noResetLimit(r) && waitingOutages() && LIMIT.moves) throw new UsageLimitReached(r, { since: OUTAGE.now(), label: opts.label || "run" });
     if (!usageLimited(r) || !Number.isFinite(r.resetAt) || !waitingOutages()) break;
     const now = OUTAGE.now();
     const end = Math.max(r.resetAt, now) + LIMIT.slackMs;
@@ -906,8 +909,11 @@ export async function runHarness(opts) {
  * routeLimits), an async check whether another account is free now, so a wait longer than `movePastMs` ends the stage
  * rather than holding its runner. An hour, not local mode's fifteen minutes: a stage moved on these routes starts
  * afresh on the branch (its session does not continue on another account there), so a nearer reset is worth its wait.
+ * `moves`: set by a stage whose account automatic choice picked (no pin; accounts.mjs stageMoves, #332), so a usage
+ * limit or quota with no reset reported ends the stage at once, for its route to move the Objective to a free account
+ * or Block naming every account's hold (local.mjs spentPaused, route-holds.mjs routeLimits `limit`).
  */
-export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, movePastMs: 60 * 60_000 };
+export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, movePastMs: 60 * 60_000, moves: false };
 
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
@@ -916,13 +922,15 @@ export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's us
 export const USAGE_LIMIT = "USAGE_LIMIT";
 
 /**
- * A pass that ended on its subscription's usage limit, reset at `resetAt` (ms), past what the stage waits for in place:
- * the stage ends on it (session.mjs usageLimitExit). `refusal` is usage.mjs providerRefusal's; `since` (ms) when met.
+ * A pass that ended on its subscription's usage limit, reset at `resetAt` (ms), past what the stage waits for in place,
+ * or on a usage limit or quota with no reset reported (`resetAt` null) that moves the Objective to another account: the
+ * stage ends on it (session.mjs usageLimitExit). `refusal` is usage.mjs providerRefusal's; `since` (ms) when met.
  */
 export class UsageLimitReached extends Error {
   constructor(refusal, { since, label }) {
-    super(`${label}: ${refusal.harness} reached its subscription's usage limit (${refusalFields(refusal)}), which resets at ${new Date(refusal.resetAt).toISOString()}`);
-    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since });
+    const reset = Number.isFinite(refusal.resetAt) ? refusal.resetAt : null;
+    super(`${label}: ${refusal.harness} reached its ${reset === null ? "usage limit or quota" : "subscription's usage limit"} (${refusalFields(refusal)}), ${reset === null ? "with no reset reported" : `which resets at ${new Date(reset).toISOString()}`}`);
+    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: reset, since });
   }
 }
 

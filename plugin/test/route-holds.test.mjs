@@ -561,3 +561,67 @@ test("a writer deletes records edited since they were written, which count for n
     assert.deepEqual(st.issues[0].comments.map((c) => c.id).includes(1), false);
   });
 });
+
+// #332: a usage limit or quota with no reset reported, with automatic choice on and no pin, moves the Objective too.
+const COPILOTS = JSON.stringify({ copilot: ["copilot", "copilot-2"] });
+const quotaError = (harness = "copilot") => Object.assign(new Error("quota"), { code: USAGE_LIMIT, refusal: { harness, status: 402, type: "quota", code: "quota_exceeded", message: "m" }, resetAt: null, since: Date.now() });
+
+test("a Copilot quota with no reset reported, another account free, goes on there, never Blocked: the guess is written and the next account step passes the account over (#332)", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: COPILOTS, FACTORY_AUTO_ACCOUNT: "1" };
+  let issues;
+  await withGitHub({ labels: ["factory:objective", "factory:running"] }, async (_reads, st) => {
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "copilot", account: "copilot", env, opts: { token: "t" } });
+    const ends = [];
+    const t = Date.now();
+    await usageLimitExit(quotaError(), { local: false, records: [], finish: async (...a) => ends.push(a), block: async () => assert.fail("no Block"), goOn: limits.limit });
+    assert.equal(ends[0][0], "waiting");
+    assert.match(ends[0][1], /^Copilot reached its usage limit or quota on account `copilot` with no reset reported, so automatic account choice passes it over until about \S+; back to Queued, to go on on another account$/);
+    assert.deepEqual([ends[0][3].reset, ends[0][3].noReset], [null, true]);
+    assert.ok(!st.issue.has("factory:running"), "back to Queued");
+    const store = (await readHolds(REPO, { token: "t" })).store;
+    assert.equal(store.until("copilot", Date.now()), null, "a guess, no hold");
+    assert.ok(store.avoidUntil("copilot", Date.now()) >= t + H, "passed over for an hour");
+    issues = st.issues;
+  });
+  setSelf(null);
+  // Objective #8's turn is copilot; its guess passes it over, so the next stage's account step starts it on copilot-2.
+  assert.equal(routeTurn(8, 2), 0);
+  const r = await runStep({ issues, accounts: COPILOTS, env: { FACTORY_HARNESS: "copilot" } });
+  assert.equal(r.outputs.account, "copilot-2");
+  assert.match(r.log, /copilot held until/);
+});
+
+test("a limit with no reset and every other account held or passed over Blocks once, provider-quota, naming each one's hold; a pinned stage never moves on one (#332)", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const t = Date.now();
+  const held = t + 3 * H;
+  const guess = { account: "claude-3", until: t + H - 60_000, at: t - 60_000, guess: true };
+  await withGitHub({ labels: ["factory:objective", "factory:running"], issues: [holdsIssue([holdComment(1, { account: "claude-2", until: held, at: t - 60_000 }), holdComment(2, guess)])] }, async (_reads, st) => {
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" }, now: () => t });
+    const ends = [];
+    const blocks = [];
+    await usageLimitExit(quotaError("claude"), { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a), goOn: limits.limit });
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0][1], "provider-quota");
+    assert.match(blocks[0][0], new RegExp(`Every other Claude Code account this repository declares is held too: \`claude-2\` held until ${iso(held).replaceAll(".", "\\.")}; \`claude-3\` passed over until about ${iso(guess.until).replaceAll(".", "\\.")} \\(no reset reported\\)\\.$`));
+    assert.equal(ends[0][0], "blocked");
+    assert.ok(st.issue.has("factory:running"), "no requeue");
+    assert.equal((await readHolds(REPO, { token: "t" })).store.avoidUntil("claude", t), t + H, "its own guess is written too");
+  });
+  // Pinned: its guess is written for other Objectives, nothing moves, and the stage Blocks as before.
+  await withGitHub({ labels: ["factory:objective", "factory:account:claude", "factory:running"] }, async (_reads, st) => {
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", pinned: true, env, opts: { token: "t" } });
+    const blocks = [];
+    await usageLimitExit(quotaError("claude"), { local: false, records: [], finish: async () => {}, block: async (...a) => blocks.push(a), goOn: limits.limit });
+    assert.equal(blocks[0][1], "provider-quota");
+    assert.doesNotMatch(blocks[0][0], /Every other/);
+    assert.ok(st.issue.has("factory:running"));
+  });
+  // The stages wire it: a stage moves on such a limit only with automatic choice on and no pin.
+  for (const script of ["worker.mjs", "review.mjs"]) {
+    const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
+    assert.match(src, /LIMIT\.moves = stageMoves\(\{ local, limits, pinned: acct\.pinned \}\);/, script);
+  }
+});

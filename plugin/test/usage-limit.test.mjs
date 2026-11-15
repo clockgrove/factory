@@ -8,7 +8,8 @@ import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
-import { LIMIT, LIMIT_PASS_PROMPT, USAGE_LIMIT, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
+import { LIMIT, LIMIT_PASS_PROMPT, USAGE_LIMIT, UsageLimitReached, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
+import { stageMoves } from "../scripts/lib/accounts.mjs";
 import { captureSession, dropSessions } from "../scripts/lib/claude-runner.mjs";
 import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
@@ -332,12 +333,12 @@ test("codex: a named type with no full window takes the latest reset of any wind
  * A fake codex: its first `limited` runs write the usage-limit rollout under CODEX_HOME (stamped now, its reset at
  * `resetS`), print the usage-limit stream and exit 1; later ones print a completed turn. argv and stdin logged.
  */
-function fakeCodex({ limited = 1, resetS = RESET_S } = {}) {
+function fakeCodex({ limited = 1, resetS = RESET_S, rollout = CODEX_ROLLOUT } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "factory-codex-limit-"));
   const home = join(bin, "codex-home");
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "limit.jsonl"), CODEX_STREAM);
-  writeFileSync(join(bin, "rollout.jsonl"), CODEX_ROLLOUT.replaceAll(`"resets_at":${RESET_S}`, `"resets_at":${resetS}`));
+  writeFileSync(join(bin, "rollout.jsonl"), rollout.replaceAll(`"resets_at":${RESET_S}`, `"resets_at":${resetS}`));
   const ok = [{ type: "thread.started", thread_id: CODEX_THREAD }, { type: "turn.started" }, { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "done" } }, { type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5 } }];
   writeFileSync(join(bin, "ok.jsonl"), ok.map((l) => JSON.stringify(l)).join("\n") + "\n");
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -436,4 +437,60 @@ test("codexPassRollout: locally only the thread's newest rollout is read, its to
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// #332: with automatic account choice on, a usage limit or quota with no reset reported ends the stage (LIMIT.moves), for
+// its route to move the Objective to a free account; pinned, or with the setting off, it Blocks as before.
+test("#332 runHarness, real, fake codex: a prose-only limit whose snapshot names no reset ends the stage at once when automatic choice picked the account; else it comes back and Blocks as before", async () => {
+  const workspace = editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "workspace_member_credits_depleted", primary: { used_percent: 40, window_minutes: 10080, resets_at: RESET_S } }));
+  try {
+    LIMIT.moves = true;
+    const f = fakeCodex({ limited: 9, rollout: workspace });
+    await inStage(f.bin, Date.parse(RESET) - 2 * 60 * 60_000, async ({ waits }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      await assert.rejects(runHarness(codexPass(f)), (e) => e instanceof UsageLimitReached && e.code === USAGE_LIMIT && e.resetAt === null && e.refusal.harness === "codex" && e.refusal.code === "workspace_member_credits_depleted" && /with no reset reported/.test(e.message));
+      assert.equal(f.calls().length, 1, "nothing run again");
+      assert.deepEqual(waits, []);
+    });
+    // Outside a stage's wait, the refusal comes back, as before.
+    await inStage(f.bin, Date.parse(RESET), async () => {
+      assert.equal((await runHarness(codexPass(f))).refusal.code, "workspace_member_credits_depleted");
+    });
+    // Pinned, or with the setting off: the refusal comes back, and the stage Blocks with it.
+    LIMIT.moves = false;
+    await inStage(f.bin, Date.parse(RESET), async () => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const rec = await runHarness(codexPass(f));
+      assert.equal(refusalCause(rec.refusal), "provider-quota");
+      assert.equal(rec.refusal.resetAt, undefined);
+    });
+    assert.equal(f.calls().length, 3);
+  } finally {
+    LIMIT.moves = false;
+  }
+});
+
+test("#332: the stage moves on a limit with no reset only when automatic choice picked its account: locally serve's env says so, on Actions the setting with no pin", () => {
+  assert.equal(stageMoves({ local: true, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), true);
+  assert.equal(stageMoves({ local: true, env: {} }), false, "a pin, or the setting off: serve sets nothing");
+  assert.equal(stageMoves({ local: false, limits: {}, pinned: false, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), true);
+  assert.equal(stageMoves({ local: false, limits: {}, pinned: true }), false, "pinned");
+  assert.equal(stageMoves({ local: false, limits: null, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), false, "off on Actions: serve's key means nothing there");
+});
+
+test("#332 usageLimitExit: a Copilot quota with no reset pauses locally with no reset and writes nothing; elsewhere, not moved, it Blocks provider-quota as a refusal", async () => {
+  const refusal = providerRefusal("copilot", [{ type: "session.error", data: { statusCode: 402, errorType: "quota", errorCode: "quota_exceeded", message: "m" } }]);
+  const e = new UsageLimitReached(refusal, { since: Date.parse(RESET), label: "work-1" });
+  assert.equal(e.resetAt, null);
+  const ends = [];
+  const blocks = [];
+  const finish = async (...a) => ends.push(a);
+  await usageLimitExit(e, { local: true, records: [], finish, block: async (...a) => blocks.push(a) });
+  assert.equal(blocks.length, 0);
+  assert.equal(ends[0][0], "paused");
+  assert.deepEqual(ends[0][3], { harness: "copilot", reset: null, since: RESET, noReset: true });
+  await usageLimitExit(e, { local: false, records: [], finish, block: async (...a) => blocks.push(a), goOn: async () => ({}) });
+  assert.equal(blocks[0][1], "provider-quota");
+  assert.equal(blocks[0][0], refusalReason(refusal));
+  assert.equal(ends[1][0], "blocked");
 });

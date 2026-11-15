@@ -254,11 +254,15 @@ export function restartRecordOf(comment) {
 }
 
 /**
- * The record's body: the restart's time (when the label was applied), who applied it, the earlier PR and the deleted
- * branch's last commit, which restores the branch.
+ * The record's body: the restart's time (when the label was applied), who applied it, and, said plainly before
+ * anything else, what the restart discards: the earlier PR with its review and the deleted branch's commits, with the
+ * last commit and the command that restores the branch. Written before the restart discards anything.
  */
-export const restartRecord = ({ issue, at, by = null, pr = null, head = null }) =>
-  `<!-- factory:restart ${JSON.stringify({ at, ...(by ? { by } : {}), ...(pr ? { pr } : {}), ...(head ? { head } : {}) })} -->\nFactory restarted this Objective from the issue's current text (\`${RESTART_LABEL}\`, applied ${at}${by ? ` by ${by}` : ""}).${pr ? ` Its earlier pull request #${pr} is closed; its commits and review stay there.` : ""}${head ? ` Its branch \`factory/${issue}\` is deleted; its last commit was ${head}, and \`git push origin ${head}:refs/heads/factory/${issue}\` restores it.` : ""} The earlier plan and the comments from before the restart do not feed the restarted run; it starts from the default branch.`;
+export const restartRecord = ({ issue, at, by = null, pr = null, head = null }) => {
+  const lost = [pr ? `pull request #${pr}, closed with its review (its commits and review stay readable there)` : "", head ? `the commits on \`factory/${issue}\`, whose branch is deleted (its last commit is ${head}; \`git push origin ${head}:refs/heads/factory/${issue}\` restores it)` : ""].filter(Boolean);
+  const discards = lost.length ? ` This restart discards the earlier work and the spend on it: ${lost.join(", and ")}.` : "";
+  return `<!-- factory:restart ${JSON.stringify({ at, ...(by ? { by } : {}), ...(pr ? { pr } : {}), ...(head ? { head } : {}) })} -->\nFactory restarted this Objective from the issue's current text (\`${RESTART_LABEL}\`, applied ${at}${by ? ` by ${by}` : ""}).${discards} The earlier plan and the comments from before the restart do not feed the restarted run; it starts from the default branch.`;
+};
 
 /** A restart Factory could not finish as asked (a ruleset keeps the branch): the dispatcher Blocks with `fix`. */
 export class RestartRefused extends Error {

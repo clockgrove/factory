@@ -14,6 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, "..", "..", "plugin", "vendor");
 /** Per library: the published paths Factory imports (an ES module tree), its licence and its package.json. */
 export const VENDORED = {
+  "@actions/expressions": (p) => p === "LICENSE" || p === "package.json" || /^dist\/.+\.js$/.test(p),
   yaml: (p) => p === "LICENSE" || p === "package.json" || p.startsWith("browser/"),
   "smol-toml": (p) => p === "LICENSE" || p === "package.json" || /^dist\/[^/]+\.js$/.test(p),
 };
@@ -58,7 +59,9 @@ for (const [name, keep] of Object.entries(VENDORED)) {
     console.log(`${name} ${want}: ${from.length} files`);
   }
 }
-if (check && existsSync(out)) for (const n of readdirSync(out)) if (!Object.hasOwn(VENDORED, n)) problems.push(`plugin/vendor/${n} is no library tools/deps pins`);
+// A scoped library sits one folder deeper (plugin/vendor/@scope/name): each name under a scope folder is checked too.
+if (check && existsSync(out))
+  for (const n of readdirSync(out).flatMap((d) => (d.startsWith("@") ? readdirSync(join(out, d)).map((m) => `${d}/${m}`) : [d]))) if (!Object.hasOwn(VENDORED, n)) problems.push(`plugin/vendor/${n} is no library tools/deps pins`);
 if (problems.length) {
   for (const p of problems) console.error(p);
   console.error("run node tools/deps/sync.mjs and commit plugin/vendor");

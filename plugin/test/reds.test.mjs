@@ -8,8 +8,8 @@ import { test } from "node:test";
 import { DIFF_FILE, checkFile, inFiles } from "../scripts/lib/handoff.mjs";
 import { decideExit, setSelf } from "../scripts/lib/logic.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
-import { allOnBase, baseEvidence, baseFailureReason, capped, evidenceText, jobsToDetail, lastGreenHead, steadyOnBase } from "../scripts/lib/reds.mjs";
-import { mirrorDiff } from "../scripts/lib/session.mjs";
+import { allOnBase, baseEvidence, baseFailureReason, capped, evidenceText, jobsToDetail, lastGreenHead, leadJobs, steadyOnBase } from "../scripts/lib/reds.mjs";
+import { failureLead, mirrorDiff } from "../scripts/lib/session.mjs";
 import { MAX_JOBS, failureSignature } from "../scripts/lib/triage.mjs";
 
 const A = "a".repeat(40);
@@ -89,6 +89,19 @@ test("a red is handed back only when every failing job is a steady base failure"
   const d = decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 1, green: false, baseFailure: reason } });
   assert.deepEqual(d, { exit: "blocked", reason, cause: "work" });
   assert.match(decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 2, green: false } }).reason, /^validation red after Factory's second pass/);
+});
+
+test("leadJobs: every red required check first and named, even when an optional job failed first; one with no line says so (#280)", () => {
+  const j = (name, line, more = {}) => ({ name, sig: { line, lines: line ? [line] : [] }, required: false, aggregate: false, suite: 1, ...more });
+  const lead = failureLead(leadJobs([j("e2e", "e2e broke"), j("build", "", { required: true }), j("unit", "unit broke", { required: true })]));
+  assert.deepEqual(lead.split("\n"), ["--- build (required check): no failure line found in its log", "--- unit (required check): unit broke", "--- e2e (not required): e2e broke"]);
+  assert.deepEqual(leadJobs([j("e2e", ""), j("unit", "", { required: true })]), [], "no failure line anywhere: the Block quotes the tail");
+  // A roll-up whose gathered jobs are known: a gathered job may fail without failing the run, so it is quoted last.
+  const rollup = j("ci", "", { required: true, aggregate: true, gathers: ["a", "b"] });
+  const out = leadJobs([j("a", "a broke", { coe: true }), j("b", "b broke", { coe: false }), rollup]);
+  assert.deepEqual(out.map((x) => x.name), ["ci (required check), from b", "a (not required: continue-on-error)"]);
+  const onlyFinder = leadJobs([j("a", "a broke", { coe: true }), j("ci", "", { required: true, aggregate: true, gathers: ["a"] })]);
+  assert.equal(onlyFinder[0].name, "ci (required check), from a (continue-on-error)", "the only failing job it gathers is said to be one that may fail");
 });
 
 test("mirrorDiff: two-dot, the green tree against the red one; not three-dot, which after a rebase shows the whole PR again", async () => {

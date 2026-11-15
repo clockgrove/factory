@@ -14,8 +14,11 @@ const unsupported = (what, line) => {
   throw new Error(`unsupported YAML (${what})${line ? ` at line ${line}` : ""}`);
 };
 
-/** The document as plain JS (`aliases: false`: an alias throws), or a throw naming what is not supported. */
-export function parseYaml(text, { aliases = true } = {}) {
+/**
+ * The document as plain JS (`aliases: false`: an alias throws), or a throw naming what is not supported. `typed`: a
+ * plain scalar the YAML 1.2 core schema reads as a boolean or a number comes back as one (as GitHub Actions reads it).
+ */
+export function parseYaml(text, { aliases = true, typed = false } = {}) {
   const src = String(text);
   const doc = parseDocument(src, { version: "1.2", merge: false, uniqueKeys: false });
   // The line of a node, worked out only for a refusal (counting per node would cost the length of the file each time).
@@ -47,7 +50,7 @@ export function parseYaml(text, { aliases = true } = {}) {
       named.add(node.anchor);
     }
     let v;
-    if (isScalar(node)) v = node.value === null || node.value === undefined ? null : typeof node.value === "string" ? node.value : node.type === "PLAIN" ? String(node.source) : fail("a scalar", node);
+    if (isScalar(node)) v = node.value === null || node.value === undefined ? null : typeof node.value === "string" ? node.value : node.type === "PLAIN" ? (typed && ["boolean", "number"].includes(typeof node.value) ? node.value : String(node.source)) : fail("a scalar", node);
     else if (isSeq(node)) v = node.items.map(value);
     else if (isMap(node)) {
       const seen = new Set();

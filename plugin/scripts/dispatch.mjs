@@ -256,7 +256,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           statuses[n] = "Blocked";
           log(`  #${n}: ${e.message}`);
           const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-          await applyExit(repo, { issue: n, pr, exit: "blocked", reason: e.message, fix: e.fix, cause: "setup", notify: inputs.notify, stage: "restart" }, opts).catch((x) => log(`  #${n}: the Block could not be written (${String(x?.message || x).slice(0, 120)})`));
+          await applyExit(repo, { issue: n, pr, exit: "blocked", reason: e.message, fix: e.fix, cause: "setup", next: "restart", notify: inputs.notify, stage: "restart" }, opts).catch((x) => log(`  #${n}: the Block could not be written (${String(x?.message || x).slice(0, 120)})`));
           await removeLabel(repo, n, RESTART_LABEL, opts).catch(() => {});
           continue;
         }

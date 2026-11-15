@@ -9,6 +9,8 @@
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md). This runs in Factory's
 // own process, never in a harness: the key stays here, and scrubbedEnv (harness.mjs) keeps it out of every child.
 import { createHash } from "node:crypto";
+import { Evaluator, Lexer, Parser, data as exprData } from "../../vendor/@actions/expressions/dist/index.js";
+import { falsy } from "../../vendor/@actions/expressions/dist/result.js";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname } from "node:path";
@@ -517,6 +519,111 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
+
+// ------------------------------------------------------------------ what a workflow file says about its failing jobs
+
+/** A matrix value GitHub shows in a leg's name: a string, a number or a boolean (the YAML reader keeps each as its text). */
+const shownValue = (v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * A job's matrix legs as GitHub makes them: the product of its keys' lists, less each `exclude`, then each `include`
+ * added to every leg whose own values it does not change, or as a leg of its own when it fits none. Each leg is
+ * {values, own}: `own` the keys the product gave it. Null when the matrix is not lists (an expression, a non-list value).
+ */
+export function matrixLegs(matrix) {
+  if (!matrix || typeof matrix !== "object" || Array.isArray(matrix)) return null;
+  const keys = Object.keys(matrix).filter((k) => k !== "include" && k !== "exclude");
+  if (keys.some((k) => !Array.isArray(matrix[k]))) return null;
+  let legs = keys.length ? [{}] : [];
+  for (const k of keys) legs = legs.flatMap((l) => matrix[k].map((v) => ({ ...l, [k]: v })));
+  const exclude = Array.isArray(matrix.exclude) ? matrix.exclude.filter((e) => e && typeof e === "object") : [];
+  legs = legs.filter((l) => !exclude.some((e) => Object.entries(e).every(([k, v]) => sameValue(l[k], v)))).map((values) => ({ values, own: Object.keys(values) }));
+  for (const inc of Array.isArray(matrix.include) ? matrix.include : []) {
+    if (!inc || typeof inc !== "object" || Array.isArray(inc)) return null;
+    const fits = legs.filter((l) => Object.entries(inc).every(([k, v]) => !l.own.includes(k) || sameValue(l.values[k], v)));
+    for (const l of fits) Object.assign(l.values, inc);
+    if (!fits.length) legs.push({ values: { ...inc }, own: Object.keys(inc) });
+  }
+  return legs;
+}
+
+/**
+ * The matrix values of the leg a check run named `name` reports, for the job whose check name is `own`: GitHub names a
+ * leg `<own> (<its values, comma separated>)`. Null unless exactly one leg shows those values (all of them, or the ones
+ * the product gave it), or the job has no matrix and the name is `own` ({}).
+ */
+export function legValues(job, own, name) {
+  const matrix = job?.strategy?.matrix;
+  if (matrix === undefined || matrix === null) return name === own ? {} : null;
+  if (!name.startsWith(`${own} (`) || !name.endsWith(")")) return null;
+  const suffix = name.slice(own.length + 2, -1);
+  const shown = (vals) => (vals.every(shownValue) ? vals.map(String).join(", ") : null);
+  const hits = (matrixLegs(matrix) || []).filter((l) => shown(Object.values(l.values)) === suffix || shown(l.own.map((k) => l.values[k])) === suffix);
+  return hits.length === 1 ? hits[0].values : null;
+}
+
+/**
+ * Whether a job may fail without failing its workflow run (its `continue-on-error`), for the leg whose matrix values
+ * are `matrix` (typed as GitHub reads them: parseYaml `typed`): true or false, read from the YAML value or, for a `${{ }}` expression, evaluated with GitHub's own
+ * expression library over the leg's `matrix` context. Null when that cannot be known: the expression reads any other
+ * context, or the leg's values are not known.
+ */
+export function continueOnError(job, matrix) {
+  const v = job?.["continue-on-error"];
+  if (v === undefined || v === null) return false;
+  if (typeof v === "boolean") return v;
+  const s = String(v).trim();
+  if (/^(?:true|True|TRUE)$/.test(s)) return true;
+  if (/^(?:false|False|FALSE)$/.test(s)) return false;
+  const m = /^\$\{\{([\s\S]*)\}\}$/.exec(s);
+  if (!m || !matrix) return null;
+  try {
+    const expr = new Parser(new Lexer(m[1]).lex().tokens, ["matrix"], []).parse();
+    return !falsy(new Evaluator(expr, JSON.parse(JSON.stringify({ matrix }), exprData.reviver)).evaluate());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a workflow file (`text`, the one a run of failing jobs came from) says about those jobs, on structure only:
+ * `coe` (by check-run id) whether each run's job may fail without failing the run (continueOnError: true, false or
+ * null), and `needs` (by check-run id) the names of the failing runs whose jobs each run's job `needs`, directly, or
+ * null when its job is not found. A run's job is the one job whose check name reports it (reports); a job calling a
+ * reusable workflow is not read. Nothing (empty maps) when the file does not parse.
+ */
+export function workflowJobs(text, runs) {
+  const coe = new Map();
+  const needs = new Map();
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""), { typed: true });
+  } catch {
+    return { coe, needs };
+  }
+  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).filter(([, j]) => j && typeof j === "object" && !j.uses);
+  const own = (id, j) => (typeof j.name === "string" || typeof j.name === "number" ? String(j.name) : id);
+  const jobOf = (name) => {
+    const hits = jobs.filter(([id, j]) => reports(own(id, j), name));
+    return hits.length === 1 ? hits[0] : null;
+  };
+  const found = new Map((runs || []).map((r) => [r.id, jobOf(r.name)]));
+  for (const r of runs || []) {
+    const hit = found.get(r.id);
+    if (!hit) {
+      coe.set(r.id, null);
+      needs.set(r.id, null);
+      continue;
+    }
+    const [id, job] = hit;
+    coe.set(r.id, continueOnError(job, legValues(job, own(id, job), r.name)));
+    const wants = (Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []).map(String);
+    needs.set(r.id, (runs || []).filter((o) => o !== r && wants.includes(found.get(o.id)?.[0])).map((o) => o.name));
+  }
+  return { coe, needs };
+}
+
 /** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
 const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
 /**

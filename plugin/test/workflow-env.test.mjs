@@ -135,7 +135,9 @@ test("local mode reads the workflow's settings from the default branch's commit,
   flow({ FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "evil.example", FACTORY_LOCAL_ENV: "AWS_SECRET_ACCESS_KEY" });
   git(dev, "commit", "-qam", "widen");
   const committed = committedWorkflowEnv(dev);
-  assert.deepEqual(committed, { wf: { FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "pypi.org" }, pins: [], branch: "trunk", error: null }, "the default branch's, whatever is checked out");
+  const { text: committedText, ...settings } = committed;
+  assert.deepEqual(settings, { wf: { FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "pypi.org" }, pins: [], branch: "trunk", error: null }, "the default branch's, whatever is checked out");
+  assert.match(committedText, /FACTORY_LOCAL_DOMAINS: pypi\.org/, "the default branch's file text, for the plugin version line");
   const working = workflowEnv(readFileSync(join(dev, ".github", "workflows", "factory.yml"), "utf8"));
   assert.deepEqual(workflowDriftLines(working, committed), [".github/workflows/factory.yml here differs from origin/trunk in FACTORY_LOCAL_DOMAINS, FACTORY_LOCAL_ENV: local mode uses origin/trunk's; commit the change to trunk to use it"]);
   const [warn] = workflowSourceChecks(working, committed);

@@ -3,10 +3,12 @@
  * `node bench/skills.mjs [--plugin DIR] [--out bench/skills.json] [--check]`: record the
  * skills as versioned text. One entry per skill with its SKILL.md's SHA-256, line and word
  * counts, plus `files` for every other file in the skill's directory (its reference files,
- * loaded on demand), and a digest over all of them; the scorecard carries the digest so every
- * row names the skills it ran on (PLAN.md: skills are versioned in the bench, one page each,
- * and no line is added without a scored Objective). The one-page cap applies to SKILL.md only.
- * `--check` exits 3 when the recorded digest differs from the tree (a skill or one of its
+ * loaded on demand). The file holds only those per-skill entries, each on lines of its own, so two
+ * changes to different skills merge without a conflict; the one digest over all of them is
+ * computed from the entries wherever it is read (skillsDigest), and the scorecard carries it so
+ * every row names the skills it ran on (PLAN.md: skills are versioned in the bench, one page
+ * each, and no line is added without a scored Objective). The one-page cap applies to SKILL.md
+ * only. `--check` exits 3 when the recorded entries differ from the tree (a skill or one of its
  * files changed without a new record).
  */
 import { createHash } from "node:crypto";
@@ -46,10 +48,14 @@ export function recordSkills(pluginDir) {
     const files = skillFiles(join(dir, name));
     if (files.length) skills[name].files = Object.fromEntries(files.map((f) => [f, measure(readFileSync(join(dir, name, f)))]));
   }
+  return { version: 2, skills };
+}
+
+/** The one digest over a record's skills (sorted by name, as recordSkills writes them). */
+export function skillsDigest(skills) {
   // One line per SKILL.md and one per other file, so a tree without reference files keeps the digest it had before them.
   const lines = Object.entries(skills).flatMap(([n, s]) => [`${n}:${s.sha256}`, ...Object.entries(s.files || {}).map(([f, m]) => `${n}/${f}:${m.sha256}`)]);
-  const digest = createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 12);
-  return { version: 1, digest, skills };
+  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 12);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -57,20 +63,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const plugin = resolve(values.plugin ?? join(import.meta.dirname, "..", "plugin"));
   const out = resolve(values.out ?? join(import.meta.dirname, "skills.json"));
   const rec = recordSkills(plugin);
+  const digest = skillsDigest(rec.skills);
   const over = Object.entries(rec.skills).filter(([, s]) => s.lines > SKILL_PAGE.lines || s.words > SKILL_PAGE.words);
   if (over.length) {
     process.stderr.write(`over the one-page cap (${SKILL_PAGE.lines} lines, ${SKILL_PAGE.words} words): ${over.map(([n, s]) => `${n} (${s.lines} lines, ${s.words} words)`).join(", ")}\n`);
     process.exit(2);
   }
   if (values.check) {
-    const prev = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : null;
-    if (!prev || prev.digest !== rec.digest) {
-      process.stderr.write(`skills changed since ${out} (${prev?.digest ?? "none"} → ${rec.digest}); record them with node bench/skills.mjs after a scored Objective\n`);
+    const prev = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")).skills ?? null : null;
+    if (JSON.stringify(prev) !== JSON.stringify(rec.skills)) {
+      process.stderr.write(`skills changed without a new record in ${out} (recorded ${prev ? skillsDigest(prev) : "none"}, tree ${digest}): run node bench/skills.mjs and commit bench/skills.json with the skill change\n`);
       process.exit(3);
     }
-    process.stdout.write(`skills unchanged: ${rec.digest}\n`);
+    process.stdout.write(`skills unchanged: ${digest}\n`);
   } else {
-    writeFileSync(out, `${JSON.stringify({ ...rec, recordedAt: new Date().toISOString() }, null, 2)}\n`);
-    process.stdout.write(`${out}: ${Object.keys(rec.skills).length} skills, digest ${rec.digest}\n`);
+    writeFileSync(out, `${JSON.stringify(rec, null, 2)}\n`);
+    process.stdout.write(`${out}: ${Object.keys(rec.skills).length} skills, digest ${digest}\n`);
   }
 }

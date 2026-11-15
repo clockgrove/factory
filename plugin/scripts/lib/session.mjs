@@ -75,7 +75,7 @@ import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
+import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
 import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
@@ -334,12 +334,13 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
- * alone: locally the live session is the newer copy. Returns `{id, from, reason}`: `id` is the session to resume,
- * or null with the reason it is not.
+ * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
+ * stage continuing its pause, continue.mjs). Returns `{id, from, reason}`: `id` is the session to resume, or null with
+ * the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness }) {
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
-  const sources = fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
+  const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
   // newest first, to the most recent one that did.
@@ -1146,8 +1147,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   /**
    * What a red hands a fix pass: for one the required checks found, each failing job's whole log, whether the default
    * branch's latest run of the same job fails with the same signature, and the diff since the PR's last green head
-   * (reds.mjs); the failures in the ask; the lead a Block quotes (each failing job's own failure lines first, its
-   * signature as triage reads it) and the tail after it.
+   * (reds.mjs); the failures in the ask; the lead a Block quotes (the red required checks first, then each other failing
+   * job's own failure lines, its signature as triage reads it: leadJobs) and the tail after it.
    */
   const redOf = async (v) => {
     const failed = v.failed;
@@ -1160,7 +1161,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       : v.failures?.length
         ? v.failures
         : [failed];
-    const lead = failureLead((detail?.jobs || []).filter((j) => !j.aggregate).map((j) => ({ name: j.name, line: j.sig.line, lines: j.sig.lines }))) || failureLead(v.refusal?.jobs);
+    // The red required checks first, each with its own failure lines or, for a roll-up with none, a failing job it
+    // gathers; then the other failing jobs, marked when no required check counts them (leadJobs).
+    const lead = failureLead(leadJobs(detail?.jobs)) || failureLead(v.refusal?.jobs);
     return { detail, failures, lead, tail: leadDetail(lead, failed.output) };
   };
   // A red's part of a fix pass's ask: each failing command or job, its exit, its whole output's file, the evidence and
@@ -1574,20 +1577,43 @@ export function questionNotice({ at = "", stage = "work", reason, pr = null, ask
 }
 
 /**
- * The Blocked notice's line: the stage, the reason, and what fixes it, which is `fix` when the stage knows better than
- * a push or an edit (objective-trust.mjs AUTHOR_FIX: an untrusted author is fixed by no edit).
+ * Whether a Blocked notice's way on is a resume or a restart, said plainly, since the two look alike and a restart
+ * throws away paid work: re-applying `factory:objective` resumes from `factory/<issue>` and its PR; `factory:restart`
+ * discards them (stop.mjs restartObjective, whose record names the commit that restores the branch). `next`, decided on
+ * structure: `resume` (the stop is outside the work: every cause but `work`), `work` (the work itself stopped: resume
+ * once its cause is fixed, restart only to redo it), `restart` (a restart was asked for and could not finish), `none`
+ * (neither gets past the stop: an untrusted author). A `delivered` PR (out of draft when the stage Blocked) is named so.
  */
-export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false }) =>
-  `Blocked (${stage}): ${reason}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}`;
+export function nextStep({ issue, pr = null, next = "resume", delivered = false }) {
+  const branch = `\`factory/${issue}\``;
+  const kept = pr ? `${branch} and PR #${pr.number}` : branch;
+  const lost = pr ? `${delivered ? "the delivered " : ""}PR #${pr.number} with its review, the commits on ${branch} and the spend on them` : `the commits on ${branch}, if any, and the spend on them`;
+  if (next === "none") return "Neither a resume nor a restart gets past this: both check the issue's author again.";
+  if (next === "restart") return `To keep the work instead of restarting, re-apply \`factory:objective\`: that resumes from ${kept}.`;
+  if (next === "work") return `Resume once the cause is fixed: re-apply \`factory:objective\` to go on from ${kept}. Restart (\`factory:restart\`) only when the work itself must be redone from the issue's text: a restart discards ${lost}.`;
+  return `Resume, don't restart: the stop is outside the work. Once its cause is fixed or has passed, re-apply \`factory:objective\` to go on from ${kept}. \`factory:restart\` would discard ${lost}, and gain nothing.`;
+}
+
+/** The way on (nextStep) a Block's cause (logic.mjs BLOCK_CAUSES) gives: `work` for the work's own, `resume` for any other. */
+export const nextOf = (cause) => (cause === "work" ? "work" : "resume");
+
+/**
+ * The Blocked notice's line: the stage, the reason, what fixes it, which is `fix` when the stage knows better than a
+ * push or an edit (objective-trust.mjs AUTHOR_FIX: an untrusted author is fixed by no edit), and whether to resume or
+ * restart (nextStep; `next` defaults to the cause's, nextOf).
+ */
+export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false, cause = "factory", next = null }) =>
+  `Blocked (${stage}): ${reason}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
 
 /**
  * Apply an exit to GitHub: card, fallback label, draft state, the one comment,
  * the review request. `where` is the issue number; `pr` may be null on blocked.
  * `notice` (local mode with a Factory App, app-token.mjs noticeMinter): the notices that @mention `notify` post as the
  * App, since local mode writes as the operator and GitHub notifies no one of their own mention (#2522).
- * `cause` (logic.mjs BLOCK_CAUSES) goes on a Blocked notice as its cause line (blockMarker), for the bench scorer.
+ * `cause` (logic.mjs BLOCK_CAUSES) goes on a Blocked notice as its cause line (blockMarker), for the bench scorer, and
+ * decides whether the notice says to resume or restart (nextStep), unless `next` says it.
  */
-export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "factory" }, { token, notice = null }) {
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "factory", next = null }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
   // The reason and the output can carry the harness's words (its exit record, a command's output): published as
   // Factory, they are sanitised like every other harness text (handoff.mjs sanitize).
@@ -1604,7 +1630,7 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     await setStateLabel(repo, issue, "blocked", { token });
     await moveCard(project, repo, issue, "Blocked", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
-    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
+    const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered, cause, next })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
     return;
   }
@@ -1767,14 +1793,15 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
  * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
  * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
  * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
- * (`usageLimit`: harness, reset, since) and nothing written to GitHub: serve keeps the claim, starts no stage on that
- * harness until the reset and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
+ * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
+ * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
+ * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
  * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
  */
-export async function usageLimitExit(e, { local, records, finish, block }) {
+export async function usageLimitExit(e, { local, records, finish, block, pause = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}) };
+  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
     const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
     log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);

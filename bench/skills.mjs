@@ -11,10 +11,9 @@
  * only. `--check` exits 3 when the recorded entries differ from the tree (a skill or one of its
  * files changed without a new record).
  */
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -57,14 +56,6 @@ export function skillsDigest(skills) {
   // One line per SKILL.md and one per other file, so a tree without reference files keeps the digest it had before them.
   const lines = Object.entries(skills).flatMap(([n, s]) => [`${n}:${s.sha256}`, ...Object.entries(s.files || {}).map(([f, m]) => `${n}/${f}:${m.sha256}`)]);
   return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 12);
-}
-
-/** What a scorecard row names: the digest of the record in `file`, and when git last committed that file (null without git history). */
-export function recordedSkills(file) {
-  const { skills } = JSON.parse(readFileSync(file, "utf8"));
-  const git = spawnSync("git", ["log", "-1", "--format=%cI", "--", basename(file)], { cwd: dirname(file), encoding: "utf8" });
-  const at = git.status === 0 ? git.stdout.trim() : "";
-  return { digest: skillsDigest(skills ?? {}), recordedAt: at ? new Date(at).toISOString() : null };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -69,7 +69,7 @@ import { loadPrices } from "./lib/cost.mjs";
 import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
 import { HANDOVER_DEFAULT, HANDOVER_SCORING, markdownTable, OBJECTIVE_LABEL, scoreObjective, STALL_MINUTES } from "./lib/objective.mjs";
 import { pooledStreak, pooledTable, streaks, streakTable, tagTime } from "./lib/streak.mjs";
-import { recordedSkills } from "./skills.mjs";
+import { skillsDigest } from "./skills.mjs";
 import { existsSync as fileExists } from "node:fs";
 
 /** An escape's identity: the `owner/name#N` it names (a hand-filled string may add words around it), else itself. */
@@ -195,7 +195,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const token = values.token ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? null;
   // The skills the rows ran on: the digest of bench/skills.json's entries (node bench/skills.mjs records them).
   const skillsFile = resolve(import.meta.dirname, "skills.json");
-  const skills = fileExists(skillsFile) ? recordedSkills(skillsFile) : null;
+  const skills = fileExists(skillsFile) ? { digest: skillsDigest(JSON.parse(readFileSync(skillsFile, "utf8")).skills) } : null;
 
   const calls = {};
   const live = (path, opts) => ghApi(path, { ...opts, token });

@@ -423,7 +423,7 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   // The row names the checkout's skills by the digest computed from bench/skills.json's entries, as --check prints it.
   const check = execFileSync("node", [join(BENCH, "skills.mjs"), "--check"], { encoding: "utf8" });
   assert.equal(`skills unchanged: ${rows[0].skills.digest}\n`, check);
-  assert.match(rows[0].skills.recordedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/);
+  assert.deepEqual(Object.keys(rows[0].skills), ["digest"]);
   const card = JSON.parse(read(standing));
   assert.deepEqual(card.rows.map((r) => r.issue), [7, 42]);
   assert.equal(card.rows[1].walkAway.value, true); // replaced, not duplicated

@@ -8,7 +8,7 @@ import { CLAIM_PAUSE_MS, GitRefusal, checkGitState, clearHarnessConfig, gitDirCh
 import { agentUser, asAgent, exec, reapAgent } from "./proc.mjs";
 import { deniedHostsFix } from "./logic.mjs";
 import { input } from "./inputs.mjs";
-import { runnerDomains } from "./local.mjs";
+import { openedStageHosts, runnerDomains } from "./local.mjs";
 
 /**
  * A local loop holds the Objective while its claim's heartbeat is fresh. A claim that cannot be read or checked
@@ -136,7 +136,7 @@ const ACTIONS = {
      */
     cardNotes: (env = process.env, harness = null, services = []) => (harness === "claude" ? SCRATCH_NOTE + DENIED_NOTE + servicesNote(services) : harness === "codex" || harness === "copilot" ? SCRATCH_NOTE + DENIED_NOTE + SERVICES_OUT_NOTE : ""),
     /** Each harness's sandbox keeps a host list here: a host one denied is allowed in the `allowed_domains` input. */
-    deniedFix: (hosts, env = process.env, harness = null) => (["claude", "codex", "copilot"].includes(harness) ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env })), "runner") : null),
+    deniedFix: (hosts, env = process.env, harness = null) => (["claude", "codex", "copilot"].includes(harness) ? deniedHostsFix(hosts, runnerDomains(input("allowed_domains", { env }), openedStageHosts()), "runner") : null),
   },
   /** CI is the gate: the head is pushed and the required checks are awaited. */
   gate: { commandsFirst: false },

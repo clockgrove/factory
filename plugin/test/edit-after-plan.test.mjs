@@ -92,8 +92,8 @@ for (const { route, self, person } of ROUTES) {
     assert.equal(review.applied[0].pr.number, 9, "the PR goes back to a draft");
     assert.equal(BLOCK_CAUSES[review.applied[0].cause].external, false, "an edit is a person's action, never External");
     const notice = blockedLine({ issue: 7, pr: { number: 9 }, stage: "review", reason: EDITED_REASON, fix: EDITED_FIX });
-    assert.match(notice, /title, body or harness and model labels \(`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`\) changed after its plan was made/);
-    assert.match(notice, /Re-apply `factory:objective` to work from the issue as it is now, its text and its harness and model labels: the worker makes its plan again from it/);
+    assert.match(notice, /title, body or harness, model and host labels \(`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`, `factory:host:`\) changed after its plan was made/);
+    assert.match(notice, /Re-apply `factory:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it/);
   });
 
   test(`edit after plan (${route}): an edit while Blocked, then the label re-applied, plans again from the new text`, async () => {

@@ -92,11 +92,14 @@ inputs:
   ci_checks:
     description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
     required: false
+  third_party_reviewers:
+    description: 'Reviewers outside Factory whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to 20 minutes for each one''s review of the head Factory''s reviewer read, then its answer pass handles their line comments as it handles Factory''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
+    required: false
   harness_version:
     description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the repository's harness only; another harness an Objective's label chooses installs its latest.
     required: false
   allowed_domains:
-    description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains). The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
+    description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `factory:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
     required: false
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
@@ -374,6 +377,7 @@ runs:
         FACTORY_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
         FACTORY_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
         FACTORY_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
+        FACTORY_INPUT_THIRD_PARTY_REVIEWERS: ${{ inputs.third_party_reviewers }}
         FACTORY_INPUT_APP_ID: ${{ inputs.app_id }}
         FACTORY_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
         FACTORY_INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}

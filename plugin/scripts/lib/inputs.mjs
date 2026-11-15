@@ -50,6 +50,7 @@ export const DEFAULTS = {
   budget_command: "",
   protected_paths: "",
   ci_checks: "",
+  third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
@@ -241,6 +242,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     budgetCommand: get("budget_command"),
     protectedAdditions: list(get("protected_paths")),
     ciChecks: list(get("ci_checks")),
+    thirdPartyReviewers: list(get("third_party_reviewers")),
     harnessVersion: get("harness_version"),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),

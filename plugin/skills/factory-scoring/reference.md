@@ -11,7 +11,7 @@ Lookup detail for the factory-scoring skill. SKILL.md says when to load each sec
 
 ## Harness and models
 
-Each stage's usage record carries `ran`: the worker, sub-agent and reviewer models it ran on (null for a harness's own default) and `labels`, the `factory:harness:`, `factory:model:`, `factory:subagent-model:` and `factory:reviewer-model:` labels that chose them; none means the repository's defaults. It is in `result.json`, and for a local stage in the `models` and `labels` of the `<!-- factory:harness -->` line of its progress comment. Report the worker's model as the harness reported it (the work stage's `model`), else its `ran.worker`; the sub-agent model from the last work stage's `ran`; the reviewer's from the last review stage's `ran`; and the labels.
+Each stage's usage record carries `ran`: the worker, sub-agent and reviewer models it ran on (null for a harness's own default) and `labels`, the `factory:harness:`, `factory:model:`, `factory:subagent-model:` and `factory:reviewer-model:` labels that chose them; none means the repository's defaults. Its `hosts` are the network hosts the Objective's `factory:host:` labels (also in `labels`) opened to its sandboxes. It is in `result.json`, and for a local stage in the `models` and `labels` of the `<!-- factory:harness -->` line of its progress comment. Report the worker's model as the harness reported it (the work stage's `model`), else its `ran.worker`; the sub-agent model from the last work stage's `ran`; the reviewer's from the last review stage's `ran`; and the labels.
 
 ## Reading the artifacts
 
@@ -42,4 +42,10 @@ The walk-away rule's stall, as `bench/score.mjs` applies it:
 
 ## Workflow hand-over
 
-Each merged PR whose body carries Factory's workflow hand-over line (`<!-- factory:N:handover-line -->`; every part of a split Objective) leaves a person's step: applying the change Factory handed over. It is one human action at that merge, asked for, so the Objective is no walk-away, and its minutes are operator minutes from a stopwatch, like any other.
+Each merged PR whose body carries Factory's workflow hand-over line (`<!-- factory:N:handover-line -->`; every part of a split Objective) leaves a person's step: applying the change Factory handed over. Factory never pushes a workflow file and its App has no workflows permission, so this step is part of the design, like a publish, and it is scored as normal work by default, for every repository (`bench/score.mjs --handover owner-step`):
+
+- When Factory's own hand-over comment with the patch (`<!-- factory:N:handover -->`) is on the issue, the hand-over is an **owner step**, not input: the Objective can still walk away, and the row shows the step apart (`ownerStep`) with its own minutes, from a stopwatch (`--owner-minutes`), never estimated. The person's removal of `factory:handover` after the merge marks it applied and is part of the step. Operator minutes stay zero on such a merge. Report it as "walk-away, owner step: workflow hand-over, N minutes" (or "not applied yet").
+- A hand-over with no such comment (or only a person's) is no owner step: each such merge is one human action, asked for, a miss.
+- The strict read (`--handover input`): every hand-over is one human action at that merge, asked for, so the Objective is no walk-away, and its minutes are operator minutes. Report which rule a row used (`walkAway.handover`).
+
+A hand-over that needed fixing when applied is an escape. An Objective whose whole change is the hand-over has no PR and Blocks: a miss either way.

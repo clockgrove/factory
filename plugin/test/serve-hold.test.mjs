@@ -758,6 +758,7 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
     },
   });
   assert.deepEqual(run.claims, [], "nothing new started");
+  assert.ok(!run.labels.includes("factory:running"), `the dispatcher never picked it: it stays Queued (${run.labels.join(", ")})`);
   assert.deepEqual(reviewed, [], "no review started");
   assert.equal(run.lines.filter((l) => /claude's usage limit is spent until .*; no stage starts on claude until then/.test(l)).length, 1);
 });
@@ -765,8 +766,7 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
 test("serve: one harness's spent usage limit holds only that harness's work; an Objective labelled for another still starts (#254)", async () => {
   const reviewed = [];
   const run = await serveAgainst({
-    view: (read, labels) => labels,
-    onList: (read, { labels }) => labels.add("factory:harness:codex"),
+    view: (read, labels) => [...labels, "factory:harness:codex"],
     firstStage: () => Promise.resolve({ exit: "delivered" }),
     stopAfter: 3,
     stubs: {
@@ -776,7 +776,7 @@ test("serve: one harness's spent usage limit holds only that harness's work; an 
       review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
     },
   });
-  assert.equal(run.claims.length, 1, "the codex Objective starts");
+  assert.deepEqual(run.claims, [1], "the codex Objective starts on the first tick");
   assert.deepEqual(reviewed, [], "the review on the loop's claude stays held");
 });
 

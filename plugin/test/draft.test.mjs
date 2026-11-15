@@ -202,7 +202,7 @@ test("local mode: `factory run` refuses a draft before any claim; a draft is nei
       return json([]);
     };
     try {
-      assert.deepEqual(await loop.pendingReviews(), [{ issue: 7, pr: 70 }], "#8 is a draft: no review");
+      assert.deepEqual((await loop.pendingReviews()).map(({ issue, pr }) => ({ issue, pr })), [{ issue: 7, pr: 70 }], "#8 is a draft: no review");
       assert.deepEqual(await loop.pausedHere(new Map()), [7], "#8 is a draft: not resumed");
     } finally {
       globalThis.fetch = realFetch;

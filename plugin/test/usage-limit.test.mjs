@@ -1,16 +1,14 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
-import { crashed, keptAtLimit, restoreTranscript, resumeKeptAtLimit, saveTranscript, usageLimitExit, writeUsage } from "../scripts/lib/session.mjs";
-import { WORK_REF, openOutbox } from "../scripts/lib/outbox.mjs";
+import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
-import { LIMIT_PASS_PROMPT, LIMIT_STAGE_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
+import { LIMIT_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
 
 // #254: a harness pass that ends on its subscription's usage limit is read from the harness's structured fields, never
@@ -197,173 +195,4 @@ test("runHarness, real, fake claude: a wait never reruns past the dollar cap; th
     assert.equal(c.length, 2);
     assert.equal(Number(c[1].args[c[1].args.indexOf("--max-budget-usd") + 1]), 1.5);
   });
-});
-
-test("usageLimitExit and keptAtLimit: a local work stage keeps its session and work; the next work stage on the same harness finds them", async () => {
-  const refusal = { harness: "claude", status: 429, type: "rate_limit", code: "usage_limit_reached", message: "m", resetAt: Date.parse(RESET), limitType: "five_hour" };
-  const e = Object.assign(new Error("x"), { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since: Date.parse(RESET) - 3 * 60 * 60_000, sessionId: "00000000-0000-0000-0000-000000000254" });
-  const ends = [];
-  const work = { head: "a".repeat(40), snapshot: "b".repeat(40) };
-  await usageLimitExit(e, { local: true, records: [], finish: async (...a) => ends.push(a), block: async () => {}, keep: async () => work });
-  const limit = ends[0][3];
-  assert.deepEqual(limit, { harness: "claude", reset: RESET, since: "2026-11-14T20:00:00.000Z", limitType: "five_hour", session: e.sessionId, work });
-  const dir = mkdtempSync(join(tmpdir(), "factory-kept-"));
-  const stage = (name, result) => {
-    mkdirSync(join(dir, name), { recursive: true });
-    writeFileSync(join(dir, name, "result.json"), JSON.stringify(result));
-  };
-  stage("usage-work-1", { exit: "paused", usageLimit: limit });
-  assert.deepEqual(keptAtLimit(dir, "claude"), limit);
-  assert.equal(keptAtLimit(dir, "codex"), null, "another harness's session is not resumed");
-  // A keep that fails: the pause stands, with nothing kept, and the next stage starts fresh.
-  const failed = [];
-  await usageLimitExit(e, { local: true, records: [], finish: async (...a) => failed.push(a), block: async () => {}, keep: async () => ({ error: "exit 5" }) });
-  assert.equal(failed[0][3].work, undefined);
-  // A newer stage that is not that pause: nothing to put back.
-  await new Promise((r) => setTimeout(r, 20));
-  stage("usage-review-2", { exit: "delivered" });
-  assert.equal(keptAtLimit(dir, "claude"), null);
-});
-
-test("outbox keepWork and restoreWork: the checkout's commits, changes and untracked files come back after putOn", async () => {
-  const quiet = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
-  const root = mkdtempSync(join(tmpdir(), "outbox-kept-"));
-  const origin = join(root, "origin.git");
-  const work = join(root, "work");
-  const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet } }).trim();
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-  execFileSync("git", ["clone", "-q", origin, work], { env: { ...process.env, ...quiet } });
-  writeFileSync(join(work, "app.txt"), "v1\n");
-  run(work, "add", "app.txt");
-  run(work, "commit", "-q", "-m", "base");
-  run(work, "push", "-q", "origin", "HEAD:main");
-  run(work, "checkout", "-q", "-b", "factory/1");
-  const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, agentEnv: { ...process.env, ...quiet }, base: root });
-  try {
-    // The pass's own unpushed commit, a changed file, a staged new file and an untracked one.
-    writeFileSync(join(work, "app.txt"), "v2\n");
-    run(work, "commit", "-q", "-am", "the pass's commit");
-    writeFileSync(join(work, "app.txt"), "v3\n");
-    writeFileSync(join(work, "staged.txt"), "s\n");
-    run(work, "add", "staged.txt");
-    writeFileSync(join(work, "new.txt"), "n\n");
-    const head = run(work, "rev-parse", "HEAD");
-    const kept = await box.keepWork();
-    assert.equal(kept.head, head, kept.error);
-    assert.equal(run(work, "rev-parse", WORK_REF), kept.snapshot);
-    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v3\n", "keeping touches nothing");
-    // The next stage: prepareClone clears untracked files, putOn forces the branch to what GitHub has.
-    rmSync(join(work, "new.txt"));
-    assert.equal((await box.putOn("refs/remotes/origin/main")).code, 0);
-    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v1\n");
-    assert.equal((await box.restoreWork(kept)).code, 0);
-    assert.equal(run(work, "rev-parse", "HEAD"), head, "the pass's commit is back");
-    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v3\n");
-    assert.equal(readFileSync(join(work, "new.txt"), "utf8"), "n\n");
-    assert.equal(readFileSync(join(work, "staged.txt"), "utf8"), "s\n");
-    assert.equal(run(work, "diff", "--cached", "--name-only"), "", "nothing staged");
-    assert.equal(run(work, "diff", "--name-only"), "app.txt", "the change unstaged");
-    assert.throws(() => run(work, "rev-parse", "--verify", "-q", WORK_REF), "the ref is dropped");
-    assert.notEqual((await box.restoreWork({ head, snapshot: "c".repeat(40) })).code, 0, "kept work that is not there fails, for the fresh-pass fallback");
-  } finally {
-    box.close();
-  }
-});
-
-test("kept work, end to end: a pass that commits and edits hits the limit, the stage pauses keeping both, the next stage restores the work and resumes the session", async () => {
-  const quiet = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
-  const root = mkdtempSync(join(tmpdir(), "kept-e2e-"));
-  const origin = join(root, "origin.git");
-  const work = join(root, "co");
-  const ws = join(root, "ws");
-  const claudeDir = join(root, "claude");
-  const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet } }).trim();
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-  execFileSync("git", ["clone", "-q", origin, work], { env: { ...process.env, ...quiet } });
-  writeFileSync(join(work, "app.txt"), "v1\n");
-  run(work, "add", "app.txt");
-  run(work, "commit", "-q", "-m", "base");
-  run(work, "push", "-q", "origin", "HEAD:main");
-  run(work, "checkout", "-q", "-b", "factory/7");
-  // A fake claude: its first run does work in the checkout (a commit, an edit, a new file), writes its session's
-  // transcript and ends at the usage limit; its second must be a resume of that session, and finds the work there.
-  const sid = "00000000-0000-0000-0000-000000000254";
-  const bin = join(root, "bin");
-  mkdirSync(bin);
-  const log = join(bin, "calls.jsonl");
-  writeFileSync(join(bin, "limit.jsonl"), withReset(LIMIT_RUN, Math.round((Date.parse(RESET) + 0) / 1000)));
-  writeFileSync(join(bin, "claude"), `#!${process.execPath}
-const fs = require("node:fs"); const cp = require("node:child_process"); const path = require("node:path");
-const args = process.argv.slice(2); const prompt = fs.readFileSync(0, "utf8");
-const n = fs.existsSync(${JSON.stringify(log)}) ? fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length : 0;
-const seen = { app: fs.readFileSync("app.txt", "utf8"), notes: fs.existsSync("notes.txt") ? fs.readFileSync("notes.txt", "utf8") : null, head: cp.execFileSync("git", ["log", "-1", "--format=%s"], { encoding: "utf8" }).trim() };
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt, seen }) + "\\n");
-const proj = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", "-co"); fs.mkdirSync(proj, { recursive: true });
-fs.appendFileSync(path.join(proj, "${sid}.jsonl"), JSON.stringify({ type: "user", n }) + "\\n");
-if (n === 0) {
-  fs.writeFileSync("app.txt", "v2\\n");
-  cp.execFileSync("git", ["-c", "user.email=a@a", "-c", "user.name=a", "commit", "-q", "-am", "the pass's commit"]);
-  fs.writeFileSync("app.txt", "v3\\n"); fs.writeFileSync("notes.txt", "half done\\n");
-  process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "limit.jsonl"))}, "utf8")); process.exit(1);
-}
-process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "done", session_id: "${sid}", total_cost_usd: 0, usage: {}, modelUsage: {} }) + "\\n");
-`, { mode: 0o755 });
-  const calls = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-  const saved = { path: process.env.PATH, claude: process.env.CLAUDE_CONFIG_DIR, local: process.env.FACTORY_LOCAL, sleep: OUTAGE.sleep, now: OUTAGE.now };
-  process.env.PATH = `${bin}:${saved.path}`;
-  process.env.CLAUDE_CONFIG_DIR = claudeDir;
-  let t = Date.parse(RESET) - 3 * 60 * 60_000;
-  Object.assign(OUTAGE, { now: () => t, sleep: async (ms) => (t += ms) });
-  const box = await openOutbox({ branch: "factory/7", defaultBranch: "main", checkout: work, remote: origin, agentEnv: { ...process.env, ...quiet }, base: root });
-  const env = { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: claudeDir, ...quiet };
-  try {
-    // Stage 1: the limit, three hours before the reset, on the local route.
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const records = [];
-    const err = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: "the task", maxUsd: 0, cwd: work, env, timeoutMs: 24 * 60 * 60_000, label: "work-1" }).catch((e) => e);
-    assert.equal(err.code, USAGE_LIMIT);
-    const dir1 = join(ws, "usage-work-1");
-    mkdirSync(dir1, { recursive: true });
-    await usageLimitExit(err, {
-      local: true,
-      records,
-      keep: () => box.keepWork(),
-      block: async () => assert.fail("no Block locally"),
-      finish: async (exit, reason, outage, usageLimit) => writeUsage(dir1, { harness: "claude", model: "claude-opus-5-5", records, passes: 1, exit, reason, usageLimit, credentialBasis: "x", session: saveTranscript({ harness: "claude", sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1), usageDir: dir1, checkout: work }) }),
-    });
-    resetNetwork();
-    const result = JSON.parse(readFileSync(join(dir1, "result.json"), "utf8"));
-    assert.equal(result.exit, "paused");
-    assert.equal(result.usageLimit.session, sid);
-    assert.ok(result.usageLimit.work?.snapshot, JSON.stringify(result.usageLimit));
-    // Stage 2, after the reset: prepareClone clears untracked files, putOn forces the branch to GitHub's.
-    t = Date.parse(RESET) + 2 * 60_000;
-    rmSync(join(work, "notes.txt"));
-    assert.equal((await box.putOn("refs/remotes/origin/main")).code, 0);
-    mkdirSync(join(ws, "usage-work-2"));
-    process.env.FACTORY_LOCAL = "1";
-    const back = await resumeKeptAtLimit({ workDir: ws, harness: "claude", restore: () => restoreTranscript({ repo: null, issue: 7, token: null, checkout: work, workDir: ws, harness: "claude" }), restoreWork: (w) => box.restoreWork(w) });
-    if (saved.local === undefined) delete process.env.FACTORY_LOCAL;
-    else process.env.FACTORY_LOCAL = saved.local;
-    assert.equal(back?.id, sid);
-    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: LIMIT_STAGE_PROMPT, maxUsd: 0, resume: back.id, cwd: work, env, timeoutMs: 24 * 60 * 60_000, label: "work-1" });
-    assert.equal(rec.ok, true);
-    const second = calls()[1];
-    assert.equal(second.args[second.args.indexOf("--resume") + 1], sid);
-    assert.equal(second.prompt, LIMIT_STAGE_PROMPT);
-    assert.deepEqual(second.seen, { app: "v3\n", notes: "half done\n", head: "the pass's commit" }, "the resumed session finds its work as it left it");
-    // Nothing kept any more: a later stage starts fresh.
-    rmSync(join(ws, "usage-work-2"), { recursive: true });
-    mkdirSync(join(ws, "usage-work-3"));
-    writeFileSync(join(ws, "usage-work-3", "result.json"), JSON.stringify({ exit: "delivered" }));
-    assert.equal(await resumeKeptAtLimit({ workDir: ws, harness: "claude", restore: async () => assert.fail("not asked"), restoreWork: async () => assert.fail("not asked") }), null);
-  } finally {
-    box.close();
-    resetNetwork();
-    process.env.PATH = saved.path;
-    if (saved.claude === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = saved.claude;
-    Object.assign(OUTAGE, { sleep: saved.sleep, now: saved.now });
-  }
 });

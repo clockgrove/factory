@@ -869,7 +869,7 @@ export async function runHarness(opts) {
       rec = { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" };
       break;
     }
-    if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run", sessionId: rec.sessionId ?? null });
+    if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
     log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${new Date(r.resetAt).toISOString()}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
     while (OUTAGE.now() < end) {
       await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
@@ -892,9 +892,6 @@ export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000 };
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
 
-/** What a work stage's resumed session is told after its stage paused on the usage limit (worker.mjs, session.mjs keptAtLimit). */
-export const LIMIT_STAGE_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. This is a new stage: the checkout holds your work as you left it, uncommitted changes included, and $FACTORY_OUT starts empty, so write its files again before you finish. Continue the same task from where it stopped; do not redo finished steps.";
-
 /** The code on the error runHarness throws for a usage limit it does not wait for in place (session.mjs usageLimitExit). */
 export const USAGE_LIMIT = "USAGE_LIMIT";
 
@@ -903,9 +900,9 @@ export const USAGE_LIMIT = "USAGE_LIMIT";
  * the stage ends on it (session.mjs usageLimitExit). `refusal` is usage.mjs providerRefusal's; `since` (ms) when met.
  */
 export class UsageLimitReached extends Error {
-  constructor(refusal, { since, label, sessionId = null }) {
+  constructor(refusal, { since, label }) {
     super(`${label}: ${refusal.harness} reached its subscription's usage limit (${refusalFields(refusal)}), which resets at ${new Date(refusal.resetAt).toISOString()}`);
-    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since, sessionId });
+    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since });
   }
 }
 

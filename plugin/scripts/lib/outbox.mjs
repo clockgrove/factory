@@ -46,8 +46,6 @@ export async function secretScan(git, range, held = heldSecrets(), maxBytes = SE
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-/** The ref in the agent's checkout that holds the work a stage kept at its harness's usage limit (outbox keepWork). */
-export const WORK_REF = "refs/factory-kept/work";
 
 /**
  * What a failed git command said, for a log line or a Blocked reason: each `error:` or `fatal:` line with the paths git
@@ -438,30 +436,6 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const script = 'git -C "$1" rebase --quit >/dev/null 2>&1; exec git -C "$1" checkout -q -f -B "$2" "$3"';
     const r = await agentMove(["sh", "-c", script, "sh", checkout, branch, ref]);
     return { code: r.code, error: r.code === 0 ? "" : gitError(r.stderr) || `exit ${r.code}` };
-  };
-
-  /**
-   * The agent's checkout as it stands, kept for a later stage (a work stage paused on its harness's usage limit, local
-   * mode): its HEAD (the harness's own commits, pushed or not) and a commit of every file in the tree on top of it,
-   * changed, staged or untracked (ignored files left out), made with a separate index so the checkout is untouched and
-   * held by WORK_REF so nothing prunes it. Read in the agent's sandbox. {head, snapshot}, or {error} when it could not be made.
-   */
-  box.keepWork = async () => {
-    const script = 'cd "$1" || exit 3; h="$(git rev-parse --verify -q "HEAD^{commit}")" || exit 4; i="$(git rev-parse --git-path factory-work-index)"; rm -f "$i"; GIT_INDEX_FILE="$i" git add -A . >/dev/null 2>&1 || { rm -f "$i"; exit 5; }; t="$(GIT_INDEX_FILE="$i" git write-tree)" || { rm -f "$i"; exit 6; }; rm -f "$i"; c="$(GIT_AUTHOR_NAME=factory GIT_AUTHOR_EMAIL=factory@localhost GIT_COMMITTER_NAME=factory GIT_COMMITTER_EMAIL=factory@localhost git commit-tree "$t" -p "$h" -m "factory: work kept at the usage limit")" || exit 7; git update-ref "$2" "$c" || exit 8; echo "$h $c"';
-    const r = await agentMove(["sh", "-c", script, "sh", checkout, WORK_REF]).catch((e) => ({ code: null, stderr: String(e?.message || e), stdout: "" }));
-    const [head, snapshot] = String(r.stdout || "").trim().split(" ");
-    return r.code === 0 && SHA.test(head || "") && SHA.test(snapshot || "") ? { head, snapshot } : { error: gitError(r.stderr || "") || `exit ${r.code ?? "none"}` };
-  };
-
-  /**
-   * Put back what keepWork kept, after putOn: the branch at the kept HEAD, the tree as the snapshot has it, the
-   * snapshot's changes left unstaged (its untracked files untracked again), and WORK_REF dropped. {code, error}.
-   */
-  box.restoreWork = async ({ head, snapshot }) => {
-    if (!SHA.test(head || "") || !SHA.test(snapshot || "")) return { code: 2, error: "no kept work named" };
-    const script = 'cd "$1" || exit 3; [ "$(git rev-parse --verify -q "$4^{commit}")" = "$4" ] && [ "$(git rev-parse --verify -q "$4^")" = "$5" ] || exit 4; git checkout -q -f -B "$2" "$4" && git reset -q --mixed "$5" && git update-ref -d "$3"';
-    const r = await agentMove(["sh", "-c", script, "sh", checkout, branch, WORK_REF, snapshot, head]).catch((e) => ({ code: null, stderr: String(e?.message || e) }));
-    return { code: r.code, error: r.code === 0 ? "" : r.code === 4 ? "the kept work is not in the checkout" : gitError(r.stderr || "") || `exit ${r.code ?? "none"}` };
   };
 
   /**

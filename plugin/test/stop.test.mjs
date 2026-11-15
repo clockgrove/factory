@@ -340,7 +340,7 @@ test("local loop: a stopped Objective's labelled PR gets no review, and a stoppe
       return json([]);
     };
     try {
-      assert.deepEqual(await loop.pendingReviews(), [{ issue: 7, pr: 70 }], "#8 lost its label, #9 is closed: no review for either");
+      assert.deepEqual((await loop.pendingReviews()).map(({ issue, pr }) => ({ issue, pr })), [{ issue: 7, pr: 70 }], "#8 lost its label, #9 is closed: no review for either");
       assert.deepEqual(await loop.pausedHere(new Map()), [7], "#8 lost its label: not resumed");
     } finally {
       globalThis.fetch = realFetch;

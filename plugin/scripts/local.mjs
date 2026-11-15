@@ -1182,24 +1182,18 @@ export class Local {
   }
 
   /**
-   * Of `issues`, the ones whose harness (its harness label, choice.mjs choiceOf, else the loop's) has its usage limit
-   * spent (limitUntil), each harness's hold said once (saidLimit). No read while no limit is spent; an unread issue is
-   * taken to run on the loop's harness.
+   * Why an Objective with these labels starts nothing now, or null: its harness (its harness label, choice.mjs choiceOf,
+   * else the loop's) has its usage limit spent (limitUntil). Read on labels the caller already holds (the dispatcher's
+   * listing, pendingReviews' read), never a read of its own; each harness's hold is said once (saidLimit).
    */
-  async limitHeld(issues) {
-    const held = new Set();
-    const now = (this.clock ?? Date.now)();
-    if (!issues.length || ![...(this.limits?.values() || [])].some((at) => at > now)) return held;
-    for (const n of issues) {
-      const data = await getIssue(this.repo, n, this.opts).catch(() => null);
-      const c = choiceOf(data?.labels || []);
-      const harness = (c.ok && c.choice.harness) || this.harness;
-      const until = this.limitUntil(harness);
-      if (until === null) continue;
-      held.add(n);
-      this.saidLimit(harness, until);
-    }
-    return held;
+  limitHold(labels) {
+    if (!this.limits?.size) return null;
+    const c = choiceOf(labels || []);
+    const harness = (c.ok && c.choice.harness) || this.harness;
+    const until = this.limitUntil(harness);
+    if (until === null) return null;
+    this.saidLimit(harness, until);
+    return `${harness}'s usage limit is spent until ${new Date(until).toISOString()}`;
   }
 
   /** The log line that no stage starts on `harness` until its usage limit's reset (`until`, ms): once per reset. */
@@ -1597,7 +1591,7 @@ export class Local {
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
-      out.push({ issue, pr: pr.number });
+      out.push({ issue, pr: pr.number, labels: data.labels || [] });
     }
     return out;
   }
@@ -1721,15 +1715,14 @@ export class Local {
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
       // A harness whose usage limit is spent (limitPaused): no review and no new work on it starts until its reset, said
       // once; work on any other harness goes on. Each Objective's harness is its harness label, else the loop's.
-      const limitHeld = await this.limitHeld([...pending.map((r) => r.issue)]);
-      const free = pending.filter((r) => !limitHeld.has(r.issue));
+      const free = pending.filter((r) => !this.limitHold(r.labels));
       const reviews = free.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1753,9 +1746,7 @@ export class Local {
         this.offline?.delete(n);
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
-      const ready = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      for (const n of await this.limitHeld(ready)) limitHeld.add(n);
-      const picks = ready.filter((n) => !limitHeld.has(n));
+      const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
       if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
       log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));

@@ -80,7 +80,7 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localStopped = {}, failedLaunch = null, recordWrites = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -820,6 +820,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // released only by that read, a trusted answer above, or the issue leaving the Objectives; any other state keeps it.
   const released = [];
   for (const key of Object.keys(localHeld || {})) held[Number(key)] ??= localHeld[key];
+  // localHold(issue): the loop's hold read on the listing's own issue (its labels), never picked while it gives a reason
+  // (local.mjs limitHold: the Objective's harness has its usage limit spent).
+  if (localHold) for (const issue of wanted) {
+    const why = localHold(issue);
+    if (why) held[issue.number] ??= why;
+  }
   for (const [key, reason] of Object.entries(localStopped || {})) {
     const n = Number(key);
     const issue = wanted.find((i) => i.number === n);

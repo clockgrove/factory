@@ -16,12 +16,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT_STAGE_PROMPT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, removeLabel, repoOf, rest, runningSince, setDraft } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, resumeKeptAtLimit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -134,8 +134,6 @@ async function main() {
   const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
   let reentry = null;
-  // Keeps the checkout's work for the next stage (outbox.mjs keepWork), once the outbox is open; for a usage-limit pause.
-  let keepWork = null;
   // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
   let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
@@ -202,7 +200,7 @@ async function main() {
     // The harness's usage limit, past what the stage waits for in place: paused locally until its reset, a
     // `provider-quota` Block elsewhere (session.mjs usageLimitExit).
     if (e?.code === USAGE_LIMIT) {
-      await usageLimitExit(e, { local, records, finish, keep: keepWork, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
+      await usageLimitExit(e, { local, records, finish, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
       return;
     }
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
@@ -370,7 +368,6 @@ async function main() {
     return;
   }
   const { base, resumed } = outbox;
-  keepWork = () => outbox.keepWork();
   const identity = await gitIdentity(app, keeper.token);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);
@@ -533,20 +530,9 @@ async function main() {
   // Resume policy: under fix-passes, a rebase send-back that conflicts resumes the worker's saved
   // session (on Actions it rides the usage artifact; locally it is on the box); every other entry starts fresh.
   let restored = null;
-  // A work stage paused here on its harness's usage limit (session.mjs keptAtLimit) left its session and its checkout's
-  // work: both are put back and the session resumed, as the in-place wait does, rather than a fresh pass. Either failing
-  // to come back, the stage starts fresh as after any pause.
-  let limitResume = false;
   if (inputs.resumePolicy === "fix-passes" && rebaseConflict) {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
-  } else if (local && !rebaseMode) {
-    const back = await resumeKeptAtLimit({ workDir: join(usageDir, ".."), harness: inputs.harness, restore: () => restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness }), restoreWork: (work) => outbox.restoreWork(work) });
-    if (back) {
-      restored = back;
-      session.id = back.id;
-      limitResume = true;
-    }
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
@@ -608,9 +594,9 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       effort: inputs.effort,
-      prompt: attempt === 1 && restored?.id ? (limitResume ? LIMIT_STAGE_PROMPT : conflictPrompt.split("\n\n---\n\n").at(-1)) : full ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
+      prompt: attempt === 1 && restored?.id ? conflictPrompt.split("\n\n---\n\n").at(-1) : full ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
       // A resume the provider refuses for a rotated credential runs fresh with the whole card (harness.mjs runHarness).
-      freshPrompt: (attempt === 1 && restored?.id && !limitResume) || rebaseConflict ? conflictPrompt : prompt,
+      freshPrompt: (attempt === 1 && restored?.id) || rebaseConflict ? conflictPrompt : prompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
       cwd: checkout,

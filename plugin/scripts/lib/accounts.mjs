@@ -269,17 +269,136 @@ export function pinnedAccount(loaded, harness, name) {
 }
 
 /**
- * The progress line a stage off local mode (GitHub Actions, the cloud sandbox) writes once when the Objective carries an
- * account label, which only local mode acts on; "" in local mode or with none.
+ * The progress line a stage on GitHub Actions or the cloud sandbox writes once when the Objective carries an account
+ * label and the repository declares no accounts for those routes (FACTORY_ACCOUNTS, routeAccounts): "" in local mode,
+ * with accounts declared (`declared`: the label pins there), or with no label.
  */
-export function accountLabelNote(names = [], local = false) {
+export function accountLabelNote(names = [], local = false, declared = false) {
   const labels = accountLabels(names);
-  if (local || !labels.length) return "";
-  return `${labels.map(pinLabelText).join(", ")} does nothing on this route: accounts are a local-mode setting (\`factory serve\` on one machine), so this stage runs on the repository's own credential.`;
+  if (local || declared || !labels.length) return "";
+  return `${labels.map(pinLabelText).join(", ")} does nothing on this route: this repository declares no accounts for GitHub Actions and the cloud sandbox (\`FACTORY_ACCOUNTS\` in its workflow file), so this stage runs on the repository's own credential.`;
 }
 
 /** The harnesses by the names a person reads. */
 export const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", copilot: "Copilot" };
+
+// ---- Accounts on GitHub Actions and the cloud sandbox (#267) ----
+
+/**
+ * The secret-name suffix no secret can have: GitHub allows only letters, digits and underscores in a secret's name, so a
+ * lookup with it (`secrets[format('ANTHROPIC_API_KEY{0}', '-')]`) resolves to nothing.
+ */
+export const NO_SECRET = "-";
+
+/**
+ * The accounts a repository declares for GitHub Actions and the cloud sandbox: FACTORY_ACCOUNTS in its workflow file's
+ * env block, a JSON object of each harness's account names in order, `{"claude": ["claude", "claude-2"]}`. Names only:
+ * each account's credential is a repository secret of its own (routeSecretSuffix). It steers which credential a stage
+ * runs on, so only the reviewed workflow file sets it, never a repository variable. The first account of a harness is
+ * its default; a harness with none has one account, named after it, on today's secrets.
+ * {ok: true, declared: false} when unset or empty; {ok: true, declared: true, accounts: {claude: [names], codex: [...],
+ * copilot: [...]}}; {ok: false, problem} (a fixed line, no value echoed) when it cannot be used.
+ */
+export function routeAccounts(text) {
+  const raw = String(text ?? "").trim();
+  const accounts = { claude: [], codex: [], copilot: [] };
+  if (!raw) return { ok: true, declared: false, accounts };
+  let v;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return { ok: false, problem: "FACTORY_ACCOUNTS is not valid JSON" };
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, problem: 'FACTORY_ACCOUNTS is not a JSON object of harnesses to account names, such as {"claude": ["claude", "claude-2"]}' };
+  const seen = new Set();
+  for (const [harness, list] of Object.entries(v)) {
+    if (!ACCOUNT_HARNESSES.includes(harness)) return { ok: false, problem: "FACTORY_ACCOUNTS names a harness Factory does not run (claude, codex or copilot)" };
+    if (!Array.isArray(list)) return { ok: false, problem: `FACTORY_ACCOUNTS's ${harness} accounts are not a list of names` };
+    for (const name of list) {
+      if (!validAccountName(name)) return { ok: false, problem: `FACTORY_ACCOUNTS has a ${harness} account whose name is not lowercase letters, digits and hyphens, starting with a letter or digit, at most ${ACCOUNT_NAME_MAX} characters` };
+      if (seen.has(name)) return { ok: false, problem: `FACTORY_ACCOUNTS declares \`${name}\` twice` };
+      // Another harness's own name is that harness's account when it declares none: a label could not tell them apart.
+      if (ACCOUNT_HARNESSES.includes(name) && name !== harness) return { ok: false, problem: `FACTORY_ACCOUNTS declares \`${name}\`, another harness's name, as a ${harness} account` };
+      seen.add(name);
+      accounts[harness].push(name);
+    }
+  }
+  return { ok: true, declared: seen.size > 0, accounts };
+}
+
+/**
+ * The suffix an account's secrets carry: none for the account named after its harness (today's secrets,
+ * ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CODEX_API_KEY, FACTORY_CODEX_GATEWAY_KEY, COPILOT_GITHUB_TOKEN), else `_`
+ * and the name upper-cased with each hyphen an underscore (`claude-2`: CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2). Account names
+ * hold no underscore, so no two accounts share a suffix.
+ */
+export const routeSecretSuffix = (name, harness) => (name === harness ? "" : `_${String(name).toUpperCase().replace(/-/g, "_")}`);
+
+/** Each harness's credential secrets, by the name a suffix is added to (doctor checks them by name, never value). */
+export const ROUTE_SECRETS = { claude: { api: ["ANTHROPIC_API_KEY"], plan: ["CLAUDE_CODE_OAUTH_TOKEN"] }, codex: { api: [["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]] }, copilot: { api: ["COPILOT_GITHUB_TOKEN"] } };
+
+/**
+ * The secret suffix each harness's credential lookups use in the workflow (workflow-template.yml) for a stage on
+ * `account` ({name, harness}): the account's own for its harness, NO_SECRET for every other harness, so the step that
+ * starts the stage resolves no other account's secret. With no account (one that cannot be picked), NO_SECRET for all.
+ */
+export function routeSuffixes(account) {
+  const out = {};
+  for (const h of ACCOUNT_HARNESSES) out[h] = account?.harness === h ? routeSecretSuffix(account.name, h) : NO_SECRET;
+  return out;
+}
+
+/**
+ * The account a `harness` stage of an Objective whose labels are `names` runs on, on GitHub Actions and the cloud sandbox,
+ * from `declared` (routeAccounts, declared): {account: {name, harness}} (its one `factory:account:<name>` label's, else
+ * its harness's first declared account, else the one named after the harness), {two: labels} (more than one account
+ * label: no stage starts), or {problem} (a fixed line naming the label: no account name, a labeler who cannot push, or
+ * no account of this harness). `vouch(label)`: why Factory does not act on the label (objective-trust.mjs
+ * labelsVouched), or null; it is asked only for a label that names an account.
+ */
+export async function routeAccount({ declared, harness, names = [], vouch }) {
+  const pin = accountPin(names);
+  if (pin.two) return { two: pin.two };
+  const mine = declared?.accounts?.[harness]?.length ? declared.accounts[harness] : [harness];
+  if (!pin.label) return { account: { name: mine[0], harness } };
+  if (!validAccountName(pin.name)) return { problem: `${pinLabelText(pin.label)} names no account` };
+  const refused = await vouch(pin.label);
+  if (refused) return { problem: refused };
+  if (mine.includes(pin.name)) return { account: { name: pin.name, harness }, label: pin.label };
+  const label = pinLabelText(pin.label);
+  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && (declared?.accounts?.[h]?.length ? declared.accounts[h] : [h]).includes(pin.name));
+  if (other) return { problem: `${label} names a ${HARNESS_NAMES[other]} account, and this Objective runs on ${HARNESS_NAMES[harness]}` };
+  return { problem: `${label} names no ${HARNESS_NAMES[harness]} account this repository declares for GitHub Actions and the cloud sandbox (${mine.map((n) => `\`${n}\``).join(", ")})` };
+}
+
+/** The line two account labels get on these routes: no stage starts until one is left. */
+export const routeTwoLine = (two) => `${two.map(pinLabelText).join(" and ")} both pin this Objective to an account, so no stage of it starts until one is left`;
+
+/**
+ * Whether a Codex credential is a ChatGPT login rather than an API key: an `auth.json` (a JSON object) or a ChatGPT
+ * access token (a JWT: three base64url parts, the first a JSON header). Refused on GitHub Actions and the cloud sandbox,
+ * as OpenAI advises API keys for CI and no ChatGPT login in public repositories' Actions; decided on the value's shape.
+ */
+export function chatgptLogin(value) {
+  const v = String(value ?? "").trim();
+  if (!v) return false;
+  if (v.startsWith("{")) {
+    try {
+      const o = JSON.parse(v);
+      return !!o && typeof o === "object";
+    } catch {
+      return false;
+    }
+  }
+  const parts = v.split(".");
+  if (parts.length !== 3 || !parts.every((p) => /^[A-Za-z0-9_-]+$/.test(p))) return false;
+  try {
+    const head = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    return !!head && typeof head === "object" && typeof head.alg === "string";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * A stage's env for `account`: with a declared Claude Code or Codex account, its folder set explicitly (never what

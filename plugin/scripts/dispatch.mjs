@@ -24,6 +24,7 @@ import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
+import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -932,6 +933,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (localHold) for (const issue of wanted) {
     const why = localHold(issue);
     if (why) held[issue.number] ??= why;
+  }
+  // Two account labels on GitHub Actions and the cloud sandbox, with accounts declared there (lib/accounts.mjs, #267): no
+  // stage starts until one is left; the Objective waits Queued, never Blocked for it, as in local mode.
+  if (backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared) {
+    for (const issue of wanted) {
+      const two = accountPin(issue.labels).two;
+      if (two) held[issue.number] ??= routeTwoLine(two);
+    }
   }
   for (const [key, reason] of Object.entries(localStopped || {})) {
     const n = Number(key);

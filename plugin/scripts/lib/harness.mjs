@@ -18,6 +18,7 @@ import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession
 import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
+import { chatgptLogin } from "./accounts.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
@@ -59,7 +60,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -151,6 +152,8 @@ export async function credentialEnv({ harness, credential, inputs, env = process
     throw new Error("no Claude credential: set ANTHROPIC_API_KEY, or id-token: write with anthropic_oidc_exchange_url for federation");
   }
   if (harness === "codex") {
+    // A ChatGPT login (accounts.mjs chatgptLogin) never runs unattended: OpenAI advises an API key for CI (#267).
+    if (!local && [inputs.codexGatewayKey, inputs.codexApiKey || env.CODEX_API_KEY].some(chatgptLogin)) throw new Error(CODEX_LOGIN_REFUSED);
     // The gateway key wins when both are set: one credential per child, and the rule needs no setting.
     if (inputs.codexGatewayKey) {
       out[CODEX_GATEWAY_ENV] = inputs.codexGatewayKey;
@@ -171,6 +174,9 @@ export async function credentialEnv({ harness, credential, inputs, env = process
   }
   throw new Error(`unknown harness ${harness}`);
 }
+
+/** Why a Codex credential that is a ChatGPT login is refused on GitHub Actions and the cloud sandbox. */
+export const CODEX_LOGIN_REFUSED = "the Codex credential is a ChatGPT login (an auth.json or its access token), which Factory never runs on GitHub Actions or the cloud sandbox: OpenAI advises an API key for CI and no ChatGPT login in a public repository's Actions; use CODEX_API_KEY or FACTORY_CODEX_GATEWAY_KEY (an API key), or run that account in local mode";
 
 /** The Vercel AI Gateway's Codex endpoint (its `/codex/v1/models` answers in the shape Codex reads at start). */
 export const GATEWAY_CODEX_URL = "https://ai-gateway.vercel.sh/codex/v1";

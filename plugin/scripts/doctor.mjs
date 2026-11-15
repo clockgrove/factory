@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { accountEnv, accountToken, defaultAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
+import { ROUTE_SECRETS, accountEnv, accountToken, chatgptLogin, defaultAccount, loadAccounts, routeAccounts, routeSecretSuffix, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
@@ -83,7 +83,9 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     const gateway = inputs.codexGatewayKey;
-    if (gateway) {
+    // A ChatGPT login never runs on GitHub Actions or the cloud sandbox (harness.mjs CODEX_LOGIN_REFUSED, #267).
+    if (env.GITHUB_ACTIONS && [gateway, key].some(chatgptLogin)) out.push(FAIL("codex credential", "the Codex credential is a ChatGPT login (an auth.json or its access token), not an API key", "OpenAI advises an API key for CI: set CODEX_API_KEY or FACTORY_CODEX_GATEWAY_KEY to one, or run that account in local mode"));
+    else if (gateway) {
       if (env.FACTORY_CODEX_GATEWAY_KEY && env.GITHUB_ACTIONS && !env.FACTORY_INPUT_CODEX_GATEWAY_KEY) out.push(WARN("codex credential", "FACTORY_CODEX_GATEWAY_KEY is a job-level variable", "pass it as the codex_gateway_key input so only the harness child sees it"));
       else out.push(PASS("codex credential", `FACTORY_CODEX_GATEWAY_KEY present, step-scoped: Codex runs through the Vercel AI Gateway${key ? "; CODEX_API_KEY is set too and goes unused (the gateway key wins)" : ""}`));
       // Unused, but a job-level CODEX_API_KEY is still in the job's environment for every step.
@@ -229,13 +231,34 @@ export async function probeHarness({ inputs, env = process.env }) {
  * The secrets a job needs, by name: the App's two and the harness credential the workflow names. An entry that is a list
  * is met by any one of its names (Codex: the gateway key or CODEX_API_KEY).
  */
-export function neededSecrets(inputs) {
-  const cred = { claude: inputs.credential === "plan" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : ["ANTHROPIC_API_KEY"], codex: [["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]], copilot: ["COPILOT_GITHUB_TOKEN"] }[inputs.harness] || [];
+export function neededSecrets(inputs, accounts = "") {
+  const declared = routeAccounts(accounts);
+  const kind = (h) => (h === "claude" && inputs.credential === "plan" ? "plan" : "api");
+  // Each account's own (lib/accounts.mjs routeSecretSuffix, #267): the repository's harness's declared accounts, else its
+  // one account on today's secrets, and every other harness's declared accounts.
+  const cred = [];
+  for (const h of Object.keys(ROUTE_SECRETS)) {
+    const names = declared.ok && declared.accounts[h].length ? declared.accounts[h] : h === inputs.harness ? [h] : [];
+    for (const name of names) for (const n of ROUTE_SECRETS[h][kind(h)]) cred.push(Array.isArray(n) ? n.map((x) => `${x}${routeSecretSuffix(name, h)}`) : `${n}${routeSecretSuffix(name, h)}`);
+  }
   return ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ...cred];
+}
+
+/**
+ * The accounts a repository declares for GitHub Actions and the cloud sandbox (FACTORY_ACCOUNTS in its workflow file,
+ * lib/accounts.mjs routeAccounts, #267): none, a FAIL naming why the declaration cannot be used, or a PASS naming each
+ * harness's accounts. Names only; secretChecks checks each one's secret by name.
+ */
+export function routeAccountChecks(accounts = "") {
+  const d = routeAccounts(accounts);
+  if (!d.ok) return [FAIL("accounts", d.problem, 'set FACTORY_ACCOUNTS in .github/workflows/factory.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
+  if (!d.declared) return [];
+  const each = Object.entries(d.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
+  return [PASS("accounts", `${each.join("; ")}: on GitHub Actions and the cloud sandbox each stage runs on one, its harness's default or the one a trusted factory:account:<name> label pins, and gets only that account's secrets`)];
 }
 const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
-export async function secretChecks({ inputs, repo }) {
+export async function secretChecks({ inputs, repo, accounts = "" }) {
   const names = new Set();
   try {
     for (const s of (await rest(`repos/${repo.full}/actions/secrets?per_page=100`, {}))?.secrets || []) names.add(s.name);
@@ -248,8 +271,8 @@ export async function secretChecks({ inputs, repo }) {
   } catch (e) {
     return [WARN("secrets", `could not list secret names (${String(e.message).slice(0, 100)})`, "run doctor with a gh login that administers the repository")];
   }
-  const missing = neededSecrets(inputs).filter((n) => ![].concat(n).some((x) => names.has(x)));
-  const present = neededSecrets(inputs).map((n) => [].concat(n).filter((x) => names.has(x)).join(", "));
+  const missing = neededSecrets(inputs, accounts).filter((n) => ![].concat(n).some((x) => names.has(x)));
+  const present = neededSecrets(inputs, accounts).map((n) => [].concat(n).filter((x) => names.has(x)).join(", "));
   return [missing.length ? FAIL("secrets", `missing ${missing.map(secretName).join(", ")} (repository, or organization secrets visible to it)`, "add them: gh secret set NAME, or at the organization with --repos") : PASS("secrets", `${present.join(", ")} exist; the job mints the App token`)];
 }
 
@@ -352,7 +375,7 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
   return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/factory@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
 }
 
-export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck }) {
+export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
     out.push(FAIL("app token", "no installation token", "set FACTORY_APP_ID and FACTORY_APP_PRIVATE_KEY secrets and pass them as app_id / app_private_key"));
@@ -360,7 +383,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   }
   // A developer's run: the job mints the App token, so here the secrets are checked by name (the repository's and the
   // organization's visible to it), and GitHub is read with the developer's own gh login.
-  if (!token) out.push(...(await secretChecks({ inputs, repo })));
+  if (!token) out.push(...(await secretChecks({ inputs, repo, accounts })));
   else if (app?.appSlug) {
     out.push(...appPermissionChecks(app));
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
@@ -1543,7 +1566,10 @@ async function main() {
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));
   if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
-  results.push(...(await githubChecks({ inputs, repo, token, app, local })));
+  // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
+  const accounts = process.env.GITHUB_ACTIONS ? process.env.FACTORY_ACCOUNTS : wf.FACTORY_ACCOUNTS;
+  if (!local) results.push(...routeAccountChecks(accounts));
+  results.push(...(await githubChecks({ inputs, repo, token, app, local, accounts })));
   results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
   results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local, wf })));

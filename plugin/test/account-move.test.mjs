@@ -184,16 +184,17 @@ test("#265: the label is no edit to the Objective: the plan's record and the cho
   assert.equal(reads, 0, "no timeline read for it");
 });
 
-test("#265: off local mode the label does nothing, and the stage's progress says so once", () => {
-  assert.match(accountLabelNote(["factory:objective", "factory:account:beta"], false), /^`factory:account:beta` does nothing on this route: accounts are a local-mode setting/);
+test("#265/#267: off local mode, with no accounts declared there, the label does nothing, and the stage's progress says so once", () => {
+  assert.match(accountLabelNote(["factory:objective", "factory:account:beta"], false), /^`factory:account:beta` does nothing on this route: this repository declares no accounts for GitHub Actions and the cloud sandbox/);
   assert.equal(accountLabelNote(["factory:objective", "factory:account:beta"], true), "", "local mode acts on it");
   assert.equal(accountLabelNote(["factory:objective"], false), "");
   for (const script of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
     const gate = src.indexOf("await choiceGate(");
-    const note = src.indexOf("accountLabelNote(trusted.labels, local)");
+    // accountGate (objective-trust.mjs) gives the note: route-accounts.test.mjs runs it.
+    const note = src.indexOf("await accountGate(");
     assert.ok(gate > 0 && note > gate, `${script}: once, after the labels are read and checked`);
-    assert.equal(src.split("accountLabelNote(").length, 2, `${script}: one call`);
+    assert.equal(src.split("await accountGate(").length, 2, `${script}: one call`);
   }
 });
 

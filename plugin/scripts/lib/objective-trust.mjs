@@ -11,6 +11,7 @@ import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelers
 import { DRAFT_LABEL } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
+import { accountLabelNote, routeAccount, routeAccounts, routeTwoLine } from "./accounts.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
@@ -288,6 +289,44 @@ export async function objectiveInputs({ repo, issue, args = {}, env = process.en
  * running on `inputs` (choice.mjs CHOSEN_FIELDS) and opening `hosts` (local.mjs openStageHosts). `gh` (labelers,
  * permission) is a test's own.
  */
+/**
+ * The account a stage on GitHub Actions or the cloud sandbox runs on (#267). With accounts declared (FACTORY_ACCOUNTS,
+ * accounts.mjs routeAccounts): the one the labels (`labels`, names) pick for `harness` (routeAccount; an account label's
+ * labeler read afresh, labelsVouched), checked against the one the route prepared the stage for (FACTORY_STAGE_ACCOUNT:
+ * the workflow's account step, whose account's credential is the only one the stage holds). {refusal: {reason, fix}} for
+ * a declaration or label that cannot be used, two account labels, or an account other than the prepared one; else
+ * {account, note: ""}. With none declared, the repository's one credential as ever: {account: null, note}, `note`
+ * accountLabelNote's line for an account label, which does nothing then. `gh` (labelers, permission) is a test's own.
+ */
+export async function routeAccountCheck({ repo, issue, harness, labels = [], env = process.env, opts, gh = {} }) {
+  const declared = routeAccounts(env.FACTORY_ACCOUNTS);
+  if (declared.ok && !declared.declared) return { account: null, note: accountLabelNote(labels, false, false) };
+  if (!declared.ok) return { refusal: { reason: `${declared.problem}, so no stage on GitHub Actions or the cloud sandbox starts`, fix: ACCOUNTS_FIX } };
+  const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account") });
+  const prepared = String(env.FACTORY_STAGE_ACCOUNT ?? "").trim();
+  if (r.two) return { refusal: { reason: `${routeTwoLine(r.two)}; a label was added while this stage started`, fix: "A person who can push removes all but one `factory:account:` label, then re-applies `factory:objective`." } };
+  if (r.problem) return { refusal: { reason: `${r.problem}, so no stage of it starts`, fix: ROUTE_PIN_FIX } };
+  if (!prepared) return { refusal: { reason: "this repository declares accounts (FACTORY_ACCOUNTS), but its workflow picked none for this stage, so the stage holds no account's credential: its jobs have no account step", fix: "Re-render the workflow (`/factory:factory-setup`), whose jobs pick each stage's account and pass only that account's secrets, merge it, then re-apply `factory:objective`." } };
+  if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
+  return { account: r.account.name, note: "" };
+}
+
+/**
+ * Every stage's account off local mode (#267), after choiceGate: routeAccountCheck, whose refusal Blocks (cause setup)
+ * through `apply` after `before`, before any harness, and returns {ok: false, reason}; else {ok, account, note}. Local
+ * mode's loop picks its own (local.mjs harnessFor): {ok, account: null, note: ""}.
+ */
+export async function accountGate({ repo, issue, harness, labels = [], env = process.env, local = false, pr = null, notify, opts, apply, before = null, stage, gh = {} }) {
+  if (local) return { ok: true, account: null, note: "" };
+  const c = await routeAccountCheck({ repo, issue, harness, labels, env, opts, gh });
+  if (!c.refusal) return { ok: true, account: c.account, note: c.note };
+  if (before) await before();
+  await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);
+  return { ok: false, reason: c.refusal.reason };
+}
+const ACCOUNTS_FIX = 'Fix FACTORY_ACCOUNTS in .github/workflows/factory.yml: a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts), then re-apply `factory:objective`.';
+const ROUTE_PIN_FIX = "A person who can push removes the account label, or applies one naming an account FACTORY_ACCOUNTS declares for the Objective's harness, then re-applies `factory:objective`.";
+
 export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {
   const t = await choiceTrusted(repo, issue, labels, opts, gh);
   const c = t.ok ? chosenInputs({ args, env, choice: t.choice }) : t;

@@ -98,6 +98,24 @@ env:
 
 The App must already review the repository's PRs; Factory only reads its reviews. Factory waits up to 20 minutes for that login's review of the head Factory's reviewer read, and the answer pass fixes or rebuts each of its line comments and replies in its thread, as for Factory's own reviewer; its text is untrusted review input, never instructions. The wait holds no runner, sandbox or local slot: after posting its own review, the review stage records the wait in a comment on the PR, takes `factory:review` off and ends (`exit: waiting` on its progress comment). The dispatcher puts the label back once that review exists or the 20 minutes have passed, and the review goes on without running Factory's reviewer again. A reviewer that posts no review of that head in time is left out: the progress comment says `third-party review: ... going on without it`, and the stage goes on to the merge. The workflow's `pull_request_review` trigger ticks the dispatcher when an App's review arrives (a person's review ticks nothing, so name Apps here); a workflow rendered before it waits for the cron, and doctor names it (re-run `setup --apply workflow`). When the reviewer posts nothing, the 20 minutes' end is a wake on a public repository; on a private one it waits for the next event that ticks the dispatcher or GitHub's cron, which can run late, since a sleeper there would bill the minutes the wait frees. Local mode reads the same setting from the env block, and `serve` resumes the review itself. PLAN.md, Review and merge, has the details.
 
+## Several accounts
+
+A repository can give GitHub Actions and the cloud sandbox several accounts of a harness, and a person pins an Objective to one with `factory:account:<name>`, as local mode does with a machine's accounts (LOCAL.md, Accounts). Declare their names in the workflow's env block, a JSON object of each harness's accounts in order:
+
+```yaml
+env:
+  FACTORY_ACCOUNTS: '{"claude": ["claude", "claude-2"], "codex": ["codex-2"]}'
+```
+
+- **Names here, credentials as secrets.** The names steer which credential a stage runs on, so only the reviewed workflow file sets them, never a repository variable. Each account's credential is its own secret: the harness's usual secret name with `_` and the account's name upper-cased, each hyphen an underscore (`claude-2`: `ANTHROPIC_API_KEY_CLAUDE_2`, or `CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` with `credential: plan`; `codex-2`: `CODEX_API_KEY_CODEX_2` or `FACTORY_CODEX_GATEWAY_KEY_CODEX_2`; a Copilot account: `COPILOT_GITHUB_TOKEN_<NAME>`). An account named after its harness (`claude`) uses the usual secrets, so a second account needs no change to the first. Accepted: Claude subscription tokens and API keys, Codex API keys and gateway keys, Copilot tokens. A ChatGPT login for Codex (an `auth.json` or its access token) is refused on these routes, as OpenAI advises an API key for CI; run such an account in local mode.
+- **Which account:** a harness's first account is its default. A trusted `factory:account:<name>` label pins the Objective to that account of its harness: it counts only when the person who last applied it can push or is a maintainer the workflow names, and it is never an edit. A label naming no account of the Objective's harness, or applied by someone who cannot push, Blocks the stage (cause `setup`). Two account labels: the dispatcher leaves the Objective Queued until one is left; a stage that starts meanwhile Blocks.
+- **Only that account's secret reaches the stage.** Each work, review and launch job has an `account` step first (the Action's `account` mode: it reads the issue's labels and the labeler with a read-only App token, and no secret). The stage's step then looks its credential up by that account's suffix (`secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)]`); every other harness gets a suffix no secret's name can have, so no other account's secret is in that step's environment, the harness's, a child's or the cloud sandbox's. The stage reads its labels again and Blocks if they pick another account by then.
+- **Recorded by name:** the progress comment's harness line, the usage record's `ran.account` and the scorecard name the account each stage ran on.
+- **Doctor** checks the declaration and each account's secret by name, never its value.
+- **With no `FACTORY_ACCOUNTS`** the `account` step is skipped and every job runs on the usual secrets, as before; an account label then does nothing, and the progress comment says so once.
+
+Declaring accounts needs the jobs' `account` steps: re-render the workflow (`/factory:factory-setup`) on an older one, or each stage Blocks saying so.
+
 ## Upgrade
 
 1. Read the release notes between your tag and the new one.

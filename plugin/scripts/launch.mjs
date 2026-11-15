@@ -35,7 +35,8 @@ import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TR
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
-import { objectiveInputs } from "./lib/objective-trust.mjs";
+import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
+import { routeSecretSuffix } from "./lib/accounts.mjs";
 import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -73,7 +74,7 @@ const BARE_SECRETS = new Set(["GITHUB_TOKEN", "GH_TOKEN", "ANTHROPIC_API_KEY", "
 /** Every name a secret can have in this process's environment: FACTORY_INPUT_<X>, FACTORY_<X> and the bare names. */
 export const isSecretEnv = (k) => BARE_SECRETS.has(k) || [...SECRET_INPUTS, ...MORE_SECRETS].some((n) => k === `FACTORY_INPUT_${n.toUpperCase()}` || k === `FACTORY_${n.toUpperCase()}`);
 /** Inputs a stage does not take from the launcher's settings: this job's own, and every secret. */
-const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "repo", "sandbox", "app_id", ...SECRET_INPUTS, ...MORE_SECRETS]);
+const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "account", "repo", "sandbox", "app_id", ...SECRET_INPUTS, ...MORE_SECRETS]);
 /** The harness's credentials, by harness: only the one the stage's harness needs goes into the sandbox. */
 const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexGatewayKey", "codexApiKey"], copilot: ["copilotGithubToken"] };
 const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
@@ -83,9 +84,12 @@ const HARNESS_SECRET_NAMES = { claude: "ANTHROPIC_API_KEY (CLAUDE_CODE_OAUTH_TOK
  * {reason, fix} when the launcher holds no credential for the stage's harness (HARNESS_SECRETS), else null: the stage
  * would Block on it inside its sandbox, after the sandbox's cost, so the launcher Blocks first.
  */
-export function missingCredential(inputs) {
+export function missingCredential(inputs, account = null) {
   if ((HARNESS_SECRETS[inputs.harness] || []).some((k) => inputs[k])) return null;
-  return { reason: `no ${inputs.harness} credential reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness"} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
+  // An account's own secrets carry its suffix (lib/accounts.mjs routeSecretSuffix): the names its fix gives.
+  const suffix = account ? routeSecretSuffix(account, inputs.harness) : "";
+  const names = (HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness").replace(/\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|FACTORY_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g, `$1${suffix}`);
+  return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
 }
 
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
@@ -318,7 +322,8 @@ export const stageProgressKey = (runId, claim) => (/^\d{1,20}$/.test(String(runI
 
 /**
  * The environment the stage starts with in the sandbox: the workflow's settings as inputs (never a secret), the GitHub
- * context, the stage's own names, the two tokens, only the credential its harness needs and the worker secrets' values
+ * context, the stage's own names, the two tokens, only the credential its harness needs (of the one account the job's
+ * account step picked, the only one the workflow passed) and the worker secrets' values
  * (the work stage's harness and the review stage's fix and answer passes get them; its reviewer never does).
  */
 export function stageEnvironment({ inputs, defaults = inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
@@ -342,6 +347,10 @@ export function stageEnvironment({ inputs, defaults = inputs, env = process.env,
   // The worker secrets' values (lib/worker-secrets.mjs): the worker hands them to its harness alone, the review stage to
   // its fix and answer passes alone.
   if (inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
+  // The accounts the workflow declares and the one the job's account step picked (#267), whose credential is the only one
+  // the launch job holds: the stage checks its labels still pick it (objective-trust.mjs accountGate) and records it.
+  if (env.FACTORY_ACCOUNTS) out.FACTORY_ACCOUNTS = env.FACTORY_ACCOUNTS;
+  if (env.FACTORY_STAGE_ACCOUNT) out.FACTORY_STAGE_ACCOUNT = env.FACTORY_STAGE_ACCOUNT;
   Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });
   if (pr) out.FACTORY_STAGE_PR = String(pr);
   if (tokens.read) out.FACTORY_READ_TOKEN = tokens.read;
@@ -988,7 +997,11 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   const chosen = await objectiveInputs({ repo, issue: n, env: process.env, opts, gateway: !!inputs.codexGatewayKey });
   if (!chosen.ok) return out(await block(run, `launcher: ${chosen.reason}`, "setup", chosen.fix));
   Object.assign(inputs, run.defaults, chosen.inputs);
-  const noKey = missingCredential(inputs);
+  // The account (#267): with accounts declared, the one the labels pick must be the one the job's account step picked,
+  // whose credential alone this job holds; else the launcher Blocks here, before any sandbox spend.
+  const acct = await routeAccountCheck({ repo, issue: n, harness: inputs.harness, labels: chosen.names, env: process.env, opts });
+  if (acct.refusal) return out(await block(run, `launcher: ${acct.refusal.reason}`, "setup", acct.refusal.fix));
+  const noKey = missingCredential(inputs, acct.account);
   if (noKey) return out(await block(run, `launcher: ${noKey.reason}`, "setup", noKey.fix));
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;

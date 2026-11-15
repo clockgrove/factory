@@ -9,7 +9,9 @@ import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
 import { reviewPost } from "../scripts/lib/handoff.mjs";
 import { parseReview } from "../scripts/lib/logic.mjs";
-import { foundationPrompt, foundationReview } from "../scripts/review.mjs";
+import { FOUNDATION_AGENT, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
+import { AGENT_DIRS, agentModel } from "../scripts/lib/checkout.mjs";
+import { harnessCommand } from "../scripts/lib/harness.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const ROOT = join(import.meta.dirname, "..", "..");
@@ -98,7 +100,7 @@ test("foundationPrompt: comments only, on the reference's section, with the issu
   assert.match(p, /\{"comments": \[\{"path": "src\/errors\.ts", "line": 12, "entry": "foundation", "body": "foundation review: \.\.\."\}\]\}/);
   assert.doesNotMatch(p, /"acceptance":/, "the first pass judges the entries");
   for (const part of ["## Issue\n## Acceptance\n- one", "## PR body\nthe body", "## Diff\n```diff\ndiff --git a/x b/x\n+y"]) assert.ok(p.includes(part), part);
-  assert.match(foundationPrompt({ issue: 5, issueTitle: "t", issueBody: "", prBody: "", diff: "", harness: "codex" }), /Act as the reviewer agent defined in \.codex\/agents\/reviewer\.toml/);
+  assert.match(foundationPrompt({ issue: 5, issueTitle: "t", issueBody: "", prBody: "", diff: "", harness: "codex" }), /Act as the reviewer agent defined in \.codex\/agents\/foundation-reviewer\.toml/);
   const ref = readFileSync(join(ROOT, "plugin", "skills", "factory-review-pr", "reference.md"), "utf8");
   assert.match(ref, /\n## Foundation review\n/, "the section the prompt names");
   assert.match(readFileSync(join(ROOT, "plugin", "skills", "factory-review-pr", "SKILL.md"), "utf8"), /The foundation pass: reference\.md, "Foundation review"\./);
@@ -140,7 +142,7 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.match(block, /mark\(rec, rec\);\n\s+records\.push\(rec\);/, "each call booked before the next check");
   assert.match(block, /if \(found\.stop === "cap"\) return blockedAtCap\("the foundation pass"\);\n\s+if \(found\.stop === "time"\) return blockedAtTime\("the foundation pass"\);/);
   assert.match(block, /exit: "blocked", reason, cause: last\.refusal \? refusalCause\(last\.refusal\) : "factory"[\s\S]*await finish\("blocked", reason\);\n\s+return;/, "no answer: nothing posted, Blocked");
-  assert.match(block, /agent: inputs\.harness === "codex" \? undefined : "reviewer",\n\s+reviewer: true,/, "the pinned reviewer, no worker secrets");
+  assert.match(block, /runHarness\(\n\s+foundationCall\(\{\n\s+harness: inputs\.harness,/, "foundationCall's agent and reviewer mark");
 });
 
 test("a session's review: post-review takes the foundation pass under `foundation` on a trusted foundation Objective only", async () => {
@@ -166,6 +168,51 @@ test("a session's review: post-review takes the foundation pass under `foundatio
   assert.ok(at("foundation: found.foundation })") < at("await postReview("));
 });
 
-test("the reviewer agent definitions tell the foundation pass from the first", () => {
-  for (const f of ["claude/reviewer.md", "codex/reviewer.toml", "copilot/reviewer.agent.md"]) assert.match(readFileSync(join(ROOT, "plugin", "agents", f), "utf8"), /When the prompt says it is the foundation pass, follow the skill's reference section \\?"Foundation review\\?" instead: judge no acceptance entry/, f);
+test("the foundation call runs as its own foundation-reviewer agent on every harness, never as the first pass's reviewer", () => {
+  const files = { claude: "claude/foundation-reviewer.md", codex: "codex/foundation-reviewer.toml", copilot: "copilot/foundation-reviewer.agent.md" };
+  const source = JSON.parse(readFileSync(join(ROOT, "plugin", "agents", "source.json"), "utf8")).agents;
+  const own = source.find((a) => a.name === FOUNDATION_AGENT);
+  const first = source.find((a) => a.name === "reviewer");
+  assert.deepEqual(own.models, first.models, "the reviewer's models");
+  assert.match(own.instructions, /judge no acceptance entry/);
+  assert.match(own.instructions, /final message is only the JSON \{"comments": \[\{"path", "line", "entry", "body"\}\]\}/);
+  assert.doesNotMatch(own.instructions, /"acceptance"/);
+  assert.doesNotMatch(first.instructions, /foundation/i, "the first pass's agent is unchanged");
+  for (const [harness, file] of Object.entries(files)) {
+    const text = readFileSync(join(ROOT, "plugin", "agents", file), "utf8");
+    assert.ok(text.includes(harness === "codex" ? 'name = "foundation-reviewer"' : "name: foundation-reviewer"), `${file}: rendered with its name`);
+    assert.ok(text.includes(harness === "codex" ? own.instructions.replace(/\\/g, "\\\\") : own.instructions), `${file}: its own instructions`);
+    assert.ok(!text.includes('"acceptance"'), `${file}: no acceptance answer asked for`);
+    // The call: Claude and Copilot select the agent by --agent; Codex, which has no flag, is told its file in the prompt.
+    const call = foundationCall({ harness, model: "m", effort: "high", label: "review-foundation", timeoutMs: 1, prompt: foundationPrompt({ issue: 5, issueTitle: "t", issueBody: "", prBody: "", diff: "", harness }), maxUsd: 3, cwd: "/w", env: {}, eventsFile: "/e" });
+    assert.deepEqual([call.agent, call.reviewer, call.maxUsd, call.label], [harness === "codex" ? undefined : "foundation-reviewer", true, 3, "review-foundation"], harness);
+    assert.equal(call.prompt.includes(`Act as the reviewer agent defined in ${AGENT_DIRS.codex}/foundation-reviewer.toml`), harness === "codex", harness);
+    assert.ok(!call.prompt.includes("/reviewer."), `${harness}: never the first pass's agent file`);
+    if (harness !== "codex") {
+      const { args } = harnessCommand({ harness, model: "m", prompt: "p", agent: call.agent });
+      assert.equal(args[args.indexOf("--agent") + 1], "foundation-reviewer", `${harness}: --agent`);
+    }
+  }
+  // Installed on the reviewer model the Objective runs on, as the first pass's agent is.
+  assert.equal(agentModel("foundation-reviewer", { reviewer: "claude-opus-5-5", subagent: "s" }), "claude-opus-5-5");
+  assert.equal(agentModel("reviewer", { reviewer: "claude-opus-5-5" }), "claude-opus-5-5");
+  assert.equal(agentModel("implementer", { subagent: "s" }), "s");
+  assert.equal(agentModel("foundation-reviewer", {}), null, "no input: the file's own pin");
+  const review = readFileSync(join(ROOT, "plugin", "scripts", "review.mjs"), "utf8");
+  assert.match(review, /const rec = await runHarness\(\n\s+foundationCall\(\{/, "the job runs exactly foundationCall's arguments");
+});
+
+test("post-review reads the session file once, whatever the order of its keys", async () => {
+  const { reviewPostFor } = await import("../scripts/local.mjs");
+  const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
+  const entries = [{ id: "A", text: "a" }];
+  const pass = '"foundation": {"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}';
+  const first = '"acceptance": [{"entry": "A", "met": true}], "comments": []';
+  for (const text of [`{${first}, ${pass}}`, `{${pass}, ${first}}`, `{"comments": [], ${pass}, "acceptance": [{"entry": "A", "met": true}]}`]) {
+    const post = reviewPostFor({ issue: 7, text, file: "f.json", diff, entries, foundation: true });
+    assert.deepEqual([post.comments.map((c) => c.body), /raised 1\./.test(post.body), /- A: met/.test(post.body)], [["foundation review: z"], true, true], text);
+  }
+  // Not one JSON value (a fenced answer): read as the review job reads one, with no foundation pass in it.
+  assert.equal(reviewPostFor({ issue: 7, text: "```json\n{" + first + "}\n```", file: "f.json", diff, entries }).placeholder, true);
+  assert.throws(() => reviewPostFor({ issue: 7, text: `{${pass}}`, file: "f.json", diff, entries, foundation: true }), /f\.json holds no reviewer JSON; nothing posted/, "the first pass is still required");
 });

@@ -1451,6 +1451,20 @@ export function parseFindings(text) {
 }
 
 /**
+ * A parsed JSON value as the reviewer's answer (parseReview's shape): an array is its comments; an object with a
+ * `comments` or `acceptance` list is the answer, whatever other keys it has and in any order; anything else is
+ * `parsed: false`.
+ */
+export function reviewOfValue(v) {
+  if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
+  if (!v || typeof v !== "object" || !(Array.isArray(v.comments) || Array.isArray(v.acceptance))) return { comments: [], acceptance: null, parsed: false };
+  const acceptance = Array.isArray(v.acceptance)
+    ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
+    : null;
+  return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
+}
+
+/**
  * The reviewer's whole answer: `comments` (line-tied findings) and `acceptance` (one judgment per acceptance entry,
  * {entry, met, path, line, evidence}; null when the answer has no such list), and `parsed`: whether any JSON answer was
  * found. From a fenced ```json block or a bare object.
@@ -1464,14 +1478,8 @@ export function parseReview(text) {
   for (const m of s.matchAll(/\{\s*"(?:acceptance|comments)"/g)) if (m.index < end) candidates.push(s.slice(m.index, end + 1));
   for (const c of candidates.reverse()) {
     try {
-      const v = JSON.parse(c.trim());
-      if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
-      if (v && (Array.isArray(v.comments) || Array.isArray(v.acceptance))) {
-        const acceptance = Array.isArray(v.acceptance)
-          ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
-          : null;
-        return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
-      }
+      const r = reviewOfValue(JSON.parse(c.trim()));
+      if (r.parsed) return r;
     } catch {
       // try the next candidate
     }

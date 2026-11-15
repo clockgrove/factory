@@ -34,7 +34,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin, staleDecision } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -2175,15 +2175,18 @@ async function handoverForPerson(issue, flags) {
  * Action's own reviewer pass.
  */
 export function reviewPostFor({ issue, text, file, diff, entries, foundation = false }) {
-  const review = parseReview(text);
+  // The file as one JSON object, read once, each pass taken from it by its key in any order; text that is not one JSON
+  // value (a fenced block, prose around it) is read as the review job reads an answer, and holds no foundation pass.
+  let whole;
+  try {
+    whole = JSON.parse(String(text).trim());
+  } catch {
+    whole = undefined;
+  }
+  const review = whole === undefined ? parseReview(text) : reviewOfValue(whole);
   if (!review.parsed) throw new Error(`${file} holds no reviewer JSON; nothing posted`);
   if (reviewMissed({ review, entries })) throw new Error(`${file} judges none of the issue's acceptance entries (${entries.map((e) => e.id).join(", ")}); nothing posted`);
-  let pass;
-  try {
-    pass = JSON.parse(String(text).trim())?.foundation;
-  } catch {
-    pass = undefined;
-  }
+  const pass = whole && typeof whole === "object" && !Array.isArray(whole) ? whole.foundation : undefined;
   if (foundation && !Array.isArray(pass?.comments)) throw new Error(`${file} holds no foundation pass ("foundation": {"comments": [...]}), which #${issue}'s factory:foundation label asks for; nothing posted`);
   if (!foundation && pass !== undefined) throw new Error(`${file} holds a foundation pass, but #${issue} is not a foundation Objective (no trusted factory:foundation label); nothing posted`);
   return reviewPost({ issue, review, diff, entries, foundation: foundation ? { comments: pass.comments, acceptance: null, parsed: true } : null });

@@ -131,7 +131,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
  * only: the first pass judges the acceptance entries.
  */
 export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
-  const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
+  const agentFile = `${AGENT_DIRS[harness]}/${FOUNDATION_AGENT}${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   return [
     `You are the Factory reviewer's foundation pass for the pull request on issue #${issue}: ${issueTitle}. The Objective is labelled \`factory:foundation\`: later work builds on what it adds.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the factory-review-pr skill (in .claude/skills/factory-review-pr and .agents/skills/factory-review-pr), its reference.md section "Foundation review", exactly. Another pass reviews the rest of the PR and judges the acceptance entries; this pass does neither.`,
     "Read the repository as you need to: the callers are in the checkout, on the PR's head. Do NOT post anything to GitHub yourself: the job posts your findings with the other pass's. Your final message must be only a JSON object of this shape, with no prose around it:",
@@ -149,6 +149,17 @@ export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, h
     promptDiff(diff),
     "```",
   ].join("\n");
+}
+
+/** The agent definition the foundation pass runs as (plugin/agents/source.json): its own, never the first pass's reviewer. */
+export const FOUNDATION_AGENT = "foundation-reviewer";
+
+/**
+ * One foundation call's runHarness arguments: as the foundation-reviewer agent (Claude and Copilot by --agent; Codex has no
+ * such flag, so foundationPrompt names its definition file), marked a reviewer call (no worker secrets).
+ */
+export function foundationCall({ harness, model, effort, label, timeoutMs, prompt, maxUsd, cwd, env, eventsFile, onLine }) {
+  return { harness, model, effort, prompt, maxUsd, agent: harness === "codex" ? undefined : FOUNDATION_AGENT, reviewer: true, cwd, env, timeoutMs, eventsFile, label, onLine };
 }
 
 /**
@@ -849,21 +860,21 @@ async function main() {
       over: () => over() || overBudget,
       timeout: () => reviewCallTimeout(remainingMs(deadlineAt)),
       run: async ({ model, effort, label, timeoutMs }) => {
-        const rec = await runHarness({
-          harness: inputs.harness,
-          model,
-          effort,
-          prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
-          maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
-          agent: inputs.harness === "codex" ? undefined : "reviewer",
-          reviewer: true,
-          cwd: checkout,
-          env: harnessEnv,
-          timeoutMs,
-          eventsFile,
-          label,
-          onLine: foundationLive.onLine,
-        });
+        const rec = await runHarness(
+          foundationCall({
+            harness: inputs.harness,
+            model,
+            effort,
+            label,
+            timeoutMs,
+            prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+            maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+            cwd: checkout,
+            env: harnessEnv,
+            eventsFile,
+            onLine: foundationLive.onLine,
+          }),
+        );
         mark(rec, rec);
         records.push(rec);
         return rec;

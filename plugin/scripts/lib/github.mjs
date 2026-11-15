@@ -1313,15 +1313,15 @@ export async function objectiveLabeledAt(repo, number, label, opts) {
 
 /**
  * Who last applied each of `names`, from the issue's timeline: {name: {at, actor}} (the actor as GitHub gives it), a name
- * with no `labeled` event left out.
+ * with no `labeled` event left out. With `event` "unlabeled", who last removed each.
  */
-export async function labelersOf(repo, number, names, opts) {
+export async function labelersOf(repo, number, names, opts, event = "labeled") {
   const want = new Set(names);
   const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   const out = {};
   for (const e of events) {
     const n = e.label?.name;
-    if (e.event !== "labeled" || !want.has(n)) continue;
+    if (e.event !== event || !want.has(n)) continue;
     if (!out[n] || Date.parse(e.created_at) > Date.parse(out[n].at)) out[n] = { at: e.created_at, actor: e.actor ?? null };
   }
   return out;

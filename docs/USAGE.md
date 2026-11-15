@@ -43,6 +43,7 @@ The workflow file's `FACTORY_HARNESS`, `FACTORY_MODEL`, `FACTORY_SUBAGENT_MODEL`
 - **A manual run's `harness` input** (`gh workflow run factory.yml -f issue=<number> -f harness=codex`) overrides the default for that run; a harness label on the issue wins over it.
 - **A label added, removed or changed after the plan is an edit** (Edit an Objective, below): the next stage Blocks, re-applying `factory:objective` plans again on the new choice, and `factory:restart` starts over with it.
 - **What ran is on the record:** the progress comment's harness line, the usage record's `ran` and the scorecard's Harness column name the harness, the worker, sub-agent and reviewer models, and the labels that chose them; in local mode, the account each stage ran on too (LOCAL.md, Accounts).
+- **In local mode, the account too:** `factory:account:<name>` moves an Objective to another account of its harness on the machine that runs it, for instance when a usage limit pauses it (LOCAL.md, Accounts). It is trusted like the labels above, but it is no edit: adding or removing it after the plan Blocks nothing. On Actions and the cloud sandbox it does nothing, and the progress comment says so.
 
 ## Ask for a foundation review
 

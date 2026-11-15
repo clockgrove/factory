@@ -86,7 +86,7 @@ test("#264: a usage limit holds only the account that met it, for every serve on
     a.result = limited(t + 180 * MIN, t);
     const end = await a.stage(8, "work", "worker.mjs", []);
     assert.equal(end.account, "alpha");
-    a.outagePaused(8, end);
+    await a.outagePaused(8, end);
     assert.equal(a.limitUntil({ key: "alpha", shared: true }), t + 180 * MIN);
     assert.equal(a.limitUntil({ key: "beta", shared: true }), null, "beta is not held");
     // Another repository's serve, and a serve started afresh: the machine's holds, read from disk.
@@ -96,7 +96,7 @@ test("#264: a usage limit holds only the account that met it, for every serve on
       const held = await b.stage(8, "work", "worker.mjs", []);
       assert.deepEqual([held.exit, held.account, held.usageLimit.held, Date.parse(held.usageLimit.reset)], ["paused", "alpha", true, t + 180 * MIN]);
       assert.equal(b.ran(), 0, "nothing started on alpha: no call spent to find the limit again");
-      b.outagePaused(8, held);
+      await b.outagePaused(8, held);
       assert.equal(b.offline.get(8).reset, t + 180 * MIN, "it resumes the Objective after the reset");
     }
     // Past the reset, alpha starts again.
@@ -135,7 +135,7 @@ test("#264: the back-off streak is the account's, shared by every serve; it ends
     const pause = async (loop) => {
       loop.result = limited(t - MIN, t);
       const end = await loop.stage(8, "work", "worker.mjs", []);
-      loop.outagePaused(8, end);
+      await loop.outagePaused(8, end);
       const held = (loop.offline.get(8).reset - t) / MIN;
       t = loop.offline.get(8).reset;
       return held;
@@ -235,7 +235,7 @@ test("#264: with no accounts declared, a hold is the login's: two serves on two 
     on("claude-a");
     const a = serveOn(h, () => t);
     a.result = limited(t + 180 * MIN, t);
-    a.outagePaused(8, await a.stage(8, "work", "worker.mjs", []));
+    await a.outagePaused(8, await a.stage(8, "work", "worker.mjs", []));
     // Another serve on another login: nothing held, its stage runs.
     on("claude-b");
     const b = serveOn(h, () => t);
@@ -265,7 +265,7 @@ test("#264: a Copilot token from serve's environment names no login: its hold st
     const a = serveOn(h, () => t);
     const hold = a.holdOf({ name: "copilot", harness: "copilot", declared: false });
     assert.deepEqual(hold, { key: "copilot@env", shared: false });
-    a.limitPaused(8, { exit: "paused", stage: "work", account: "copilot", hold, usageLimit: { harness: "copilot", reset: new Date(t + 60 * MIN).toISOString(), since: new Date(t).toISOString() } });
+    await a.limitPaused(8, { exit: "paused", stage: "work", account: "copilot", hold, usageLimit: { harness: "copilot", reset: new Date(t + 60 * MIN).toISOString(), since: new Date(t).toISOString() } });
     assert.equal(a.limitUntil(hold), t + 60 * MIN);
     assert.match(a.limitHold(["factory:objective", "factory:harness:copilot"]), /^copilot's usage limit is spent until /);
     assert.equal(serveOn(h, () => t).limitUntil(hold), null, "another serve does not see it");

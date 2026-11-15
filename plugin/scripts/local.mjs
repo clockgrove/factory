@@ -27,7 +27,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, organizationVariableNames, repoOf, repositoryVariables, rest, setStateLabel, transientError } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, organizationVariableNames, repoOf, repositoryVariables, rest, setStateLabel, transientError, upsertComment } from "./lib/github.mjs";
 import { MACHINE_SETTINGS, MODEL_SETTINGS, holdSecrets, ignoredLines, input, layerLines, log, logTo, machineSettings, organizationVariablesLine, redactSecrets, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -35,7 +35,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -51,19 +51,47 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
-import { accountEnv, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, sandboxRoots } from "./lib/accounts.mjs";
-import { accountHolds, holdsDir } from "./lib/holds.mjs";
+import { HARNESS_NAMES, accountEnv, accountLabels, accountPin, accountReason, accountToken, defaultAccount, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
+import { accountHolds, holdsDir, windowOf } from "./lib/holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
 /** An account in a hold's log line and reason: the harness alone for the one named after it (none declared). */
 const limitName = (harness, account) => (account === harness ? harness : `${harness} account ${account}`);
+/**
+ * The pause notice's text (Local.pauseNotice, #265): the account a usage limit paused the Objective on (`account`, its
+ * name; the harness's own name with none declared), its reset (`reset`, ms) and window (`window`, as the harness named
+ * it, or null), and `free`, the names of the harness's other accounts free now, each with its label. `note`: a line
+ * about the issue's account labels. Account names only: no path, no login, no @mention.
+ */
+export function pauseNoticeBody({ stage = "work", harness, account, reset, window = null, free = [], note = null }) {
+  const h = HARNESS_NAMES[harness] || harness;
+  const who = account === harness ? `${h} (this machine's one ${h} login)` : `${h} account \`${account}\``;
+  // The window as the harness named it, only in its own form: harness output never reaches the issue as it is.
+  const named = windowOf(window);
+  const moves = free.length
+    ? `Free now: ${free.map((n) => `\`${n}\` (apply \`factory:account:${n}\`)`).join(", ")}. Applying one moves this Objective to that account: \`factory serve\` on this machine starts its stage there at once, and every later stage runs there while the label stays.`
+    : `No other ${h} account on this machine is free now.`;
+  return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
+}
+
+/**
+ * How often a loop writes again the claim of an Objective it holds paused (Local.beatPaused): well inside the dispatcher's
+ * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
+ */
+export const PAUSED_BEAT_MS = 60 * 60_000;
+
+/** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
+const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
+
+/** What a Blocked notice tells a person to do about an account label this machine cannot act on (#265). */
+const PIN_FIX = "Apply one `factory:account:<name>` naming an account of this Objective's harness that this machine declares (~/.config/factory/accounts.json; doctor.mjs --local lists them), as a person who can push, or remove the label to run on the harness's default account; then re-apply `factory:objective`.";
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
 const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
 /** A pinned release serve could not fetch or start is tried again after this long (followPin). */
@@ -632,8 +660,11 @@ export class Local {
    * The harness an Objective's stage runs on here (objective-trust.mjs objectiveInputs): its harness and model labels
    * over this loop's settings, read before the stage's sandbox is set up for it, and the hosts its approved host labels
    * open (`hosts`: stageEnv sets this stage's sandboxes up with them). Another harness than the loop's is checked on this
-   * machine as the loop's own was at its start (harnessReady), on the account the stage runs on (accountFor).
-   * {ok, harness, hosts, account} or {ok: false, reason, fix}.
+   * machine as the loop's own was at its start (harnessReady), on the account the stage runs on: the one its
+   * `factory:account:<name>` label pins it to (pinFor, #265; its labeler read afresh at each stage start), else its
+   * harness's default (accountFor). A pin this machine cannot act on (an untrusted labeler, a name no account of its
+   * harness has) Blocks; two pins start nothing ({ok: false, wait}: the Objective waits, never Blocked).
+   * {ok, harness, hosts, account, pinned, pin} or {ok: false, reason, fix} or {ok: false, wait}.
    */
   async harnessFor(issue) {
     const env = this.baseEnv();
@@ -643,16 +674,27 @@ export class Local {
     if (!chosen.ok) return chosen;
     const harness = chosen.inputs.harness;
     let account;
+    let pin;
     try {
       account = this.accountFor(harness);
+      pin = await this.pinFor(issue, chosen.names, harness);
     } catch (e) {
       // Only a declaration that cannot be used Blocks, with its fixed reason; any other failure is Factory's own.
       if (e?.code !== "account" || typeof e.reason !== "string") throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
       return { ok: false, reason: e.reason, fix: "Fix those accounts in ~/.config/factory/accounts.json on this machine (doctor.mjs --local names what is wrong with each), then re-apply `factory:objective`." };
     }
+    if (pin.problem) {
+      // A Block: the kept labeler check goes with it, so whatever is applied next is read afresh.
+      this.pinTrusts?.delete(issue);
+      return { ok: false, reason: `local mode: ${pin.problem}, so no stage of it starts`, fix: PIN_FIX };
+    }
+    // Two account labels: no move, to the default or anywhere else. The stage does not start; the Objective waits.
+    if (pin.two) return { ok: false, wait: twoPinsLine(pin.two) };
+    this.pinClear(issue);
+    if (pin.account) account = pin.account;
     const problems = this.harnessReady(harness, account);
-    if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account };
+    if (!problems.length) return { ok: true, harness, hosts: chosen.hosts, account, ...(pin.account ? { pinned: true, pin: pin.label } : {}) };
     // What is missing stays in this machine's log: a path or a probe's output never reaches GitHub (block()).
     log(`#${issue}: ${harness} cannot run here: ${problems.join("; ")}`);
     return { ok: false, reason: `local mode on this machine cannot run ${harness}, which this Objective's harness label asks for; the loop's log names what is missing`, fix: "Set that harness up on this machine (doctor.mjs --local with FACTORY_HARNESS set to it names what is missing) and re-apply `factory:objective`, or run the Objective where that harness is set up." };
@@ -664,10 +706,96 @@ export class Local {
    * account cannot be used; the why, which names no path either, goes to this machine's log.
    */
   accountFor(harness) {
+    return defaultAccount(this.loadedAccounts(), harness);
+  }
+
+  /** This machine's account declaration, read and checked afresh (loadAccounts); throws as accountFor says. */
+  loadedAccounts() {
     const loaded = loadAccounts({ home: homedir(), env: process.env, roots: sandboxRoots(this.dev) });
-    if (loaded.ok) return defaultAccount(loaded, harness);
+    if (loaded.ok) return loaded;
     const why = loaded.problems.map((p) => `account ${p.account}: ${p.why}`).join("; ");
     throw Object.assign(new Error(`this machine's account declaration cannot be used: ${why}`), { code: "account", reason: accountReason(loaded.problems) });
+  }
+
+  /**
+   * The account an Objective's `factory:account:<name>` label pins its `harness` stages to (#265), from `names`, the
+   * issue's labels as last read: {account} (null with no label: the harness's default), {account: null, two} (more than
+   * one label: no move, the Objective waits) or {account: null, problem} (a fixed line naming the label: one whose latest
+   * labeler cannot push, or a name that is no account of this harness on this machine). The labeler is read from the
+   * timeline before any account is named. `at`: the issue's `updated_at` from the read `names` came from, which keys the
+   * kept labeler check (pinTrust, the per-tick paths); with none (a stage start) it is read afresh. Throws as accountFor
+   * does on a declaration that cannot be used, and on a failed read.
+   */
+  async pinFor(issue, names, harness, at = null) {
+    const pin = accountPin(names);
+    if (pin.two) return { account: null, two: pin.two };
+    if (!pin.label) return { account: null };
+    // A name that is no account name: no read, and nothing of the label echoed.
+    if (!validAccountName(pin.name)) return { account: null, problem: `${pinLabelText(pin.label)} names no account` };
+    const untrusted = await this.pinTrust(issue, pin.label, at);
+    if (untrusted) return { account: null, problem: untrusted };
+    const r = pinnedAccount(this.loadedAccounts(), harness, pin.name);
+    return r.problem ? { account: null, problem: r.problem } : { account: r.account, label: pin.label };
+  }
+
+  /**
+   * Why Factory does not act on account label `label` on `issue` (objective-trust.mjs labelsVouched: its latest
+   * labeler, or with `event` "unlabeled" its latest remover, cannot push and is no pinned maintainer), or null. With `at`
+   * (the issue's `updated_at` as a listing read it) the answer is kept for that label, event and `at`: any change to the
+   * issue's labels moves `at`, so a label removed and applied again is read afresh. With no `at`, always read. A read
+   * that fails is not kept, and throws.
+   */
+  async pinTrust(issue, label, at = null, event = "labeled") {
+    const key = `${event}:${label}@${at}`;
+    const seen = at ? this.pinTrusts?.get(issue) : null;
+    if (seen?.key === key) return seen.refused;
+    const refused = await labelsVouched(this.repo, issue, [label], this.opts, {}, event === "labeled" ? "Factory does not move the Objective to that account" : "Factory does not move the Objective off that account", event);
+    if (at) (this.pinTrusts ??= new Map()).set(issue, { key, label, event, refused });
+    return refused;
+  }
+
+  /**
+   * The kept answer for account label `label` on `issue` at `at` (pinTrust), or, with none, a read started in the
+   * background (once at a time per issue; `pinReading` holds it) for the next tick, and undefined meanwhile.
+   */
+  pinTrustKept(issue, label, at) {
+    const seen = this.pinTrusts?.get(issue);
+    if (at && seen?.key === `labeled:${label}@${at}`) return seen.refused;
+    if (!at || !this.repo || this.pinReading?.has(issue)) return undefined;
+    const read = this.pinTrust(issue, label, at).catch((e) => log(`#${issue}: who applied \`${label}\` could not be read (${String(e?.message || e).slice(0, 120)}); read again next tick`));
+    (this.pinReading ??= new Map()).set(issue, read.finally(() => this.pinReading.delete(issue)));
+    return undefined;
+  }
+
+  /**
+   * A line about an Objective's account labels in this loop's log, once while it holds (pinClear forgets it), and on
+   * the issue (pinNote) when `note`. Returns whether it was said now.
+   */
+  async saidPin(issue, line, { note = false } = {}) {
+    const said = (this.pinSaid ??= new Map()).get(issue) ?? new Set();
+    if (said.has(line)) return false;
+    said.add(line);
+    this.pinSaid.set(issue, said);
+    log(`#${issue}: ${line}`);
+    if (note) await this.pinNote(issue, line);
+    return true;
+  }
+
+  /** The Objective's account labels are fine again: a problem said before is said again if it comes back. */
+  pinClear(issue) {
+    this.pinSaid?.delete(issue);
+  }
+
+  /**
+   * A line about the issue's account labels on the issue: on the pause notice while the Objective is paused on a usage
+   * limit here, else as that comment's only text. A write that fails is logged.
+   */
+  async pinNote(issue, line) {
+    const pause = this.offline?.get(issue)?.harness ? this.pauses?.get(issue) : null;
+    if (pause) return this.pauseNotice(issue, { ...pause, note: line });
+    if (!this.repo) return;
+    this.pauseBodies?.delete(issue);
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), `Factory: ${line}.`, this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
   }
 
   /**
@@ -1037,6 +1165,11 @@ export class Local {
     // The harness this Objective runs on here (harnessFor): a label no writer applied, a model its harness cannot run or a
     // harness this machine cannot run Blocks before anything is set up for it.
     const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue) : { ok: true, harness: this.harness };
+    // Two account labels (#265): nothing starts and nothing Blocks; the Objective waits here for one to be left (pinWaiting).
+    if (runs.wait) {
+      rmSync(usageDir, { recursive: true, force: true });
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, pinWait: runs.wait };
+    }
     if (!runs.ok) {
       log(`#${issue}: refusing to run: ${runs.reason}`);
       await this.block(issue, name, runs.reason, { fix: runs.fix });
@@ -1050,7 +1183,7 @@ export class Local {
     if (until !== null) {
       rmSync(usageDir, { recursive: true, force: true });
       this.saidLimit(runs.harness, account, hold, until);
-      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString(), held: true } };
     }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
@@ -1143,7 +1276,7 @@ export class Local {
           // A pass on its account completed (the provider served it, and no usage limit ended it): its back-off streak ends,
           // when the stage started after the newest limit met there (holds.mjs served).
           if (runs.account && result && servedPass(result)) this.holdStore(hold).served({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), started });
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1341,7 +1474,7 @@ export class Local {
       if (!this.stopping && !failure?.startFailed) {
         // A stage this machine's network ended (`paused`): no lapse, the claim stays, and pausedHere resumes it once
         // the host answers again (outagePaused).
-        if (result?.exit === "paused") this.outagePaused(issue, result);
+        if (result?.exit === "paused") await this.outagePaused(issue, result);
         // Only a stage's own end (or a throw) without an exit record lapses; anything else that ends (a merge followed
         // and not merged yet) releases the claim as an exit does.
         else if (!result?.exit && (failure || result?.stage)) {
@@ -1413,6 +1546,7 @@ export class Local {
    */
   outagePaused(issue, result) {
     if (result?.usageLimit) return this.limitPaused(issue, result);
+    if (result?.pinWait) return this.pinWaiting(issue, result);
     const o = result?.outage || {};
     const at = Date.parse(o.since);
     const own = Number.isFinite(at) ? at : (this.clock ?? Date.now)();
@@ -1434,9 +1568,10 @@ export class Local {
    * loop's memory, and pausedHere resumes it after the reset, with no bound: the reset is known. No lapse is counted; the
    * claim stays. A provider that refuses again past the reset it stated is held at least 2, 5, 10, then 15 minutes per
    * such pause in a row on that account (lib/holds.mjs accountHolds.limit). A stage held before it ran (`held`) adds no
-   * hold and counts nothing.
+   * hold and counts nothing. Either way the issue gets the pause notice (pauseNotice), which says which other accounts
+   * of the harness are free to move the Objective to (#265); pausedHere resumes it early on the one its label then names.
    */
-  limitPaused(issue, result) {
+  async limitPaused(issue, result) {
     const l = result.usageLimit;
     const now = (this.clock ?? Date.now)();
     const stated = Date.parse(l.reset);
@@ -1444,10 +1579,138 @@ export class Local {
     const account = result.account || l.harness;
     const hold = result.hold ?? this.holdOf(implicitAccount(l.harness));
     let reset = Number.isFinite(stated) ? stated : now;
-    if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now });
-    (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset });
+    if (!l.held && l.harness) reset = this.holdStore(hold).limit({ harness: l.harness, account: hold.key, reset, now, window: l.limitType ?? null });
+    (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset, hold: hold.key, account, pinned: !!result.pinned, pin: result.pin ?? null });
     this.lapsed?.delete(issue);
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${limitName(l.harness, account)}'s usage limit is spent until ${new Date(reset).toISOString()}${reset !== stated ? ` (the provider stated ${l.reset})` : ""}; the claim stays and this loop resumes it after then`);
+    if (l.harness) await this.pauseNotice(issue, { stage: result?.stage || "work", harness: l.harness, account, hold: hold.key, reset, window: l.limitType ?? this.holdStore(hold).window(hold.key, now) ?? null });
+  }
+
+  /**
+   * A stage that did not start because the Objective has more than one account label (harnessFor `wait`, #265): it is
+   * kept in this loop's memory as paused, its claim kept, never Blocked and with no bound; pausedHere resumes it once
+   * the issue shows at most one. Said once, in the log and on the issue.
+   */
+  async pinWaiting(issue, result) {
+    (this.offline ??= new Map()).set(issue, { since: (this.clock ?? Date.now)(), stage: result?.stage || "work", origin: null, host: "its account labels", code: "two account labels", pinWait: true });
+    this.lapsed?.delete(issue);
+    (this.twoNoted ??= new Set()).add(issue);
+    await this.saidPin(issue, result.pinWait, { note: true });
+  }
+
+  /** The two-label line (twoPinsLine) for `issue`, said once in the log and on the issue; twoCleared takes it back. */
+  async sayTwo(issue, labels) {
+    (this.twoNoted ??= new Set()).add(issue);
+    await this.saidPin(issue, twoPinsLine(labels), { note: true });
+  }
+
+  /**
+   * The issue's account labels are down to one or none after the two-label line was said: the issue's note says the
+   * Objective goes on (the pause notice without that line, while it is paused on a usage limit), and the line would be
+   * said again if it came back. Nothing written when no such line was said.
+   */
+  async twoCleared(issue) {
+    if (!this.twoNoted?.delete(issue)) return;
+    this.pinClear(issue);
+    const pause = this.offline?.get(issue)?.harness ? this.pauses?.get(issue) : null;
+    if (pause) {
+      const { note: _note, ...plain } = pause;
+      return this.pauseNotice(issue, plain);
+    }
+    if (!this.repo) return;
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), "Factory: one account label or none is left, so the Objective goes on.", this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
+  }
+
+  /** A note write from a path that cannot wait on it (limitHold): kept in `notesInFlight` until it settles. */
+  noting(p) {
+    const set = (this.notesInFlight ??= new Set());
+    const kept = p.finally(() => set.delete(kept));
+    set.add(kept);
+  }
+
+  /**
+   * A claim this loop holds on an Objective it keeps paused (a usage limit's reset, its account labels: pausedHere),
+   * written again once its comment is PAUSED_BEAT_MS old (`claim`, localClaim's read: its heartbeat is GitHub's update
+   * time). No stage runs to heartbeat it, and a claim a day old is a loop gone away, which the dispatcher Blocks. A
+   * write that fails is logged; the next tick tries again.
+   */
+  async beatPaused(issue, claim) {
+    if (!claim?.heartbeat || (this.clock ?? Date.now)() - Date.parse(claim.heartbeat) < PAUSED_BEAT_MS) return;
+    await writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue}: the paused claim's heartbeat could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`));
+  }
+
+  /**
+   * The pause notice (#265): one comment on the issue, updated in place, with no @mention. It names the account whose
+   * usage limit paused the Objective, its reset and window, and the other accounts of that harness this machine declares
+   * that are free now, each with the label that moves the Objective to it; `note` is a line about the issue's account
+   * labels (pausedHere). Written only when its text changes; a write that fails is logged, never the pause's end. A
+   * loop made without the constructor (a test's) writes none.
+   */
+  async pauseNotice(issue, pause) {
+    if (!this.repo) return;
+    (this.pauses ??= new Map()).set(issue, pause);
+    const body = pauseNoticeBody({ ...pause, free: this.freeAccounts(pause.harness, pause.hold) });
+    if ((this.pauseBodies ??= new Map()).get(issue) === body) return;
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), body, this.opts).then(
+      () => this.pauseBodies.set(issue, body),
+      (e) => log(`#${issue}: the pause notice could not be written (${String(e?.message || e).slice(0, 120)}); the pause stands`),
+    );
+  }
+
+  /** The names of `harness`'s declared accounts free now (no hold), but the one held under `heldKey`; none on a bad declaration. */
+  freeAccounts(harness, heldKey) {
+    let loaded;
+    try {
+      loaded = this.loadedAccounts();
+    } catch {
+      return [];
+    }
+    return (loaded.accounts?.[harness] || []).filter((a) => {
+      const hold = this.holdOf(a);
+      return hold.key !== heldKey && this.limitUntil(hold) === null;
+    }).map((a) => a.name);
+  }
+
+  /**
+   * Whether an Objective paused on a usage limit here (`off`, limitPaused) resumes before that limit's reset, on the
+   * account its labels (`names`, the issue's as pausedHere's listing read them at `at`, its `updated_at`) now name
+   * (#265): the one its single `factory:account:` label pins, read through the kept labeler check (pinTrust); with none,
+   * after a pin came off, its harness's default, but only when the person who removed it can push (a removal anyone
+   * else made moves nothing). Yes when that account is another than the one it paused on and is not held; a pinned
+   * account that is held waits for its own reset. A label this machine cannot act on (pinFor) keeps it paused, said once
+   * in the log and on the pause notice; at the reset the stage starts and Blocks on it (harnessFor). A failed read keeps
+   * it paused for the next tick. More than one account label is pausedHere's to hold.
+   */
+  async movesEarly(issue, off, names, at) {
+    let to;
+    try {
+      if (!accountLabels(names).length) {
+        // Paused on the harness's default with no label: nothing to move to, and nothing read.
+        if (!off.pinned || !off.pin) return false;
+        const refused = await this.pinTrust(issue, off.pin, at, "unlabeled");
+        if (refused) {
+          await this.saidPin(issue, `${refused}, so it stays paused`, { note: true });
+          return false;
+        }
+        to = this.accountFor(off.harness);
+      } else {
+        const pin = await this.pinFor(issue, names, off.harness, at);
+        if (pin.problem) {
+          await this.saidPin(issue, `${pin.problem}, so it stays paused`, { note: true });
+          return false;
+        }
+        if (!pin.account) return false;
+        to = pin.account;
+      }
+    } catch (e) {
+      await this.saidPin(issue, `its account label could not be checked (${String(e?.message || e).slice(0, 120)}); it stays paused, and the next tick checks again`);
+      return false;
+    }
+    this.pinClear(issue);
+    const hold = this.holdOf(to);
+    if (hold.key === off.hold || this.limitUntil(hold) !== null) return false;
+    log(`#${issue}: moving to ${limitName(off.harness, to.name)}, which is free, before ${limitName(off.harness, off.account)}'s reset`);
+    return true;
   }
 
   /**
@@ -1486,19 +1749,37 @@ export class Local {
   }
 
   /**
-   * Why an Objective with these labels starts nothing now, or null: the account it runs on (its harness, from its harness
-   * label, choice.mjs choiceOf, else the loop's; that harness's default account, accountFor) has its usage limit spent
-   * (limitUntil). Read on labels the caller already holds (the dispatcher's listing, pendingReviews' read), never a read
-   * of its own; the account declaration is read only while an account of that harness is held. Each hold is said once.
+   * Why an Objective with these labels starts nothing now, or null: more than one account label (#265: it waits on no
+   * account, said once), or the account it runs on (its harness, from its harness label, choice.mjs choiceOf, else the
+   * loop's; the account its one `factory:account:<name>` label names when its labeler is known to be trusted, else that
+   * harness's default, accountFor) has its usage limit spent (limitUntil). Read on labels the caller already holds (the
+   * dispatcher's listing, pendingReviews' read; `issue` and `at`, its number and `updated_at` there), never a read in its
+   * own path: an account label's labeler is the kept check (pinTrustKept), read in the background for the next tick, and
+   * until it is known (or when it is refused) the default account is the one weighed. A pin this machine cannot act on
+   * starts, and Blocks at the start (harnessFor). The account declaration is read only while an account of that
+   * harness is held. Each hold is said once.
    */
-  limitHold(labels) {
+  limitHold(labels, issue = null, at = null) {
     const c = choiceOf(labels || []);
     const harness = (c.ok && c.choice.harness) || this.harness;
+    const pin = accountPin(labels);
+    if (pin.two) {
+      if (issue !== null) this.noting(this.sayTwo(issue, pin.two));
+      return twoPinsLine(pin.two);
+    }
+    if (issue !== null && this.twoNoted?.has(issue)) this.noting(this.twoCleared(issue));
     const now = (this.clock ?? Date.now)();
     if (!this.holdStore().held(harness, now) && !this.ownHolds?.held(harness, now)) return null;
     let account;
     try {
-      account = this.accountFor(harness);
+      const loaded = this.loadedAccounts();
+      account = defaultAccount(loaded, harness);
+      if (pin.label && validAccountName(pin.name) && issue !== null && this.pinTrustKept(issue, pin.label, at) === null) {
+        const r = pinnedAccount(loaded, harness, pin.name);
+        // A name this machine cannot run the Objective on Blocks its stage at the start (harnessFor): not a hold.
+        if (r.problem) return null;
+        account = r.account;
+      }
     } catch {
       // A declaration that cannot be used Blocks the stage at its start (harnessFor): not a hold.
       return null;
@@ -1549,9 +1830,23 @@ export class Local {
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
         // Paused on a usage limit (limitPaused: its hold, the backoff floor included) or GitHub's spent rate limit:
-        // resumed once its reset has passed, with no probe.
+        // resumed once its reset has passed, with no probe; on a usage limit, sooner on another account that is free
+        // (movesEarly: its account label moved it, or came off).
         const now = (this.clock ?? Date.now)();
-        if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
+        const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
+        // More than one account label (#265): a stage that waited on them, or a usage-limit pause, waits on, past its
+        // reset too, until one is left; said once. Never Blocked for it.
+        const two = accountPin(names).two;
+        if (two && (off.pinWait || off.harness)) {
+          await this.sayTwo(issue.number, two);
+          await this.beatPaused(issue.number, c);
+          continue;
+        }
+        await this.twoCleared(issue.number);
+        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
+        if (due) out.push(issue.number);
+        // Waiting on a usage limit's reset or on its account labels: its claim kept alive while this loop is.
+        else if (off.harness) await this.beatPaused(issue.number, c);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
@@ -1601,7 +1896,7 @@ export class Local {
   async resume(issue) {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
-    if (off && !off.harness && now - off.since >= OUTAGE.blockMs) {
+    if (off && !off.harness && !off.pinWait && now - off.since >= OUTAGE.blockMs) {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = !off.origin || (await probeHost(off.origin)) === null;
       const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
@@ -1969,7 +2264,7 @@ export class Local {
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
-      out.push({ issue, pr: pr.number, labels: data.labels || [] });
+      out.push({ issue, pr: pr.number, labels: data.labels || [], updatedAt: data.updated_at ?? null });
     }
     return out;
   }
@@ -2454,7 +2749,7 @@ export class Local {
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
       // An account whose usage limit is spent (limitPaused, in any serve on this machine): no review and no new work on
       // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
-      const free = pending.filter((r) => !this.limitHold(r.labels));
+      const free = pending.filter((r) => !this.limitHold(r.labels, r.issue, r.updatedAt ?? null));
       // Each review starts as soon as its slot is taken, as resumes do: never a slot held idle through the dispatch.
       const reviews = switching ? [] : free.slice(0, slots.take(free.length));
       for (const r of reviews) slots.start(r.issue, "review", () => track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)));
@@ -2473,7 +2768,7 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;

@@ -182,9 +182,12 @@ test("local mode, the real path: harnessFor reads the host labels and who applie
       throw new Error(`unexpected ${u}`);
     };
   };
+  // A home of its own: harnessFor reads this machine's account declaration (lib/accounts.mjs), none here.
+  const home = process.env.HOME;
+  process.env.HOME = dev;
   try {
     read("dev");
-    assert.deepEqual(await local.harnessFor(8), { ok: true, harness: "claude", hosts: ["huggingface.co"] });
+    assert.deepEqual(await local.harnessFor(8), { ok: true, harness: "claude", hosts: ["huggingface.co"], account: { name: "claude", harness: "claude", declared: false } });
     read("reader");
     const refused = await local.harnessFor(8);
     assert.equal(refused.ok, false);
@@ -202,6 +205,7 @@ test("local mode, the real path: harnessFor reads the host labels and who applie
     await local.stage(8, "work", "worker.mjs", []);
     assert.deepEqual(setUp, [["huggingface.co"]]);
   } finally {
+    process.env.HOME = home;
     globalThis.fetch = real;
     rmSync(dev, { recursive: true, force: true });
   }

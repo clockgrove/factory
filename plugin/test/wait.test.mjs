@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { WAIT_KINDS, WAIT_MAX_PAGES, WAIT_PAGE, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
+import { WAIT_KINDS, WAIT_MAX_PAGES, WAIT_PAGE, WAIT_TIMEOUT_EXIT, cursorText, jsonLine, parseCursor, waitQueue } from "../scripts/lib/wait.mjs";
 import { parseArgs } from "../scripts/local.mjs";
 
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
@@ -308,7 +308,7 @@ test("a timeout during the start's read of the open Objectives (#285 review) pri
   };
   const r = await waiting(gh, [], { opts: { token: "t", signal: stop.signal } });
   assert.equal(r.code, WAIT_TIMEOUT_EXIT);
-  assert.deepEqual(r.lines.map((l) => [l.event, l.cursor]), [["timeout", start]], "the start's cursor, its queue state unknown");
+  assert.deepEqual(r.lines.map((l) => [l.event, idOf(l.cursor), stateOf(l.cursor)]), [["timeout", Number(start), null]], "the start's cursor, its queue state unknown");
   const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor), kinds: ["blocked"] });
   assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["blocked", 5]]);
 });
@@ -330,7 +330,7 @@ test("a read cut off at --timeout (#285 review) leaves the cursor where it was: 
   const before = gh.s.events.length ? String(gh.s.events.at(-1).id) : "0";
   const r = await waiting(gh, [() => (gh.state(5, null), gh.event(5, "closed"))], { opts: { token: "t", signal: stop.signal } });
   assert.equal(r.code, WAIT_TIMEOUT_EXIT);
-  assert.deepEqual(r.lines.map((l) => [l.event, l.cursor]), [["timeout", `${before}a`]], "the cursor from before the read, not past the close");
+  assert.deepEqual(r.lines.map((l) => [l.event, idOf(l.cursor), stateOf(l.cursor)]), [["timeout", Number(before), false]], "the cursor from before the read, not past the close");
   const again = await waiting(gh, [], { since: parseCursor(r.lines[0].cursor) });
   assert.deepEqual(again.lines.map((l) => [l.event, l.issue]), [["merged", 5], ["drained", null]]);
 });
@@ -422,13 +422,12 @@ test("factory wait's command line: issue numbers, a cursor or a time, kinds, --f
   assert.deepEqual(parseArgs(["wait", "--follow", "--since=2026-11-14T14:00:00Z"]), { cmd: "wait", flags: { _: ["wait"], follow: true, since: "2026-11-14T14:00:00Z" } });
   for (const a of ["wait x", "wait --on blocked,done", "wait --since yesterday", "wait --since 2026-11-14T14:00:00", "wait --timeout 0", "wait --follow=1"]) assert.throws(() => parseArgs(a.split(" ")), (e) => e.usage === true, a);
   assert.deepEqual(parseCursor("2026-11-14T14:00:00-08:00"), { at: Date.parse("2026-11-14T22:00:00Z") });
-  assert.deepEqual(parseCursor("36176470266d"), { id: 36176470266, drained: true, seen: [36176470266] });
-  assert.deepEqual(parseCursor("36176470266a"), { id: 36176470266, drained: false, seen: [36176470266] });
+  // A printed cursor parses back to its id, queue state and ids read; a bare event id is one too, its state unknown.
+  for (const drained of [true, false, null]) assert.deepEqual(parseCursor(cursorText({ id: 36176470266 }, drained, [36176470259, 36176470266, 36176470224])), { id: 36176470266, drained, seen: [36176470266, 36176470259, 36176470224] });
+  assert.match(cursorText({ id: 36176470266 }, true, [36176470259]), /^[A-Za-z0-9_-]+$/, "safe on a command line unquoted");
   assert.deepEqual(parseCursor("36176470266"), { id: 36176470266, drained: null, seen: [36176470266] });
-  // The ids read below it, each one's distance below the one before in base 36.
-  assert.deepEqual(parseCursor("36176470266d.7,z"), { id: 36176470266, drained: true, seen: [36176470266, 36176470259, 36176470224] });
-  for (const bad of ["36176470266.", "36176470266.0", "36176470266.7,", "36176470266.A"]) assert.equal(parseCursor(bad), null, bad);
-  assert.equal(parseCursor("36176470266x"), null);
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  for (const bad of ["36176470266x", "yesterday", enc({ id: 5, seen: [5] }), enc({ id: 5, drained: "yes" }), enc({ id: -1 }), enc([1]), "e30="]) assert.equal(parseCursor(bad), null, bad);
 });
 
 test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited out as serve does; the Block after it is one JSON line and exit 0; with nothing by --timeout, or a read still in flight at it, a timeout line and exit 3", async () => {
@@ -489,7 +488,9 @@ test("factory wait, run for real: GitHub's rate limit spent mid-wait is waited o
     const hung = await run("--since", String(gh.s.events.at(-1).id), "--timeout", "0.5");
     assert.equal(hung.code, WAIT_TIMEOUT_EXIT, hung.out + hung.err);
     assert.ok(Date.now() - started < 5_000, `ended at its timeout, not when the read would (${Date.now() - started} ms)`);
-    assert.deepEqual(JSON.parse(hung.out.trim()), { event: "timeout", issue: null, at: JSON.parse(hung.out.trim()).at, cursor: String(gh.s.events.at(-1).id) });
+    const timedOut = JSON.parse(hung.out.trim());
+    assert.deepEqual(timedOut, { event: "timeout", issue: null, at: timedOut.at, cursor: timedOut.cursor });
+    assert.equal(idOf(timedOut.cursor), gh.s.events.at(-1).id);
   } finally {
     server.closeAllConnections();
     server.close();

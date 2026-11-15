@@ -29,37 +29,38 @@ const STATE_KINDS = { "factory:blocked": "blocked", "factory:question": "questio
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
 
 /**
- * A `--since` cursor: the `cursor` of a line `factory wait` printed, an event id with the watched queue's state there
- * when it was known (`d` drained, `a` not) and the other ids read within WAIT_LOOKBACK_MS of it (after a `.`, each one's
- * distance below the one before, base 36), as {id, drained, seen} (`seen` with the id itself); or a time GitHub's events
- * are compared with as {at} (ms), the state unknown. Null for anything else.
+ * A `--since` cursor: the `cursor` of a line `factory wait` printed, base64url JSON (Node's Buffer and JSON, no format of
+ * our own) of {id, drained, seen}: the newest event id read, the watched queue's state there (null when unknown) and the
+ * other ids read within WAIT_LOOKBACK_MS of it, as distances below `id`. Parsed as {id, drained, seen} (`seen` with
+ * the id itself). Also a bare event id (state unknown, nothing else read), or a time with its zone, which GitHub's events
+ * are compared with, as {at} (ms). Null for anything else.
  */
 export function parseCursor(text) {
   const s = String(text ?? "").trim();
-  const m = /^(\d+)([ad]?)(?:\.([0-9a-z]+(?:,[0-9a-z]+)*))?$/.exec(s);
-  if (m) {
-    const id = Number(m[1]);
-    if (!Number.isSafeInteger(id)) return null;
-    const seen = [id];
-    for (const d of m[3] ? m[3].split(",") : []) {
-      const below = seen.at(-1) - parseInt(d, 36);
-      if (!(below > 0 && below < seen.at(-1))) return null;
-      seen.push(below);
-    }
-    return { id, drained: m[2] ? m[2] === "d" : null, seen };
-  }
+  if (/^\d+$/.test(s)) return Number.isSafeInteger(Number(s)) ? { id: Number(s), drained: null, seen: [Number(s)] } : null;
   // A time with its zone, so the cursor means the same on every machine.
-  if (!/^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:?\d\d)$/.test(s)) return null;
-  const at = Date.parse(s);
-  return Number.isFinite(at) ? { at } : null;
+  if (/^\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:?\d\d)$/.test(s)) {
+    const at = Date.parse(s);
+    return Number.isFinite(at) ? { at } : null;
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  let o;
+  try {
+    o = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  const { id, drained = null, seen = [] } = o ?? {};
+  if (!Number.isSafeInteger(id) || id < 0 || ![true, false, null].includes(drained) || !Array.isArray(seen)) return null;
+  if (!seen.every((d) => Number.isSafeInteger(d) && d > 0 && d < id)) return null;
+  return { id, drained, seen: [id, ...seen.map((d) => id - d)] };
 }
 
 /** A cursor as a line prints it, which --since takes back: with the queue's state at it, when known, and `seen`, the other ids read. */
 export function cursorText(c, drained = null, seen = []) {
   if (c.id === undefined) return new Date(c.at).toISOString();
   const below = [...seen].filter((id) => id < c.id).sort((a, b) => b - a);
-  const steps = below.map((id, k) => ((k ? below[k - 1] : c.id) - id).toString(36));
-  return `${c.id}${drained === true ? "d" : drained === false ? "a" : ""}${steps.length ? `.${steps.join(",")}` : ""}`;
+  return Buffer.from(JSON.stringify({ id: c.id, drained, seen: below.map((id) => c.id - id) })).toString("base64url");
 }
 
 /**

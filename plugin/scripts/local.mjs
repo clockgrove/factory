@@ -35,7 +35,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, selfLogin, staleDecision } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -49,7 +49,7 @@ import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck } from "./doctor.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
@@ -1894,6 +1894,10 @@ async function issueForSession(issue, flags) {
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
+  // A foundation Objective (`factory:foundation`, vouched for as the review job vouches for it): its review has two passes.
+  const found = await foundationTrusted(clone.repo, issue, t.labels, clone.opts);
+  if (!found.ok) log(`#${issue}: ${found.reason}. ${found.fix} Until then post-review posts no review for it.`);
+  else if (found.foundation) log(`#${issue}: a foundation Objective (factory:foundation): its review runs the foundation pass too`);
   if (!planFile) return 0;
   const plan = state === "same" ? (posted.text ?? null) : null;
   if (plan !== null) writeFileSync(planFile, plan);
@@ -2186,15 +2190,28 @@ async function handoverForPerson(issue, flags) {
 
 /**
  * The review `factory post-review` posts from a findings file's text, or a throw when the file is no reviewer pass: it
- * holds no reviewer JSON, or it judges none of the issue's acceptance entries (handoff.mjs reviewMissed). Nothing is
+ * holds no reviewer JSON, or it judges none of the issue's acceptance entries (handoff.mjs reviewMissed). On a foundation
+ * Objective (`foundation`, foundationTrusted) the file also holds the foundation pass, `"foundation": {"comments": [...]}`,
+ * posted as the review job posts it; a file without it, or with it on any other Objective, is refused. Nothing is
  * posted then, so the user fixes the file and runs the command again; a review carrying the marker would stop the
  * Action's own reviewer pass.
  */
-export function reviewPostFor({ issue, text, file, diff, entries }) {
-  const review = parseReview(text);
+export function reviewPostFor({ issue, text, file, diff, entries, foundation = false }) {
+  // The file as one JSON object, read once, each pass taken from it by its key in any order; text that is not one JSON
+  // value (a fenced block, prose around it) is read as the review job reads an answer, and holds no foundation pass.
+  let whole;
+  try {
+    whole = JSON.parse(String(text).trim());
+  } catch {
+    whole = undefined;
+  }
+  const review = whole === undefined ? parseReview(text) : reviewOfValue(whole);
   if (!review.parsed) throw new Error(`${file} holds no reviewer JSON; nothing posted`);
   if (reviewMissed({ review, entries })) throw new Error(`${file} judges none of the issue's acceptance entries (${entries.map((e) => e.id).join(", ")}); nothing posted`);
-  return reviewPost({ issue, review, diff, entries });
+  const pass = whole && typeof whole === "object" && !Array.isArray(whole) ? whole.foundation : undefined;
+  if (foundation && !Array.isArray(pass?.comments)) throw new Error(`${file} holds no foundation pass ("foundation": {"comments": [...]}), which #${issue}'s factory:foundation label asks for; nothing posted`);
+  if (!foundation && pass !== undefined) throw new Error(`${file} holds a foundation pass, but #${issue} is not a foundation Objective (no trusted factory:foundation label); nothing posted`);
+  return reviewPost({ issue, review, diff, entries, foundation: foundation ? { comments: pass.comments, acceptance: null, parsed: true } : null });
 }
 
 /**
@@ -2214,6 +2231,9 @@ async function postFindings(prNumber, file, flags) {
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
   // The review job's second check: a review of code made from earlier text than the Objective's now is not posted.
   if ((await planStateNow(repo, issue, trusted, opts)).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
+  // The review job's third: a foundation label it would Block on is refused here; a trusted one asks for both passes.
+  const found = await foundationTrusted(repo, issue, trusted.labels, opts);
+  if (!found.ok) throw new Error(`nothing posted: ${found.reason}. ${found.fix}`);
   // The diff from this clone's history in a scratch repository (no file limit), GitHub's files API when that fails.
   const tmp = privateTmp({ ...process.env });
   let diff;
@@ -2231,7 +2251,7 @@ async function postFindings(prNumber, file, flags) {
   } finally {
     dropOwned(tmp.factory);
   }
-  const post = reviewPostFor({ issue, text: readFileSync(file, "utf8"), file, diff, entries: acceptanceEntries(trusted.issueData.body) });
+  const post = reviewPostFor({ issue, text: readFileSync(file, "utf8"), file, diff, entries: acceptanceEntries(trusted.issueData.body), foundation: found.foundation });
   const { comments } = post;
   const posted = await postReview(repo, prNumber, { body: post.body, comments, commitId: pr.head.sha }, opts);
   log(`PR #${prNumber}: review posted with ${comments.length} comment(s)${posted.moved ? `; ${posted.moved} moved to a line GitHub takes` : ""}${posted.inBody ? `; ${posted.inBody} in the review body${posted.retried ? ` (GitHub answered ${posted.retried} to the line comments)` : " (no line GitHub can take)"}` : ""}`);

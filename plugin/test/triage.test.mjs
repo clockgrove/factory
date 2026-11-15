@@ -487,8 +487,11 @@ const failingLog = ["##[group]Run npm test", "ok 1 - lockfile parses", "# Subtes
 // The required aggregate: no failure of its own, then actions/checkout's post-job cleanup.
 const aggregateLog = ['##[group]Run test "$RESULT" = success', 'test "$RESULT" = success', "##[error]Process completed with exit code 1.", "##[group]Post job cleanup.", ...Array.from({ length: 40 }, (_, i) => `[command]/usr/bin/git config --local --name-only --get-regexp core\\.sshCommand ${i}`)].join("\n");
 
-/** GitHub on fetch for a red head: check runs, jobs (with their workflow run), logs, and the rerun's answer. */
-async function withRed({ runs, jobs = {}, logs = {}, rerun = 403 }, fn) {
+/**
+ * GitHub on fetch for a red head: check runs, jobs (with their workflow run), logs, and the rerun's answer; with
+ * `workflow`, the workflow file each check suite's run came from (at `.github/workflows/ci.yml`).
+ */
+async function withRed({ runs, jobs = {}, logs = {}, rerun = 403, workflow = null }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -502,6 +505,8 @@ async function withRed({ runs, jobs = {}, logs = {}, rerun = 403 }, fn) {
     m = /\/actions\/jobs\/(\d+)$/.exec(u.pathname);
     if (m && jobs[m[1]]) return json(jobs[m[1]]);
     if (/\/actions\/runs\/\d+$/.test(u.pathname)) return json({ status: "completed" });
+    if (workflow !== null && /\/actions\/runs$/.test(u.pathname) && u.searchParams.get("check_suite_id")) return json({ total_count: 1, workflow_runs: [{ id: 700, path: ".github/workflows/ci.yml", head_sha: "c".repeat(40) }] });
+    if (workflow !== null && /\/contents\/\.github\/workflows\/ci\.yml$/.test(u.pathname) && u.searchParams.get("ref") === "c".repeat(40)) return new Response(workflow, { status: 200 });
     if (method === "POST" && /\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(u.pathname)) return json({ message: "Resource not accessible by personal access token" }, rerun);
     if (/\/issues\/\d+\/comments$/.test(u.pathname) || /\/pulls\/\d+\/files$/.test(u.pathname)) return json([]);
     return json({ message: "Not Found" }, 404);
@@ -563,11 +568,156 @@ test("the last red, triaged flaky with its rerun refused, Blocks naming the verd
   // What the Blocked notice quotes (applyExit keeps the last DETAIL_CHARS): the failing job's own line leads it.
   const shown = result.lastOutput.slice(-2500);
   assert.equal(DETAIL_CHARS, 2500);
-  assert.ok(shown.startsWith(`--- test: ${supplyChain}`), shown.slice(0, 300));
-  assert.ok(!/^--- quality/m.test(shown.split("\n\n")[0]), "the aggregate printed no failure of its own: it does not lead");
+  // The required aggregate leads by name, quoted from the job it gathers (its workflow file unread: its run's jobs).
+  assert.ok(shown.startsWith(`--- quality (required check), from test: ${supplyChain}`), shown.slice(0, 300));
+  assert.ok(!/^--- test/m.test(shown.split("\n\n")[0]), "the gathered job is quoted once, under the required check");
   // On Actions the grant is the workflow's, and a refusal that is no 403 names no permission.
   assert.match(refusedRerunText({ ...refused, where: "actions" }), /or give the workflow's work and review jobs `actions: write`, then/);
   assert.match(refusedRerunText({ ...refused, status: 404, permission: false }), /refused the rerun \(404\); rerun the failed jobs on GitHub then re-apply the label$/);
+});
+
+// ------------------------------------------------------------------ the Block's lead is the required check's (#280)
+
+// A roll-up `ci` (the one required check) needs `check` and the `test` matrix; the macOS and Windows legs are finders
+// that may fail without failing the run, and `reuse` is required by nothing.
+const ROLLUP_YML = `on: pull_request
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - run: pnpm check
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-26, windows-2025]
+    runs-on: \${{ matrix.os }}
+    continue-on-error: \${{ matrix.os != 'ubuntu-26.04' }}
+    steps:
+      - run: pnpm test
+  ci:
+    needs: [check, test]
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - run: test "\${{ needs.test.result }}" = success
+  reuse:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: fsfe/reuse-action@v6
+`;
+const legLog = (line) => ["##[group]Run pnpm test", `  ${line}`, "##[error]Process completed with exit code 1."].join("\n");
+const WINDOWS = "AssertionError [ERR_ASSERTION]: C:\\tmp\\x is not a POSIX path";
+const LINUX = "AssertionError [ERR_ASSERTION]: the manifest lists 3 assets, expected 4";
+const MAC = "AssertionError [ERR_ASSERTION]: the cache key differs on APFS";
+const REUSE = "Error: 2 files have no licence";
+
+/** The red of #280's shape through the real validation loop, its last pass: what its Block quotes. */
+async function rollupRed(workflow, ciLog = aggregateLog) {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const at = (min) => `2026-11-14T01:${String(min).padStart(2, "0")}:00Z`;
+  const run = (id, name, from, to) => ({ id, name, status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: at(from), completed_at: at(to) });
+  // GitHub lists the Windows leg first, as on the post-mortem's red.
+  // `ci`'s id differs with its log: a finished job's log is read once per process (github.mjs jobLog's cache).
+  const ci = ciLog === aggregateLog ? 55 : 56;
+  const runs = [run(51, "test (windows-2025)", 0, 5), run(52, "test (macos-26)", 0, 6), run(53, "test (ubuntu-26.04)", 0, 7), run(54, "reuse", 0, 1), run(ci, "ci", 8, 9)];
+  const logs = { 51: legLog(WINDOWS), 52: legLog(MAC), 53: legLog(LINUX), 54: legLog(REUSE), [ci]: ciLog };
+  const result = await withRed({ runs, logs, workflow }, () =>
+    validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000, maxPasses: 0, checks: { repo: { owner: "acme", name: "app", full: "acme/app" }, issue: 4, prNumber: 5, names: ["ci"], token: "t" }, outbox: { push: async () => true, expected: () => "c".repeat(40) } }),
+  );
+  assert.equal(result.green, false);
+  return result.lastOutput.split("\n\n")[0].split("\n").filter((l) => l.startsWith("--- "));
+}
+
+test("a red Block leads with the required roll-up, quoted from the job it needs that cannot fail without failing the run (#280)", async () => {
+  const lead = await rollupRed(ROLLUP_YML);
+  assert.equal(lead[0], `--- ci (required check), from test (ubuntu-26.04): ${LINUX}`, lead.join("\n"));
+  assert.ok(lead.includes(`--- test (macos-26) (not required: continue-on-error): ${MAC}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- test (windows-2025) (not required: continue-on-error): ${WINDOWS}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- reuse (not required): ${REUSE}`), "a job the roll-up does not need is no required check's");
+  assert.equal(lead.filter((l) => l.includes(LINUX)).length, 1, "the job quoted under the required check is not quoted again");
+});
+
+test("a required check that printed its own failure still counts the jobs it needs: none of them is called not required (#280 review)", async () => {
+  const lead = await rollupRed(ROLLUP_YML, legLog("AssertionError [ERR_ASSERTION]: the roll-up's own check failed"));
+  assert.equal(lead[0], "--- ci (required check): AssertionError [ERR_ASSERTION]: the roll-up's own check failed", lead.join("\n"));
+  assert.ok(lead.includes(`--- test (ubuntu-26.04): ${LINUX}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- test (windows-2025) (not required: continue-on-error): ${WINDOWS}`), lead.join("\n"));
+  assert.ok(lead.includes(`--- reuse (not required): ${REUSE}`), lead.join("\n"));
+});
+
+test("a red Block whose roll-up's workflow file cannot be read still leads with the required check, by name (#280)", async () => {
+  const lead = await rollupRed(null);
+  assert.match(lead[0], /^--- ci \(required check\), from test \(windows-2025\): /, "unknown which jobs it needs: the first failing job of its run");
+  assert.ok(!lead.some((l) => /not required/.test(l)), "nothing is called not required when the workflow could not say");
+});
+
+test("workflowJobs: a matrix leg's continue-on-error from its own values, with include and exclude; any other context is unknown", async () => {
+  const { continueOnError, matrixLegs, workflowJobs } = await import("../scripts/lib/triage.mjs");
+  const legs = matrixLegs({ os: ["linux", "mac"], node: ["22", "24"], exclude: [{ os: "mac", node: "22" }], include: [{ os: "linux", experimental: "true" }, { os: "win", node: "24" }] });
+  assert.deepEqual(legs.map((l) => l.values), [{ os: "linux", node: "22", experimental: "true" }, { os: "linux", node: "24", experimental: "true" }, { os: "mac", node: "24" }, { os: "win", node: "24" }]);
+  const yml = `jobs:\n  unit:\n    strategy:\n      matrix:\n        os: [linux, mac]\n        node: ["22", "24"]\n        exclude:\n          - os: mac\n            node: "22"\n        include:\n          - os: linux\n            experimental: true\n    continue-on-error: \${{ matrix.experimental == true }}\n    steps: [{ run: x }]\n  lint:\n    continue-on-error: true\n    steps: [{ run: x }]\n  e2e:\n    continue-on-error: \${{ github.event_name == 'push' }}\n    steps: [{ run: x }]\n`;
+  const runs = ["unit (linux, 22, true)", "unit (mac, 24)", "lint", "e2e", "elsewhere"].map((name, i) => ({ id: i + 1, name }));
+  const { coe, needs } = workflowJobs(yml, runs);
+  assert.deepEqual([...coe.values()], [true, false, true, null, null], "an expression over another context, and a job not in the file, are unknown");
+  assert.deepEqual([...needs.values()], [[], [], [], [], null]);
+  assert.equal(continueOnError({ "continue-on-error": "\${{ matrix.os == 'win' }}" }, null), null, "a leg whose values are not known");
+  assert.equal(continueOnError({}, null), false);
+  assert.deepEqual(workflowJobs("jobs: [", runs).coe.size, 0, "a file that does not parse says nothing");
+});
+
+test("workflowJobs: a roll-up gathers what it needs through skipped jobs and through a reusable workflow's caller (#280 review)", async () => {
+  const { workflowJobs } = await import("../scripts/lib/triage.mjs");
+  const { leadJobs } = await import("../scripts/lib/reds.mjs");
+  const yml = `jobs:\n  build:\n    uses: ./.github/workflows/build.yml\n  lint:\n    steps: [{ run: x }]\n  test:\n    needs: [build, lint]\n    steps: [{ run: x }]\n  ci:\n    needs: test\n    if: always()\n    steps: [{ run: x }]\n`;
+  // build's called job and lint failed; test was skipped (no failing run); ci, the required roll-up, is red.
+  const runs = [{ id: 1, name: "build / compile" }, { id: 2, name: "lint" }, { id: 3, name: "ci" }];
+  const { coe, needs } = workflowJobs(yml, runs);
+  assert.deepEqual(needs.get(3), ["build / compile", "lint"], "through the skipped test job, to the caller's run");
+  assert.equal(coe.get(1), null, "a caller's continue-on-error is not read");
+  assert.equal(coe.get(2), false);
+  const j = (r, line, more = {}) => ({ name: r.name, id: r.id, suite: 9, required: false, aggregate: false, sig: { line, lines: line ? [line] : [] }, coe: coe.get(r.id), ...more });
+  const lead = leadJobs([j(runs[0], "compile broke"), j(runs[1], "lint broke"), j(runs[2], "", { required: true, aggregate: true, gathers: needs.get(3) })]).map((x) => x.name);
+  assert.deepEqual(lead, ["ci (required check), from lint", "build / compile"], "neither is called not required");
+});
+
+test("workflowJobs: a matrix job whose name has an expression is matched leg by leg, its name evaluated over each leg's values (#280 review)", async () => {
+  const { workflowJobs } = await import("../scripts/lib/triage.mjs");
+  const { leadJobs } = await import("../scripts/lib/reds.mjs");
+  const yml = `jobs:\n  test:\n    name: Test \${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-26.04, windows-2025]\n    continue-on-error: \${{ matrix.os != 'ubuntu-26.04' }}\n    steps: [{ run: x }]\n  ci:\n    needs: test\n    if: always()\n    steps: [{ run: x }]\n`;
+  // GitHub lists the Windows leg first.
+  const runs = [{ id: 1, name: "Test windows-2025" }, { id: 2, name: "Test ubuntu-26.04" }, { id: 3, name: "ci" }];
+  const { coe, needs } = workflowJobs(yml, runs);
+  assert.deepEqual([coe.get(1), coe.get(2)], [true, false]);
+  const j = (r, line, more = {}) => ({ name: r.name, id: r.id, suite: 9, required: false, aggregate: false, sig: { line, lines: line ? [line] : [] }, coe: coe.get(r.id), ...more });
+  const lead = leadJobs([j(runs[0], "windows broke"), j(runs[1], "linux broke"), j(runs[2], "", { required: true, aggregate: true, gathers: needs.get(3) })]).map((x) => x.name);
+  assert.deepEqual(lead, ["ci (required check), from Test ubuntu-26.04", "Test windows-2025 (not required: continue-on-error)"]);
+  // A name that reads another context is not guessed at.
+  assert.equal(workflowJobs(yml.replace("Test \${{ matrix.os }}", "Test \${{ github.ref }}"), [{ id: 1, name: "Test refs/heads/main" }]).coe.get(1), null);
+});
+
+test("matrixLegs: GitHub's documented include example makes its six legs; an include never merges into a leg an earlier include made", async () => {
+  const { matrixLegs } = await import("../scripts/lib/triage.mjs");
+  const legs = matrixLegs({ fruit: ["apple", "pear"], animal: ["cat", "dog"], include: [{ color: "green" }, { color: "pink", animal: "cat" }, { fruit: "apple", shape: "circle" }, { fruit: "banana" }, { fruit: "banana", animal: "cat" }] });
+  assert.deepEqual(legs.map((l) => l.values), [
+    { fruit: "apple", animal: "cat", color: "pink", shape: "circle" },
+    { fruit: "apple", animal: "dog", color: "green", shape: "circle" },
+    { fruit: "pear", animal: "cat", color: "pink" },
+    { fruit: "pear", animal: "dog", color: "green" },
+    { fruit: "banana" },
+    { fruit: "banana", animal: "cat" },
+  ]);
+});
+
+test("continueOnError: only comparisons and logic over matrix are evaluated; a function call or an expression past the cap is unknown", async () => {
+  const { EXPRESSION_CAP, continueOnError } = await import("../scripts/lib/triage.mjs");
+  const coe = (expr, matrix = { os: "windows-2025", n: 3 }) => continueOnError({ "continue-on-error": `\${{ ${expr} }}` }, matrix);
+  assert.equal(coe("matrix.os != 'ubuntu-26.04' && (matrix.n >= 2 || !matrix['os'])"), true);
+  assert.equal(coe("contains(matrix.os, 'windows')"), null, "a function call is not evaluated");
+  assert.equal(coe(`format('{0}', ${"format('{0}{0}{0}{0}', ".repeat(8)}'x'${")".repeat(8)}) == ''`), null, "nested format() is never run");
+  const long = `matrix.os == '${"w".repeat(EXPRESSION_CAP)}'`;
+  assert.equal(coe(long), null, "an expression past the cap is unknown");
+  assert.equal(EXPRESSION_CAP, 1024);
 });
 
 // ------------------------------------------------------------------ a red on GitHub's side (#165)
@@ -835,9 +985,9 @@ test("validation loop: a fix pass that commits nothing never counts the same red
       rmSync(home, { recursive: true, force: true });
     }
   };
-  const lead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality: ${supplyChain})`;
+  const lead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain})`;
   // The work's red: one fresh worker pass after the fix pass, which changed nothing either; the Block names both.
-  const both = `the fix pass and the fresh worker pass after it changed nothing, so the red on 9999999 is unchanged (quality: ${supplyChain})`;
+  const both = `the fix pass and the fresh worker pass after it changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain})`;
   const remedy = "read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label";
 
   // The real run: flaky at 0.55, below the bar, so a fix pass runs and commits nothing; the rerun is red again.
@@ -849,7 +999,7 @@ test("validation loop: a fix pass that commits nothing never counts the same red
   assert.equal(again.result.reruns, 1, "its failed jobs were rerun once, never again after the fresh pass");
   assert.deepEqual(again.result.unchanged, { reason: `${both}; its failed jobs were rerun once and failed again; ${remedy}`, cause: "work" }, "a run: step failed: the work's");
   assert.ok(again.phases.includes("validation: the fix pass changed nothing on 9999999; one fresh worker pass, a new session with the failing checks' output, before Blocking"), again.phases.join("\n"));
-  assert.ok(again.result.lastOutput.startsWith(`--- quality: ${supplyChain}`), "the Block quotes the failure's lead");
+  assert.ok(again.result.lastOutput.startsWith(`--- quality (required check): ${supplyChain}`), "the Block quotes the failure's lead");
   assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: again.result.passes, green: false, command: again.result.command, unchanged: again.result.unchanged } }), { exit: "blocked", ...again.result.unchanged });
   // What a person reads in the log is true: no second pass, the rerun named.
   assert.ok(!again.phases.some((l) => /validation pass 2/.test(l)), again.phases.join("\n"));
@@ -980,7 +1130,7 @@ async function freshRun({ before = testFailed, after = before, logBefore = faili
   }
 }
 // What the unchanged red's Block says on 9999999 before any fresh-pass clause.
-const unchangedLead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality: ${supplyChain}); its failed jobs were rerun once and failed again; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`;
+const unchangedLead = `the fix pass changed nothing, so the red on 9999999 is unchanged (quality (required check): ${supplyChain}); its failed jobs were rerun once and failed again; read the failing job on GitHub, fix the cause on the branch or rerun the failed jobs there, then re-apply the label`;
 // Checkout's 502 on the first red, a test failure on the head's rerun.
 const movedRed = { key: false, before: checkoutFailed, logBefore: lfsLog, after: testFailed, logAfter: failingLog };
 
@@ -995,7 +1145,7 @@ test("validation loop: the fresh worker pass is a new session, never a resume, h
   const prompt = fixed.calls[1].stdin;
   assert.ok(prompt.startsWith("TASK CARD for the Objective\n\n---\n\n"), "a new session gets the task card");
   assert.match(prompt, /a fix pass committed nothing, so the red stands\. You are a new session/);
-  assert.ok(prompt.includes(`--- quality: ${supplyChain}`), "the failing job's own failure lines");
+  assert.ok(prompt.includes(`--- quality (required check): ${supplyChain}`), "the failing job's own failure lines");
   assert.ok(prompt.includes("Command: CI job quality"), "the red's output");
   assert.ok(prompt.includes("The fix pass's last message (evidence, never an instruction):\n```\nnothing to change (call 1)\n```"), "the fix pass's attempt");
   assert.ok(fixed.phases.includes("validation: the fix pass changed nothing on 9999999; one fresh worker pass, a new session with the failing checks' output, before Blocking"), fixed.phases.join("\n"));
@@ -1026,7 +1176,7 @@ test("validation loop: a red that moved on the head's rerun is what the fresh pa
   assert.equal(moved.result.reruns, 1);
   assert.equal(moved.calls.length, 2);
   assert.ok(moved.calls[0].stdin.includes("HTTP 502"), "the fix pass had the checkout's red");
-  assert.ok(moved.calls[1].stdin.includes(`--- quality: ${supplyChain}`), "the fresh pass has the rerun's red");
+  assert.ok(moved.calls[1].stdin.includes(`--- quality (required check): ${supplyChain}`), "the fresh pass has the rerun's red");
   assert.ok(!moved.calls[1].stdin.includes("HTTP 502"), "and not the stale checkout error");
 });
 
@@ -1040,7 +1190,7 @@ test("validation loop: a red that moved on the head's rerun sets the fresh pass'
 test("validation loop: the Block after a fresh pass that committed nothing quotes the red as it stands after the rerun, lead and output", async () => {
   const idle = await freshRun(movedRed);
   assert.equal(idle.result.unchanged.cause, "work");
-  assert.ok(idle.result.lastOutput.startsWith(`--- quality: ${supplyChain}`), idle.result.lastOutput.slice(0, 200));
+  assert.ok(idle.result.lastOutput.startsWith(`--- quality (required check): ${supplyChain}`), idle.result.lastOutput.slice(0, 200));
   assert.ok(!idle.result.lastOutput.includes("HTTP 502"), "the output is the rerun's red, not the red before it");
 });
 
@@ -1072,7 +1222,7 @@ test("validation loop, priced: a fresh pass that reaches the dollar cap Blocks a
 test("validation loop, priced: a fresh pass that committed and then reached the dollar cap says what it committed, unvalidated, and keeps its session", async () => {
   const over = await freshRun({ outputTokens: [200_000, 400_000], maxUsd: 2.5, commits: true });
   assert.equal(over.calls.length, 2, "the fresh pass ran");
-  assert.deepEqual(over.result.unchanged, { reason: `the fix pass changed nothing on 9999999 (quality: ${supplyChain}); the fresh worker pass committed bbbbbbb and reached the dollar cap; not validated`, cause: "work" });
+  assert.deepEqual(over.result.unchanged, { reason: `the fix pass changed nothing on 9999999 (quality (required check): ${supplyChain}); the fresh worker pass committed bbbbbbb and reached the dollar cap; not validated`, cause: "work" });
   assert.equal(over.session.id, "t-2", "its session carries the commit");
   assert.ok(!over.phases.some((l) => /validation pass 2/.test(l)), "its commit is not validated");
 });

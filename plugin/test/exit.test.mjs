@@ -644,22 +644,25 @@ test("exec: a fileStdio run whose output grows past maxBytes is killed there, it
 test("exec: a fileStdio read that fails mid-run stops the run instead of leaving it silent (#2660)", async () => {
   const { closeSync, readdirSync, readlinkSync } = await import("node:fs");
   const { exec } = await import("../scripts/lib/proc.mjs");
-  const started = Date.now();
-  const run = exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 5000)"], { fileStdio: true });
-  await new Promise((r) => setTimeout(r, 200));
-  // Factory's read end of the run's stdout file, closed from under it: the next read fails with EBADF.
-  const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
-    try {
-      return /factory-stdio-[^/]+\/stdout$/.test(readlinkSync(`/proc/self/fd/${n}`));
-    } catch {
-      return false;
-    }
-  });
-  assert.ok(fd !== undefined, "the read end is open");
-  closeSync(fd);
-  const r = await run;
+  // Factory's read end of the run's stdout file, closed from under it once its first line has been read (however long a
+  // loaded machine takes to start the child): the next read fails with EBADF.
+  let closedAt = null;
+  const closeReadEnd = () => {
+    const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
+      try {
+        return /factory-stdio-[^/]+\/stdout$/.test(readlinkSync(`/proc/self/fd/${n}`));
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(fd !== undefined, "the read end is open");
+    closeSync(fd);
+    closedAt = Date.now();
+  };
+  const r = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 5000)"], { fileStdio: true, onLine: () => closedAt ?? closeReadEnd() });
+  assert.ok(closedAt, "the read end was closed mid-run");
   assert.deepEqual([r.readError, !!r.signal, r.stdout, /reading the run's output failed \(EBADF\)/.test(r.stderr)], ["EBADF", true, "x\n", true]);
-  assert.ok(Date.now() - started < 3000, `stopped after ${Date.now() - started} ms`);
+  assert.ok(Date.now() - closedAt < 3000, `stopped ${Date.now() - closedAt} ms after its read end was closed`);
 });
 
 test("exec: a fileStdio file the child truncates is read again from its start (#2660)", async () => {

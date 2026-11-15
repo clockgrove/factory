@@ -12,6 +12,7 @@ import { relayProbeCommand, relayShimScript, writeRelayShim } from "../scripts/l
 import { RELAY_SOCKET_DIR_ENV, RELAY_SOCKET_ROOT, SOCKET_DIR_RECORD, checkSocketRoot, closeWorkerRelay, dropSocketDir, handSocketDir, localRelayDir, makeSocketDir, openWorkerRelay, readSocketDirRecord, relaySocketDir, unrelayedGatewayKeys } from "../scripts/lib/worker-relay.mjs";
 import { STAGE_RECORD, reapSocketDirs, relaysGatewayKey } from "../scripts/local.mjs";
 import { processRecord } from "../scripts/lib/proc.mjs";
+import { refusingOrigin, unhandedPort } from "./ports.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
 import { maxUsdReached, usdText } from "../scripts/lib/logic.mjs";
 import { harnessOuterSettings } from "../scripts/lib/local.mjs";
@@ -472,7 +473,10 @@ test("a long checkout path: the relay starts, a call through Factory's forwarder
   const usageDir = join(dir, "an-adopter-whose-checkout-path-is-long", ".factory", "81", "usage-review-2026-11-13T05-00-00-000Z");
   assert.ok(Buffer.byteLength(join(localRelayDir(usageDir), "relay-0123456789ab.sock")) > UNIX_SOCKET_PATH_MAX);
   const shell = { [RELAYED_NAME]: KEY };
-  const open = (o) => openRelay({ ...o, origin: gw.origin, lookupDelaysMs: [1] });
+  // The stand-in shares this machine's network, where the relay's pick for a namespace of the command's own could be a
+  // port another process holds (the forwarder then cannot listen and the call fails): one no process is handed instead.
+  const port = await unhandedPort();
+  const open = async (o) => Object.assign(await openRelay({ ...o, origin: gw.origin, lookupDelaysMs: [1] }), { port, url: `http://127.0.0.1:${port}` });
   let opened = null;
   try {
     chmodSync(root, 0o1700);
@@ -921,7 +925,8 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
     // A real turnaround's size (four base64 photo references, 38.5 MiB) passes whole.
     const turnaround = big(Math.ceil(38.5 * 1024 * 1024));
     assert.equal((await send(real.socketPath, { path: EDITS, headers: auth, body: turnaround })).status, 200);
-    assert.ok(gw.seen.at(-1).raw.equals(turnaround), "the turnaround-sized body arrived whole");
+    // The call's own request: its price lookup, 5 ms after the answer, may have reached the gateway since.
+    assert.ok(gw.seen.findLast((x) => x.url === EDITS).raw.equals(turnaround), "the turnaround-sized body arrived whole");
     assert.deepEqual([(await real.endPass()).calls], [1]);
 
     // The same limits, small (a 64 KiB cap, a 300 ms body deadline), so no step depends on how fast the machine streams
@@ -1368,15 +1373,6 @@ const logLines = (file) =>
     .trim()
     .split("\n")
     .map((l) => JSON.parse(l));
-/**
- * An origin on this machine's loopback that refuses connections, for good while the test runs: a port held open on
- * 127.0.0.1 (so no other process can take it), called at another loopback address, where nothing listens.
- */
-async function refusingOrigin() {
-  const holder = net.createServer();
-  await new Promise((resolve) => holder.listen(0, "127.0.0.1", resolve));
-  return { origin: `http://127.42.0.1:${holder.address().port}`, close: () => new Promise((r) => holder.close(r)) };
-}
 /** A TCP peer that takes a connection, reads its first bytes and resets: `seen.bytes` is what reached it. */
 async function resettingPeer() {
   const seen = { bytes: 0, connections: 0 };
@@ -2074,13 +2070,14 @@ test("a fast 408 or 409 is a fast error status, as a fast 5xx is: only the run c
   const gw = await fakeGateway({
     [LANG]: async (body) => {
       const { status, slow } = JSON.parse(body || "{}");
-      if (slow) await sleep(150);
+      if (slow) await sleep(600);
       return { status, body: { error: { message: "x" } } };
     },
   });
   const dir = mkdtempSync(join(tmpdir(), "relay-fast4xx-"));
-  // A fast error status within 100 ms here (3 s in a stage).
-  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100 });
+  // A fast error status within 500 ms here (3 s in a stage): a loaded machine's answer at once still is one, and a slow
+  // one, held past it, never is.
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 500 });
   const go = (status, slow = false) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ status, slow }) });
   try {
     r.beginPass(100);

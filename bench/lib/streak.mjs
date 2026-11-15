@@ -12,6 +12,8 @@
 // An External one (walkAway.bucket: its only stops were external Blocks, lib/objective.mjs walkAwayBucket) is listed
 // in the sequence as skipped: it neither extends nor breaks, and does not count as finished. A P1 escape found in its
 // merge makes it a break.
+// A workflow hand-over scored as an owner step (lib/objective.mjs HANDOVER_SCORING, the default) leaves the merge a
+// walk-away: it extends the streak, and its entry says it carries an owner step (`ownerStep`). Scored as input, it breaks.
 // A finished row whose harness is unknown (none recorded, or two on one Objective) is listed under "unknown", which is
 // no harness's streak; when it breaks, it breaks every harness's streak, since it may have been any of them.
 
@@ -39,14 +41,35 @@ export function verdict(row) {
   const unseen = row.walkAway.unseen === undefined ? ["input sources not recorded"] : row.walkAway.unseen;
   if (unseen.length) return { ok: false, why: `input not readable (${unseen.join(", ")}): walk-away unproven` };
   if (escapes.length) return { ok: false, why: `P1 escape: ${escapes.map((e) => (typeof e === "string" ? e : e.issue)).join(", ")}` };
+  if (row.ownerStep) return { ok: true, why: "walk-away merge; owner step: workflow hand-over", ownerStep: row.ownerStep.kind };
   return { ok: true, why: "walk-away merge" };
 }
 
 /**
+ * The hand-over rules the rows were scored by (walkAway.handover). Only rows with a hand-over decide the mix (an owner
+ * step, or Factory's `workflow hand-over` request; such a row from before the rule was recorded scored it as input);
+ * with none, the one rule the rows record, if they record exactly one.
+ */
+const handoverRules = (rows) => {
+  const handed = rows.filter((r) => r.ownerStep || (r.walkAway?.interventions?.requests || []).some((q) => q.kind === "workflow hand-over"));
+  const rules = new Set(handed.length ? handed.map((r) => r.walkAway?.handover ?? "input") : rows.map((r) => r.walkAway?.handover).filter(Boolean));
+  return handed.length || rules.size === 1 ? [...rules].sort() : [];
+};
+
+/** The streak header's sentence on the workflow hand-over, by the rules its rows were scored by. */
+export function handoverSentence(rules = []) {
+  if (!rules.length) return "";
+  if (rules.length > 1) return " A workflow hand-over is scored per row here (walkAway.handover): an owner step on some, input on others.";
+  return rules[0] === "owner-step"
+    ? " A workflow hand-over counts as normal work (--handover owner-step): applying it is an owner step after the merge, which the entry names, not input."
+    : " A workflow hand-over is input here (--handover input): it breaks the streak.";
+}
+
+/**
  * Streaks per harness from `from` (ISO time: the tag's): `{from, harnesses: {[h]: {current, best, finished, walkAway,
- * external, sequence: [{issue, endedAt, ok, why, external?}], inFlight: [issue]}}, before: [issue]}`. An External entry
- * has `ok: null` and `external: true`; `finished` leaves it out. `before` lists rows whose clock started
- * earlier (left out).
+ * external, sequence: [{issue, endedAt, ok, why, external?, ownerStep?}], inFlight: [issue]}}, before: [issue], handover}`.
+ * An External entry has `ok: null` and `external: true`; `finished` leaves it out. `before` lists rows whose clock
+ * started earlier (left out). `ownerStep` names a walk-away's owner step; `handover`, the hand-over rules the rows used.
  */
 export function streaks(rows, { from }) {
   const out = { from, harnesses: {}, before: [] };
@@ -55,6 +78,7 @@ export function streaks(rows, { from }) {
     if (from && ms(r.walkAway?.since) < ms(from)) out.before.push(r.issue);
     else counted.push(r);
   }
+  out.handover = handoverRules(counted);
   const slot = (h) => (out.harnesses[h] ??= { current: 0, best: 0, finished: 0, walkAway: 0, external: 0, sequence: [], inFlight: [] });
   const finished = [];
   for (const r of counted) {
@@ -77,7 +101,7 @@ export function streaks(rows, { from }) {
       h.current += 1;
       h.best = Math.max(h.best, h.current);
     } else h.current = 0;
-    h.sequence.push({ issue: r.issue, endedAt: end, ok: v.ok, why: v.why });
+    h.sequence.push({ issue: r.issue, endedAt: end, ok: v.ok, why: v.why, ...(v.ownerStep ? { ownerStep: v.ownerStep } : {}) });
     // Unknown harness: it may have been any of them, so a break breaks every harness's streak, and says so there.
     if (!r.harness && !v.ok)
       for (const [name, other] of Object.entries(out.harnesses)) {
@@ -90,14 +114,14 @@ export function streaks(rows, { from }) {
 }
 
 /** A sequence entry's verdict: yes, skipped (External) or no, with why. */
-const entryText = (x) => (x.external ? `skipped: ${cell(x.why)}` : x.ok ? "yes" : `no: ${cell(x.why)}`);
+const entryText = (x) => (x.external ? `skipped: ${cell(x.why)}` : x.ok ? (x.ownerStep ? `yes, owner step: ${cell(x.ownerStep)}` : "yes") : `no: ${cell(x.why)}`);
 
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 /** The streak as Markdown: one line per harness, then each harness's sequence, oldest first. */
 export function streakTable(result, { repository = "", tag = null } = {}) {
   const head = ["Harness", "Current streak", "Best", "Walk-away / finished", "In flight"];
-  const lines = [`Streak on ${repository} from ${tag ? `${tag} (${result.from})` : result.from}: consecutive walk-away merges per harness; any human input, Blocked, a stall, an unmerged end, a later P1 escape or an input source not read breaks it, an unknown harness's break breaks every harness, and an External Objective (only external Blocks) is skipped.`, "", `| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
+  const lines = [`Streak on ${repository} from ${tag ? `${tag} (${result.from})` : result.from}: consecutive walk-away merges per harness; any human input, Blocked, a stall, an unmerged end, a later P1 escape or an input source not read breaks it, an unknown harness's break breaks every harness, and an External Objective (only external Blocks) is skipped.${handoverSentence(result.handover)}`, "", `| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   const names = Object.keys(result.harnesses).sort();
   for (const h of names) {
     const s = result.harnesses[h];
@@ -131,10 +155,11 @@ export async function tagTime(api, repo, tag) {
  * order they ended, on any harness; a walk-away merge (verdict ok) extends it, any miss resets it and an External row is
  * skipped (listed, `ok: null`, `external: true`). `rows` carry
  * their `repository`. Returns `{from, current, best, finished, walkAway, sequence: [{repository, issue, harness,
- * endedAt, ok, why}], inFlight: [{repository, issue}], before: [{repository, issue}]}`.
+ * endedAt, ok, why, ownerStep?}], inFlight: [{repository, issue}], before: [{repository, issue}], handover}`.
  */
 export function pooledStreak(rows, { from }) {
   const out = { from, current: 0, best: 0, finished: 0, walkAway: 0, external: 0, sequence: [], inFlight: [], before: [] };
+  out.handover = handoverRules(rows.filter((r) => !(from && ms(r.walkAway?.since) < ms(from))));
   const finished = [];
   for (const r of rows) {
     const id = { repository: r.repository, issue: r.issue };
@@ -156,7 +181,7 @@ export function pooledStreak(rows, { from }) {
       out.current += 1;
       out.best = Math.max(out.best, out.current);
     } else out.current = 0;
-    out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: v.ok, why: v.why });
+    out.sequence.push({ repository: r.repository, issue: r.issue, harness: r.harness ?? UNKNOWN, endedAt: end, ok: v.ok, why: v.why, ...(v.ownerStep ? { ownerStep: v.ownerStep } : {}) });
   }
   return out;
 }
@@ -167,7 +192,7 @@ const ref = (x) => `${x.repository}#${x.issue}`;
 export function pooledTable(result, { repositories = [], tag = null } = {}) {
   const head = ["Current streak", "Best", "Walk-away / finished", "In flight"];
   const lines = [
-    `Pooled streak across ${repositories.join(", ")} from ${tag ? `${tag} (${result.from})` : result.from}: consecutive walk-away merges on any harness, in the order they ended; any miss on any repository resets it and an External Objective is skipped.`,
+    `Pooled streak across ${repositories.join(", ")} from ${tag ? `${tag} (${result.from})` : result.from}: consecutive walk-away merges on any harness, in the order they ended; any miss on any repository resets it and an External Objective is skipped.${handoverSentence(result.handover)}`,
     "",
     `| ${head.join(" | ")} |`,
     `| ${head.map(() => "---").join(" | ")} |`,

@@ -14,7 +14,7 @@ import { HANDOVER_FILE, HANDOVER_LABEL, closedHarnessText, handoverLine, handove
 import { PLACEHOLDER_MARKER, decisionsSection, diffLines, entryKey, isBodyFindingId, isSelf, marker, selfLogin, parseExitRecord, restartedAt, snapComments, trustedAuthor } from "./logic.mjs";
 import { refusalFields } from "./usage.mjs";
 import { exec } from "./proc.mjs";
-import { log } from "./inputs.mjs";
+import { commandFailed, log } from "./inputs.mjs";
 
 /** The files the harness may leave in $FACTORY_OUT. Anything else there is ignored. */
 export const OUT_FILES = ["plan.md", "pr.md", "replies.json", "note.md", "exit.json", HANDOVER_FILE];
@@ -337,7 +337,8 @@ process.stdout.write(JSON.stringify(out));
 async function agentIo(op, dir, names, env, input, profile = "command") {
   const [cmd, args] = backend(env).sandbox[profile]([process.execPath, "-e", AGENT_IO, op, dir, ...names], env);
   const r = await exec(cmd, args, { env, input, timeoutMs: 120_000, maxBytes: 16 * 1024 * 1024 });
-  if (r.code !== 0) throw new Error(`hand-off ${op} in ${dir} failed (exit ${r.code ?? r.signal}): ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
+  // Never the folder or the output in the error, which a Block may carry: both name a path on this machine.
+  if (r.code !== 0) throw commandFailed(`the hand-off's ${op} in the agent's sandbox failed`, r);
   return JSON.parse(String(r.stdout).trim() || "{}");
 }
 

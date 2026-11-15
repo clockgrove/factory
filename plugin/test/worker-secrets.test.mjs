@@ -168,7 +168,7 @@ test("validation's HEAD read: Factory's git gets neither the worker secrets' car
     // srt stands where local mode's sandbox would: it records the environment Factory's git starts with.
     const out = join(dir, "env.txt");
     writeFileSync(join(dir, "srt"), `#!/bin/sh\nenv > "${out}"\n`, { mode: 0o755 });
-    await runValidation(dir, [], { env: { PATH: `${dir}:${process.env.PATH}`, FACTORY_LOCAL: "1", FACTORY_LOCAL_SRT_GIT: join(dir, "none"), ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY }), ANTHROPIC_API_KEY: "sk-model-credential" } });
+    await runValidation(dir, [], { env: { HOME: process.env.HOME, PATH: `${dir}:${process.env.PATH}`, FACTORY_LOCAL: "1", FACTORY_LOCAL_SRT_GIT: join(dir, "none"), ...packShellSecrets({ AI_GATEWAY_API_KEY: KEY }), ANTHROPIC_API_KEY: "sk-model-credential" } });
     const seen = readFileSync(out, "utf8");
     assert.ok(seen.includes("FACTORY_LOCAL_SRT_GIT="), "srt ran with the stage's sandbox settings");
     assert.ok(!seen.includes(KEY) && !seen.includes(SHELL_SECRETS_ENV), "no worker secret");

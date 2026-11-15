@@ -51,7 +51,7 @@ import {
   upsertComment,
   transientError,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
+import { commandFailed, log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
@@ -497,7 +497,11 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   // In the agent's sandbox (backend.mjs sandbox.git): Factory runs no git on the host in the agent's checkout.
   const sandboxGit = async (_, args) => {
     const r = await exec(...backend(env).sandbox.git(["git", "-C", checkout, ...args], env), { env });
-    if (r.code !== 0) throw new Error(`git ${args.join(" ")} in the checkout failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 160)}`);
+    // Its arguments and output can name a path on this machine (a hooks folder, the credential helper): the log has them.
+    if (r.code !== 0) {
+      log(`git ${args.join(" ")} in the checkout failed`);
+      throw commandFailed(`git ${args[0]} in the checkout failed`, r);
+    }
     return r;
   };
   await sandboxGit(checkout, ["config", "user.name", name]);

@@ -8,6 +8,7 @@
 // The action declares no defaults of its own, so an empty `with:` value falls
 // through to the env block rather than overriding it with "".
 import { appendFileSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 
 /**
  * Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's
@@ -312,6 +313,31 @@ export const logTo = (stream) => {
   LOG_STREAM = stream;
 };
 export const log = (...parts) => (LOG_STREAM ?? process.stdout).write(`[factory] ${redactSecrets(parts.join(" "))}\n`);
+
+/**
+ * A thrown error as a Blocked reason may carry it, which `log` (this process's log: the local loop's, or a stage's) has
+ * whole: a system error (Node's, with its `syscall`: a file or process call, whose message names the path, an account's
+ * folder or token file included) by its code and call alone; any other by its message, the home directory shortened to
+ * `~`.
+ */
+export const postedError = (e, { home = homedir(), log = "the local loop's log" } = {}) => {
+  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
+  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
+  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; ${log} names the path` : `${code}; ${log} names the path`;
+};
+
+/**
+ * A command Factory ran that failed (`r`: exec's {code, signal, stderr}), as an error a Blocked reason may carry: `what`
+ * and the exit alone, never the command's output, which can name a path on this machine (a clone, a temp or account
+ * folder, inside the home directory or out of it). The output's last line goes to this process's log instead.
+ */
+export function commandFailed(what, r, fields = {}) {
+  const exit = r?.code ?? r?.signal ?? null;
+  const said = `${what}${exit === null ? "" : ` (exit ${exit})`}`;
+  const out = String(r?.stderr ?? "").trim().split("\n").at(-1)?.slice(0, 300) || "";
+  log(`${said}${out ? `: ${out}` : ""}`);
+  return Object.assign(new Error(`${said}; the log on this machine has its output`), fields);
+}
 
 /**
  * The forms a secret takes in text Factory stores or posts: itself, its JSON-escaped inner form, its

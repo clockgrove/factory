@@ -576,7 +576,7 @@ setTimeout(() => {
       if (first) Atomics.wait(busy, 0, 0, 1000);
       first = false;
     };
-    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: bin, env: { PATH: process.env.PATH }, timeoutMs: 60_000, label: "review", onLine });
+    const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "review", onLine });
     assert.equal(rec.exitCode, 0, rec.stderrTail);
     assert.deepEqual([rec.ok, rec.turns, rec.finalText, /os error 11/.test(rec.stderrTail)], [true, 1, '{"comments": []}', false]);
   } finally {

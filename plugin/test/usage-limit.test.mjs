@@ -105,7 +105,7 @@ test("runHarness, real, fake claude: a reset within the stage's in-place bound i
   // Ten minutes before the reset; a local stage waits fifteen in place.
   await inStage(bin, Date.parse(RESET) - 10 * 60_000, async ({ waits, now }) => {
     waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
-    const rec = await runHarness(pass(bin, { env: { PATH: process.env.PATH } }));
+    const rec = await runHarness(pass(bin, { env: { HOME: process.env.HOME, PATH: process.env.PATH } }));
     const c = calls();
     assert.equal(c.length, 2);
     assert.ok(c.every((x) => x.args[x.args.indexOf("--model") + 1] === "claude-fable-5-2"), "the same model both times");

@@ -190,7 +190,7 @@ test("the decoy: a readable process outside the sandbox that holds the marker fa
   const bin = join(root, "bin");
   mkdirSync(bin);
   writeFileSync(join(bin, "codex"), `#!/bin/sh\nfor d; do :; done\necho "args=$*"\ntr '\\0' '\\n' < /proc/$d/environ | grep -c '^${PROBE_MARKER}=m88$'\n`, { mode: 0o755 });
-  const got = execFileSync("/bin/sh", ["-c", DECOY_LAUNCH, "sh", "sandbox", "x"], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m88" } }).split("\n");
+  const got = execFileSync("/bin/sh", ["-c", DECOY_LAUNCH, "sh", "sandbox", "x"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m88" } }).split("\n");
   assert.match(got[0], /^args=sandbox x \d+$/);
   assert.equal(got[1], "1", "the decoy holds the marker while codex runs");
 });
@@ -202,7 +202,7 @@ test("the network rule fails without curl or node, rather than passing unchecked
   const bin = join(root, "bin3");
   mkdirSync(bin);
   for (const b of ["tr", "grep", "rm"]) symlinkSync(execFileSync("/bin/sh", ["-c", `command -v ${b}`], { encoding: "utf8" }).trim(), join(bin, b));
-  const out = execFileSync("/bin/sh", ["-c", '/bin/sh -c "$1" sh "$2" "" "$3" example.com "" ""; echo "exit $?"', "sh", CONFINEMENT_PROBE, ro, agent.tmp], { encoding: "utf8", env: { PATH: bin } });
+  const out = execFileSync("/bin/sh", ["-c", '/bin/sh -c "$1" sh "$2" "" "$3" example.com "" ""; echo "exit $?"', "sh", CONFINEMENT_PROBE, ro, agent.tmp], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: bin } });
   assert.equal(out, "no curl or node to check the network rule\nexit 4\n");
 });
 

@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
-import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
@@ -229,7 +229,8 @@ async function main() {
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);
-    const reason = `worker crashed: ${e.message.slice(0, 200)}`;
+    // A system error by its code and call alone: its message names a path on this machine (postedError).
+    const reason = `worker crashed: ${postedError(e, { log: "the stage's log" }).slice(0, 200)}`;
     await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "crash" }, token).catch((x) => log(`exit after crash failed: ${x.message.slice(0, 120)}`));
     await finish("blocked", reason);
     throw e;
@@ -405,7 +406,7 @@ async function main() {
   // Whatever an earlier stage or run left in a reused checkout (local mode) is discarded (outbox.mjs putOn).
   const putOn = async () => {
     const onBranch = await outbox.putOn(resumed ? `refs/remotes/origin/${branch}` : `refs/remotes/origin/${defaultBranch}`);
-    if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
+    if (onBranch.code !== 0) throw commandFailed(`the checkout could not be put on ${branch}`, { code: onBranch.code, stderr: onBranch.error });
   };
   // What an abandoned pass left untracked, once the checkout is on the branch: a clean that fails leaves it, and a
   // later `git add -A` could push it, so the stage Blocks (setup) rather than run on such a clone.
@@ -479,7 +480,7 @@ async function main() {
         if (outbox.merged) log(`${defaultBranch} changed ${outbox.merged.paths.join(", ")} after the rebase: Factory merged ${defaultBranch}@${outbox.merged.default.slice(0, 7)} into ${branch} before pushing`);
         // Pointer files for its Git LFS media first, then the media handed over (outbox.mjs putOnRebased).
         const moved = await outbox.putOnRebased(outbox.head || rebasedTo);
-        if (moved.code !== 0) throw new Error(`the checkout could not be put on the rebased ${branch}: ${moved.error}`);
+        if (moved.code !== 0) throw commandFailed(`the checkout could not be put on the rebased ${branch}`, { code: moved.code, stderr: moved.error });
         if (moved.warning) log(`warning: ${moved.warning}`);
       }
       log(`rebase mode: ${behind} commit(s) behind ${defaultBranch}; ${rebaseConflict ? "conflicts, the harness resolves them" : `rebased cleanly to ${rebasedTo.slice(0, 7)} in Factory's mirror, no harness run`}`);

@@ -379,7 +379,7 @@ test("#277: a stopped rebase stage whose end runs out of time still leaves its r
       process.exit(0);
     `;
     bodies.length = 0;
-    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` }, stdio: ["ignore", "pipe", "pipe"] });
     let err = "";
     child.stderr.on("data", (c) => (err += c));
     assert.equal(await new Promise((r) => child.on("exit", r)), 0, err);

@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -485,6 +485,40 @@ test("#305: Factory's own secrets are recognised by the file itself, however its
   assert.deepEqual(one(join(keys, "copilot-a")), [], "a token file of its own still passes");
 });
 
+test("#318: Factory's own GitHub tokens are listed without following a link: a loop of links finishes fast and still finds them", () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
+  // Two links to `.`: followed, the listing grows threefold at every level. In a child process, so a stall fails the test.
+  symlinkSync(".", join(keys, "tokens", "loop-a"));
+  symlinkSync(".", join(keys, "tokens", "loop-b"));
+  declare(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] });
+  const script = `import { loadAccounts } from ${JSON.stringify(join(ROOT, "plugin", "scripts", "lib", "accounts.mjs"))};
+process.stdout.write(JSON.stringify(loadAccounts({ home: ${JSON.stringify(h)}, env: {} }).problems ?? []));`;
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, HOME: h }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(r.status, 0, `the check finished: ${r.signal || r.stderr}`);
+  assert.ok(Date.now() - t0 < 10_000, "and fast");
+  assert.deepEqual(JSON.parse(r.stdout).map((p) => p.account), ["gh"], "the token behind the loop is still Factory's own");
+});
+
+test("#318: a folder of Factory's tokens that cannot be read costs that folder alone", { skip: process.getuid?.() === 0 }, () => {
+  const h = fakeHome();
+  const keys = join(h, ".config", "factory");
+  mkdirSync(join(keys, "tokens", "acme"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(keys, "tokens", "locked"), { mode: 0o700 });
+  writeFileSync(join(keys, "tokens", "acme", "app"), "github_pat_dummy\n", { mode: 0o600 });
+  linkSync(join(keys, "tokens", "acme", "app"), join(keys, "TOKENS-acme-app"));
+  chmodSync(join(keys, "tokens", "locked"), 0o000);
+  try {
+    assert.deepEqual(problems(h, { copilot: [{ name: "gh", token_file: join(keys, "TOKENS-acme-app") }] }), [["gh", "its token file is one of Factory's own secrets (the accounts file, the AI Gateway key, a GitHub token or the App's key)"]]);
+  } finally {
+    chmodSync(join(keys, "tokens", "locked"), 0o700);
+  }
+});
+
 test("#305: the outer probe builds Codex's profile from the stage's account env, never serve's", { skip: process.platform !== "linux" }, async () => {
   const { runOuterProbe } = await import("../scripts/lib/local.mjs");
   const h = fakeHome();
@@ -495,7 +529,7 @@ test("#305: the outer probe builds Codex's profile from the stage's account env,
   mkdirSync(bin);
   writeFileSync(join(bin, "srt"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${seen}"\n`, { mode: 0o755 });
   const omega = defaultAccount(loadAccounts({ home: h, env: {} }), "codex");
-  runOuterProbe("codex", { env: accountEnv({ PATH: `${bin}:${process.env.PATH}` }, omega, h), home: h });
+  runOuterProbe("codex", { env: accountEnv({ HOME: h, PATH: `${bin}:${process.env.PATH}` }, omega, h), home: h });
   const profile = readFileSync(seen, "utf8").split("\n").find((a) => a.startsWith("permissions.factory="));
   const denies = (p) => profile.includes(`${JSON.stringify(p)}="deny"`);
   assert.ok(denies(join(h, "work", "codex-a", "auth.json*")), "the account's own login files, as its stage's profile denies them");
@@ -549,4 +583,49 @@ test("#305, the real path: a stage's set-up failing in an account folder outside
     assert.ok(!reason.includes(acct) && !reason.includes("outside-"), `no path: ${reason}`);
   }
   assert.ok(lines.some((l) => l.includes(acct)), "this machine's log has the whole error");
+});
+
+test("#318: a clone that cannot be prepared Blocks with a fixed reason, never the set-up's output naming a path outside the home; the log has it", { skip: process.platform === "win32" }, async () => {
+  const { logTo } = await import("../scripts/lib/inputs.mjs");
+  const { exec } = await import("../scripts/lib/proc.mjs");
+  const { prepareClone } = await import("../scripts/lib/local.mjs");
+  const h = fakeHome();
+  // A clone outside the home directory (a checkout under /srv), named by the line its set-up command failed with.
+  const outside = join(realpathSync(mkdtempSync(join(tmpdir(), "srv-"))), "checkout");
+  const { local } = await fakeLoop(h);
+  Object.assign(local, { repoFull: "acme/app", repo: { owner: "acme", name: "app", full: "acme/app" }, opts: { token: "t" } });
+  const blocked = [];
+  local.block = async (...a) => {
+    blocked.push(a);
+    throw new Error("the test's own end");
+  };
+  const lines = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (/\/issues\/8$/.test(String(url))) return new Response(JSON.stringify({ number: 8, labels: [{ name: "factory:running" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    throw new Error(`unexpected ${url}`);
+  };
+  logTo({ write: (s) => lines.push(s) });
+  try {
+    // The clone's sandbox, its command failing as git does, with the clone's path on its last line.
+    const run = () => exec("sh", ["-c", `echo "fatal: Unable to create '${outside}/.git/index.lock': File exists." >&2; exit 3`]);
+    const failed = await prepareClone(outside, [], run, { fresh: true }).then(() => assert.fail("the set-up should fail"), (e) => e);
+    await withHome(h, {}, async () => {
+      // A review stage's set-up failing twice (lapse), and a work stage's start failing a third time (unstart).
+      failed.stageSetup = "review";
+      await local.lapse(8, null, failed);
+      await local.lapse(8, null, failed);
+      local.startFailures = new Map([[8, { count: 2, retryAt: 0 }]]);
+      await local.unstart(8, Object.assign(failed, { startFailed: "work" }));
+    });
+  } finally {
+    logTo(null);
+    globalThis.fetch = real;
+  }
+  assert.equal(blocked.length, 2);
+  for (const [, , reason] of blocked) {
+    assert.match(reason, /the clone could not be prepared in its sandbox \(exit 3\); the log on this machine has its output/);
+    assert.ok(!reason.includes(outside) && !reason.includes("srv-") && !reason.includes("index.lock"), `no path, no output: ${reason}`);
+  }
+  assert.ok(lines.some((l) => l.includes(`${outside}/.git/index.lock`)), "this machine's log has the output");
 });

@@ -375,7 +375,8 @@ test("outbox: a malformed object in the agent's bundle is refused by Factory's o
   r.run(r.work, "update-ref", "refs/heads/factory/1", bad);
   const box = await open(r);
   assert.equal(await box.push(), false);
-  assert.match(box.error, /failed Factory's object check/);
+  // #318: its exit alone, never index-pack's output (which names the mirror's pack, a path on this machine).
+  assert.match(box.error, /^the agent's bundle failed Factory's object check \(exit \d+\); the log on this machine has its output$/);
   assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"));
 });
 

@@ -17,7 +17,7 @@ import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, member
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
-import { heldSecrets, log, secretForms } from "./inputs.mjs";
+import { commandFailed, heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
 
@@ -213,7 +213,7 @@ async function indexBundle(file, git) {
     });
     pack.pipe(child.stdin);
   });
-  if (idx.code !== 0) throw new Error(`the agent's bundle failed Factory's object check: ${idx.stderr.trim().split("\n").at(-1)?.slice(0, 200)}`);
+  if (idx.code !== 0) throw commandFailed("the agent's bundle failed Factory's object check", idx);
   // Every object the new commits reach is here now (index-pack checks the pack's own objects, this the rest).
   const all = await git(["rev-list", "--objects", "--missing=error", refs[0], ...(prereqs.length ? ["--not", ...prereqs] : [])]);
   if (all.code !== 0) throw new Error("the agent's bundle is missing objects its commits need");
@@ -250,7 +250,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   git.env = gitEnv;
   const must = async (args, opts) => {
     const r = await git(args, opts);
-    if (r.code !== 0) throw new Error(`git ${args[0]} in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || r.code}`);
+    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Factory's mirror failed`, r);
     return r.stdout.trim();
   };
   // The stage's real end: its work deadline plus the exit's reserve (GIT_RETRY).
@@ -290,7 +290,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
   const netMust = async (what, args) => {
     const r = await net(what, args);
-    if (r.code !== 0) throw new Error(`git ${args[0]} in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || r.code}`);
+    if (r.code !== 0) throw commandFailed(`git ${args[0]} in Factory's mirror failed`, r);
     return r.stdout.trim();
   };
   // A git command as the agent, in its checkout and its sandbox.
@@ -303,7 +303,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   /** GitHub's head of a branch, read from the server (never a remote-tracking ref), or "" when it does not exist. */
   const serverHead = async (ref) => {
     const r = await net("ls-remote", ["ls-remote", "origin", `refs/heads/${ref}`]);
-    if (r.code !== 0) throw new Error(`the branch on GitHub could not be read: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
+    if (r.code !== 0) throw commandFailed("the branch on GitHub could not be read", r);
     return /^([0-9a-f]{40,64})\t/m.exec(r.stdout)?.[1] ?? "";
   };
   // git cannot hold factory/<issue> beside factory/<issue>/<anything> (a ref is a file or a directory, not both): an
@@ -386,7 +386,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         r = await pipeToFile(c2, a2, { env: agentGitEnv, file, cap: 4 * 1024 ** 3 });
       }
       if (r.over) throw new Error("the branch's bundle is over 4 GB");
-      if (r.code !== 0) throw new Error(`the agent could not bundle its branch: ${r.stderr.trim().split("\n").at(-1)?.slice(0, 200)}`);
+      if (r.code !== 0) throw commandFailed("the agent could not bundle its branch", r);
       head = await indexBundle(file, git);
       rmSync(file, { force: true });
     }
@@ -414,7 +414,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (bundle.code !== 0) throw new Error(`the mirror could not bundle ${refs.join(", ")}`);
     const script = 'f="$(mktemp)" && cat > "$f" && git -C "$1" fetch -q --no-tags --update-head-ok "$f" "+refs/remotes/origin/*:refs/remotes/origin/*" "+refs/factory/*:refs/factory/*"; rc=$?; rm -f "$f"; exit $rc';
     const r = await exec(...backend(agentGitEnv).sandbox.git(["sh", "-c", script, "sh", checkout], agentGitEnv), { env: agentGitEnv, input: bundle.stdout });
-    if (r.code !== 0) throw new Error(`the checkout could not take the default branch: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
+    if (r.code !== 0) throw commandFailed("the checkout could not take the default branch", r);
     return base;
   };
 
@@ -873,7 +873,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   let fence = null;
   const names = async (range) => {
     const r = await git(["diff", "--no-renames", "--no-relative", "--name-only", "-z", ...range, "--"]);
-    if (r.code !== 0) throw new Error(`git diff in Factory's mirror failed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 160) || r.code}`);
+    if (r.code !== 0) throw commandFailed("git diff in Factory's mirror failed", r);
     return r.stdout.split("\0").filter(Boolean);
   };
 
@@ -1039,7 +1039,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (up.code !== 0) {
           const out = `${up.stdout}\n${up.stderr}`;
           const quota = lfsQuotaLine(out);
-          return refuse(quota ? `Git LFS refused the upload (quota or storage): ${quota}` : `Git LFS upload failed: ${out.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 200) || `exit ${up.code}`}`, { lfs: !!quota, kind: quota ? "lfs-quota" : "" });
+          // GitHub's quota line as it is; any other output (which can name a path on this machine) to the log alone.
+          return refuse(quota ? `Git LFS refused the upload (quota or storage): ${quota}` : commandFailed("Git LFS upload failed", { code: up.code, stderr: out }).message, { lfs: !!quota, kind: quota ? "lfs-quota" : "" });
         }
       }
     }

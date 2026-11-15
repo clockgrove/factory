@@ -201,9 +201,11 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
   const own = [accountsFile(home), gatewayKeyFile(home), ...(appKey ? [real(resolve(appKey))] : [])].filter(Boolean);
   // Each also by the file itself (its device and inode), whatever its name is spelled: on a case-insensitive file system
   // (macOS) `Accounts.json` or `TOKENS/acme/app` is that file under another name, which no path comparison catches.
-  const ownFiles = [...own, ...filesIn(join(keyDir, "tokens"))].map(statQuiet).filter(Boolean);
+  // Listed once, and only when an account declares a token file.
+  let ownFiles;
   const isOwn = (f) => {
     const st = statQuiet(f);
+    ownFiles ??= [...own, ...filesIn(join(keyDir, "tokens"))].map(statQuiet).filter(Boolean);
     return !!st && ownFiles.some((o) => o.dev === st.dev && o.ino === st.ino);
   };
   for (const a of all.filter((x) => x.tokenFile)) {
@@ -263,13 +265,28 @@ const tokenText = (file) => {
     return null;
   }
 };
-/** Every path in `dir` and its subfolders (none when it cannot be read); links are listed, never followed into. */
+/**
+ * Every path in `dir` and its subfolders. Only a real directory is descended into: a link is listed, never followed (a
+ * link to `.` or to a large tree costs one entry), and a folder that cannot be read lists nothing of its own, the rest
+ * still listed.
+ */
 const filesIn = (dir) => {
-  try {
-    return readdirSync(dir, { recursive: true }).map((f) => join(dir, f));
-  } catch {
-    return [];
-  }
+  const out = [];
+  const walk = (d) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = join(d, e.name);
+      out.push(p);
+      if (e.isDirectory()) walk(p);
+    }
+  };
+  walk(dir);
+  return out;
 };
 /** statSync, or null when the path is gone (a folder removed between its realpath and here) or cannot be read. */
 const statQuiet = (p) => {

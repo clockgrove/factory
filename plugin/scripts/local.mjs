@@ -28,7 +28,7 @@ import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError } from "./lib/github.mjs";
-import { holdSecrets, input, log, logTo, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { holdSecrets, input, log, logTo, postedError, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -265,9 +265,10 @@ export function repoFromRemote(url) {
  * Why local mode cannot start here, one line each. `outer` is lib/local.mjs outerProbe: Copilot runs locally only inside
  * the outer sandbox, since its own sandbox applies its file policy only best-effort, so on a host where that does not
  * start (macOS, or Linux without what its sandbox's network needs) local Copilot is refused before any claim.
- * `wf` is the workflow's settings and `env` this shell's, which wins (as in baseEnv); `os` is the platform.
+ * `wf` is the workflow's settings and `env` this shell's, which wins (as in baseEnv); `os` is the platform; `account` the
+ * one the loop starts on (lib/accounts.mjs), whose probe result outerProbe keeps apart from every other account's.
  */
-export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform() } = {}) {
+export function preflight(harness, repoFull, token, copilotToken, { outer = outerProbe, wf = {}, env = process.env, os = platform(), account = null } = {}) {
   const problems = [];
   for (const bin of ["git", "gh"]) if (!onPath(bin)) problems.push(`${bin} is not on PATH`);
   if (!onPath("srt")) problems.push("srt is not on PATH; Factory's own commands run in it (npm i -g @anthropic-ai/sandbox-runtime)");
@@ -279,7 +280,7 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
   // macOS's sandbox has no network namespace of its own: a throwaway Postgres there would listen on the box's loopback.
   // Whichever source set it: the shell's value, else the workflow's (baseEnv), which every stage then runs with.
   if (os === "darwin" && (env.FACTORY_LOCAL_DB ?? wf.FACTORY_LOCAL_DB ?? "") === "1") problems.push("FACTORY_LOCAL_DB runs on Linux and WSL2 only: macOS's sandbox shares the box's loopback, so a throwaway database would be reachable from outside it");
-  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length }));
+  problems.push(...harnessProblems(harness, copilotToken, { outer, sandboxStarts: !startProblems.length, account }));
   if (!token) problems.push(`no token for ${repoFull}: create a fine-grained token for this one repository (contents, issues and pull requests read and write; actions read) and save it to ${tokenFile(repoFull)} (chmod 600) or export FACTORY_LOCAL_TOKEN`);
   return problems;
 }
@@ -287,9 +288,10 @@ export function preflight(harness, repoFull, token, copilotToken, { outer = oute
 /**
  * Why one harness cannot run here, one line each: the loop's own at its start (preflight), and another an Objective's
  * harness label names before its first stage on this machine (Local.harnessFor). `sandboxStarts`: whether srt's sandbox
- * starts here (preflight's own check), without which Copilot's outer sandbox is not probed.
+ * starts here (preflight's own check), without which Copilot's outer sandbox is not probed. `account`: the one the
+ * harness runs on, for outerProbe.
  */
-export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true } = {}) {
+export function harnessProblems(harness, copilotToken, { outer = outerProbe, sandboxStarts = true, account = null } = {}) {
   const problems = [];
   if (!["claude", "codex", "copilot"].includes(harness)) return [`unknown harness ${harness}`];
   if (!onPath(harness)) problems.push(`${harness} is not on PATH`);
@@ -302,7 +304,7 @@ export function harnessProblems(harness, copilotToken, { outer = outerProbe, san
     if (platform() !== "linux" || (["srt", "bwrap", "copilot"].every(onPath) && sandboxStarts)) {
       // Without the developer's own COPILOT_HOME: the probe makes and seeds the home it is given, and Factory leaves theirs alone.
       const { COPILOT_HOME: _own, ...env } = process.env;
-      const o = outer("copilot", { env });
+      const o = outer("copilot", { env, account });
       if (!o.on) problems.push(`${COPILOT_OUTER_OFF}: ${o.why}; use FACTORY_HARNESS=claude or codex locally, or run Copilot Objectives on the Action${o.cacheFile ? ` (a yes is kept in ${o.cacheFile})` : ""}`);
     }
   }
@@ -320,16 +322,6 @@ function copilotToken() {
   const f = copilotTokenFile();
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
-/**
- * A thrown error as a Blocked reason may carry it, which this machine's log has whole: a system error (Node's, with its
- * `syscall`: a file or process call, whose message names the path, an account's folder or token file included) by its
- * code and call alone; any other by its message, the home directory shortened to `~`.
- */
-export const postedError = (e, home = homedir()) => {
-  if (typeof e?.syscall !== "string") return String(e?.message || e).replaceAll(home, "~");
-  const code = typeof e.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? e.code : "a system error";
-  return /^[a-z_]+$/.test(e.syscall) ? `${code} from ${e.syscall}; the local loop's log names the path` : `${code}; the local loop's log names the path`;
-};
 /** The Copilot token a stage on `account` runs on: a declared account's file alone, else copilotToken(). */
 const copilotTokenOf = (account) => (account?.declared ? accountToken(account) : copilotToken());
 /**
@@ -552,7 +544,7 @@ export class Local {
     this.startAccount = accounts.ok ? defaultAccount(accounts, this.harness) : implicitAccount(this.harness);
     this.copilotToken = this.harness === "copilot" ? copilotTokenOf(this.startAccount) : "";
     const problems = accounts.ok ? [] : accounts.problems.map((p) => `account ${p.account} (~/.config/factory/accounts.json): ${p.why}`);
-    problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf }));
+    problems.push(...preflight(this.harness, this.repoFull, this.token, this.copilotToken, { wf: this.wf, account: this.startAccount }));
     // The Factory App, when configured, posts the notices (#2522). Its key stays in this process: a stage asks for a
     // notice token over its IPC channel (stage()), and nothing else, env or file, carries the key or the token.
     const startEnv = accountEnv(process.env, this.startAccount);
@@ -662,7 +654,7 @@ export class Local {
     this.ready ??= new Set([key(this.startAccount ?? implicitAccount(this.harness))]);
     if (this.ready.has(key(account))) return [];
     const env = accountEnv(process.env, account);
-    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "");
+    const problems = harnessProblems(harness, harness === "copilot" ? copilotTokenOf(account) : "", { account });
     const app = localApp(env, homedir(), harness).problem;
     const gateway = gatewayKeyProblem(env, homedir(), harness);
     for (const p of [app, gateway]) if (p) problems.push(p);
@@ -842,7 +834,7 @@ export class Local {
     // Whether the harness runs in it on this host: Claude Code on Linux, Codex where its own sandbox starts inside it (probed
     // once per host and version, lib/local.mjs outerProbe), Copilot where its sandbox's network starts inside it (probed the
     // same way). Said once when it does not.
-    const outer = outerProbe(harness, { domains, env: { ...host, ...extra } });
+    const outer = outerProbe(harness, { domains, env: { ...host, ...extra }, account });
     const outerOn = outer.on;
     // Entries Codex's and Copilot's sandboxes cannot enforce as written (a loopback name, an IP address, host:port) are left
     // out of their policies (lib/local.mjs sandboxHosts: #106, #108).

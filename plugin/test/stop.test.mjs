@@ -220,7 +220,7 @@ setTimeout(() => {}, 60000);
     import { passesRunning, runHarness, stageSpendSoFar, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
     import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     const root = process.env.FAKE_STATE;
-    const pass = (label) => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { PATH: process.env.PATH, FAKE_STATE: root }, timeoutMs: 120_000, label });
+    const pass = (label) => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, timeoutMs: 120_000, label });
     const started = Date.now();
     // The caller of a pass the stop ended never goes on: the stop writes the stage's end.
     let returned = 0;
@@ -285,7 +285,7 @@ setTimeout(() => {}, 60000);
     process.env.GITHUB_API_URL = "https://github.test";
     const root = process.env.FAKE_STATE;
     const records = [];
-    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { PATH: process.env.PATH }, timeoutMs: 120_000, label: "work-1" });
+    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 120_000, label: "work-1" });
     const started = Date.now();
     while (!((await stageSpendSoFar()).usd > 0) && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
     const ends = [];

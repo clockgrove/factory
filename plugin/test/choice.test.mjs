@@ -369,6 +369,8 @@ test("local mode, the real path: stageEnv sets the stage up for the harness it i
 
 test("local mode, the real path: harnessFor reads the issue's labels and their appliers from GitHub, and refuses a stranger's label", async () => {
   const { Local } = await import("../scripts/local.mjs");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
   const loop = Object.assign(Object.create(Local.prototype), { dev: "/nonexistent", harness: "claude", repoFull: "acme/app", repo, wf: {}, opts: { token: "t" } });
   const labels = ["factory:objective", "factory:model:claude-sonnet-5-5"];
   const real = globalThis.fetch;
@@ -383,13 +385,17 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
       if (/\/issues\/8$/.test(u)) return json({ number: 8, labels: labels.map((name) => ({ name })) });
       throw new Error(`unexpected ${u}`);
     };
+    // A home of its own: harnessFor reads this machine's account declaration (lib/accounts.mjs), none here.
+    const home = process.env.HOME;
+    process.env.HOME = mkdtempSync(join(tmpdir(), "choice-home-"));
     try {
       return await loop.harnessFor(8);
     } finally {
+      process.env.HOME = home;
       globalThis.fetch = real;
     }
   };
-  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", hosts: [] });
+  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", hosts: [], account: { name: "claude", harness: "claude", declared: false } }, "nothing declared here: the account named after the harness");
   const refused = await run("reader");
   assert.equal(refused.ok, false);
   assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);

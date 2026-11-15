@@ -525,10 +525,12 @@ function eventReader() {
  * void that throws when it cannot). `tcp`: also listen on 127.0.0.1 (no sandbox). `maxUsd`: the stage's max_usd (0 or
  * less: no cap). `socketDir`: where the socket goes, when not in `dir` (worker-relay.mjs relaySocketDir: a short
  * directory the caller made, mode 700); its path must fit UNIX_SOCKET_PATH_MAX. `editsMaxBytes`: an image edit's body
- * cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other limits and delays). Returns the relay: {url, port,
+ * cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other limits and delays). `upstreamClock`: what a call's
+ * time upstream is read on, against fastErrorMs and slowFailureMs (Date.now; a test sets its own, so a loaded machine's
+ * pause never turns a fast answer slow). Returns the relay: {url, port,
  * tcpPort, socketPath, dir, socketDir, token, probeId, beginPass(budget), endPass(), totals(), close()}.
  */
-export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, log = () => {} }) {
+export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -923,7 +925,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     headers["accept-encoding"] = "identity";
     // Sent: from here the call may be billed whatever the client does, so it runs to its end (never aborted on a client's
     // hang-up) and is priced then; an end that leaves its cost unknown fails closed.
-    const sentAt = Date.now();
+    const sentAt = upstreamClock();
     const done = (async () => {
       let upstream;
       try {
@@ -933,7 +935,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
         const code = String(e?.relayTimeout ? "timeout" : e?.code || e?.cause?.code || e?.name || "error").slice(0, 40);
         const unsent = e?.unsent === true;
         if (!res.headersSent && !res.destroyed) refusal(res, 502, unsent ? `the AI Gateway could not be reached (${code}): the call never left this machine, so nothing was billed, and it can be tried again` : `the AI Gateway call failed (${code})`);
-        return { sentError: true, error: code, unsent, upstreamMs: Date.now() - sentAt };
+        return { sentError: true, error: code, unsent, upstreamMs: upstreamClock() - sentAt };
       }
       const outHeaders = {};
       for (const [k, v] of upstream.headers) if (RESPONSE_HEADERS.test(k.toLowerCase()) && !keyForms.carries(v)) outHeaders[k] = v;
@@ -979,7 +981,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
           parsed.doc = null;
         }
       }
-      return { status: upstream.status, broken, overflow, stream: !!events, headerId: upstream.headers.get("x-generation-id"), upstreamMs: Date.now() - sentAt, ...parsed };
+      return { status: upstream.status, broken, overflow, stream: !!events, headerId: upstream.headers.get("x-generation-id"), upstreamMs: upstreamClock() - sentAt, ...parsed };
     })().catch(() => ({ sentError: true, error: "relay" }));
     // In flight until its answer ends (endPass waits for these first, then gives the lookups ENDPASS_LOOKUP_MS).
     s.inflight.add(done);

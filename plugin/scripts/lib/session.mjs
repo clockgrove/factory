@@ -1536,6 +1536,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
     // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
     ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
+    // The local account the stage ran on (accounts.mjs), by name only; none on Actions or in a cloud sandbox.
+    ...(ran?.account ? { account: ran.account } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,

@@ -169,12 +169,15 @@ export function routeProblem(prepared, harness) {
 
 /**
  * What a stage records of the harness and models it ran and the hosts its labels opened (the usage record's `ran`, the
- * progress comment's harness line).
+ * progress comment's harness line), and in local mode the account it ran on (`account`: FACTORY_STAGE_ACCOUNT,
+ * accounts.mjs), by name only.
  */
-export const ranWith = (inputs, labels = []) => {
+export const ranWith = (inputs, labels = [], account = null) => {
   const h = hostsOf(labels);
-  return { harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), hosts: h.ok ? h.hosts : [] };
+  return { harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), hosts: h.ok ? h.hosts : [], ...(stageAccountName(account) ? { account } : {}) };
 };
+/** An account name as accounts.mjs allows one (a harness's own name included), else null: nothing else is recorded. */
+export const stageAccountName = (name) => (typeof name === "string" && name.length <= LABEL_MAX - "factory:account:".length && /^[a-z0-9][a-z0-9-]*$/.test(name) ? name : null);
 
 /**
  * Why a stage cannot run with the hosts its labels now open where its route prepared its sandboxes for others

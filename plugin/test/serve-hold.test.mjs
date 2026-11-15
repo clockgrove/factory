@@ -761,3 +761,44 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
   assert.deepEqual(reviewed, [], "no review started");
   assert.equal(run.lines.filter((l) => /claude's usage limit is spent until .*; no stage starts on claude until then/.test(l)).length, 1);
 });
+
+test("serve: one harness's spent usage limit holds only that harness's work; an Objective labelled for another still starts (#254)", async () => {
+  const reviewed = [];
+  const run = await serveAgainst({
+    view: (read, labels) => labels,
+    onList: (read, { labels }) => labels.add("factory:harness:codex"),
+    firstStage: () => Promise.resolve({ exit: "delivered" }),
+    stopAfter: 3,
+    stubs: {
+      harness: "claude",
+      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      pendingReviews: async () => [{ issue: 8, pr: 18 }],
+      review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
+    },
+  });
+  assert.equal(run.claims.length, 1, "the codex Objective starts");
+  assert.deepEqual(reviewed, [], "the review on the loop's claude stays held");
+});
+
+test("limitPaused: a provider that refuses past its stated reset is held 2, 5, 10, then 15 minutes, not every tick; a reset further out starts over (#254)", async () => {
+  const loop = await claimLoop();
+  let t = Date.parse("2026-11-14T23:01:00Z");
+  loop.clock = () => t;
+  const pause = (reset, extra = {}) => loop.limitPaused(7, { exit: "paused", stage: "work", usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(t).toISOString(), ...extra } });
+  const holds = [];
+  for (let i = 0; i < 5; i++) {
+    pause(t - 60_000);
+    holds.push((loop.offline.get(7).reset - t) / 60_000);
+    t = loop.offline.get(7).reset;
+  }
+  assert.deepEqual(holds, [2, 5, 10, 15, 15]);
+  // A stage held before it ran counts nothing.
+  pause(t + 60_000, { held: true });
+  assert.equal(loop.offline.get(7).reset, t + 60_000);
+  // A real window ahead: its reset, and the count starts again.
+  pause(t + 60 * 60_000);
+  assert.equal(loop.offline.get(7).reset, t + 60 * 60_000);
+  t += 60 * 60_000;
+  pause(t - 1);
+  assert.equal(loop.offline.get(7).reset, t + 2 * 60_000);
+});

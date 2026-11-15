@@ -863,7 +863,13 @@ export async function runHarness(opts) {
     const end = Math.max(r.resetAt, now) + LIMIT.slackMs;
     const bound = waitBound(now);
     const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - (end - now) : Infinity;
-    if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run" });
+    // Nothing left of the dollar cap to run it again with: the pass ends at the cap (a cap of 0 would run uncapped).
+    const spent = [...limited, rec].reduce((s, x) => s + (Number.isFinite(x.usd) ? Math.max(0, x.usd) : 0), 0);
+    if (opts.maxUsd > 0 && opts.maxUsd - spent <= 0) {
+      rec = { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" };
+      break;
+    }
+    if (limited.length >= LIMIT.waits || bound === null || end > bound || left < LIMIT.minRunMs) throw new UsageLimitReached(r, { since: now, label: opts.label || "run", sessionId: rec.sessionId ?? null });
     log(`${opts.label || "run"}: ${r.harness} reached its subscription's usage limit (${refusalFields(r)}), which resets at ${new Date(r.resetAt).toISOString()}; waiting for it in place (${minutesText(end - now)}), then running the pass again on the same model`);
     while (OUTAGE.now() < end) {
       await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
@@ -871,9 +877,8 @@ export async function runHarness(opts) {
       if (stopping()) await parked();
     }
     limited.push(rec);
-    const spent = limited.reduce((s, x) => s + (Number.isFinite(x.usd) ? Math.max(0, x.usd) : 0), 0);
     const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
-    rec = await runCutOff({ ...opts, maxUsd: opts.maxUsd > 0 ? Math.max(0, opts.maxUsd - spent) : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: LIMIT_PASS_PROMPT } : {}) });
+    rec = await runCutOff({ ...opts, maxUsd: opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: LIMIT_PASS_PROMPT } : {}) });
   }
   return limited.length ? joinLost(limited, rec, { limit: true }) : rec;
 }
@@ -887,6 +892,9 @@ export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000 };
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
 
+/** What a work stage's resumed session is told after its stage paused on the usage limit (worker.mjs, session.mjs keptAtLimit). */
+export const LIMIT_STAGE_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. This is a new stage: the checkout holds your work as you left it, uncommitted changes included, and $FACTORY_OUT starts empty, so write its files again before you finish. Continue the same task from where it stopped; do not redo finished steps.";
+
 /** The code on the error runHarness throws for a usage limit it does not wait for in place (session.mjs usageLimitExit). */
 export const USAGE_LIMIT = "USAGE_LIMIT";
 
@@ -895,9 +903,9 @@ export const USAGE_LIMIT = "USAGE_LIMIT";
  * the stage ends on it (session.mjs usageLimitExit). `refusal` is usage.mjs providerRefusal's; `since` (ms) when met.
  */
 export class UsageLimitReached extends Error {
-  constructor(refusal, { since, label }) {
+  constructor(refusal, { since, label, sessionId = null }) {
     super(`${label}: ${refusal.harness} reached its subscription's usage limit (${refusalFields(refusal)}), which resets at ${new Date(refusal.resetAt).toISOString()}`);
-    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since });
+    Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since, sessionId });
   }
 }
 

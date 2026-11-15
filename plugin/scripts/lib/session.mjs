@@ -1604,11 +1604,19 @@ export async function outageExit(e, { local, records, finish, block }) {
  * harness until the reset and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
  * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
  */
-export async function usageLimitExit(e, { local, records, finish, block }) {
+export async function usageLimitExit(e, { local, records, finish, block, keep = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString() };
+  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}) };
   if (local) {
+    // A work stage keeps its pass's session and its checkout's work (outbox.mjs keepWork) for the next work stage here
+    // (keptAtLimit), which puts both back and resumes the session rather than running a fresh pass.
+    const session = e.sessionId || records.map((r) => r?.sessionId).filter(Boolean).at(-1) || null;
+    if (keep && session) {
+      const kept = await Promise.resolve(keep()).catch((x) => ({ error: String(x?.message || x).slice(0, 160) }));
+      if (kept?.head && kept?.snapshot) Object.assign(usageLimit, { session, work: { head: kept.head, snapshot: kept.snapshot } });
+      else log(`the work at the usage limit could not be kept (${kept?.error || "no answer"}); the next work stage starts fresh`);
+    }
     const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
     log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);
     await finish("paused", reason, null, usageLimit);
@@ -1618,6 +1626,23 @@ export async function usageLimitExit(e, { local, records, finish, block }) {
   log(`blocked: ${reason}`);
   await block(reason, "provider-quota").catch((x) => log(`the usage limit's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", reason, null, usageLimit);
+}
+
+/**
+ * What the newest stage here kept when it paused on `harness`'s usage limit (usageLimitExit): its result.json's
+ * `usageLimit` with the `session` and the checkout's `work` ({head, snapshot}), when that stage was a work stage on the
+ * same harness; else null. Local mode only: `workDir` is the Objective's directory with its stages' usage directories.
+ */
+export function keptAtLimit(workDir, harness) {
+  const newest = localSessionSources(workDir)[0];
+  if (!newest || !/^usage-work-/.test(newest.name)) return null;
+  try {
+    const r = JSON.parse(readFileSync(join(workDir, newest.name, "result.json"), "utf8"));
+    const l = r?.exit === "paused" ? r.usageLimit : null;
+    return l && l.harness === harness && typeof l.session === "string" && l.session && l.work?.head && l.work?.snapshot ? l : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

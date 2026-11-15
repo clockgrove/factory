@@ -1,12 +1,14 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { jsonLines, parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
+import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
-import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
+import { crashed, keptAtLimit, usageLimitExit } from "../scripts/lib/session.mjs";
+import { WORK_REF, openOutbox } from "../scripts/lib/outbox.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
 import { LIMIT_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
@@ -24,7 +26,7 @@ const withReset = (text, s) => text.replaceAll(`"resetsAt":${RESET_S}`, `"resets
 
 test("claude: the usage limit is a refusal read from api_error, with the reset from the structured resetsAt; no crash, Blocked provider-quota naming the reset", () => {
   const rec = { ...parseUsage("claude", LIMIT_RUN, "claude-opus-5-5", 1), exitCode: 1, signal: null, timedOut: false };
-  assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "claude", status: 429, type: "rate_limit", code: "usage_limit_reached", message: undefined, resetAt: Date.parse(RESET) });
+  assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "claude", status: 429, type: "rate_limit", code: "usage_limit_reached", message: undefined, limitType: "five_hour", resetAt: Date.parse(RESET) });
   assert.equal(crashed(rec), false);
   const d = decideExit({ harness: { ...rec, died: 0 }, pr: null, commits: 0 });
   assert.equal(d.exit, "blocked");
@@ -43,22 +45,28 @@ test("claude: the usage limit is a refusal read from api_error, with the reset f
   assert.match(refusalReason(bare), /with no reset time reported; .*once the limit has reset/);
 });
 
-test("codex: a provider body with usage_limit_reached carries its resets_at; copilot's quota stays a provider-quota refusal", () => {
-  const body = JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ status: 429, error: { type: "usage_limit_reached", message: "m", resets_at: RESET_S } }) } });
-  const r = providerRefusal("codex", jsonLines(body));
-  assert.equal(r.type, "usage_limit_reached");
-  assert.equal(r.resetAt, Date.parse(RESET));
-  assert.equal(refusalCause(r), "provider-quota");
+test("claude: with no resetsAt on the API error, the reset is the last rejected rate_limit_event of the error's own window", () => {
+  const weekly = Date.parse(RESET) / 1000 + 5 * 86_400;
+  const text = LIMIT_RUN.replace('"rateLimitType":"five_hour"}},"api_error_origin"', '"rateLimitType":"five_hour"}},"api_error_origin"')
+    .replace(/("api_error_params":\{"rate_limit_info":\{"status":"rejected"),"resetsAt":\d+/, "$1")
+    .replace(/(\{"type":"rate_limit_event"[^\n]*\n)/, `$1{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${weekly},"rateLimitType":"seven_day"},"session_id":"x"}\n`);
+  assert.ok(!/"api_error_params":\{"rate_limit_info":\{[^}]*resetsAt/.test(text), "the fixture's API error carries no reset");
+  const r = parseUsage("claude", text, null).refusal;
+  assert.equal(r.limitType, "five_hour");
+  assert.equal(r.resetAt, Date.parse(RESET), "the five-hour window's reset, not the later seven-day one");
+});
+
+test("copilot's quota stays a provider-quota refusal with no reset", () => {
   const copilot = providerRefusal("copilot", [{ type: "session.error", data: { statusCode: 402, errorType: "quota", errorCode: "quota_exceeded", message: "m" } }]);
   assert.equal(refusalCause(copilot), "provider-quota");
   assert.equal(copilot.resetAt, undefined);
 });
 
 /** A fake claude: its first `limited` runs print the usage-limit run (reset at `resetS`) and exit 1, later ones succeed; argv logged. */
-function fakeClaude({ limited = 1, resetS = RESET_S } = {}) {
+function fakeClaude({ limited = 1, resetS = RESET_S, usd = 0 } = {}) {
   const bin = mkdtempSync(join(tmpdir(), "factory-claude-limit-"));
   const log = join(bin, "calls.jsonl");
-  writeFileSync(join(bin, "limit.jsonl"), withReset(LIMIT_RUN, resetS));
+  writeFileSync(join(bin, "limit.jsonl"), withReset(LIMIT_RUN, resetS).replace('"total_cost_usd":0', `"total_cost_usd":${usd}`));
   const ok = [{ type: "system", subtype: "init", session_id: "00000000-0000-0000-0000-000000000254" }, { type: "result", subtype: "success", is_error: false, num_turns: 2, result: "done", session_id: "00000000-0000-0000-0000-000000000254", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }];
   writeFileSync(join(bin, "ok.jsonl"), ok.map((l) => JSON.stringify(l)).join("\n") + "\n");
   writeFileSync(join(bin, "claude"), `#!${process.execPath}
@@ -169,4 +177,95 @@ test("runHarness, real, fake claude: off the local route the in-place bound is t
     assert.equal(calls().length, 2);
     assert.equal(rec.ok, true);
   });
+});
+
+test("runHarness, real, fake claude: a wait never reruns past the dollar cap; the rerun gets what is left of it", async () => {
+  const start = Date.parse(RESET) - 10 * 60_000;
+  const spent = fakeClaude({ usd: 0.5 });
+  await inStage(spent.bin, start, async () => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    const rec = await runHarness(pass(spent.bin, { maxUsd: 0.5 }));
+    assert.equal(spent.calls().length, 1, "no uncapped rerun");
+    assert.equal(rec.budgetExceeded, true);
+    assert.equal(rec.error, "dollar cap reached");
+  });
+  const left = fakeClaude({ usd: 0.5 });
+  await inStage(left.bin, start, async () => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    await runHarness(pass(left.bin, { maxUsd: 2 }));
+    const c = left.calls();
+    assert.equal(c.length, 2);
+    assert.equal(Number(c[1].args[c[1].args.indexOf("--max-budget-usd") + 1]), 1.5);
+  });
+});
+
+test("usageLimitExit and keptAtLimit: a local work stage keeps its session and work; the next work stage on the same harness finds them", async () => {
+  const refusal = { harness: "claude", status: 429, type: "rate_limit", code: "usage_limit_reached", message: "m", resetAt: Date.parse(RESET), limitType: "five_hour" };
+  const e = Object.assign(new Error("x"), { code: USAGE_LIMIT, refusal, resetAt: refusal.resetAt, since: Date.parse(RESET) - 3 * 60 * 60_000, sessionId: "00000000-0000-0000-0000-000000000254" });
+  const ends = [];
+  const work = { head: "a".repeat(40), snapshot: "b".repeat(40) };
+  await usageLimitExit(e, { local: true, records: [], finish: async (...a) => ends.push(a), block: async () => {}, keep: async () => work });
+  const limit = ends[0][3];
+  assert.deepEqual(limit, { harness: "claude", reset: RESET, since: "2026-11-14T20:00:00.000Z", limitType: "five_hour", session: e.sessionId, work });
+  const dir = mkdtempSync(join(tmpdir(), "factory-kept-"));
+  const stage = (name, result) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "result.json"), JSON.stringify(result));
+  };
+  stage("usage-work-1", { exit: "paused", usageLimit: limit });
+  assert.deepEqual(keptAtLimit(dir, "claude"), limit);
+  assert.equal(keptAtLimit(dir, "codex"), null, "another harness's session is not resumed");
+  // A keep that fails: the pause stands, with nothing kept, and the next stage starts fresh.
+  const failed = [];
+  await usageLimitExit(e, { local: true, records: [], finish: async (...a) => failed.push(a), block: async () => {}, keep: async () => ({ error: "exit 5" }) });
+  assert.equal(failed[0][3].work, undefined);
+  // A newer stage that is not that pause: nothing to put back.
+  await new Promise((r) => setTimeout(r, 20));
+  stage("usage-review-2", { exit: "delivered" });
+  assert.equal(keptAtLimit(dir, "claude"), null);
+});
+
+test("outbox keepWork and restoreWork: the checkout's commits, changes and untracked files come back after putOn", async () => {
+  const quiet = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  const root = mkdtempSync(join(tmpdir(), "outbox-kept-"));
+  const origin = join(root, "origin.git");
+  const work = join(root, "work");
+  const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet } }).trim();
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  execFileSync("git", ["clone", "-q", origin, work], { env: { ...process.env, ...quiet } });
+  writeFileSync(join(work, "app.txt"), "v1\n");
+  run(work, "add", "app.txt");
+  run(work, "commit", "-q", "-m", "base");
+  run(work, "push", "-q", "origin", "HEAD:main");
+  run(work, "checkout", "-q", "-b", "factory/1");
+  const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, agentEnv: { ...process.env, ...quiet }, base: root });
+  try {
+    // The pass's own unpushed commit, a changed file, a staged new file and an untracked one.
+    writeFileSync(join(work, "app.txt"), "v2\n");
+    run(work, "commit", "-q", "-am", "the pass's commit");
+    writeFileSync(join(work, "app.txt"), "v3\n");
+    writeFileSync(join(work, "staged.txt"), "s\n");
+    run(work, "add", "staged.txt");
+    writeFileSync(join(work, "new.txt"), "n\n");
+    const head = run(work, "rev-parse", "HEAD");
+    const kept = await box.keepWork();
+    assert.equal(kept.head, head, kept.error);
+    assert.equal(run(work, "rev-parse", WORK_REF), kept.snapshot);
+    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v3\n", "keeping touches nothing");
+    // The next stage: prepareClone clears untracked files, putOn forces the branch to what GitHub has.
+    rmSync(join(work, "new.txt"));
+    assert.equal((await box.putOn("refs/remotes/origin/main")).code, 0);
+    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v1\n");
+    assert.equal((await box.restoreWork(kept)).code, 0);
+    assert.equal(run(work, "rev-parse", "HEAD"), head, "the pass's commit is back");
+    assert.equal(readFileSync(join(work, "app.txt"), "utf8"), "v3\n");
+    assert.equal(readFileSync(join(work, "new.txt"), "utf8"), "n\n");
+    assert.equal(readFileSync(join(work, "staged.txt"), "utf8"), "s\n");
+    assert.equal(run(work, "diff", "--cached", "--name-only"), "", "nothing staged");
+    assert.equal(run(work, "diff", "--name-only"), "app.txt", "the change unstaged");
+    assert.throws(() => run(work, "rev-parse", "--verify", "-q", WORK_REF), "the ref is dropped");
+    assert.notEqual((await box.restoreWork({ head, snapshot: "c".repeat(40) })).code, 0, "kept work that is not there fails, for the fresh-pass fallback");
+  } finally {
+    box.close();
+  }
 });

@@ -167,7 +167,7 @@ function codexError(events) {
     }
   }
   if (!body || typeof body !== "object" || !body.error || typeof body.error !== "object") return null;
-  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message), resetAt: epochMs(body.error.resets_at) };
+  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message) };
 }
 
 /**
@@ -199,8 +199,9 @@ export function rotatedPin(harness, events) {
  *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
  * A usage limit (usageLimited) carries `resetAt` (ms) when the harness reported the reset as structure:
  *   claude  : the result's `api_error` is the code (`usage_limit_reached`); the reset is the API error message's
- *             `api_error_params.rate_limit_info.resetsAt`, else the last `rate_limit_event` whose status is `rejected`
- *   codex   : the provider's body's `error.resets_at` (epoch seconds)
+ *             `api_error_params.rate_limit_info.resetsAt`, else the last `rate_limit_event` whose status is `rejected`,
+ *             of the error's own window (`rateLimitType`, kept as `limitType`) when it names one
+ *   codex   : Codex reports its usage limit as prose only, so it is not read as one
  *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
 export function providerRefusal(harness, events) {
@@ -212,12 +213,15 @@ export function providerRefusal(harness, events) {
     const status = num(res?.api_error_status) ?? num(api?.api_error_status);
     if (res?.is_error !== true || status === null) return null;
     r = { status, type: str(api?.error), code: str(res.api_error) ?? str(api?.api_error), message: str(res.result) };
-    const rejected = [...events].reverse().find((e) => e?.type === "rate_limit_event" && e.rate_limit_info?.status === "rejected");
-    reset = epochMs(api?.api_error_params?.rate_limit_info?.resetsAt) ?? epochMs(rejected?.rate_limit_info?.resetsAt);
+    // The limit's window (`rateLimitType`, e.g. five_hour) as the API error names it; the fallback reset is that window's.
+    const info = api?.api_error_params?.rate_limit_info;
+    const limitType = str(info?.rateLimitType);
+    const rejected = [...events].reverse().find((e) => e?.type === "rate_limit_event" && e.rate_limit_info?.status === "rejected" && (!limitType || e.rate_limit_info.rateLimitType === limitType));
+    reset = epochMs(info?.resetsAt) ?? epochMs(rejected?.rate_limit_info?.resetsAt);
+    if (limitType && USAGE_LIMIT_KINDS.has(r.code)) r.limitType = limitType;
   } else if (harness === "codex") {
-    const e = codexError(events);
-    if (!e) return null;
-    ({ resetAt: reset, ...r } = e);
+    r = codexError(events);
+    if (!r) return null;
   } else if (harness === "copilot") {
     const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
     if (!d || typeof d !== "object") return null;

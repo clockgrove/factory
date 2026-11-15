@@ -94,6 +94,8 @@ What to do with each:
 
 A comment counts when its author has write access to the repository or is a maintainer the workflow names (`notify`, and the optional `maintainers` list), since an App cannot always see an organization member's access.
 
+An agent that supervises the queue for you can wait on it instead of watching logs: `factory wait` exits with one JSON line per Objective that Blocked, asked a Question, went In review, merged or closed since the last read, or when the queue drains, within a poll (30 seconds) of the change, on every route ([LOCAL.md](LOCAL.md), Run it). The @mention to a person stays as it is.
+
 ## Factory merges on its own
 
 Code lands with no human read. The gate is your CI workflow's checks on the reviewed head and the integrated commit, the comment-only reviewer pass, and the merge queue's own re-run where you have one. Set `FACTORY_AUTO_MERGE: false` for ready-for-review PRs instead.
@@ -136,4 +138,4 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 | "Apply the Clockgrove Factory workflow hand-over for Objective 12." | `/factory:factory-handover <issue>` | Puts the workflow change Factory handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
 | "Show the Clockgrove Factory scorecard." | `/factory:factory-score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
-On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).
+On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, local mode has `factory serve`, `factory run <issue>` and `factory review <pr>`, and `factory wait` waits for the queue's next event on any route ([LOCAL.md](LOCAL.md), Run it).

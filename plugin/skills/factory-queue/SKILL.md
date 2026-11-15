@@ -20,6 +20,8 @@ Then `gh run list --workflow factory.yml --limit 3` and show the user the run li
 
 Never run the plugin's `scripts/dispatch.mjs` from this session except as `node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" --repo OWNER/NAME --dry-run` to preview what the next tick would pick: a real local run marks issues Running on the board and no worker job exists outside the workflow to run them.
 
+To be told when an Objective needs a person rather than watch the runs, run `factory wait --on blocked,question,merged,closed,drained` in the background: it reads GitHub, so it covers the Action's Objectives too, and exits with one JSON line per event; start it again with `--since <cursor>` from its last line (`/factory:factory-serve` says more).
+
 If `/factory:factory-doctor` has not run on this repository in this session, run it first; a misconfigured repository Blocks every Objective with the same one-line reason and spends a runner minute each.
 
 ## When the workflow is absent

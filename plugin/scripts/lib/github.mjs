@@ -70,7 +70,7 @@ function env(token) {
   return e;
 }
 
-async function call(url, { method = "GET", body, token, accept = "application/vnd.github+json", maxBytes = 0 }) {
+async function call(url, { method = "GET", body, token, accept = "application/vnd.github+json", maxBytes = 0, etag = null }) {
   const t = tokenOf(token);
   const r = await fetch(url, {
     method,
@@ -79,6 +79,7 @@ async function call(url, { method = "GET", body, token, accept = "application/vn
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "clockgrove-factory",
       ...(t ? { Authorization: `Bearer ${t}` } : {}),
+      ...(etag ? { "If-None-Match": etag } : {}),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     // Every request body: no held secret (a worker secret's value, inputs.mjs holdSecrets) is ever posted.
@@ -295,21 +296,30 @@ const createAgain = (landed) => {
  * (repeatable); a create only as createAgain allows, with the caller's optional `landed`. A DELETE whose retry finds
  * nothing (404) after a transient failure is done: the first try removed it. `noRateWait`: a rate limit is thrown at once,
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
+ * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
+ * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed);
   const quota = quotaKey(url, tokenOf(token));
+  const conditional = cache && method === "GET" && !raw;
   const one = async (n) => {
+    const kept = conditional ? cache.get(url) : undefined;
     let res;
     try {
-      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0 });
+      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag });
     } catch (e) {
       throw transportError(`${method} ${path}`, e);
     }
     const { r, text } = res;
-    if (r.ok) return { r, text };
+    if (kept && r.status === 304) return { r, text: kept.text, link: kept.link };
+    if (r.ok) {
+      const etag = conditional ? r.headers.get("etag") : null;
+      if (etag) cache.set(url, { etag, text, link: r.headers.get("link") });
+      return { r, text, link: r.headers.get("link") };
+    }
     if (method === "DELETE" && r.status === 404 && n > 1) return { r, text: "" };
     let msg = text.slice(0, 500);
     try {
@@ -329,12 +339,12 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota });
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
-    const { r, text } = res;
+    const { text, link } = res;
     if (raw) return text;
     const data = text.trim() ? JSON.parse(text) : null;
     if (!paginate) return data;
     pages.push(data);
-    const next = /<([^>]+)>;\s*rel="next"/.exec(r.headers.get("link") || "")?.[1];
+    const next = /<([^>]+)>;\s*rel="next"/.exec(link || "")?.[1];
     if (!next) break;
     url = next;
   }

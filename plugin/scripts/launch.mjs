@@ -29,14 +29,15 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
-import { CLI } from "./lib/harness.mjs";
+import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit } from "./lib/session.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
-import { routeSecretSuffix } from "./lib/accounts.mjs";
+import { chatgptLogin, routeSecretSuffix } from "./lib/accounts.mjs";
+import { waitOnAccounts } from "./lib/account-wait.mjs";
 import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -90,6 +91,15 @@ export function missingCredential(inputs, account = null) {
   const suffix = account ? routeSecretSuffix(account, inputs.harness) : "";
   const names = (HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness").replace(/\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|FACTORY_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g, `$1${suffix}`);
   return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
+}
+
+/**
+ * {reason, fix} when the credential the launcher holds is one these routes never run, else null: a Codex ChatGPT login
+ * (lib/accounts.mjs chatgptLogin), refused here before any sandbox is started or billed, as the stage would refuse it.
+ */
+export function refusedCredential(inputs) {
+  if (inputs.harness !== "codex" || ![inputs.codexGatewayKey, inputs.codexApiKey].some(chatgptLogin)) return null;
+  return { reason: CODEX_LOGIN_REFUSED, fix: "Replace that secret's value with an OpenAI API key (or a Vercel AI Gateway key), then re-apply `factory:objective`." };
 }
 
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
@@ -1000,8 +1010,10 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // The account (#267): with accounts declared, the one the labels pick must be the one the job's account step picked,
   // whose credential alone this job holds; else the launcher Blocks here, before any sandbox spend.
   const acct = await routeAccountCheck({ repo, issue: n, harness: inputs.harness, labels: chosen.names, env: process.env, opts });
+  // Two account labels: the stage waits (lib/account-wait.mjs), a review's label off, a work stage back to Queued.
+  if (acct.wait) return out({ exit: stage === "review" ? "skipped" : "queued", reason: `#${n}: ${await waitOnAccounts({ repo, issue: n, stage, pr, two: acct.wait, opts })}` });
   if (acct.refusal) return out(await block(run, `launcher: ${acct.refusal.reason}`, "setup", acct.refusal.fix));
-  const noKey = missingCredential(inputs, acct.account);
+  const noKey = missingCredential(inputs, acct.account) || refusedCredential(inputs);
   if (noKey) return out(await block(run, `launcher: ${noKey.reason}`, "setup", noKey.fix));
   log(`#${n}: ${ev.kind} event, state ${ctx.state}: stage ${stage}${pr ? ` (PR #${pr})` : ""}`);
   const prior = ctx.record;

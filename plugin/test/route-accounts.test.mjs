@@ -27,11 +27,15 @@ const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const KEY = privateKey.export({ type: "pkcs1", format: "pem" });
 
 /**
- * A GitHub for Objective #8: its labels, each applied by `by[label]` (kirk, who can push, unless named), the App's token
- * mint, the repository's secret names (`secrets`), and every request made, in `reads`.
+ * A GitHub for Objective #8 and its PR #9: the issue's labels, each applied by `by[label]` (kirk, who can push, unless
+ * named), any more timeline `events`, the App's token mint (each request's permissions in `minted`), the repository's
+ * secret names (`secrets`), the PR's labels and comments (Factory's own as `factory-test[bot]`), and every request made,
+ * in `reads`. Label and comment writes change that state.
  */
-async function withGitHub({ labels = ["factory:objective"], by = {}, secrets = [] }, fn) {
+async function withGitHub({ labels = ["factory:objective"], by = {}, events = [], secrets = [], prLabels = ["factory:review"], comments = [] }, fn) {
   const reads = [];
+  const state = { issue: new Set(labels), pr: new Set(prLabels), comments: [...comments], minted: [] };
+  let id = 500;
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -39,32 +43,46 @@ async function withGitHub({ labels = ["factory:objective"], by = {}, secrets = [
     const p = u.pathname;
     reads.push(`${method} ${p}`);
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    const body = init.body ? JSON.parse(init.body) : null;
     if (p === "/app") return json({ slug: "factory-test", name: "Factory test" });
     if (p === "/repos/acme/app/installation") return json({ id: 3, permissions: { issues: "write", metadata: "read", contents: "write", pull_requests: "write" }, account: { type: "Organization" } });
-    if (method === "POST" && p === "/app/installations/3/access_tokens") return json({ token: "ghs_fakeminted0000", expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: JSON.parse(init.body).permissions, repositories: [{ full_name: "acme/app" }] }, 201);
-    if (p === "/repos/acme/app/issues/8") return json({ number: 8, state: "open", labels: labels.map((name) => ({ name })) });
-    if (p === "/repos/acme/app/issues/8/timeline") return json(labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: new Date(Date.UTC(2026, 10, 15, 0, i)).toISOString(), actor: { login: by[name] || "kirk", type: "User", id: 7 } })));
+    if (method === "POST" && p === "/app/installations/3/access_tokens") return state.minted.push(body.permissions), json({ token: "ghs_fakeminted0000", expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: body.permissions, repositories: [{ full_name: "acme/app" }] }, 201);
+    if (p === "/repos/acme/app/issues/8") return json({ number: 8, state: "open", labels: [...state.issue].map((name) => ({ name })) });
+    if (p === "/repos/acme/app/issues/8/timeline") return json([...labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: new Date(Date.UTC(2026, 10, 15, 0, i)).toISOString(), actor: { login: by[name] || "kirk", type: "User", id: 7 } })), ...events]);
     const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(p);
     if (perm) return json({ permission: perm[1] === "kirk" ? "write" : "read" });
     if (p === "/repos/acme/app/actions/secrets") return json({ secrets: secrets.map((name) => ({ name })) });
     if (p === "/repos/acme/app/actions/organization-secrets") return json({ message: "no organization" }, 422);
+    const lab = /^\/repos\/acme\/app\/issues\/(8|9)\/labels(?:\/(.+))?$/.exec(p);
+    if (lab) {
+      const set = lab[1] === "8" ? state.issue : state.pr;
+      if (method === "DELETE") return set.delete(decodeURIComponent(lab[2])) ? json([]) : json({ message: "Label does not exist" }, 404);
+      if (method === "POST") return body.labels.forEach((l) => set.add(l)), json([...set].map((name) => ({ name })));
+    }
+    if (p === "/repos/acme/app/issues/9/comments" && method === "GET") return json(state.comments);
+    if (p === "/repos/acme/app/issues/9/comments" && method === "POST") return state.comments.push({ id: ++id, user: { login: "factory-test[bot]", type: "Bot" }, body: body.body, created_at: new Date().toISOString() }), json(state.comments.at(-1), 201);
+    const one = /^\/repos\/acme\/app\/issues\/comments\/(\d+)$/.exec(p);
+    if (one && method === "DELETE") return (state.comments = state.comments.filter((c) => c.id !== Number(one[1]))), new Response(null, { status: 204 });
+    if (one && method === "PATCH") return json(Object.assign(state.comments.find((c) => c.id === Number(one[1])), { body: body.body }));
+    if (p.endsWith("/graphql")) return json({ data: { repository: null, viewer: { login: "factory-test[bot]" } } });
     return json({ message: "Not Found" }, 404);
   };
   try {
-    return await fn(reads);
+    return await fn(reads, state);
   } finally {
     globalThis.fetch = real;
   }
 }
 
 /** The account step as the Action runs it (accountStep: the App's token minted, then stageAccount), its outputs read back. */
-async function runStep({ labels, by, accounts = ACCOUNTS, harness = "claude", issue = "8", branch = "none" }) {
+async function runStep({ labels, by, events, accounts = ACCOUNTS, harness = "claude", issue = "8", branch = "none" }) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
   const env = { GITHUB_REPOSITORY: "acme/app", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_HARNESS: harness, FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY };
   let reads;
-  await withGitHub({ labels, by }, (r) => ((reads = r), accountStep({ args: { repo: "acme/app", issue, branch }, env })));
-  return { outputs: Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").map((l) => l.split(/=(.*)/s).slice(0, 2))), reads };
+  let minted;
+  await withGitHub({ labels, by, events }, (r, st) => ((reads = r), (minted = st.minted), accountStep({ args: { repo: "acme/app", issue, branch }, env })));
+  return { minted, outputs: Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").map((l) => l.split(/=(.*)/s).slice(0, 2))), reads };
 }
 
 test("the accounts declaration is a JSON object of each harness's account names; anything else is refused naming why, never echoing it (#267)", () => {
@@ -79,6 +97,8 @@ test("the accounts declaration is a JSON object of each harness's account names;
     ['{"claude": ["Claude_2"]}', /lowercase letters, digits and hyphens/],
     ['{"claude": ["a"], "codex": ["a"]}', /declares `a` twice/],
     ['{"claude": ["codex"]}', /another harness's name/],
+    ['{"claude": ["claude-2"], "claude": ["claude-3"]}', /names a harness twice/],
+    ['{"claude": ["claude-2"], "\\u0063laude": ["claude-3"]}', /names a harness twice/],
   ]) {
     const r = routeAccounts(text);
     assert.equal(r.ok, false, text);
@@ -102,10 +122,14 @@ test("the account step picks the trusted label's account, else the harness's def
   const pinned = await runStep({ labels: ["factory:objective", "factory:account:claude-2"] });
   assert.deepEqual(pinned.outputs, { account: "claude-2", suffix_claude: "_CLAUDE_2", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
   assert.ok(pinned.reads.includes("GET /repos/acme/app/issues/8/timeline"), "the labeler is read");
+  assert.deepEqual(pinned.minted, [{ issues: "read", metadata: "read" }], "the step's token is read-only: issues and metadata, nothing more");
   // No label: the harness's first declared account, on today's secrets (it is named after the harness).
   const plain = await runStep({ labels: ["factory:objective"] });
   assert.deepEqual(plain.outputs, { account: "claude", suffix_claude: "", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
-  assert.ok(!plain.reads.some((r) => r.endsWith("/timeline")), "no label: no timeline read");
+  // A pin removed by someone who cannot push still stands; removed by someone who can, the default again.
+  const removal = (login) => [{ event: "labeled", label: { name: "factory:account:claude-2" }, created_at: "2026-11-15T01:00:00Z", actor: { login: "kirk", type: "User", id: 7 } }, { event: "unlabeled", label: { name: "factory:account:claude-2" }, created_at: "2026-11-15T02:00:00Z", actor: { login, type: "User", id: 9 } }];
+  assert.equal((await runStep({ labels: ["factory:objective"], events: removal("stranger") })).outputs.account, "claude-2");
+  assert.equal((await runStep({ labels: ["factory:objective"], events: removal("kirk") })).outputs.account, "claude");
   // A harness label: that harness's default account.
   const codex = await runStep({ labels: ["factory:objective", "factory:harness:codex"] });
   assert.deepEqual(codex.outputs, { account: "codex-2", suffix_claude: NO_SECRET, suffix_codex: "_CODEX_2", suffix_copilot: NO_SECRET });
@@ -120,7 +144,7 @@ test("the account step picks the trusted label's account, else the harness's def
     [["factory:objective", "factory:account:claude", "factory:account:claude-2"], {}],
   ]) {
     const r = await runStep({ labels, by });
-    assert.deepEqual(r.outputs, { account: "", suffix_claude: NO_SECRET, suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET }, labels.join(" "));
+    assert.deepEqual(r.outputs, { account: NO_SECRET, suffix_claude: NO_SECRET, suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET }, labels.join(" "));
   }
 });
 
@@ -196,8 +220,10 @@ test("the stage runs only on the account it was prepared with: a changed or unus
   assert.match(old.applied[0].fix, /Re-render the workflow/);
   const stranger = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "" }, { "factory:account:claude-2": "stranger" });
   assert.match(stranger.applied[0].reason, /`factory:account:claude-2` was applied by `stranger`, who cannot push/);
-  const two = await gate([...pin, "factory:account:claude"], { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "" });
-  assert.match(two.applied[0].reason, /both pin this Objective to an account/);
+  // The step ran and picked none: named so, not as a workflow with no account step.
+  const none = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET });
+  assert.match(none.applied[0].reason, /the job's account step picked no account/);
+  assert.doesNotMatch(none.applied[0].reason, /no account step/);
   const bad = await gate(["factory:objective"], { FACTORY_ACCOUNTS: "{", FACTORY_STAGE_ACCOUNT: "" });
   assert.match(bad.applied[0].reason, /FACTORY_ACCOUNTS is not valid JSON/);
   // None declared: today's single credential, the label only noted.
@@ -312,4 +338,139 @@ test("the accounts are the workflow file's alone: no repository variable or loca
   };
   const declared = render(null).replace(/^env:\n/m, `env:\n  FACTORY_ACCOUNTS: '${ACCOUNTS}'\n`);
   assert.equal(workflowSettings(render(declared)).env.FACTORY_ACCOUNTS, ACCOUNTS);
+});
+
+test("two account labels never Block on these routes: a review takes its label off and waits, the dispatcher puts it back once one is left, and a work stage goes back to Queued (#267)", async () => {
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
+  setSelf("factory-test[bot]");
+  const two = ["factory:objective", "factory:in-review", "factory:account:claude", "factory:account:claude-2"];
+  const env = { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "claude" };
+  await withGitHub({ labels: two }, async (_reads, st) => {
+    const applied = [];
+    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: two, env, pr: { number: 9 }, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "review" });
+    assert.equal(r.ok, false);
+    assert.match(r.wait, /both pin this Objective to an account.*the review waits for one to be left/);
+    assert.deepEqual(applied, [], "no Block");
+    assert.ok(!st.pr.has("factory:review"), "the review label is off");
+    const wait = accountWaitOf(st.comments, 8);
+    assert.ok(wait, "the wait is recorded on the PR, as Factory's own comment");
+    // Still two: the dispatcher leaves it waiting.
+    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), false);
+    assert.ok(!st.pr.has("factory:review"));
+    // One left: the label goes back and the record goes.
+    st.issue.delete("factory:account:claude");
+    assert.equal(await accountWaitResume({ repo: REPO, pr: 9, wait, labels: [...st.issue], opts: { token: "t" } }), true);
+    assert.ok(st.pr.has("factory:review"));
+    assert.equal(accountWaitOf(st.comments, 8), null);
+    // A pasted marker by anyone else is no record.
+    assert.equal(accountWaitOf([{ id: 1, user: { login: "stranger", type: "User" }, body: "<!-- factory:8:account-wait -->" }], 8), null);
+  });
+  // A work stage that met them as it started: back to Queued, where the dispatcher holds it; no Block.
+  await withGitHub({ labels: ["factory:objective", "factory:running", "factory:account:claude", "factory:account:claude-2"] }, async (_reads, st) => {
+    const applied = [];
+    const r = await accountGate({ repo: REPO, issue: 8, harness: "claude", labels: [...st.issue], env, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "work" });
+    assert.match(r.wait, /back to Queued until one is left/);
+    assert.deepEqual(applied, []);
+    assert.ok(!st.issue.has("factory:running"));
+  });
+  for (const script of ["worker.mjs", "review.mjs"]) {
+    const src = readFileSync(join(ROOT, "plugin", "scripts", script), "utf8");
+    assert.match(src, new RegExp(`if \\(acct\\.wait\\) \\{\\n\\s+log\\(acct\\.wait\\);\\n\\s+await finish\\("${script === "worker.mjs" ? "skipped" : "waiting"}", acct\\.wait\\);`), `${script}: the wait ends the stage, with no Block`);
+  }
+});
+
+test("on an account, a missing or unusable credential is named as that account's secret on every harness, and only the step's input counts (#267)", async () => {
+  const on = (account) => ({ GITHUB_ACTIONS: "true", FACTORY_ACCOUNTS: JSON.stringify({ claude: ["claude", "claude-2"], codex: ["codex", "codex-2"], copilot: ["copilot", "copilot-2"] }), FACTORY_STAGE_ACCOUNT: account });
+  // A job-level variable of the default account's, and federation, never stand in for the account's own input.
+  const dflt = { ANTHROPIC_API_KEY: "fake-default", CLAUDE_CODE_OAUTH_TOKEN: "fake-default-plan", CODEX_API_KEY: "sk-fake-default", COPILOT_GITHUB_TOKEN: "github_pat_default", ACTIONS_ID_TOKEN_REQUEST_URL: "https://token.test" };
+  await assert.rejects(credentialEnv({ harness: "claude", credential: "api", inputs: { anthropicOidcExchangeUrl: "https://x.test" }, env: { ...on("claude-2"), ...dflt } }), /set ANTHROPIC_API_KEY_CLAUDE_2 \(or CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2 with credential: plan\)$/);
+  await assert.rejects(credentialEnv({ harness: "claude", credential: "plan", inputs: {}, env: { ...on("claude-2"), ...dflt } }), /CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2/);
+  await assert.rejects(credentialEnv({ harness: "codex", credential: "api", inputs: {}, env: { ...on("codex-2"), ...dflt } }), /CODEX_API_KEY_CODEX_2 \(or FACTORY_CODEX_GATEWAY_KEY_CODEX_2\)/);
+  await assert.rejects(credentialEnv({ harness: "copilot", credential: "api", inputs: {}, env: { ...on("copilot-2"), ...dflt } }), /COPILOT_GITHUB_TOKEN_COPILOT_2/);
+  assert.deepEqual((await credentialEnv({ harness: "claude", credential: "plan", inputs: { claudeCodeOauthToken: "fake-claude-2-plan" }, env: { ...on("claude-2"), ...dflt } })).env, { CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-2-plan" });
+  // The account named after its harness: today's names, still its own input alone.
+  await assert.rejects(credentialEnv({ harness: "codex", credential: "api", inputs: {}, env: { ...on("codex"), ...dflt } }), /set CODEX_API_KEY \(or FACTORY_CODEX_GATEWAY_KEY\)/);
+  // No accounts declared: today's fallbacks.
+  assert.deepEqual((await credentialEnv({ harness: "claude", credential: "api", inputs: {}, env: { GITHUB_ACTIONS: "true", ANTHROPIC_API_KEY: "fake-default" } })).env, { ANTHROPIC_API_KEY: "fake-default" });
+  // Doctor's lines (the job checks, the review stage's credential check) name the account's secret too.
+  const fails = async (harness, credential, account) => (await credentialChecks({ inputs: { harness, credential, model: "gpt-6.1-sol" }, env: { ...on(account), ...dflt }, local: false })).filter((c) => c.status === "FAIL");
+  const [plan] = await fails("claude", "plan", "claude-2");
+  assert.match(plan.fix, /gh secret set CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2/);
+  assert.doesNotMatch(`${plan.detail} ${plan.fix}`, /CLAUDE_CODE_OAUTH_TOKEN(?!_CLAUDE_2)/);
+  const [api] = await fails("claude", "api", "claude-2");
+  assert.match(api.fix, /gh secret set ANTHROPIC_API_KEY_CLAUDE_2/);
+  assert.doesNotMatch(api.fix, /id-token/, "an account takes no federation");
+  const [codex] = await fails("codex", "api", "codex-2");
+  assert.match(codex.fix, /FACTORY_CODEX_GATEWAY_KEY_CODEX_2 .* or CODEX_API_KEY_CODEX_2/);
+  const [copilot] = await fails("copilot", "api", "copilot-2");
+  assert.match(copilot.fix, /gh secret set COPILOT_GITHUB_TOKEN_COPILOT_2/);
+});
+
+test("the launcher refuses a ChatGPT-login Codex credential before any sandbox is started (#267)", async () => {
+  const { refusedCredential } = await import("../scripts/launch.mjs");
+  const jwt = `${Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url")}.${Buffer.from("{}").toString("base64url")}.c2ln`;
+  assert.match(refusedCredential({ harness: "codex", codexApiKey: jwt }).reason, /ChatGPT login/);
+  assert.match(refusedCredential({ harness: "codex", codexGatewayKey: '{"tokens":{}}' }).reason, /ChatGPT login/);
+  assert.equal(refusedCredential({ harness: "codex", codexApiKey: "sk-proj-fake" }), null);
+  assert.equal(refusedCredential({ harness: "claude", claudeCodeOauthToken: jwt }), null, "only Codex logins are refused");
+  // Checked beside the missing credential, before the claim and any sandbox call.
+  const src = readFileSync(join(ROOT, "plugin", "scripts", "launch.mjs"), "utf8");
+  const check = src.indexOf("missingCredential(inputs, acct.account) || refusedCredential(inputs)");
+  assert.ok(check > 0 && check < src.indexOf("const claim = randomBytes(6)"), "before the claim and the sandbox");
+});
+
+test("a narrowed App token that would hold none of the asked permissions is not minted (#267)", async () => {
+  const { mintInstallationToken } = await import("../scripts/lib/app-token.mjs");
+  await withGitHub({}, async (_r, st) => {
+    await assert.rejects(mintInstallationToken({ appId: "12", privateKey: KEY, owner: "acme", repo: "app", narrowTo: { checks: "read" } }), /grants none of checks/);
+    assert.deepEqual(st.minted, [], "no token asked for");
+  });
+});
+
+test("the dispatcher's tick puts a waiting review's label back once one account label is left, and not before (#267)", async () => {
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const run = async (labels) => {
+    setSelf("factory-test[bot]");
+    const issue = { number: 8, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "kirk" } };
+    const pr = { number: 9, state: "open", draft: false, labels: [], head: { ref: "factory/8", sha: "abc1234" }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" };
+    const comments = [{ id: 77, user: { login: "factory-test[bot]", type: "Bot" }, body: "<!-- factory:8:account-wait -->\nFactory: waiting", created_at: new Date().toISOString() }];
+    const writes = [];
+    const real = globalThis.fetch;
+    const saved = process.env.FACTORY_ACCOUNTS;
+    process.env.FACTORY_ACCOUNTS = ACCOUNTS;
+    globalThis.fetch = async (url, init = {}) => {
+      const u = new URL(url);
+      const method = init.method || "GET";
+      const p = u.pathname;
+      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+      if (method !== "GET" && !p.endsWith("/graphql")) writes.push(`${method} ${p}`);
+      if (p.endsWith("/graphql")) return json({ data: { viewer: { login: "factory-test[bot]" }, repository: null } });
+      if (p === "/user") return json({ login: "kirk", type: "User" });
+      if (p === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? [] : [issue]);
+      if (p === "/repos/acme/app/pulls") return json(u.searchParams.get("head") === "acme:factory/8" ? [pr] : []);
+      if (p === "/repos/acme/app/pulls/9") return json(pr);
+      if (p === "/repos/acme/app/issues/9/comments" && method === "GET") return json(comments);
+      if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
+      if (/\/(timeline|comments|collaborators|reviews|commits|check-runs|status)$/.test(p)) return json([]);
+      if (method !== "GET") return method === "DELETE" ? new Response(null, { status: 204 }) : json({}, 200);
+      return json({ message: "Not Found" }, 404);
+    };
+    try {
+      const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+      return { r, writes };
+    } finally {
+      globalThis.fetch = real;
+      if (saved === undefined) delete process.env.FACTORY_ACCOUNTS;
+      else process.env.FACTORY_ACCOUNTS = saved;
+    }
+  };
+  const still = await run(["factory:objective", "factory:in-review", "factory:account:claude", "factory:account:claude-2"]);
+  assert.deepEqual(still.r.accountResumed, []);
+  assert.ok(!still.writes.some((w) => w === "POST /repos/acme/app/issues/9/labels"), "two left: the label stays off");
+  const one = await run(["factory:objective", "factory:in-review", "factory:account:claude-2"]);
+  assert.deepEqual(one.r.accountResumed, [8]);
+  assert.ok(one.writes.includes("POST /repos/acme/app/issues/9/labels"), "the review label goes back on");
+  assert.ok(one.writes.includes("DELETE /repos/acme/app/issues/comments/77"), "the wait record goes");
 });

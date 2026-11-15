@@ -18,7 +18,7 @@ import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession
 import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
-import { chatgptLogin } from "./accounts.mjs";
+import { accountSecretText, chatgptLogin, routeCredentialEnv, routeStageAccount } from "./accounts.mjs";
 import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
@@ -122,8 +122,13 @@ export function hasApiCredential({ harness, inputs, env = process.env }) {
   return false;
 }
 
-export async function credentialEnv({ harness, credential, inputs, env = process.env, session = null }) {
+export async function credentialEnv({ harness, credential, inputs, env: given = process.env, session = null }) {
   const out = {};
+  // On an account (#267, lib/accounts.mjs routeStageAccount) only its step-scoped input counts: no job-level variable of
+  // the default account's and no federation, and a missing one is named as that account's secret.
+  const account = routeStageAccount(given);
+  const named = (text) => accountSecretText(text, given, harness);
+  const env = routeCredentialEnv(given);
   const local = !env.GITHUB_ACTIONS;
   if (credential === "login" || (local && credential === "api" && !hasApiCredential({ harness, inputs, env }))) {
     if (!local) throw new Error("credential: login is for a developer's machine; unattended runs use api (or plan on your own repository)");
@@ -135,7 +140,7 @@ export async function credentialEnv({ harness, credential, inputs, env = process
   if (harness === "claude") {
     if (credential === "plan") {
       const tok = inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN;
-      if (!tok) throw new Error("credential: plan needs CLAUDE_CODE_OAUTH_TOKEN (claude setup-token); use it only on your own repository");
+      if (!tok) throw new Error(named("credential: plan needs CLAUDE_CODE_OAUTH_TOKEN (claude setup-token); use it only on your own repository"));
       out.CLAUDE_CODE_OAUTH_TOKEN = tok;
       return { env: out, basis: "plan token" };
     }
@@ -144,12 +149,12 @@ export async function credentialEnv({ harness, credential, inputs, env = process
       out.ANTHROPIC_API_KEY = key;
       return { env: out, basis: "ANTHROPIC_API_KEY" };
     }
-    const fed = await federate({ exchangeUrl: inputs.anthropicOidcExchangeUrl, env });
+    const fed = account ? null : await federate({ exchangeUrl: inputs.anthropicOidcExchangeUrl, env });
     if (fed) {
       out.ANTHROPIC_API_KEY = fed;
       return { env: out, basis: "workload identity federation" };
     }
-    throw new Error("no Claude credential: set ANTHROPIC_API_KEY, or id-token: write with anthropic_oidc_exchange_url for federation");
+    throw new Error(account ? named("no Claude credential: set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN with credential: plan)") : "no Claude credential: set ANTHROPIC_API_KEY, or id-token: write with anthropic_oidc_exchange_url for federation");
   }
   if (harness === "codex") {
     // A ChatGPT login (accounts.mjs chatgptLogin) never runs unattended: OpenAI advises an API key for CI (#267).
@@ -161,14 +166,14 @@ export async function credentialEnv({ harness, credential, inputs, env = process
       return { env: out, basis: `${CODEX_GATEWAY_ENV} (Vercel AI Gateway, step-scoped)` };
     }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
-    if (!key) throw new Error("no Codex credential: set CODEX_API_KEY on the worker step");
+    if (!key) throw new Error(named("no Codex credential: set CODEX_API_KEY (or FACTORY_CODEX_GATEWAY_KEY) on the worker step"));
     out.CODEX_API_KEY = key;
     return { env: out, basis: "CODEX_API_KEY (step-scoped)" };
   }
   if (harness === "copilot") {
     // Never the job's own token: it can write to the repository, and the harness holds no GitHub write access.
     const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN;
-    if (!tok) throw new Error("no Copilot credential: set copilot_github_token (a fine-grained token with only the Copilot Requests permission)");
+    if (!tok) throw new Error(named("no Copilot credential: set copilot_github_token, the secret COPILOT_GITHUB_TOKEN (a fine-grained token with only the Copilot Requests permission)"));
     out.COPILOT_GITHUB_TOKEN = tok;
     return { env: out, basis: inputs.copilotGithubToken ? "copilot_github_token (step-scoped)" : "COPILOT_GITHUB_TOKEN" };
   }

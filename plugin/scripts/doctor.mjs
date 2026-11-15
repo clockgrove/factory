@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { ROUTE_SECRETS, accountEnv, accountToken, chatgptLogin, defaultAccount, loadAccounts, routeAccounts, routeSecretSuffix, sandboxRoots } from "./lib/accounts.mjs";
+import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, loadAccounts, routeAccounts, routeCredentialEnv, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
@@ -49,10 +49,16 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
-export async function credentialChecks({ inputs, env = process.env, probe = false, local = backend(env).name === "local" }) {
+export async function credentialChecks({ inputs, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
   const out = [];
   const h = inputs.harness;
   if (!CLI[h]) return [FAIL("harness", `unknown harness ${h}`, "set harness to claude, codex or copilot")];
+  // On an account (#267, lib/accounts.mjs routeStageAccount): only its step-scoped input counts, as harness.mjs
+  // credentialEnv reads it, and every credential line names that account's own secret (accountSecretText), so a fix
+  // never sets the default account's.
+  const account = routeStageAccount(given);
+  const env = routeCredentialEnv(given);
+  const named = (c) => (account && / credential$/.test(c.name) ? { ...c, detail: accountSecretText(c.detail, given, h), fix: c.fix ? accountSecretText(c.fix, given, h) : c.fix } : c);
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
@@ -71,6 +77,7 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
       if (key) out.push(WARN("claude credential", "ANTHROPIC_API_KEY is also set and silently wins over the plan token", "remove one of them"));
     } else if (key) out.push(PASS("claude credential", "ANTHROPIC_API_KEY present"));
     else if (fed) out.push(PASS("claude credential", "workload identity federation configured (id-token: write, exchange URL set)"));
+    else if (account) out.push(FAIL("claude credential", "no ANTHROPIC_API_KEY for this account", "gh secret set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN with credential: plan); an account takes no federation"));
     else out.push(FAIL("claude credential", "no ANTHROPIC_API_KEY and no federation", "gh secret set ANTHROPIC_API_KEY, or add id-token: write and anthropic_oidc_exchange_url"));
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
   }
@@ -100,8 +107,8 @@ export async function credentialChecks({ inputs, env = process.env, probe = fals
     if (!tok) out.push(FAIL("copilot credential", "no token for Copilot", "set copilot_github_token: a fine-grained token with only the Copilot Requests permission (gh secret set COPILOT_GITHUB_TOKEN); the job's own token is never used, since it can write"));
     else out.push(await copilotWriteProbe({ repo: inputs.repo, token: tok }));
   }
-  if (probe) out.push(await probeHarness({ inputs, env }));
-  return out;
+  if (probe) out.push(await probeHarness({ inputs, env: given }));
+  return out.map(named);
 }
 
 /**

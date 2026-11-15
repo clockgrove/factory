@@ -18,7 +18,7 @@ inputs:
     description: The Objective issue number (mode work, mode account), or one issue to dispatch alone (mode dispatch, from workflow_dispatch).
     required: false
   account:
-    description: '(work, review, launch) The account the stage runs on, the `account` output of the job''s account step (empty when the repository declares no accounts): its credential is the only one the workflow passes, and the stage records the name and Blocks when its labels pick another. Never a secret.'
+    description: '(work, review, launch) The account the stage runs on, the `account` output of the job''s account step (empty when the repository declares no accounts, `-` when the step picked none): its credential is the only one the workflow passes, and the stage records the name and Blocks when its labels pick another. Never a secret.'
     required: false
   pr:
     description: The pull request number to review (mode review), or the JSON list of PR numbers to watch (mode watch).
@@ -261,7 +261,7 @@ outputs:
     description: (sweep) See `usage_name_1`.
     value: ${{ steps.run.outputs.usage_name_3 }}
   account:
-    description: "(account) The account the job's stage runs on, for the next step's `account` input; empty when none can be picked (the stage then Blocks with why)."
+    description: "(account) The account the job's stage runs on, for the next step's `account` input; `-` when none can be picked (the stage then holds no credential, and Blocks or waits with why)."
     value: ${{ steps.run.outputs.account }}
   suffix_claude:
     description: "(account) The suffix the Claude Code credential secrets are looked up with (`secrets[format('ANTHROPIC_API_KEY{0}', ...)]`): empty for today's secrets, `_<NAME>` for an account's own, `-` (which no secret's name can have) when the stage runs on another harness or no account."

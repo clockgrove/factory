@@ -341,6 +341,11 @@ async function main() {
   // The account it runs on off local mode (objective-trust.mjs accountGate, #267): the one its labels pick, when the
   // repository declares accounts, must be the one whose credential this stage was given, or it Blocks before any harness.
   const acct = await accountGate({ repo, issue, harness: inputs.harness, labels: trusted.labels, local, pr: prNow, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
+  if (acct.wait) {
+    log(acct.wait);
+    await finish("skipped", acct.wait);
+    return;
+  }
   if (!acct.ok) {
     log(acct.reason);
     await finish("blocked", acct.reason);

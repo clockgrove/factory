@@ -11,7 +11,8 @@ import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelers
 import { DRAFT_LABEL } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
-import { accountLabelNote, routeAccount, routeAccounts, routeTwoLine } from "./accounts.mjs";
+import { waitOnAccounts } from "./account-wait.mjs";
+import { ACCOUNT_LABEL_PREFIX, NO_SECRET, accountLabelNote, routeAccount, routeAccounts, routeTwoLine } from "./accounts.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
@@ -302,23 +303,58 @@ export async function routeAccountCheck({ repo, issue, harness, labels = [], env
   const declared = routeAccounts(env.FACTORY_ACCOUNTS);
   if (declared.ok && !declared.declared) return { account: null, note: accountLabelNote(labels, false, false) };
   if (!declared.ok) return { refusal: { reason: `${declared.problem}, so no stage on GitHub Actions or the cloud sandbox starts`, fix: ACCOUNTS_FIX } };
-  const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account") });
+  const r = await routeAccount({ declared, harness, names: labels, vouch: (label) => labelsVouched(repo, issue, [label], opts, gh, "Factory does not run the Objective on that account"), kept: () => trustedRoutePin(repo, issue, opts, gh) });
   const prepared = String(env.FACTORY_STAGE_ACCOUNT ?? "").trim();
-  if (r.two) return { refusal: { reason: `${routeTwoLine(r.two)}; a label was added while this stage started`, fix: "A person who can push removes all but one `factory:account:` label, then re-applies `factory:objective`." } };
+  // Two account labels: the Objective waits until one is left, never Blocked for it (the caller's wait, account-wait.mjs).
+  if (r.two) return { wait: r.two };
   if (r.problem) return { refusal: { reason: `${r.problem}, so no stage of it starts`, fix: ROUTE_PIN_FIX } };
   if (!prepared) return { refusal: { reason: "this repository declares accounts (FACTORY_ACCOUNTS), but its workflow picked none for this stage, so the stage holds no account's credential: its jobs have no account step", fix: "Re-render the workflow (`/factory:factory-setup`), whose jobs pick each stage's account and pass only that account's secrets, merge it, then re-apply `factory:objective`." } };
+  // The account step ran and could pick none (its labels then could not be used), so it passed no credential.
+  if (prepared === NO_SECRET) return { refusal: { reason: `the job's account step picked no account, so this stage holds no account's credential; the labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
   if (prepared !== r.account.name) return { refusal: { reason: `this stage was prepared with account \`${prepared}\`'s credential, but the Objective's labels now pick \`${r.account.name}\`: its account label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage gets the credential of the account its labels pick." } };
   return { account: r.account.name, note: "" };
 }
 
 /**
+ * The account label that still pins an Objective with none on it now (#267): its timeline's account-label events
+ * replayed oldest first, each counting only when its actor can push or is a pinned maintainer (vouches): a trusted
+ * `labeled` pins that label, a trusted `unlabeled` of the pinned label ends the pin, and any other is ignored. So a
+ * removal by someone who cannot push leaves the last trusted pin standing. null: no pin. `gh` (timeline, permission) is
+ * a test's own; each actor's permission is read once.
+ */
+export async function trustedRoutePin(repo, issue, opts, gh = {}) {
+  const read = { permission: collaboratorPermission, ...gh };
+  const events = ((await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [])
+    .filter((e) => (e.event === "labeled" || e.event === "unlabeled") && typeof e.label?.name === "string" && e.label.name.toLowerCase().startsWith(ACCOUNT_LABEL_PREFIX))
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  const trusted = new Map();
+  const vouched = async (a) => {
+    if (!a?.login) return false;
+    const key = `${a.type}:${a.login}:${a.id}`;
+    if (!trusted.has(key)) trusted.set(key, await vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, read));
+    return trusted.get(key);
+  };
+  let pin = null;
+  for (const e of events) {
+    if (!(await vouched(e.actor))) continue;
+    if (e.event === "labeled") pin = e.label.name;
+    else if (pin === e.label.name) pin = null;
+  }
+  return pin;
+}
+
+/**
  * Every stage's account off local mode (#267), after choiceGate: routeAccountCheck, whose refusal Blocks (cause setup)
- * through `apply` after `before`, before any harness, and returns {ok: false, reason}; else {ok, account, note}. Local
- * mode's loop picks its own (local.mjs harnessFor): {ok, account: null, note: ""}.
+ * through `apply` after `before`, before any harness, and returns {ok: false, reason}; two account labels make the
+ * stage wait (account-wait.mjs waitOnAccounts: a review's label off and its wait recorded, a work stage back to Queued),
+ * {ok: false, wait: line}; else {ok, account, note}. Local mode's loop picks its own (local.mjs harnessFor): {ok,
+ * account: null, note: ""}.
  */
 export async function accountGate({ repo, issue, harness, labels = [], env = process.env, local = false, pr = null, notify, opts, apply, before = null, stage, gh = {} }) {
   if (local) return { ok: true, account: null, note: "" };
   const c = await routeAccountCheck({ repo, issue, harness, labels, env, opts, gh });
+  // Two account labels: the stage waits (account-wait.mjs), never Blocks.
+  if (c.wait) return { ok: false, wait: await waitOnAccounts({ repo, issue, stage, pr: pr?.number ?? pr, two: c.wait, opts }) };
   if (!c.refusal) return { ok: true, account: c.account, note: c.note };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);

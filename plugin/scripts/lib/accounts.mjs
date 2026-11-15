@@ -310,6 +310,10 @@ export function routeAccounts(text) {
     return { ok: false, problem: "FACTORY_ACCOUNTS is not valid JSON" };
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, problem: 'FACTORY_ACCOUNTS is not a JSON object of harnesses to account names, such as {"claude": ["claude", "claude-2"]}' };
+  // JSON.parse keeps a repeated key's last value: every key the text spells (in a string followed by a colon) is read, so
+  // a harness named twice is refused rather than half dropped. A key nested deeper is refused below as no account name.
+  const keys = [...raw.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)].map((m) => JSON.parse(`"${m[1]}"`));
+  if (new Set(keys).size !== keys.length) return { ok: false, problem: "FACTORY_ACCOUNTS names a harness twice" };
   const seen = new Set();
   for (const [harness, list] of Object.entries(v)) {
     if (!ACCOUNT_HARNESSES.includes(harness)) return { ok: false, problem: "FACTORY_ACCOUNTS names a harness Factory does not run (claude, codex or copilot)" };
@@ -356,20 +360,72 @@ export function routeSuffixes(account) {
  * no account of this harness). `vouch(label)`: why Factory does not act on the label (objective-trust.mjs
  * labelsVouched), or null; it is asked only for a label that names an account.
  */
-export async function routeAccount({ declared, harness, names = [], vouch }) {
+export async function routeAccount({ declared, harness, names = [], vouch, kept = null }) {
   const pin = accountPin(names);
   if (pin.two) return { two: pin.two };
   const mine = declared?.accounts?.[harness]?.length ? declared.accounts[harness] : [harness];
-  if (!pin.label) return { account: { name: mine[0], harness } };
+  if (!pin.label) {
+    // No label now: the pin a removal by someone who cannot push left standing (`kept`, objective-trust.mjs
+    // trustedRoutePin), else the harness's default.
+    const left = kept ? await kept() : null;
+    if (!left) return { account: { name: mine[0], harness } };
+    return pinnedRouteAccount(declared, harness, left, mine, " (it stays: whoever removed it cannot push)");
+  }
   if (!validAccountName(pin.name)) return { problem: `${pinLabelText(pin.label)} names no account` };
   const refused = await vouch(pin.label);
   if (refused) return { problem: refused };
-  if (mine.includes(pin.name)) return { account: { name: pin.name, harness }, label: pin.label };
-  const label = pinLabelText(pin.label);
-  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && (declared?.accounts?.[h]?.length ? declared.accounts[h] : [h]).includes(pin.name));
-  if (other) return { problem: `${label} names a ${HARNESS_NAMES[other]} account, and this Objective runs on ${HARNESS_NAMES[harness]}` };
-  return { problem: `${label} names no ${HARNESS_NAMES[harness]} account this repository declares for GitHub Actions and the cloud sandbox (${mine.map((n) => `\`${n}\``).join(", ")})` };
+  return pinnedRouteAccount(declared, harness, pin.label, mine);
 }
+
+/** The account a trusted pin `label` names for a `harness` stage, or {problem}; `mine` its harness's accounts. */
+function pinnedRouteAccount(declared, harness, label, mine, why = "") {
+  const name = label.slice(ACCOUNT_LABEL_PREFIX.length).trim().toLowerCase();
+  if (mine.includes(name)) return { account: { name, harness }, label };
+  const shown = `${pinLabelText(label)}${why}`;
+  if (!validAccountName(name)) return { problem: `${shown} names no account` };
+  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && (declared?.accounts?.[h]?.length ? declared.accounts[h] : [h]).includes(name));
+  if (other) return { problem: `${shown} names a ${HARNESS_NAMES[other]} account, and this Objective runs on ${HARNESS_NAMES[harness]}` };
+  return { problem: `${shown} names no ${HARNESS_NAMES[harness]} account this repository declares for GitHub Actions and the cloud sandbox (${mine.map((n) => `\`${n}\``).join(", ")})` };
+}
+
+/**
+ * The stage's account on GitHub Actions or the cloud sandbox: its name (FACTORY_STAGE_ACCOUNT, the account step's pick)
+ * when the workflow declares accounts there, else null (none declared: the repository's one credential; local mode's
+ * accounts are its machine's own). With one, only the step's credential inputs count (routeCredentialEnv).
+ */
+export function routeStageAccount(env = process.env) {
+  if (!env.GITHUB_ACTIONS) return null;
+  const name = String(env.FACTORY_STAGE_ACCOUNT ?? "").trim();
+  return validAccountName(name) && routeAccounts(env.FACTORY_ACCOUNTS).declared ? name : null;
+}
+
+/**
+ * The names a harness credential is read from besides the step's inputs: a job-level variable of the default account's
+ * name, and Claude's workload identity federation (the job's OIDC token). Not read for a stage on an account.
+ */
+const DEFAULT_CREDENTIAL_ENV = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "FACTORY_CODEX_GATEWAY_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
+
+/**
+ * The env a stage's credential is read from (harness.mjs credentialEnv, doctor.mjs credentialChecks): on an account
+ * (routeStageAccount), `env` without any other credential, so the stage runs on its account's step-scoped input alone,
+ * never on the default account's variable or federation while recording the account; else `env` as it is.
+ */
+export function routeCredentialEnv(env = process.env) {
+  if (!routeStageAccount(env)) return env;
+  const out = { ...env };
+  for (const k of DEFAULT_CREDENTIAL_ENV) delete out[k];
+  return out;
+}
+
+const SECRET_NAMES = /\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|FACTORY_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g;
+/**
+ * `text` (Factory's own line: a missing credential's reason or fix) with each harness credential secret named as the
+ * stage's account has it (routeSecretSuffix), so its fix never sets the default account's secret; unchanged with none.
+ */
+export const accountSecretText = (text, env = process.env, harness = "") => {
+  const name = routeStageAccount(env);
+  return name ? String(text).replace(SECRET_NAMES, (m) => `${m}${routeSecretSuffix(name, harness)}`) : text;
+};
 
 /** The line two account labels get on these routes: no stage starts until one is left. */
 export const routeTwoLine = (two) => `${two.map(pinLabelText).join(" and ")} both pin this Objective to an account, so no stage of it starts until one is left`;

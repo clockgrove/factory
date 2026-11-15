@@ -25,6 +25,7 @@ import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne
 import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
+import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -93,7 +94,7 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
   const repo = repoOf(inputs.repo);
@@ -736,6 +737,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const queueWatch = [];
   // PRs whose third-party wait ended this tick: their review label went back on.
   const thirdPartyResumed = [];
+  // PRs whose account-label wait ended this tick: their review label went back on.
+  const accountResumed = [];
   // Each In-review Objective's open PR (null for none) as this pass read it.
   const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
@@ -781,7 +784,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread, wait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread, wait, accountWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
       // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
@@ -808,6 +811,21 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (waiting?.waiting) {
         due(issue.number, "third-party", waiting.until + WAKE_SLACK_MS);
         if (waiting.unread) retry(`PR #${open.number}'s review label time`);
+        continue;
+      }
+      // A review waiting on two account labels (lib/account-wait.mjs, #267): its label goes back once one account label or
+      // none is left; meanwhile nothing else runs on the PR.
+      if (!reviewing && accountWait) {
+        if (dryRun) continue;
+        try {
+          if (await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, opts })) {
+            accountResumed.push(issue.number);
+            log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
+          } else log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
+        } catch (e) {
+          log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
+          retry(`#${issue.number}'s review label`);
+        }
         continue;
       }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
@@ -1147,7 +1165,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

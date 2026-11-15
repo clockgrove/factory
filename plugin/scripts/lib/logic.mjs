@@ -2175,33 +2175,58 @@ export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.str
 
 /**
  * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
- * dollars (0 for a clean rebase with no harness run, null unmetered) and whether it was a conflict pass. The worker
- * sums the earlier ones on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
+ * dollars (0 for a clean rebase with no harness run, null unmetered), its bound marks as the spend line carries them
+ * (`usdLowerBound`, `usdUpperBound`: stageSpendLine) and whether it was a conflict pass. The worker sums the earlier ones
+ * on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
  */
-export const rebaseCostMarker = ({ usd, conflict }) => `<!-- factory:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict })} -->`;
+export const rebaseCostMarker = ({ usd, conflict, usdLowerBound = false, usdUpperBound = false }) =>
+  `<!-- factory:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...(usdLowerBound && Number.isFinite(usd) ? { usdLowerBound: true } : {}), ...(usdUpperBound && Number.isFinite(usd) ? { usdUpperBound: true } : {}) })} -->`;
+
+/**
+ * A rebase stage's cost for its rebase line, from what its spend line is made of (stageSpendLine: the usage record
+ * `usage`, the pass `records`, `known` the stage's spend so far): {usd, usdLowerBound?, usdUpperBound?}. No harness pass
+ * (none, or only `noRun` placeholders) is $0; passes with neither a recorded figure nor a live reading are unmetered.
+ */
+export function rebaseCost(usage, { records = [], known = null } = {}) {
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  if (!records.some((r) => r && !r.noRun)) return { usd: 0 };
+  if (num(usage?.usd) === null && num(known?.usd) === null) return { usd: null };
+  const line = stageSpendLine(usage, { records, known });
+  return { usd: line.usd, ...(line.parts.usdLowerBound ? { usdLowerBound: true } : {}), ...(line.parts.usdUpperBound ? { usdUpperBound: true } : {}) };
+}
+
+/** Dollars with their bound marks, as a rebase line words them: "at least $1.20", "at most $1.20 (an estimate)". */
+const boundUsd = (usd, lower, upper) => {
+  const fmt = `$${usd.toFixed(2)}`;
+  if (lower && upper) return `about ${fmt} (part a lower bound, part an estimate)`;
+  if (lower) return `at least ${fmt}`;
+  return upper ? `at most ${fmt} (an estimate)` : fmt;
+};
 
 /**
  * The send-back stage's words on its exit line: how it went by the harness passes that ran (`passes`: none is a clean
- * rebase with no model run; a `conflict` rebase's are its conflict pass, any other's are fix passes), its cost, and,
- * when the earlier rebases could be read (`before`, rebaseTally; null unread), which rebase of the Objective it is and
- * what all of them cost.
+ * rebase with no model run; a `conflict` rebase's are its conflict pass, any other's are fix passes), its cost with its
+ * bound marks, and, when the earlier rebases could be read (`before`, rebaseTally; null unread), which rebase of the
+ * Objective it is and what all of them cost.
  */
-export function rebaseLine({ usd, conflict, passes = 0 }, before = null) {
-  const fmt = (n) => `$${n.toFixed(2)}`;
+export function rebaseLine({ usd, conflict, passes = 0, usdLowerBound = false, usdUpperBound = false }, before = null) {
   const how = !passes ? "clean, no model run" : conflict ? "a conflict pass" : `clean, ${passes} fix pass(es)`;
-  const cost = usd === null ? "unmetered" : fmt(usd);
+  const cost = usd === null ? "unmetered" : boundUsd(usd, usdLowerBound, usdUpperBound);
   if (!before) return `rebase (${how}): ${cost}`;
   const unmetered = before.unmetered + (usd === null ? 1 : 0);
-  return `rebase ${before.count + 1} of this Objective (${how}): ${cost}; all its rebases: ${fmt(before.usd + (usd ?? 0))}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
+  const metered = usd !== null;
+  const total = boundUsd(before.usd + (usd ?? 0), !!before.usdLowerBound || (metered && usdLowerBound), !!before.usdUpperBound || (metered && usdUpperBound));
+  return `rebase ${before.count + 1} of this Objective (${how}): ${cost}; all its rebases: ${total}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
 }
 
-/** The rebase line in one comment body: {usd, conflict}, or null when it has none (or a broken one). */
+/** The rebase line in one comment body: {usd, conflict, usdLowerBound?, usdUpperBound?}, or null when it has none (or a broken one). */
 export function rebaseCostOf(body) {
   const m = /^<!-- factory:rebase-cost (\{[^\n]*\}) -->$/m.exec(body || "");
   if (!m) return null;
   try {
     const v = JSON.parse(m[1]);
-    return { usd: typeof v.usd === "number" && Number.isFinite(v.usd) && v.usd >= 0 ? v.usd : null, conflict: v.conflict === true };
+    const usd = typeof v.usd === "number" && Number.isFinite(v.usd) && v.usd >= 0 ? v.usd : null;
+    return { usd, conflict: v.conflict === true, ...(usd !== null && v.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(usd !== null && v.usdUpperBound === true ? { usdUpperBound: true } : {}) };
   } catch {
     return null;
   }
@@ -2209,11 +2234,20 @@ export function rebaseCostOf(body) {
 
 /**
  * Issue `issue`'s send-back rebases so far, from the rebase lines in the work stages' progress comments `comments`
- * written by `mine` (Factory's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`,
- * `usd` the metered stages' sum.
+ * written by `mine` (Factory's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`
+ * and, when any summed figure carries one, its bound mark (`usdLowerBound`, `usdUpperBound`). `usd` is the metered
+ * stages' sum with each one's sandbox dollars, read from the vendor comment keyed as its progress comment (vendorBody)
+ * when `comments` holds it.
  */
 export function rebaseTally(comments, issue, mine = trustedAuthor) {
   const out = { count: 0, usd: 0, unmetered: 0, conflicts: 0 };
+  const keyOf = (body, kind) => new RegExp(`^<!-- factory:${issue}:${kind}:(work[A-Za-z0-9:-]{0,96}) -->`).exec(body || "")?.[1] ?? null;
+  const vendor = new Map();
+  for (const c of comments || []) {
+    const key = mine(c) ? keyOf(c.body, "vendor") : null;
+    const usd = key ? spendParts(c.body)?.vendorUsd : null;
+    if (Number.isFinite(usd)) vendor.set(key, usd);
+  }
   const head = `<!-- factory:${issue}:progress:work`;
   for (const c of comments || []) {
     if (!mine(c) || !(c.body || "").startsWith(head)) continue;
@@ -2222,7 +2256,12 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
     out.count += 1;
     if (r.conflict) out.conflicts += 1;
     if (r.usd === null) out.unmetered += 1;
-    else out.usd = Math.round((out.usd + r.usd) * 1e4) / 1e4;
+    else {
+      if (r.usdLowerBound) out.usdLowerBound = true;
+      if (r.usdUpperBound) out.usdUpperBound = true;
+    }
+    const sum = (r.usd ?? 0) + (vendor.get(keyOf(c.body, "progress")) ?? 0);
+    out.usd = Math.round((out.usd + sum) * 1e4) / 1e4;
   }
   return out;
 }

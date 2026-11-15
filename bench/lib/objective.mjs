@@ -769,20 +769,21 @@ export function spendRecords(collected, { app = null } = {}) {
 /**
  * The Objective's send-back rebases (#277): `sentBack`, Factory's send-back notices on its PRs (each names the head it
  * saw, `<!-- factory:<n>:rebase:<sha> -->`), and from its own work stages' rebase lines (plugin logic.mjs
- * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their metered dollars, also in the
- * row's cost), `unmetered` and `conflicts` (the ones a harness resolved). A stage from before the rebase line is in
- * `sentBack` only.
+ * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their metered dollars with their
+ * sandboxes', also in the row's cost; `usdLowerBound` / `usdUpperBound` when a summed figure carries that mark),
+ * `unmetered` and `conflicts` (the ones a harness resolved). A stage from before the rebase line is in `sentBack` only.
  */
 export function rebasesOf(collected, { app = null } = {}) {
   const n = collected.issue.number;
   const self = factoryLogin(collected.issueTimeline, app);
   const local = localLogin(collected);
   const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
-  const tally = rebaseTally(factoryStages(collected, { app }), n, () => true);
+  // The stages' own vendor comments ride along: a sandbox rebase's dollars include its sandbox's (rebaseTally).
+  const tally = rebaseTally([...factoryStages(collected, { app }), ...vendorComments(collected, { app })], n, () => true);
   const notice = `<!-- factory:${n}:rebase:`;
   let sentBack = 0;
   for (const pr of branchPulls(collected)) sentBack += (collected.pullDetails?.[pr.number]?.comments || []).filter((c) => mine(c) && (c.body || "").startsWith(notice)).length;
-  return { sentBack, stages: tally.count, usd: tally.usd, unmetered: tally.unmetered, conflicts: tally.conflicts };
+  return { sentBack, stages: tally.count, usd: tally.usd, unmetered: tally.unmetered, conflicts: tally.conflicts, ...(tally.usdLowerBound ? { usdLowerBound: true } : {}), ...(tally.usdUpperBound ? { usdUpperBound: true } : {}) };
 }
 
 /**
@@ -1031,8 +1032,12 @@ const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === 
 /** One table cell: no pipe, no line break (a Blocked reason may carry either). */
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
-/** The Rebases cell: the send-backs, and the rebase stages' dollars when any recorded them ("3, $4.10"); "?" for an old row. */
-export const rebaseCell = (r) => (!r ? "?" : `${r.sentBack}${r.stages ? `, ${fmtUsd(r.usd)}${r.unmetered ? ` + ${r.unmetered} unmetered` : ""}` : ""}`);
+/**
+ * The Rebases cell: the send-backs, and the rebase stages' dollars when any recorded them ("3, $4.10"), with their bound
+ * marks ("3, at least $4.10"); "?" for an old row.
+ */
+const rebaseBound = (r) => (r.usdLowerBound && r.usdUpperBound ? "about " : r.usdLowerBound ? "at least " : r.usdUpperBound ? "at most " : "");
+export const rebaseCell = (r) => (!r ? "?" : `${r.sentBack}${r.stages ? `, ${rebaseBound(r)}${fmtUsd(r.usd)}${r.unmetered ? ` + ${r.unmetered} unmetered` : ""}` : ""}`);
 
 /** The Markdown table: one row per Objective, oldest issue first. */
 /** An External row's stops, by cause: "Blocked: max-usd, provider-quota". */

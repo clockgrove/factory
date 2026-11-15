@@ -20,7 +20,7 @@ import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -173,14 +173,16 @@ async function main() {
       const line = stageSpendLine(usage, { records, known });
       progress.spend(line.usd, line.parts);
     }
-    // A rebase's dollars on every route: 0 when no harness pass ran, else its passes' (a conflict pass, fix passes).
+    // A rebase's dollars on every route, with the spend line's bound marks: 0 when no harness pass ran, else its passes'
+    // (a conflict pass, fix passes).
     let rebaseText = "";
     if (rebaseStage) {
-      const usd = typeof usage.usd === "number" ? usage.usd : records.length ? null : 0;
+      const cost = rebaseCost(usage, { records, known });
       // The earlier rebases are read from the issue, but not through an outage this stage is ending on; unread, the
       // line names this rebase alone. The rebase line is set before that read, so a stop's write carries it.
       const read = outage ? null : () => listComments(repo, issue, token);
-      rebaseText = `; ${await rebaseExitLine(progress, issue, { usd, conflict: rebaseStage.conflict, passes: records.length }, read)}`;
+      const passesRan = records.filter((r) => r && !r.noRun).length;
+      rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.

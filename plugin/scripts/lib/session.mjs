@@ -76,7 +76,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalField
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -783,25 +783,27 @@ export const progressTail = ({ harness = null, model = "", ran = null, spend = n
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`factory:host:\` labels).` : "");
 /**
- * A send-back rebase stage's end (#277): its rebase line (`usd`, `conflict`) is set on the progress comment first, so a
- * stop's write (progress.flushNow) carries it even when the read after it outlasts the stop; then the earlier rebases are
- * read (`read`, the issue's comments; null reads none) for the exit line's words (logic.mjs rebaseLine).
+ * A send-back rebase stage's end (#277): its rebase line (`cost`, logic.mjs rebaseCost: its dollars and bound marks;
+ * `conflict`) is set on the progress comment first, so a stop's write (progress.flushNow) carries it even when the read
+ * after it outlasts the stop; then the earlier rebases are read (`read`, the issue's comments; null reads none) for the
+ * exit line's words (logic.mjs rebaseLine), `passes` the harness passes that ran.
  */
-export async function rebaseExitLine(progress, issue, { usd, conflict, passes = 0 }, read = null) {
-  progress.rebase({ usd, conflict });
+export async function rebaseExitLine(progress, issue, { cost, conflict, passes = 0 }, read = null) {
+  progress.rebase({ ...cost, conflict });
   const comments = read ? await read().catch(() => null) : null;
-  return rebaseLine({ usd, conflict, passes }, comments ? rebaseTally(comments, issue) : null);
+  return rebaseLine({ ...cost, conflict, passes }, comments ? rebaseTally(comments, issue) : null);
 }
 
 /**
  * The rebase line of a stopped rebase stage whose end ran out of time (worker endNow), unless the end set it already:
- * its passes' dollars as the stop read them (stop.mjs stoppedRecords: a pass cut short counts at its live reading),
- * $0 with no harness pass, unmetered when a pass that ran has no figure.
+ * its passes' dollars as the stop read them (stop.mjs stoppedRecords: a pass cut short counts at its live reading, a
+ * lower bound), with their bound marks (logic.mjs rebaseCost); a pass with no figure leaves the sum a lower bound.
  */
 export function stoppedRebase(progress, conflict, recs = []) {
   if (progress.rebased()) return;
-  const unpriced = recs.some((r) => r && !r.noRun && !(typeof r.usd === "number" && Number.isFinite(r.usd)));
-  progress.rebase({ usd: unpriced ? null : Math.round(sumSpend(recs) * 1e4) / 1e4, conflict });
+  const priced = recs.some((r) => r && !r.noRun && typeof r.usd === "number" && Number.isFinite(r.usd));
+  const usage = { usd: priced ? Math.round(sumSpend(recs) * 1e4) / 1e4 : null, usdLowerBound: recs.some((r) => r?.usdLowerBound), usdUpperBound: recs.some((r) => r?.usdUpperBound) };
+  progress.rebase({ ...rebaseCost(usage, { records: recs }), conflict });
 }
 
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */

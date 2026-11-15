@@ -2,10 +2,10 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
-import { marker, rebaseCostOf, rebaseLine, rebaseTally } from "../scripts/lib/logic.mjs";
+import { marker, rebaseCost, rebaseCostOf, rebaseLine, rebaseTally, vendorBody } from "../scripts/lib/logic.mjs";
 import { forgetFiles, heavyOverlap, plannedFiles, siblingOrder } from "../scripts/lib/overlap.mjs";
-import { progressReporter, rebaseNotice } from "../scripts/lib/session.mjs";
-import { markdownTable, rebasesOf } from "../../bench/lib/objective.mjs";
+import { progressReporter, rebaseExitLine, rebaseNotice } from "../scripts/lib/session.mjs";
+import { markdownTable, rebaseCell, rebasesOf } from "../../bench/lib/objective.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -387,7 +387,7 @@ test("#277: a stopped rebase stage whose end runs out of time still leaves its r
   };
   try {
     // The end's read of the earlier rebases never answers; the stop's fallback (worker endNow) runs meanwhile.
-    const slow = await run(`void rebaseExitLine(progress, 7, { usd: 0.6, conflict: true, passes: 1 }, () => new Promise(() => {}));
+    const slow = await run(`void rebaseExitLine(progress, 7, { cost: { usd: 0.6 }, conflict: true, passes: 1 }, () => new Promise(() => {}));
       stoppedRebase(progress, true, [{ label: "work-1", usd: null }]);`);
     assert.match(slow, /^PATCH /, "the stop's write is made");
     assert.deepEqual(rebaseCostOf(slow), { usd: 0.6, conflict: true }, "the end's own figure, not the fallback's");
@@ -395,10 +395,59 @@ test("#277: a stopped rebase stage whose end runs out of time still leaves its r
     const clean = await run(`progress.spend(0);
       stoppedRebase(progress, false, [{ label: "rebase", usd: 0, noRun: true }]);`);
     assert.deepEqual(rebaseCostOf(clean), { usd: 0, conflict: false });
-    // A stopped pass counts at its live reading (stop.mjs stoppedRecords).
+    // A stopped pass counts at its live reading (stop.mjs stoppedRecords), a lower bound; so does a sum missing a pass.
     const cut = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: 0.42, usdLowerBound: true }]);`);
-    assert.deepEqual(rebaseCostOf(cut), { usd: 0.42, conflict: false });
+    assert.deepEqual(rebaseCostOf(cut), { usd: 0.42, conflict: false, usdLowerBound: true });
+    const part = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: 0.2 }, { label: "fix-2", usd: null }]);`);
+    assert.deepEqual(rebaseCostOf(part), { usd: 0.2, conflict: false, usdLowerBound: true });
   } finally {
     server.close();
   }
+});
+
+test("#277: a rebase's partial cost keeps its bound marks from the end's figure to the tally and the scorecard, and a sandbox rebase counts its sandbox", async () => {
+  // As the spend line: a pass with no price beside a priced one leaves a lower bound; one priced at the dearest rates an estimate.
+  assert.deepEqual(rebaseCost({ usd: 1.2, usdLowerBound: true }, { records: [{ usd: 1.2 }, { usd: null }] }), { usd: 1.2, usdLowerBound: true });
+  assert.deepEqual(rebaseCost({ usd: 0.5, usdUpperBound: true }, { records: [{ usd: 0.5, usdUpperBound: true }] }), { usd: 0.5, usdUpperBound: true });
+  assert.deepEqual(rebaseCost(null, { records: [{ usd: null }], known: { usd: 0.3 } }), { usd: 0.3, usdLowerBound: true });
+  assert.deepEqual(rebaseCost({ usd: null }, { records: [{ usd: null }] }), { usd: null });
+  assert.deepEqual(rebaseCost({ usd: null }, { records: [{ usd: null, noRun: true }] }), { usd: 0 });
+
+  const written = [];
+  const realFetch = globalThis.fetch;
+  const savedUrl = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = async (url, init = {}) => {
+    if ((init.method || "GET") === "GET") return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    written.push(JSON.parse(init.body).body);
+    return new Response(JSON.stringify({ id: 1 }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let line;
+  try {
+    const progress = progressReporter(repoOf(REPO), 7, { token: "t" }, { stage: "work", runId: "43", soFar: null });
+    const cost = rebaseCost({ usd: 1.2, usdLowerBound: true }, { records: [{ usd: 1.2 }, { usd: null }] });
+    const before = `${marker(7, "progress", "work:41")}\nFactory work: started.\n<!-- factory:rebase-cost {"usd":0.5,"conflict":false} -->`;
+    line = await rebaseExitLine(progress, 7, { cost, conflict: true, passes: 2 }, async () => [{ id: 1, user: { login: SELF, type: "Bot" }, body: before }]);
+    await progress(`exit: delivered; ${line}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    if (savedUrl === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = savedUrl;
+  }
+  assert.equal(line, "rebase 2 of this Objective (a conflict pass): at least $1.20; all its rebases: at least $1.70");
+  const body = written.at(-1);
+  assert.deepEqual(rebaseCostOf(body), { usd: 1.2, conflict: true, usdLowerBound: true });
+
+  const at = (m) => new Date(Date.UTC(2026, 10, 14, 10, m)).toISOString();
+  const own = (b, m) => ({ id: m, user: { login: SELF, type: "Bot" }, body: b, created_at: at(m) });
+  // The sandbox route: the launcher books the sandbox's dollars in a vendor comment keyed as the stage's progress comment.
+  const sandbox = own(`${marker(7, "progress", "work:44")}\nFactory work: started.\n<!-- factory:rebase-cost {"usd":0.3,"conflict":false} -->`, 3);
+  const vendor = own(`${marker(7, "vendor", "work:44")}\n${vendorBody({ line: "sandbox", vendorUsd: 0.05 })}`, 4);
+  const comments = [own(body.startsWith("<!--") ? body : `${marker(7, "progress", "work:43")}\n${body}`, 2), sandbox, vendor];
+  assert.deepEqual(rebaseTally(comments, 7, (c) => c.user.login === SELF), { count: 2, usd: 1.55, unmetered: 0, conflicts: 1, usdLowerBound: true });
+
+  const collected = { repository: REPO, issue: { number: 7, title: "x", created_at: at(0), labels: [], state: "open" }, issueTimeline: [{ event: "labeled", label: { name: "factory:running" }, actor: { login: SELF, type: "Bot" }, created_at: at(0) }], issueComments: comments, pulls: [], pullDetails: {} };
+  const rebases = rebasesOf(collected);
+  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 1.55, unmetered: 0, conflicts: 1, usdLowerBound: true });
+  assert.match(rebaseCell(rebases), /^0, at least \$1\.55/);
 });

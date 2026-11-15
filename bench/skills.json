@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "digest": "0d6f98e05975",
+  "digest": "e515740fbd17",
   "skills": {
     "factory-deliver-pr": {
       "sha256": "6d9995faec6830393d586cf5fa6f926d91b148ab7e8be5b5a54f495e1fbc4a3f",
@@ -89,19 +89,19 @@
       "words": 699
     },
     "factory-score": {
-      "sha256": "ebe5c74df0764831000f38f4a07a081de01c0a184929c67b53b408e2b278cb3e",
+      "sha256": "8d52bc0a75390a98b7459afbefa66c9803ef0f71e71d8ec3a4add095a9d9c319",
       "lines": 28,
-      "words": 474
+      "words": 487
     },
     "factory-scoring": {
-      "sha256": "ac75f143260bdcebf77fd9edda3b84a5ff7bcb6ba1e02e3e47a611854e3f7d18",
+      "sha256": "7b738932eea81960fe2555a7c486cc4f88465611d23cc929aaa4719dc03b12e2",
       "lines": 37,
-      "words": 691,
+      "words": 696,
       "files": {
         "reference.md": {
-          "sha256": "9d5d1208642eefd5fd8f03574bcda80b76e20930314a5f49ef3afe950712d4fa",
-          "lines": 46,
-          "words": 1054
+          "sha256": "552d566bd632ee4fda2811539e5c3ef7ef5880ffd1f45c6142f71c483d547c2e",
+          "lines": 52,
+          "words": 1241
         }
       }
     },
@@ -133,5 +133,5 @@
       "words": 361
     }
   },
-  "recordedAt": "2026-11-15T07:51:36.069Z"
+  "recordedAt": "2026-11-15T07:53:24.336Z"
 }

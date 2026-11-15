@@ -16,7 +16,8 @@
  *                          after --since, in the order they ended; any human input (a hand-started or re-run Factory
  *                          workflow run included), a Blocked card, an unmerged end or a later P1 escape breaks it
  *   --repo OWNER/NAME      the repository; give it more than once with --streak and --since for the pooled streak
- *                          (then --issue, --usage, --minutes, --read, --md, --snapshot and --replay are not taken)
+ *                          (then --issue, --usage, --minutes, --owner-minutes, --read, --md, --snapshot and --replay
+ *                          are not taken)
  *   --factory OWNER/NAME   the repository --since TAG is read from (default clockgrove/factory)
  *   --workflow FILE        the adopter's Factory workflow file (default factory.yml): a person's dispatch or re-run of it is input
  *   --usage DIR            result.json / events.jsonl files to read instead of
@@ -24,6 +25,11 @@
  *                          issue without one having no usage; or, for one
  *                          --issue, one artifact's unzip); works without a token
  *   --minutes N=M          operator minutes for issue N, from a stopwatch
+ *   --handover RULE        how a workflow hand-over is scored, for every row and repository of the run: owner-step
+ *                          (the default: normal work; the Objective can still walk away, and applying the posted
+ *                          hand-over is an owner step shown apart with its own minutes) or input (the strict read:
+ *                          each merged PR carrying the hand-over line is one asked-for human action, a miss)
+ *   --owner-minutes N=M    owner-step minutes for issue N (applying its workflow hand-over), from a stopwatch
  *   --read N=ok|defect     the owner's read of issue N's merged diff (kept across --append)
  *   --baseline REF         the ref the judge compares each merged head with;
  *                          the row carries the pair for bench/judge.mjs
@@ -61,7 +67,7 @@ import { parseArgs } from "node:util";
 import { collectObjective, listObjectives, recordingApi, snapshotApi, usageDirFor, usageFromDir } from "./lib/collect.mjs";
 import { loadPrices } from "./lib/cost.mjs";
 import { downloadArtifact, ghApi, ghGraphql } from "./lib/gh.mjs";
-import { markdownTable, OBJECTIVE_LABEL, scoreObjective, STALL_MINUTES } from "./lib/objective.mjs";
+import { HANDOVER_DEFAULT, HANDOVER_SCORING, markdownTable, OBJECTIVE_LABEL, scoreObjective, STALL_MINUTES } from "./lib/objective.mjs";
 import { pooledStreak, pooledTable, streaks, streakTable, tagTime } from "./lib/streak.mjs";
 import { existsSync as fileExists } from "node:fs";
 
@@ -102,6 +108,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       workflow: { type: "string" },
       usage: { type: "string" },
       minutes: { type: "string", multiple: true },
+      handover: { type: "string" },
+      "owner-minutes": { type: "string", multiple: true },
       read: { type: "string", multiple: true },
       baseline: { type: "string" },
       bot: { type: "string", multiple: true },
@@ -138,7 +146,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const pooled = repos.length > 1;
   if (pooled) {
     if (!values.streak || !values.since) usage("Several --repo values give the pooled streak: add --streak and --since TAG");
-    const issueKeyed = ["issue", "usage", "minutes", "read", "md", "snapshot", "replay"].filter((k) => values[k] !== undefined);
+    const issueKeyed = ["issue", "usage", "minutes", "owner-minutes", "read", "md", "snapshot", "replay"].filter((k) => values[k] !== undefined);
     if (issueKeyed.length) usage(`--${issueKeyed[0]} takes one --repo`);
   }
   const repo = repos[0];
@@ -156,12 +164,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const stallMinutes = values["stall-minutes"] === undefined ? STALL_MINUTES : Number(values["stall-minutes"]);
   if (!(stallMinutes > 0)) usage("--stall-minutes takes a positive number of minutes");
   if (values.usage && !(existsSync(values.usage) && statSync(values.usage).isDirectory())) usage(`--usage: ${values.usage} is not a directory`);
-  const minutes = {};
-  for (const m of values.minutes ?? []) {
-    const match = /^(\d+)=(\d+(?:\.\d+)?)$/.exec(m);
-    if (!match) usage(`--minutes takes ISSUE=MINUTES, not ${m}`);
-    minutes[Number(match[1])] = Number(match[2]);
-  }
+  const perIssue = (flag) => {
+    const out = {};
+    for (const m of values[flag] ?? []) {
+      const match = /^(\d+)=(\d+(?:\.\d+)?)$/.exec(m);
+      if (!match) usage(`--${flag} takes ISSUE=MINUTES, not ${m}`);
+      out[Number(match[1])] = Number(match[2]);
+    }
+    return out;
+  };
+  const minutes = perIssue("minutes");
+  const ownerMinutes = perIssue("owner-minutes");
+  const handover = values.handover ?? HANDOVER_DEFAULT;
+  if (!HANDOVER_SCORING.includes(handover)) usage(`--handover takes ${HANDOVER_SCORING.join(" or ")}, not ${handover}`);
   const reads = {};
   for (const r of values.read ?? []) {
     const match = /^(\d+)=(ok|defect|unread)$/.exec(r);
@@ -217,7 +232,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         if (usageDir && snapshot) collected.usage = usageFor(issue, numbers.length) ?? [];
         collected.harness = collected.usage.find((r) => r.harness)?.harness ?? collected.harness ?? null;
         if (values.snapshot) (calls.__collected ??= {})[issue] = collected;
-        const row = scoreObjective(collected, { prices, minutes: minutes[issue], read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills, app: values.app ?? null, stallMinutes });
+        const row = scoreObjective(collected, { prices, minutes: minutes[issue], ownerMinutes: ownerMinutes[issue], handover, read: reads[issue], baseline: values.baseline ?? null, bots, label, clockAfter, checks: values.check ?? [], skills, app: values.app ?? null, stallMinutes });
         rows.push(row);
         byRepo[repo].push(row);
       }
@@ -249,8 +264,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stderr.write(`${values.append}: ${rows.length} row(s) merged into the standing scorecard\n`);
   }
   const json = pooled
-    ? `${JSON.stringify({ version: 1, repositories: repos, scoredAt: new Date().toISOString(), rows, streak: { tag: sinceTag, pooled: pool, repositories: perRepo } }, null, 2)}\n`
-    : `${JSON.stringify({ version: 1, repository: repo, scoredAt: new Date().toISOString(), rows, ...(streak ? { streak: { tag: sinceTag, ...streak } } : {}) }, null, 2)}\n`;
+    ? `${JSON.stringify({ version: 1, repositories: repos, scoredAt: new Date().toISOString(), handover, rows, streak: { tag: sinceTag, pooled: pool, repositories: perRepo } }, null, 2)}\n`
+    : `${JSON.stringify({ version: 1, repository: repo, scoredAt: new Date().toISOString(), handover, rows, ...(streak ? { streak: { tag: sinceTag, ...streak } } : {}) }, null, 2)}\n`;
   if (values.out) {
     mkdirSync(dirname(resolve(values.out)), { recursive: true });
     writeFileSync(values.out, json);

@@ -58,7 +58,7 @@ import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
-import { namedReviewer, thirdPartyComment } from "./third-party-review.mjs";
+import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -2163,7 +2163,8 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
     const tip = await branchState(repo, pr.base?.ref || "main", opts).catch((e) => (log(`#${issue}: ${pr.base?.ref} could not be read (${errCode(e)}); the send-back goes ahead`), null));
     if (tip?.head === record.base) stuck = record;
   }
-  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck };
+  // The PR's third-party wait record (third-party-review.mjs waitOf), read from the same comments.
+  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue) };
 }
 
 /**

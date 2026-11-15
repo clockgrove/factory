@@ -707,7 +707,8 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
  * sandbox the launch job's tick on its own failure, the sweep's own wakes (sweep-wake, image-wake) and the dispatcher's
- * owed image build (image_owed). A workflow rendered before them leaves those waits to GitHub's cron,
+ * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Factory PR
+ * (pull_request_review, filtered to a Bot reviewer), which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
 export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
@@ -733,10 +734,15 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
     ...(jobs["launch-gate"] && !ownWake("sweep") ? ["the sweep's own wake (sweep-wake)"] : []),
     ...(jobs["launch-gate"] && !(ownWake("image") && /cancelled\(\)|always\(\)/.test(String(jobs["image-wake"]?.if || ""))) ? ["the sweep's wake after an image build (image-wake) that runs past a skipped dispatcher"] : []),
     ...(jobs["launch-gate"] && !owedBuild ? ["the dispatcher's owed image build (image_owed)"] : []),
+    ...(thirdPartyNamed(doc, jobs) && !(on?.pull_request_review && /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot'/.test(String(jobs.dispatch?.if || ""))) ? ["a dispatcher tick on a third-party reviewer's review (pull_request_review, from an App only)"] : []),
   ];
   if (!missing.length) return PASS("dispatcher ticks", `a closed issue, a failed launch and the waits only time ends tick the dispatcher on time${jobs["launch-gate"] ? "; the sandbox sweep arms its own wakes and an owed image build runs on the day's first tick" : ""}`);
-  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
+  return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a review waiting for a third-party reviewer, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");
 }
+
+/** Whether the workflow names third-party reviewers: FACTORY_THIRD_PARTY_REVIEWERS in its env block, or `third_party_reviewers` on a step. */
+const thirdPartyNamed = (doc, jobs) =>
+  !!String(doc?.env?.FACTORY_THIRD_PARTY_REVIEWERS ?? "").trim() || Object.values(jobs).some((j) => (j?.steps || []).some((st) => !!String(st?.with?.third_party_reviewers ?? "").trim()));
 
 /**
  * On a private repository the wake jobs sleep only to the short waits (a quota retry, a read retry, the sweep's minutes):
@@ -745,7 +751,7 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  */
 export function longWaitCheck(repoData) {
   if (repoData?.private !== true) return null;
-  return PASS("long waits", "private repository: a sandbox stage's lease end and the UTC day's turn after daily_usd fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
+  return PASS("long waits", "private repository: a sandbox stage's lease end, the UTC day's turn after daily_usd and a third-party wait's bound fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

@@ -84,3 +84,14 @@ test("every skill's frontmatter is strict YAML with its directory's name and a d
     assert.ok(typeof doc.description === "string" && doc.description.length > 40, `${name}: description`);
   }
 });
+
+// GitHub evaluates `${{ }}` anywhere in an action's metadata, descriptions included, and refuses to load the action when
+// an expression names a context an action may not use (`vars`, `secrets`): every job then fails at "Set up job". A
+// description holds no expression at all, and no expression names those contexts.
+test("action.yml: no expression in any description, and none names a context an action cannot read", () => {
+  const text = readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8");
+  const action = parseYaml(text);
+  const descriptions = [action.description, ...Object.values(action.inputs || {}).map((i) => i?.description), ...Object.values(action.outputs || {}).map((o) => o?.description)];
+  for (const d of descriptions) assert.ok(!String(d ?? "").includes("${{"), `an expression in a description: ${String(d).slice(0, 80)}`);
+  for (const [, expr] of text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) assert.ok(!/(?<![.\w])(vars|secrets)\b/.test(expr), `an action cannot read this context: \${{${expr}}}`);
+});

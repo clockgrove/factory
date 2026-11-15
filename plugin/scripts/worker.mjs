@@ -40,7 +40,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
-import { CLEAN_REFUSED, checkoutHolds, continuePrompt, enterStage, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
+import { CLEAN_REFUSED, checkoutHolds, continuePrompt, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -394,7 +394,7 @@ async function main() {
   // What an abandoned pass left untracked, once the checkout is on the branch: a clean that fails leaves it, and a
   // later `git add -A` could push it, so the stage Blocks (setup) rather than run on such a clone.
   const clean = () =>
-    prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true }).catch((e) => {
+    prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true, strict: true }).catch((e) => {
       log(`the clone's leftovers could not be removed: ${String(e?.message || e).slice(0, 200)}`);
       throw Object.assign(new Error(CLEAN_REFUSED), { code: "clone-clean" });
     });
@@ -503,16 +503,24 @@ async function main() {
     allowAgentEnv(Object.keys(wrote));
   }
   const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // A continued stage's install that failed on its kept checkout: the pass is told, and finishes it (continue.mjs installEnd).
+  let installNote = "";
   if (install) {
     log(`install: ${install}`);
     await progress(first ? "install (first time on this machine)" : "install");
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
-    if (!i.ok) {
-      const reason = i.reason;
+    const ended = installEnd(i, { continued: !!continued, command: install });
+    if (ended.block) {
+      const reason = ended.block;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "install" }, token);
       await finish("blocked", reason);
       return;
+    }
+    if (ended.note) {
+      log(`${i.reason}; the continued pass finishes its dependency change on the kept checkout`);
+      await progress("install failed on the kept checkout; the continued pass finishes it");
+      installNote = ended.note;
     }
   }
 
@@ -604,8 +612,8 @@ async function main() {
   const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
   // A continued pause: its resumed session is told where it stands and the new hand-off folders; a fresh session on the
   // kept checkout gets the task card and what the checkout holds (lib/continue.mjs).
-  const workPrompt = continued ? keptPrompt(prompt) : prompt;
-  const resumedPrompt = continued ? continuePrompt(io.dirs) : conflictPrompt.split("\n\n---\n\n").at(-1);
+  const workPrompt = continued ? keptPrompt(prompt, { note: installNote }) : prompt;
+  const resumedPrompt = continued ? continuePrompt(io.dirs, { note: installNote }) : conflictPrompt.split("\n\n---\n\n").at(-1);
   // The plan's Needs-Workflow lines (handover.mjs plannedWorkflows): the hand-over notice goes on the issue as the plan
   // is written, once, unless one is there already.
   let workflowsNoticed = false;

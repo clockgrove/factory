@@ -8,10 +8,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CLEAN_REFUSED, CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, enterStage, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
+import { CLEAN_REFUSED, CONTINUE_GUARDS, checkoutHolds, continueDecision, continuePrompt, enterStage, installEnd, keptPrompt, lastStage, loginOf, pauseRecord } from "../scripts/lib/continue.mjs";
 import { UsageLimitReached, runHarness } from "../scripts/lib/harness.mjs";
 import { claudeProject, gitPinFile, pinGitDir, prepareClone } from "../scripts/lib/local.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
+import { installCommand, installDeps } from "../scripts/lib/checkout.mjs";
 import { restoreTranscript, saveTranscript, usageLimitExit, writeUsage } from "../scripts/lib/session.mjs";
 import { Local } from "../scripts/local.mjs";
 
@@ -357,4 +358,44 @@ test("a stage directory whose process never ran (a stopping serve's start) does 
   const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(3)}`), now: async () => guardsNow(), holds: async () => "", putOn: async () => assert.fail("kept"), clean: async () => assert.fail("kept"), restore: async () => ({ id: "s", from: `usage-work-${STAMP(1)}`, reason: "" }) });
   assert.equal(entry.continue, true);
   assert.equal(entry.from, `usage-work-${STAMP(1)}`);
+});
+
+test("a fresh work stage's clean that cannot remove a leftover fails with clone-clean; serve's best-effort clean still only warns", { skip: process.getuid?.() === 0 && "root removes anything" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "cont-stuck-"));
+  const { clone } = pausedClone(root);
+  // An abandoned pass's untracked file git clean cannot remove (its directory read-only).
+  mkdirSync(join(clone, "stuck"));
+  writeFileSync(join(clone, "stuck", "planted.txt"), "x\n");
+  chmodSync(join(clone, "stuck"), 0o555);
+  const run = (inner) => exec(inner[0], inner.slice(1), { env: GIT_ENV });
+  try {
+    await prepareClone(clone, [], run, { fresh: true });
+    assert.ok(existsSync(join(clone, "stuck", "planted.txt")), "best effort: left, with a warning");
+    await assert.rejects(prepareClone(clone, [], run, { fresh: true, strict: true }), (e) => e.code === "clone-clean" && /could not all be removed/.test(e.message));
+    // Through the decider, as worker.mjs calls it: the entry fails, and the worker Blocks on its clone-clean code.
+    await pausedStage(root, 1, { pause: pauseRecord(guardsNow()) });
+    await assert.rejects(enterStage({ ws: root, own: join(root, `usage-work-${STAMP(2)}`), now: async () => guardsNow({ text: "0".repeat(64) }), holds: async () => "", putOn: async () => {}, clean: () => prepareClone(clone, [], run, { fresh: true, strict: true }), restore: async () => assert.fail("nothing restored") }), (e) => e.code === "clone-clean");
+  } finally {
+    chmodSync(join(clone, "stuck"), 0o755);
+  }
+});
+
+test("a continued stage's frozen install that fails on its unfinished dependency change does not Block: the pass is told and finishes it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cont-npm-"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", version: "1.0.0" }));
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ name: "app", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "app", version: "1.0.0" } } }));
+  // The paused pass added a dependency to package.json and had not updated the lockfile yet.
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", version: "1.0.0", dependencies: { "left-pad": "1.3.0" } }));
+  const command = installCommand(dir, "auto");
+  assert.equal(command, "npm ci --ignore-scripts");
+  const env = { ...process.env, npm_config_offline: "true", npm_config_cache: join(dir, ".npm"), npm_config_update_notifier: "false", npm_config_audit: "false", npm_config_fund: "false" };
+  const result = await installDeps(dir, command, { env, timeoutMs: 120_000 });
+  assert.equal(result.ok, false, "npm ci refuses a manifest its lockfile does not match");
+  assert.deepEqual(installEnd(result, { continued: false, command }), { block: result.reason }, "a fresh stage Blocks on it, as before");
+  const kept = installEnd(result, { continued: true, command });
+  assert.equal(kept.block, undefined);
+  assert.match(kept.note, /^Factory's install \(npm ci --ignore-scripts\) failed on this checkout.*lockfile included/);
+  assert.ok(continuePrompt({ in: "/i", out: "/o" }, { note: kept.note }).endsWith(kept.note), "the resumed session is told");
+  assert.ok(keptPrompt("# Task card\n", { note: kept.note }).endsWith(kept.note), "so is a fresh session on the kept checkout");
+  assert.deepEqual(installEnd({ ok: true }, { continued: true, command }), {});
 });

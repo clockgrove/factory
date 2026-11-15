@@ -416,8 +416,8 @@ export function prepareProtectedPaths(clone) {
 // checked out: each gitlink's .git and .git/modules removed, then checked: exit 3 when git would still read another
 // directory), HARNESS_EXEC_CONFIG back to HEAD (a tracked file restored, anything else removed, never followed through a
 // symlink), and the submodule names .gitmodules gives printed as JSON for the harness's git env. Fresh, at a stage's
-// start: the untracked files an earlier stage or run left in this reused clone (never pushed) removed, best effort;
-// ignored ones (dependencies, Factory's plugin) and the paths Factory makes here stay. Its changes to tracked files are
+// start: the untracked files an earlier stage or run left in this reused clone (never pushed) removed, best effort
+// ("fresh-strict", a fresh work stage's: a removal that fails exits 4); ignored ones (dependencies, Factory's plugin) and the paths Factory makes here stay. Its changes to tracked files are
 // the checkout's to discard (outbox.mjs putOn).
 const PREPARE_CLONE = String.raw`
 const fs = require("fs"), path = require("path"), cp = require("child_process");
@@ -469,10 +469,13 @@ if (clear === "1") {
   for (const x of X) if (realParents(x)) sweep(x);
   if (head.length) git("checkout", "HEAD", "--", ...head);
 }
-if (clear === "fresh" && gst && gst.isDirectory()) {
+if ((clear === "fresh" || clear === "fresh-strict") && gst && gst.isDirectory()) {
   const keep = [...P.dirs, ...H.dirs, ...P.files, ...H.files].flatMap((p) => ["-e", "/" + p]);
   try { cp.execFileSync("git", ["-C", clone, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "clean", "-q", "-f", "-d", ...keep], { stdio: ["ignore", "ignore", "pipe"] }); }
-  catch (e) { process.stderr.write("warning: the clone's leftovers could not all be removed: " + String(e.stderr || e.message).trim().split("\n")[0].slice(0, 200) + "\n"); }
+  catch (e) {
+    process.stderr.write("warning: the clone's leftovers could not all be removed: " + String(e.stderr || e.message).trim().split("\n")[0].slice(0, 200) + "\n");
+    if (clear === "fresh-strict") process.exit(4);
+  }
 }
 for (const d of [...P.dirs, ...H.dirs].map((d) => path.join(clone, d)).concat(dirs)) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
 const made = [];
@@ -492,8 +495,10 @@ process.stdout.write(JSON.stringify({ submodules: names, locks: removed }));
  * `locks`: the stale git locks to remove first (staleGitLocks), each re-checked there as a regular `.lock` file under
  * `.git` with no symlink on its path. Returns {submodules, locks}: the names .gitmodules gives and the locks removed.
  */
-export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, locks = [] } = {}) {
-  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? "fresh" : "0", JSON.stringify(locks), ...dirs]);
+export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, strict = false, locks = [] } = {}) {
+  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? (strict ? "fresh-strict" : "fresh") : "0", JSON.stringify(locks), ...dirs]);
+  // `strict` (a fresh work stage, worker.mjs): leftovers that could not all be removed are a failure, code clone-clean.
+  if (r.code === 4) throw Object.assign(new Error(`the clone's leftovers could not all be removed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`), { code: "clone-clean" });
   if (r.code !== 0) throw new Error(`the clone could not be prepared in its sandbox: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
   try {
     return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };

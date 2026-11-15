@@ -169,11 +169,23 @@ export async function enterStage({ ws, own, now, holds, putOn, clean, restore })
  * What a resumed session is told when its stage continues a pause: the checkout as it left it, and Factory's hand-off
  * folders, which are new for every stage (`dirs`: handoff.mjs handoffDirs), restated so a path it remembers is not used.
  */
-export function continuePrompt(dirs) {
-  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Factory's hand-off folders are new for this run and the earlier ones are gone: FACTORY_IN is now ${dirs.in} and FACTORY_OUT is now ${dirs.out}. $FACTORY_IN/plan.md is your plan as Factory last saved it. Read $FACTORY_IN/decisions.md again: it holds every maintainer decision, those made since you stopped included. Keep the current plan in $FACTORY_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $FACTORY_OUT.`;
+export function continuePrompt(dirs, { note = "" } = {}) {
+  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Factory's hand-off folders are new for this run and the earlier ones are gone: FACTORY_IN is now ${dirs.in} and FACTORY_OUT is now ${dirs.out}. $FACTORY_IN/plan.md is your plan as Factory last saved it. Read $FACTORY_IN/decisions.md again: it holds every maintainer decision, those made since you stopped included. Keep the current plan in $FACTORY_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $FACTORY_OUT.${note ? ` ${note}` : ""}`;
 }
 
 /** The task card for a fresh session on a kept checkout (a continued stage whose session does not carry over). */
-export function keptPrompt(prompt) {
-  return `${prompt.trimEnd()}\n\n---\n\nAn earlier pass of this Objective stopped at the provider's usage limit before it finished. Its work is still in this checkout: its commits on the branch and its uncommitted changes. $FACTORY_IN/plan.md is its plan as Factory last saved it. Continue from there; do not redo finished items.`;
+export function keptPrompt(prompt, { note = "" } = {}) {
+  return `${prompt.trimEnd()}\n\n---\n\nAn earlier pass of this Objective stopped at the provider's usage limit before it finished. Its work is still in this checkout: its commits on the branch and its uncommitted changes. $FACTORY_IN/plan.md is its plan as Factory last saved it. Continue from there; do not redo finished items.${note ? ` ${note}` : ""}`;
+}
+
+/**
+ * What a failed install (checkout.mjs installDeps: {ok, reason}) means for a work stage: `block` with its reason, as for
+ * any stage; but on a continued stage's kept checkout, whose pass may have stopped mid-way through a dependency change
+ * (a manifest edited, its lockfile not yet), the pass goes on and is told (`note`), so it can finish that change. {}
+ * when the install succeeded.
+ */
+export function installEnd(result, { continued, command }) {
+  if (result.ok) return {};
+  if (!continued) return { block: result.reason };
+  return { note: `Factory's install (${command}) failed on this checkout, which keeps your unfinished changes: finish any dependency change, its lockfile included, and install before you validate.` };
 }

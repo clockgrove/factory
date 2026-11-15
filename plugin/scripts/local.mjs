@@ -19,7 +19,7 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, constants as osConstants, homedir, hostname, platform, tmpdir, totalmem, uptime } from "node:os";
+import { constants as osConstants, homedir, hostname, platform, tmpdir, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -50,6 +50,7 @@ import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./docto
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const onPath = (bin) => whichSync(bin) !== null;
@@ -140,17 +141,6 @@ export function parseArgs(argv) {
   return { cmd, flags };
 }
 
-/** OWNER/NAME from the clone's origin remote. */
-/**
- * How many Objective stages (work or review) this box runs at once: FACTORY_LOCAL_MAX_CONCURRENT, else a quarter of
- * its CPU threads and at most one per 8 GB of memory (each stage runs a harness, validation and maybe Postgres).
- */
-export function localMaxConcurrent(setting, { cpus = availableParallelism(), memBytes = totalmem() } = {}) {
-  const n = Number.parseInt(setting, 10);
-  if (Number.isFinite(n) && n > 0) return n;
-  return Math.max(1, Math.min(Math.floor(cpus / 4), Math.floor(memBytes / 8 / 2 ** 30)));
-}
-
 const readId = (file) => {
   try {
     return readFileSync(file, "utf8").trim().replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
@@ -202,6 +192,7 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
   }
 }
 
+/** OWNER/NAME from the clone's origin remote. */
 export function repoFromRemote(url) {
   const m = /github\.com[:/]([^/]+)\/([^/]+?)(\.git)?\/?$/.exec(url || "");
   return m ? `${m[1]}/${m[2]}` : null;
@@ -492,6 +483,8 @@ export class Local {
     this.holder = holderId();
     this.firstSetup = new Map();
     this.children = new Set();
+    // Where the machine's stage budget, its slots and its load are read (lib/machine.mjs): shared by every loop here.
+    this.machine = { home: homedir(), proc: "/proc" };
     this.excludeWorkspaces();
   }
 
@@ -1714,7 +1707,105 @@ export class Local {
     return false;
   }
 
-  /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, up to this box's limit. */
+  /** Where this loop reads the machine's budget, slots and load: the user's home and /proc, or a test's own. */
+  machinePlaces() {
+    const home = this.machine?.home ?? homedir();
+    return { home, dir: slotsDir(home), proc: this.machine?.proc ?? "/proc" };
+  }
+
+  /**
+   * The machine's room for this loop's new starts now (lib/machine.mjs machineRoom), with its cap: FACTORY_LOCAL_MAX_CONCURRENT,
+   * else the machine's budget. A budget setting that cannot be used is said once.
+   */
+  machineBox(running) {
+    const { home, dir, proc } = this.machinePlaces();
+    const budget = machineBudget({ home });
+    if (budget.problem && budget.problem !== this.saidBudget) log(`machine budget: ${budget.problem}; using ${budget.stages}, from this machine's size`);
+    this.saidBudget = budget.problem;
+    const cap = loopCap(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
+    let held = 0;
+    try {
+      held = slotHolders(dir).length;
+    } catch (e) {
+      this.slotTrouble(e);
+    }
+    return { ...machineRoom({ running, cap, budget: budget.stages, held, pressure: readPressure({ root: proc }) }), cap, from: budget.from, file: budget.file, dir };
+  }
+
+  /** A slot directory this loop cannot use: said once per cause; its stages then start uncounted, as the room allows. */
+  slotTrouble(e) {
+    const why = String(e?.code || e?.message || e).slice(0, 160);
+    if (why !== this.saidSlots) log(`machine slots: ${this.machinePlaces().dir} cannot be used (${why}); this loop's stages run without a slot there`);
+    this.saidSlots = why;
+    return { assign() {}, release() {} };
+  }
+
+  /** One slot of the machine's budget, held while a stage runs; a slot directory that cannot be used gives a slot of none. */
+  slotFor(box, force, holder) {
+    try {
+      return takeSlot({ dir: box.dir, budget: box.budget, force, holder: { repo: this.repoFull, ...holder } });
+    } catch (e) {
+      return this.slotTrouble(e);
+    }
+  }
+
+  /**
+   * One tick's slots, up to `box.room`, for the stages it starts into `running`: `take(n)` takes up to n more now and
+   * answers how many it got (fewer when another loop on this machine took the last ones first; the first one is taken
+   * whatever the count when this loop holds none, so no loop starves); `left()` is the room not yet taken; `start(n, stage, task)` runs task on
+   * the next slot taken, which it holds until the task ends; `spare()` lets go of the slots no start took.
+   */
+  takeSlots(box, running) {
+    let left = box.room;
+    let force = running.size === 0;
+    const held = [];
+    const take = (n) => {
+      let got = 0;
+      while (got < n && left > 0) {
+        const slot = this.slotFor(box, force, { cmd: "serve" });
+        if (!slot) {
+          left = 0;
+          break;
+        }
+        force = false;
+        left -= 1;
+        got += 1;
+        held.push(slot);
+      }
+      return got;
+    };
+    const start = (n, stage, task) => {
+      // A start without a slot taken for it would be a bug in the counts above: it then holds none rather than fail.
+      const slot = held.shift() ?? { assign() {}, release() {} };
+      slot.assign({ issue: n, stage });
+      running.set(
+        n,
+        task().finally(() => {
+          running.delete(n);
+          slot.release();
+        }),
+      );
+    };
+    const spare = () => {
+      for (const slot of held.splice(0)) slot.release();
+    };
+    return { take, left: () => left, start, spare };
+  }
+
+  /**
+   * The slot of `factory run` or `review`: such a loop holds no other, so it takes one whatever the machine holds, and
+   * says what would otherwise hold it.
+   */
+  holdSlot(holder) {
+    const box = this.machineBox(0);
+    if (box.why) log(`${holder.pr ? `PR #${holder.pr}` : `#${holder.issue}`}: ${box.why}`);
+    return this.slotFor(box, true, holder);
+  }
+
+  /**
+   * The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, as many as the
+   * machine's room allows (machineBox), each holding one slot of the machine's budget while it runs.
+   */
   async serve({ once = false, intervalMs = 30_000 } = {}) {
     const running = new Map();
     // Objectives whose stage here ended with a Question or a Block: held until a trusted answer re-queues one or a
@@ -1726,8 +1817,8 @@ export class Local {
         const why = stopHold(r);
         if (why) stopped.set(n, { why });
       });
-    const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
-    log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+    const first = this.machineBox(0);
+    log(`machine budget: ${first.budget} Objective stage(s) at once on this machine, shared by every Factory loop here (${first.from === "setting" ? first.file : "from its CPU threads and memory"}); this loop: at most ${first.cap} (FACTORY_LOCAL_MAX_CONCURRENT)`);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
     // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
@@ -1769,23 +1860,29 @@ export class Local {
       const inputs = resolveInputs({ args: { repo: this.repoFull }, env: { ...this.baseEnv(), FACTORY_INPUT_GITHUB_TOKEN: this.token } });
       // Failed starts whose holder was unknown: read their claims again once their backoff ends.
       await this.recheckStarts(running).catch((e) => log(`start recheck: ${e.message.slice(0, 160)}`));
+      // The machine's room for new starts (machineBox): its budget, shared by every loop here, this loop's cap and the
+      // machine's load. Each start takes its slot of the budget just before it is started or picked (takeSlots), and
+      // holds it while it runs.
+      const box = this.machineBox(running.size);
+      const slots = this.takeSlots(box, running);
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
-      const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
+      const paused = await this.pausedHere(running);
+      const resumes = paused.slice(0, slots.take(paused.length));
       for (const n of resumes) {
         log(`#${n}: resuming (this machine held it when it went away)`);
-        running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
+        slots.start(n, "resume", () => track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)));
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
       // A harness whose usage limit is spent (limitPaused): no review and no new work on it starts until its reset, said
       // once; work on any other harness goes on. Each Objective's harness is its harness label, else the loop's.
       const free = pending.filter((r) => !this.limitHold(r.labels));
-      const reviews = free.slice(0, Math.max(0, limit - running.size));
+      const reviews = free.slice(0, slots.take(free.length));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: slots.left(), localTake: slots.take, localFull: box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1797,6 +1894,7 @@ export class Local {
         return { ready: [] };
       });
       if (result.refused) {
+        slots.spare();
         if (once) return void (await Promise.all(running.values()));
         await new Promise((r) => setTimeout(r, intervalMs));
         continue;
@@ -1810,10 +1908,13 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
-      for (const n of picks) running.set(n, track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
-      for (const r of reviews) running.set(r.issue, track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));
+      if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
+      // What holds new starts on this machine, said once: here, unless the dispatcher's reason (localFull) says it already.
+      const hold = box.why && result.reason !== box.why ? `; holding new starts: ${box.why}` : "";
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${hold}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
+      for (const r of reviews) slots.start(r.issue, "review", () => track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)));
+      for (const n of picks) slots.start(n, "work", () => track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)));
+      slots.spare();
       if (once) {
         await Promise.all(running.values());
         return;
@@ -2276,12 +2377,14 @@ async function main() {
     const local = await new Local(flags).init();
     let task = null;
     local.stopOnSignals(() => task);
+    // One slot of the machine's budget while it runs (lib/machine.mjs): other loops here count it.
+    const slot = local.holdSlot({ issue, stage: "run", cmd: "run" });
     task = (async () => {
       let r = await local.runIssue(issue, { wait: !!flags.wait });
       // --wait on a split Objective: each part runs once the one before it merged.
       while (r.next) r = await local.runObjective(issue, { wait: true });
       return r;
-    })();
+    })().finally(() => slot.release());
     const r = await task;
     // Delivered, not followed to its merge: the last line says who tends it now.
     if (r.exit === "delivered" && !flags.wait) {
@@ -2311,7 +2414,8 @@ async function main() {
     const local = await new Local(flags).init();
     let task = null;
     local.stopOnSignals(() => task);
-    task = local.runReview(Number(arg), { wait: !!flags.wait });
+    const slot = local.holdSlot({ pr: Number(arg), stage: "review", cmd: "review" });
+    task = local.runReview(Number(arg), { wait: !!flags.wait }).finally(() => slot.release());
     process.exitCode = (await task).exit === "delivered" ? 0 : 1;
     return;
   }

@@ -5,7 +5,7 @@ description: "/factory:factory-serve. Start Clockgrove Factory's local loop for 
 
 # /factory:factory-serve
 
-Start local mode's loop for the repository whose clone is the current directory. It applies the dispatcher's rules every 30 seconds (order, caps, blocking, send-backs, Done) and runs the picks here, at most `FACTORY_LOCAL_MAX_CONCURRENT` at once, reviews before new work and this machine's paused Objectives before both (docs/LOCAL.md).
+Start local mode's loop for the repository whose clone is the current directory. It applies the dispatcher's rules every 30 seconds (order, caps, blocking, send-backs, Done) and runs the picks here, as many as the machine's stage budget (shared by every Factory loop on it), its load and `FACTORY_LOCAL_MAX_CONCURRENT` allow, reviews before new work and this machine's paused Objectives before both (docs/LOCAL.md).
 
 ## Start
 

@@ -32,6 +32,7 @@ import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { dropOwned } from "./lib/fsafe.mjs";
+import { machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -1355,6 +1356,27 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
+ * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), who holds its slots (pid,
+ * repository, issue and stage), and the machine's load now, with whether loops here hold new starts on it. A budget
+ * setting that cannot be used, and a saturated machine, are WARNs. Read only: doctor removes no slot. `home` and
+ * `proc` are a test's own.
+ */
+export function machineChecks({ env = process.env, local, home = homedir(), proc = "/proc" }) {
+  if (!local || env.GITHUB_ACTIONS) return [];
+  const budget = machineBudget({ home });
+  const holders = slotHolders(slotsDir(home), { reap: false });
+  const pressure = readPressure({ root: proc });
+  const sat = saturation(pressure);
+  const what = (h) => `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
+  const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
+  return [
+    budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
+    PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
+    sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
+  ];
+}
+
+/**
  * The hosts the open Objectives' host labels open to their own sandboxes (choice.mjs hostsOf), beyond the hosts every
  * Objective reaches: one PASS naming each Objective with its hosts, or that none has one; a WARN for an Objective whose
  * host label names no host a sandbox can allow (each of its stages Blocks on it). Who applied each label is every
@@ -1447,6 +1469,7 @@ async function main() {
   results.push(...gatewayRelayChecks({ inputs, env }));
   results.push(...localDomainChecks({ inputs, env, local }));
   results.push(...localLoginChecks({ inputs, env: process.env, local }));
+  results.push(...machineChecks({ env: process.env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env }));

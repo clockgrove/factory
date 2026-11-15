@@ -80,7 +80,7 @@ const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localHeld = {}, localHold = null, localStopped = {}, failedLaunch = null, recordWrites = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = "this box is full", localHeld = {}, localHold = null, localStopped = {}, failedLaunch = null, recordWrites = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -890,10 +890,20 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     picked.ready = [];
     picked.reason = why;
   }
-  // A local loop's own capacity (local.mjs serve): it starts no more than the box runs, so none is labelled Running idle.
+  // A local loop's own capacity (local.mjs serve): it starts no more than its machine has room for, so none is labelled
+  // Running idle. localSlots: that room as the loop read it; localFull: what holds the rest (the machine's budget or
+  // load, or the loop's own cap). localTake(n): the loop takes the slots of its machine's budget for n picks now, before
+  // any is labelled, and answers how many it got (fewer when another loop on the machine took the last ones meanwhile).
   if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
     picked.ready = picked.ready.slice(0, Math.max(0, localSlots));
-    picked.reason = picked.reason || `this box is full (FACTORY_LOCAL_MAX_CONCURRENT)`;
+    picked.reason = picked.reason || localFull;
+  }
+  if (localTake && picked.ready.length) {
+    const taken = localTake(picked.ready.length);
+    if (taken < picked.ready.length) {
+      picked.ready = picked.ready.slice(0, Math.max(0, taken));
+      picked.reason = picked.reason || "this machine's budget is full: another loop here took its last slots";
+    }
   }
   // Done: an issue closed by any route (the merged PR's "Closes #N", or a human) loses its
   // state label and its card moves to Done. No job runs on merge, so the cron does it. A local loop does it only for

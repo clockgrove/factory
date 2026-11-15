@@ -81,6 +81,9 @@ test("workflowPins: the Factory refs a workflow's steps call, once each; setting
     'FACTORY_MODEL: unset → "m"',
   ]);
   assert.deepEqual(settingsChanges({ FACTORY_MODEL: "m" }, { FACTORY_MODEL: "m" }, {}), []);
+  // Every setting this shell sets keeps its value, a model too (inputs.mjs machineSettings), and the change says so.
+  assert.deepEqual(settingsChanges({ FACTORY_MODEL: "m" }, { FACTORY_MODEL: "n" }, { FACTORY_MODEL: "mine" }), ['FACTORY_MODEL: "m" → "n" (this shell sets it, and its value wins)']);
+  assert.deepEqual(settingsChanges({ FACTORY_MAX_USD: "1" }, { FACTORY_MAX_USD: "2" }, { FACTORY_MAX_USD: "3" }), ['FACTORY_MAX_USD: "1" → "2"'], "not one the shell's value does not win for");
 });
 
 test("pinDecision: a release tag or a full SHA other than the running one is followed; a branch, a short SHA or steps that disagree never are", () => {

@@ -96,7 +96,7 @@ inputs:
     description: 'Reviewers outside Factory whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to 20 minutes for each one''s review of the head Factory''s reviewer read, then its answer pass handles their line comments as it handles Factory''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
     required: false
   harness_version:
-    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the repository's harness only; another harness an Objective's label chooses installs its latest.
+    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (FACTORY_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.
     required: false
   allowed_domains:
     description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `factory:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
@@ -296,11 +296,13 @@ runs:
         FACTORY_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}
         FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
-        DEFAULT_HARNESS="${FACTORY_INPUT_HARNESS:-${FACTORY_VARIABLE_HARNESS:-${FACTORY_HARNESS:-claude}}}"
-        HARNESS="${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}"
+        name() { printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+        WORKFLOW_HARNESS="$(name "${FACTORY_HARNESS:-}")"; WORKFLOW_HARNESS="${WORKFLOW_HARNESS:-claude}"
+        DEFAULT_HARNESS="$(name "${FACTORY_INPUT_HARNESS:-${FACTORY_VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
+        HARNESS="$(name "${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
         VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
-        # harness_version pins the repository's harness only: another one an Objective's label chose installs its latest.
-        if [ -n "$FACTORY_CHOSEN_HARNESS" ] && [ "$FACTORY_CHOSEN_HARNESS" != "$DEFAULT_HARNESS" ]; then VERSION=latest; fi
+        # harness_version pins the workflow env block's harness only: another one (an Objective's label's, a run's override's, a repository variable's) installs its latest.
+        if [ "$HARNESS" != "$WORKFLOW_HARNESS" ]; then VERSION=latest; fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
         # asks for each package's scripts to be allowed by name, and this allows that one package's only.
         case "$HARNESS" in

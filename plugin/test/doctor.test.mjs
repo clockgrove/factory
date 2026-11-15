@@ -204,18 +204,21 @@ test("doctor without --checkout takes the settings from the default branch's wor
     const u = new URL(url);
     asked.push([`${u.pathname}${u.search}`, init.headers?.Authorization]);
     if (status !== 200) return new Response(JSON.stringify({ message: "x" }), { status, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/repos/o/r/actions/organization-variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "FACTORY_MAX_USD", value: "9" }] }), { status: 200, headers: { "content-type": "application/json" } });
     if (u.pathname === "/repos/o/r/actions/variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "FACTORY_DAILY_USD", value: "40" }] }), { status: 200, headers: { "content-type": "application/json" } });
     return new Response("on: issues\nenv:\n  FACTORY_HARNESS: copilot\n  FACTORY_MODEL: gpt-x\n  FACTORY_RUNNER_NAME: no-setting\njobs: {}\n", { status: 200 });
   };
   const copy = clone("env:\n  FACTORY_HARNESS: codex\n");
   try {
     const r = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: {} });
-    assert.deepEqual(asked, [["/repos/o/r/actions/variables?per_page=30", "Bearer t"], ["/repos/o/r/contents/.github/workflows/factory.yml", "Bearer t"]], "the repository's variables and the default branch's file, with doctor's token");
+    assert.deepEqual(asked, [["/repos/o/r/actions/variables?per_page=30", "Bearer t"], ["/repos/o/r/actions/organization-variables?per_page=30", "Bearer t"], ["/repos/o/r/contents/.github/workflows/factory.yml", "Bearer t"]], "the repository's variables, the organization's it shares, and the default branch's file, with doctor's token");
     assert.equal(r.inputs.harness, "copilot");
     assert.equal(r.inputs.dailyUsd, 40, "a repository variable over the workflow (#284)");
+    assert.equal(r.inputs.maxUsd, 25, "an organization variable is not Factory's");
+    assert.deepEqual(r.checks.map((c) => [c.status, c.name]), [["WARN", "organization variables"]]);
+    assert.match(r.checks[0].detail, /^organization variable FACTORY_MAX_USD is not supported: Factory's settings take the repository's own variables only/);
     assert.match(defaultsCheck(r.inputs).detail, /^harness copilot, worker gpt-x,/);
     assert.deepEqual((await credentialChecks({ inputs: r.inputs, env: {}, local: false })).map((c) => c.name), ["copilot credential"]);
-    assert.deepEqual(r.checks, []);
     assert.equal(r.env.FACTORY_RUNNER_NAME, undefined, "only the settings Factory takes");
     // GitHub's copy wins over a clone's here; this shell wins over both.
     assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "copilot");
@@ -223,7 +226,7 @@ test("doctor without --checkout takes the settings from the default branch's wor
     // With --checkout, that checkout's copy, and GitHub's file is not read.
     asked.length = 0;
     assert.equal((await doctorSettings({ args: { checkout: copy }, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "codex");
-    assert.deepEqual(asked, [["/repos/o/r/actions/variables?per_page=30", "Bearer t"]]);
+    assert.deepEqual(asked.map(([p]) => p), ["/repos/o/r/actions/variables?per_page=30", "/repos/o/r/actions/organization-variables?per_page=30"]);
     // Unreadable: one WARN naming the harness assumed, from the local copy when there is one.
     for (status of [404, 403]) {
       const none = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: {} });

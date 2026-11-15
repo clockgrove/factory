@@ -17,8 +17,8 @@ import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
-import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, repositoryVariables, rest } from "./lib/github.mjs";
-import { FACTORY_VERSION, appliedLayers, ignoredLines, input, layerLines, mask, parseArgs, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, organizationVariableNames, repoOf, repositoryVariables, rest } from "./lib/github.mjs";
+import { FACTORY_VERSION, appliedLayers, ignoredLines, input, layerLines, mask, organizationVariablesLine, parseArgs, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -1521,7 +1521,11 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
     try {
       const r = await repositoryVariables(repo, { token: varsToken });
       if (r.refused) checks.push(WARN("repository variables", `${who} cannot read the repository's variables (HTTP ${r.refused}), so the checks take the workflow's values${local ? " and so does local mode on this machine" : ""}`, fix));
-      else variables = r.vars;
+      else {
+        variables = r.vars;
+        const org = organizationVariablesLine(await organizationVariableNames(repo, { token: varsToken }));
+        if (org) checks.push(WARN("organization variables", org, "set Factory's variables on the repository (gh variable set FACTORY_<NAME> --repo OWNER/NAME) and delete the organization's"));
+      }
     } catch (e) {
       checks.push(WARN("repository variables", `not read (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)}), so the checks take the workflow's values`, "run doctor again"));
     }
@@ -1546,14 +1550,15 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
 
 /**
  * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row; and a WARN naming the
- * repository variables that are ignored: a setting only the reviewed workflow file sets, or no setting at all.
+ * repository variables that are ignored: a setting only the reviewed workflow file sets, no setting at all, or a value
+ * Factory would not take as given.
  */
 export function settingsRows(layers) {
   const lines = layerLines({ values: layers.values, from: layers.from });
   const ignored = ignoredLines(layers);
   return [
     PASS("settings", `each over the one below (Factory's defaults, the workflow, the repository's variables, this machine):\n       ${lines.join("\n       ")}`),
-    ...(ignored.length ? [WARN("repository variables", ignored.join("; "), "delete those variables; a setting only the workflow file sets goes in its env block, through a pull request")] : []),
+    ...(ignored.length ? [WARN("repository variables", ignored.join("; "), "delete or correct those variables; a setting only the workflow file sets goes in its env block, through a pull request")] : []),
   ];
 }
 

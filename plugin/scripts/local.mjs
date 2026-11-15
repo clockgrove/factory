@@ -27,8 +27,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, repositoryVariables, rest, setStateLabel, transientError } from "./lib/github.mjs";
-import { MACHINE_SETTINGS, MODEL_SETTINGS, holdSecrets, ignoredLines, input, layerLines, log, logTo, machineSettings, redactSecrets, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, organizationVariableNames, repoOf, repositoryVariables, rest, setStateLabel, transientError } from "./lib/github.mjs";
+import { MACHINE_SETTINGS, MODEL_SETTINGS, holdSecrets, ignoredLines, input, layerLines, log, logTo, machineSettings, organizationVariablesLine, redactSecrets, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -76,6 +76,8 @@ const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
 const SWITCHED_FROM_ENV = "FACTORY_SERVE_SWITCHED_FROM";
 const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
+/** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
+export const START_VARIABLES_MS = 15_000;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
 export const SETTINGS_EVERY_MS = 3 * 60_000;
 
@@ -228,25 +230,29 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 }
 
 /**
- * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
- * name order, with the layer the new value comes from when `layers` (settingLayers's `from`) is given; one this shell
- * also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as in baseEnv. Values are
- * the workflow's or a variable's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
- */
-/**
- * The workflow settings a running serve takes from the default branch at its next tick (refreshSettings): how many run,
- * on which models and effort, what validation runs, how a session resumes and its cache. What a stage may reach or
- * receive, spend, protect or be set up with is taken only when serve starts.
+ * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
+ * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
+ * validation runs, how a session resumes and its cache. One this shell sets (inputs.mjs machineSettings) keeps the
+ * shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
+ * the harness, are taken only when serve starts.
  */
 export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
 
+/**
+ * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
+ * name order, with the layer the new value comes from when `layers` (settingLayers's `from`) is given; one this shell
+ * sets (inputs.mjs machineSettings: a FACTORY_LOCAL_* name, the harness, models and session settings) says that the
+ * shell's value still wins, as in baseEnv. Values are the workflow's or a variable's own (no secret is ever one: `${{ }}`
+ * values are not read), cut at 80 characters.
+ */
 export function settingsChanges(before = {}, after = {}, env = process.env, layers = null) {
+  const shell = machineSettings(env);
   const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
   const layer = (k) => (!layers ? "" : after[k] === undefined ? " (Factory's default)" : layers[k] === "variable" ? " (repository variable)" : " (workflow)");
   return [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((k) => before[k] !== after[k])
     .sort()
-    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${layer(k)}${(k.startsWith("FACTORY_LOCAL_") || k === "FACTORY_HARNESS") && env[k] !== undefined ? " (this shell sets it, and its value wins)" : ""}`);
+    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${layer(k)}${k in shell ? " (this shell sets it, and its value wins)" : ""}`);
 }
 
 /** OWNER/NAME from the clone's origin remote. */
@@ -588,8 +594,8 @@ export class Local {
   }
 
   /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
-  async init() {
-    await this.readVariables();
+  async init({ serve = false } = {}) {
+    await this.startVariables({ serve });
     this.takeSettings();
     await checkToken(this.repoFull, this.token);
     if (this.notice) {
@@ -2027,10 +2033,11 @@ export class Local {
    * The repository's variables (#284), the layer of its settings over the workflow's: one conditional list call with
    * the local token (an unchanged list costs no rate limit), at the start and with each settings read
    * (refreshSettings). A token without Variables: read (403, 404) is said once, with the fix, and the workflow's values
-   * stand until a read gets through; any other failure is said once and keeps the last read.
+   * stand until a read gets through; any other failure is said once and keeps the last read. Returns `read`, `refused`,
+   * `failed` (the error in `variablesError`) or `none` (no repository or token to read with).
    */
   async readVariables() {
-    if (!this.repo || !this.token) return;
+    if (!this.repo || !this.token) return "none";
     this.variablesCache ??= new Map();
     let r;
     try {
@@ -2038,18 +2045,42 @@ export class Local {
     } catch (e) {
       if (!this.variablesFailed) log(`the repository's variables could not be read (${String(e?.message || e).slice(0, 160)}); serve keeps the ones it has`);
       this.variablesFailed = true;
-      return;
+      this.variablesError = e;
+      return "failed";
     }
     this.variablesFailed = false;
     if (r.refused) {
       if (this.variablesRefused !== r.refused) log(variablesRefusedLine(r.refused));
       this.variablesRefused = r.refused;
       this.variables = {};
-      return;
+      return "refused";
     }
     if (this.variablesRefused) log("the local token reads the repository's variables now: they apply over the workflow's settings");
     this.variablesRefused = null;
     this.variables = r.vars;
+    return "read";
+  }
+
+  /**
+   * The start's read of the repository's variables (#284), which fails closed: a variable may lower a cap, so nothing
+   * starts on the workflow's values alone after a failed read. `serve` waits outages out (lib/network.mjs) and tries
+   * again, every START_VARIABLES_MS doubling to five minutes, until a read gets through or GitHub says the token may not
+   * read them (403, 404: the workflow's values, as readVariables says); `run` and `review` try three times, then stop
+   * with nothing started. A read that gets through also names the organization FACTORY_* variables shared with the
+   * repository, which Factory does not take (inputs.mjs organizationVariablesLine).
+   */
+  async startVariables({ serve = false } = {}) {
+    if (serve) waitOutages();
+    let state = await this.readVariables();
+    for (let i = 0; state === "failed"; i += 1) {
+      if (!serve && i >= 2) throw new Error(`reading the repository's variables failed 3 times (${String(this.variablesError?.message || this.variablesError).slice(0, 160)}); nothing was started, run it again`);
+      if (i === 0) log(serve ? "serve starts no stage until it reads the repository's variables, or GitHub says the token may not" : "trying again before anything starts");
+      await new Promise((r) => setTimeout(r, Math.min((this.startVariablesMs ?? START_VARIABLES_MS) * 2 ** i, 5 * 60_000)));
+      state = await this.readVariables();
+    }
+    if (state !== "read") return;
+    const org = organizationVariablesLine(await organizationVariableNames(this.repo, { token: this.token }));
+    if (org) log(org);
   }
 
   /**
@@ -3027,7 +3058,7 @@ async function main() {
     process.exitCode = await waitForQueue(flags);
     return;
   }
-  if (cmd === "serve") await (await new Local(flags).init()).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });
+  if (cmd === "serve") await (await new Local(flags).init({ serve: true })).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -375,6 +375,20 @@ export async function repositoryVariables(repo, { token, cache = null } = {}) {
   }
 }
 
+/**
+ * The FACTORY_* names among the organization variables shared with the repository (one list call, the local token's
+ * Variables read), which Factory's variable layer does not take (inputs.mjs organizationVariablesLine); null when they
+ * could not be listed (a repository a user owns has none to list).
+ */
+export async function organizationVariableNames(repo, { token } = {}) {
+  try {
+    const list = await rest(`repos/${repo.full}/actions/organization-variables?per_page=30`, { token, paginate: true });
+    return (list || []).map((v) => String(v?.name ?? "").toUpperCase()).filter((n) => n.startsWith("FACTORY_")).sort();
+  } catch {
+    return null;
+  }
+}
+
 /** Whether a GraphQL document is a mutation (its first operation keyword, comments aside): a create, never resent blindly. */
 const isMutation = (query) => /^mutation\b/.test(String(query).replace(/#[^\n]*/g, "").trim());
 

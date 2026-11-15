@@ -198,16 +198,20 @@ test("the Action installs the harness the label names: read before the install, 
   assert.ok(at("choice") >= 0 && at("choice") < at("install") && at("install") < at("run"), "the label is read before the install, the install before the run");
   assert.match(steps[at("choice")].if, /inputs\.mode == 'work' \|\| inputs\.mode == 'review'/);
   assert.equal(steps[at("install")].env.FACTORY_CHOSEN_HARNESS, "${{ steps.choice.outputs.harness }}");
-  // The label, then with:, then the repository's FACTORY_HARNESS variable (#284), then the env block: the install step's own lines, run.
+  // The label, then with:, then the repository's FACTORY_HARNESS variable (#284), then the env block, each read as
+  // inputs.mjs reads a harness (trimmed, lower case); the pin only for the env block's own harness. The step's lines, run.
   assert.equal(steps[at("install")].env.FACTORY_VARIABLE_HARNESS, "${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}");
-  const pick = steps[at("install")].run.split("\n").slice(0, 2).join("\n");
-  assert.match(pick, /^DEFAULT_HARNESS=.*\nHARNESS=/);
-  const installs = (env) => execFileSync("bash", ["-c", `${pick}\necho "$HARNESS"`], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).trim();
-  assert.equal(installs({}), "claude");
-  assert.equal(installs({ FACTORY_HARNESS: "codex" }), "codex");
-  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot" }), "copilot");
-  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude" }), "claude");
-  assert.equal(installs({ FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude", FACTORY_CHOSEN_HARNESS: "codex" }), "codex");
+  const lines = steps[at("install")].run.split("\n");
+  const pick = lines.slice(0, lines.findIndex((l) => /then VERSION=latest; fi/.test(l)) + 1).join("\n");
+  const installs = (env) => execFileSync("bash", ["-c", `${pick}\necho "$HARNESS $VERSION"`], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } }).trim();
+  assert.equal(installs({}), "claude latest");
+  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_HARNESS_VERSION: "1.2.3" }), "codex 1.2.3");
+  assert.equal(installs({ FACTORY_HARNESS: " Codex ", FACTORY_HARNESS_VERSION: "1.2.3" }), "codex 1.2.3");
+  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_HARNESS_VERSION: "1.2.3", FACTORY_VARIABLE_HARNESS: " Copilot" }), "copilot latest", "a variable's harness: its latest, never the workflow harness's pin");
+  assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_VARIABLE_HARNESS: "Claude" }), "claude 2.1.140", "the same harness keeps it");
+  assert.equal(installs({ FACTORY_HARNESS: "codex", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_INPUT_HARNESS: "claude", FACTORY_HARNESS_VERSION: "1.2.3" }), "claude latest", "a run's override: its latest");
+  assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_VARIABLE_HARNESS: "copilot", FACTORY_CHOSEN_HARNESS: "claude" }), "claude 2.1.140", "a label back to the workflow's harness: its pin");
+  assert.equal(installs({ FACTORY_HARNESS: "claude", FACTORY_HARNESS_VERSION: "2.1.140", FACTORY_CHOSEN_HARNESS: "codex" }), "codex latest");
   assert.match(steps[at("choice")].run, /--branch "\$\{GITHUB_HEAD_REF:-none\}"/, "the review job's branch from its event");
   assert.doesNotMatch(readFileSync(join(ROOT, "plugin", "scripts", "objective-harness.mjs"), "utf8"), /pulls\//, "no pull request read: the job token may not have pull-requests access");
   assert.match(steps[at("install")].run, /echo "harness=\$HARNESS" >> "\$GITHUB_OUTPUT"/);
@@ -262,7 +266,9 @@ test("the harness CLI version pin is for the repository's harness only", () => {
   assert.equal(harnessVersionFor("claude", "claude", ""), "latest");
   const steps = parseYaml(readFileSync(join(ROOT, "action.yml"), "utf8")).runs.steps;
   const install = steps.find((s) => s.id === "install").run;
-  assert.match(install, /if \[ -n "\$FACTORY_CHOSEN_HARNESS" \] && \[ "\$FACTORY_CHOSEN_HARNESS" != "\$DEFAULT_HARNESS" \]; then VERSION=latest; fi/, "the Action likewise");
+  assert.match(install, /if \[ "\$HARNESS" != "\$WORKFLOW_HARNESS" \]; then VERSION=latest; fi/, "the Action likewise");
+  // The launcher's pin is for the env block's harness, never a variable's (inputs.mjs workflowHarness).
+  assert.match(readFileSync(join(ROOT, "plugin", "scripts", "launch.mjs"), "utf8"), /harnessVersionFor\(inputs\.harness, workflowHarness\(\), inputs\.harnessVersion\)/);
 });
 
 test("what ran is recorded: the progress comment's harness line and doctor's defaults line", () => {

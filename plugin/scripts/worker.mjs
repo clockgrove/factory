@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, keptAtLimit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, resumeKeptAtLimit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -537,19 +537,16 @@ async function main() {
   // work: both are put back and the session resumed, as the in-place wait does, rather than a fresh pass. Either failing
   // to come back, the stage starts fresh as after any pause.
   let limitResume = false;
-  const kept = local && !rebaseMode ? keptAtLimit(join(usageDir, ".."), inputs.harness) : null;
   if (inputs.resumePolicy === "fix-passes" && rebaseConflict) {
     restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
     if (restored.id) session.id = restored.id;
-  } else if (kept) {
-    const back = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
-    const work = back.id === kept.session ? await outbox.restoreWork(kept.work) : { code: null, error: back.id ? `the newest saved session is ${back.id.slice(0, 8)}, not ${kept.session.slice(0, 8)}` : back.reason };
-    if (work.code === 0) {
+  } else if (local && !rebaseMode) {
+    const back = await resumeKeptAtLimit({ workDir: join(usageDir, ".."), harness: inputs.harness, restore: () => restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness }), restoreWork: (work) => outbox.restoreWork(work) });
+    if (back) {
       restored = back;
       session.id = back.id;
       limitResume = true;
-      log(`resuming session ${back.id.slice(0, 8)} with the work kept at the usage limit (${kept.work.snapshot.slice(0, 7)} on ${kept.work.head.slice(0, 7)})`);
-    } else log(`the session and work kept at the usage limit could not be put back (${work.error}); starting fresh`);
+    }
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
   reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };

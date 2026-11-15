@@ -1686,6 +1686,25 @@ export function keptAtLimit(workDir, harness) {
 }
 
 /**
+ * The session and checkout work a work stage kept at its usage limit (keptAtLimit), put back for the next work stage
+ * here: the saved session restored (`restore`, restoreTranscript's answer) and, only when it is the kept one, the work
+ * (`restoreWork`, outbox.mjs restoreWork). restoreTranscript's answer when both came back; null (logged) when nothing was
+ * kept or either did not come back, so the stage starts a fresh pass as after any pause.
+ */
+export async function resumeKeptAtLimit({ workDir, harness, restore, restoreWork }) {
+  const kept = keptAtLimit(workDir, harness);
+  if (!kept) return null;
+  const back = await restore().catch((e) => ({ id: null, reason: String(e?.message || e).slice(0, 160) }));
+  const work = back.id === kept.session ? await restoreWork(kept.work).catch((e) => ({ code: null, error: String(e?.message || e).slice(0, 160) })) : { code: null, error: back.id ? `the newest saved session is ${back.id.slice(0, 8)}, not ${kept.session.slice(0, 8)}` : back.reason };
+  if (work.code !== 0) {
+    log(`the session and work kept at the usage limit could not be put back (${work.error}); starting fresh`);
+    return null;
+  }
+  log(`resuming session ${back.id.slice(0, 8)} with the work kept at the usage limit (${kept.work.snapshot.slice(0, 7)} on ${kept.work.head.slice(0, 7)})`);
+  return back;
+}
+
+/**
  * The same end as outageExit for a stage the network (or a spent rate limit) ended before its usual end exists (its
  * token's mint, its first reads): its usage written to `usageDir` when it is known, its exit and reason as step outputs,
  * no progress comment. On the local route `paused`, for serve's resume; elsewhere `blocked`, through `block(reason,

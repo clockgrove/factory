@@ -34,7 +34,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, prepareClone, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -49,6 +49,7 @@ import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
+import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
@@ -62,6 +63,18 @@ const onPath = (bin) => whichSync(bin) !== null;
 const limitName = (harness, account) => (account === harness ? harness : `${harness} account ${account}`);
 /** Whether a stage's result.json shows a pass its provider served (output or credits), with no usage limit ending it. */
 const servedPass = (r) => !r.usageLimit && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+/** A pinned release serve could not fetch or start is tried again after this long (followPin). */
+export const PIN_RETRY_MS = 10 * 60_000;
+/** The least time between two switches to a new pinned release (followPin), so a pin that keeps moving cannot hold the loop. */
+export const SWITCH_GAP_MS = 30 * 60_000;
+/** The env name a serve that started again on a new release (restartOn) learns when it last switched from. */
+const SWITCHED_ENV = "FACTORY_SERVE_SWITCHED_AT";
+/** The env name that tells a serve started again on a new release where it came from, for a failure at its start (main). */
+const SWITCHED_FROM_ENV = "FACTORY_SERVE_SWITCHED_FROM";
+const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
+delete process.env[SWITCHED_FROM_ENV];
+/** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
+export const SETTINGS_EVERY_MS = 3 * 60_000;
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
@@ -205,10 +218,13 @@ export function sameMachineHolder(holder, id = machineIdentity()) {
  * A claim left by a loop on this machine whose process is gone (serve stopped, crashed, the machine restarted): its
  * Objective is this machine's to resume at once, fresh heartbeat or not.
  */
-export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid } = {}) {
+export function deadHereHolder(holder, { id = machineIdentity(), self = process.pid, own = null } = {}) {
   if (!sameMachineHolder(holder, id)) return false;
   const { pid, boot } = parseHolder(holder);
-  if (!Number.isInteger(pid) || pid <= 0 || pid === self) return false;
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // This process's pid: its own loop (`own`) is alive; any other holder with it was the loop this process ran before it
+  // started again on a new pinned release (Local.restartOn), whose image is gone.
+  if (pid === self) return !!own && holder !== own;
   // Another boot: every process of that one is gone, whatever pid now runs.
   if (boot && boot !== id.boot) return true;
   try {
@@ -217,6 +233,26 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
   } catch (e) {
     return e.code === "ESRCH";
   }
+}
+
+/**
+ * What changed between two sets of workflow settings (workflowSettings's `kept`), one `NAME: old → new` each, in name
+ * order; one this shell also sets (a FACTORY_LOCAL_* name, FACTORY_HARNESS) says that the shell's value still wins, as
+ * in baseEnv. Values are the workflow's own (no secret is ever one: `${{ }}` values are not read), cut at 80 characters.
+ */
+/**
+ * The workflow settings a running serve takes from the default branch at its next tick (refreshSettings): how many run,
+ * on which models and effort, what validation runs, how a session resumes and its cache. What a stage may reach or
+ * receive, spend, protect or be set up with is taken only when serve starts.
+ */
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
+
+export function settingsChanges(before = {}, after = {}, env = process.env) {
+  const show = (v) => (v === undefined ? "unset" : JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v));
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((k) => before[k] !== after[k])
+    .sort()
+    .map((k) => `${k}: ${show(before[k])} → ${show(after[k])}${(k.startsWith("FACTORY_LOCAL_") || k === "FACTORY_HARNESS") && env[k] !== undefined ? " (this shell sets it, and its value wins)" : ""}`);
 }
 
 export function repoFromRemote(url) {
@@ -485,6 +521,9 @@ export class Local {
     // The workflow's settings as committed on the default branch (#122), never this working tree's, whatever branch is
     // checked out: as the Action runs the reviewed workflow. A working tree that differs is named (doctor too).
     const committed = committedWorkflowEnv(this.dev);
+    // serve reads the default branch's workflow again at each tick (refreshSettings), and follows its Factory pin (followPin).
+    this.settingsBranch = committed.branch;
+    this.pins = committed.pins || [];
     if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     const plugin = pluginLine(committed);
@@ -513,10 +552,16 @@ export class Local {
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
     this.opts = { token: this.token, notice: this.notice };
-    // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim.
+    // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
+    // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
+    // was are a dead loop's (deadHereHolder), resumed at once as after any restart.
     this.holder = holderId();
     // This machine's usage-limit holds, per account (lib/holds.mjs): shared with every serve here and kept across restarts.
     this.holds = accountHolds({ dir: holdsDir(homedir()), onError: (e) => log(`a usage-limit hold could not be kept in ${holdsDir(homedir())} for the machine's other serves (${String(e?.message || e).slice(0, 160)}); this loop still holds it`) });
+    // When this process last switched releases (restartOn), if it did, within the last day: the next switch waits SWITCH_GAP_MS.
+    const switched = Number(process.env[SWITCHED_ENV]);
+    this.switchedAt = Number.isFinite(switched) && switched <= Date.now() && Date.now() - switched < 24 * 60 * 60_000 ? switched : 0;
+    delete process.env[SWITCHED_ENV];
     this.firstSetup = new Map();
     this.children = new Set();
     this.excludeWorkspaces();
@@ -920,15 +965,25 @@ export class Local {
    * and never another stage's.
    */
   async stage(issue, name, script, args) {
+    // A stage is set up with one set of settings: from its harness's choice to its env. A change the workflow brings
+    // meanwhile waits for every set-up under way to end (refreshSettings).
+    this.settingUp = (this.settingUp || 0) + 1;
+    let settingUp = true;
+    const setUp = () => {
+      if (settingUp) this.settingUp -= 1;
+      settingUp = false;
+    };
     try {
-      return await this.startStage(issue, name, script, args);
+      return await this.startStage(issue, name, script, args, setUp);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       throw err.stageStarted ? err : Object.assign(err, { stageSetup: name });
+    } finally {
+      setUp();
     }
   }
 
-  async startStage(issue, name, script, args) {
+  async startStage(issue, name, script, args, setUp = () => {}) {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
@@ -1001,6 +1056,8 @@ export class Local {
       await this.block(issue, name, reason);
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // Its env is made: the settings may change from here on.
+    setUp();
     if (this.stopping) {
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
@@ -1165,7 +1222,7 @@ export class Local {
       // Who holds it is unknown: nothing about the Objective may change on this (unstart).
       throw Object.assign(e, { startFailed: "claim-read" });
     }
-    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder);
+    const others = !!held && held.holder !== this.holder && !deadHereHolder(held.holder, { own: this.holder });
     if (others && held.fresh) {
       log(`#${issue}: another local loop holds it (${held.holder}); leaving it alone`);
       return { exit: "skipped" };
@@ -1408,7 +1465,7 @@ export class Local {
         if (Number.isFinite(off.reset) ? now >= off.reset : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
-      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder)) out.push(issue.number);
+      if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
     }
     return out;
   }
@@ -1618,7 +1675,7 @@ export class Local {
         await this.unstart(n, Object.assign(e, { startFailed: "claim-read" }));
         continue;
       }
-      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder)) {
+      if (c?.fresh && c.holder !== this.holder && !deadHereHolder(c.holder, { own: this.holder })) {
         this.startFailures.delete(n);
         log(`#${n}: another local loop holds it (${c.holder}); leaving it alone`);
         continue;
@@ -1823,6 +1880,149 @@ export class Local {
     return false;
   }
 
+  /**
+   * The workflow's settings as the default branch has them now, read at each serve tick (#276). Only HOT_SETTINGS (caps,
+   * models and effort, validation, resume policy, cache TTL) apply while serve runs: from that tick, to this loop's limit,
+   * the dispatcher's caps and every stage that starts from then on, never to a stage in flight or being set up, and said
+   * once, by name. Every other setting (what a stage may reach or receive, budgets, maintainers, protected paths, the
+   * harness, setup) keeps its value from serve's start until serve starts again, said once. The read also brings the
+   * workflow's Factory pin (followPin).
+   */
+  async refreshSettings() {
+    if (!this.settingsBranch) return;
+    // Fetched every SETTINGS_EVERY_MS; each tick between takes what the last read brought.
+    if (Date.now() - (this.settingsReadAt ?? 0) >= (this.settingsEveryMs ?? SETTINGS_EVERY_MS)) {
+      this.settingsReadAt = Date.now();
+      const read = await committedWorkflowNow(this.dev, this.settingsBranch, { token: this.token });
+      // Offline: nothing read, nothing changes (lib/network.mjs says when the network goes and comes back).
+      if (!read.unfetched) this.settingsRead = read;
+    }
+    const now = this.settingsRead;
+    if (!now) return;
+    if (now.error) {
+      if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
+      this.settingsError = now.error;
+      return;
+    }
+    this.settingsError = null;
+    this.pins = now.pins;
+    // A stage being set up keeps the settings it started with (stage()): the change is taken at a later tick.
+    if (this.settingUp > 0) return;
+    const next = workflowSettings(now.wf).kept;
+    const hot = { ...this.wf };
+    for (const k of HOT_SETTINGS) if (next[k] === undefined) delete hot[k];
+    else hot[k] = next[k];
+    const changes = settingsChanges(this.wf, hot);
+    // The rest, against what serve started with: said once for each set of differences.
+    const held = settingsChanges(this.wf, { ...next, ...Object.fromEntries(HOT_SETTINGS.map((k) => [k, this.wf[k]])) });
+    const heldKey = held.join("\n");
+    if (heldKey !== (this.settingsHeld ?? "")) {
+      if (held.length) log(`the workflow's settings on origin/${this.settingsBranch} changed; these take effect when serve restarts, and until then serve keeps the values it started with: ${held.join("; ")}`);
+      this.settingsHeld = heldKey;
+    }
+    if (!changes.length) return;
+    log(`the workflow's settings on origin/${this.settingsBranch} changed; each stage that starts from now on runs with them, and stages in flight keep theirs: ${changes.join("; ")}`);
+    this.wf = hot;
+  }
+
+  /**
+   * The workflow's Factory pin against the Factory this serve runs (#276), at each tick. A new release tag or commit
+   * SHA there is taken at a stage boundary: serve fetches it from Factory's own repository (lib/release.mjs), starts no
+   * new stage meanwhile, and once no stage runs here starts again on it in this same process (restartOn), which resumes
+   * this loop's paused work. Only a serve that runs a release follows it (a checkout at its own release tag, or one serve
+   * fetched): one started from any other checkout, a branch or a change of your own, keeps running what you started, and
+   * says the pin differs. Never an older release (pinDecision, releaseCheckout). A switch starts at most once in
+   * SWITCH_GAP_MS. Said once per pin. Returns true while new stages wait for the switch.
+   */
+  async followPin(inFlight, { once = false } = {}) {
+    this.factory ??= runningFactory();
+    const name = runningName(this.factory);
+    const d = pinDecision(this.pins, this.factory);
+    const ref = d.follow ? d.ref : null;
+    if (this.repin && this.repin.ref !== ref) {
+      log(`clockgrove/factory@${this.repin.ref} is no longer the workflow's pin: serve stays on ${name}`);
+      this.repin = null;
+    }
+    if (d.same) {
+      this.pinNoted = null;
+      return false;
+    }
+    const where = `origin/${this.settingsBranch}`;
+    const note = (line) => {
+      if (this.pinNoted !== d.ref) log(line);
+      this.pinNoted = d.ref;
+      return false;
+    };
+    if (!d.follow) return note(`the workflow on ${where} pins ${d.why}; serve runs no code from it and keeps running ${name}`);
+    if (once) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}; a serve that keeps running takes the pin, --once does not`);
+    if (!this.factory.release) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name} from ${this.factory.root}, which is not a release checkout, so it keeps running that: start serve from ${ref} to run it`);
+    if (this.repin?.state === "failed" && Date.now() >= this.repin.retryAt) this.repin = null;
+    // Counted from the last switch this process made (restartOn), never from a try that did not switch.
+    if (!this.repin && Date.now() - (this.switchedAt || 0) < SWITCH_GAP_MS) return note(`the workflow on ${where} pins clockgrove/factory@${ref}; serve switched releases less than ${Math.round(SWITCH_GAP_MS / 60_000)} minutes ago, so it takes this pin from ${new Date(this.switchedAt + SWITCH_GAP_MS).toISOString()} and runs ${name} until then`);
+    if (!this.repin) {
+      log(`the workflow on ${where} pins clockgrove/factory@${ref}; this serve runs ${name}. It fetches ${ref} from ${RELEASES_URL} and starts no new stage meanwhile; ${inFlight ? `once the ${inFlight} stage(s) in flight here end` : "once fetched"}, serve runs on ${ref}`);
+      const r = (this.repin = { ref, state: "fetching" });
+      r.fetch = releaseCheckout(ref, { ...this.releaseOpts, running: this.factory })
+        .then(async (c) => {
+          const problem = await startProblem(c.dir);
+          if (problem) throw new Error(problem);
+          r.checkout = c;
+          r.state = "ready";
+        })
+        .catch((e) => {
+          // An older commit than this one, or a SHA not on Factory's main: never tried again until the pin changes.
+          r.state = e?.code === "older" || e?.code === "refused" ? "refused" : "failed";
+          r.retryAt = Date.now() + PIN_RETRY_MS;
+          if (this.repin !== r) return;
+          if (r.state === "refused") log(`${String(e.message).slice(0, 300)}; serve keeps running ${name}`);
+          else log(`clockgrove/factory@${ref} could not be taken (${String(e?.message || e).slice(0, 300)}); serve goes on with ${name} and tries again in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+        });
+    }
+    const r = this.repin;
+    if (r.state === "fetching") return true;
+    if (r.state !== "ready") return false;
+    if (inFlight) return true;
+    if (this.stopping) return false;
+    return this.restartOn(r);
+  }
+
+  /**
+   * Start serve again on the release `r` names, in this same process (process.execve): its pid, its terminal and its
+   * front end stay. The new loop takes up the claims this one leaves (paused work, a stage that lapsed) at once, as a
+   * dead loop's on this machine (deadHereHolder). Called only when no stage of this loop runs. The checkout is checked
+   * once more first, without git (checkoutProblem: every file's SHA-256 against the manifest taken at its fetch): one
+   * changed since is not run, and is fetched afresh later. If the new release fails at its start, it says it switched
+   * from here (main). Where the
+   * process cannot be replaced, says how to restart instead and goes on with the release it runs. Returns false when it
+   * did not restart.
+   */
+  restartOn(r) {
+    const script = join(r.checkout.dir, "plugin", "scripts", "local.mjs");
+    if (typeof process.execve !== "function") {
+      r.state = "manual";
+      log(`this Node (${process.version}) cannot start serve again in its own process (process.execve needs Node 22.15 or newer): serve goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve to run clockgrove/factory@${r.ref}`);
+      return false;
+    }
+    const problem = checkoutProblem(r.checkout);
+    if (problem) {
+      r.state = "failed";
+      r.retryAt = Date.now() + PIN_RETRY_MS;
+      log(`the checkout of clockgrove/factory@${r.ref} at ${r.checkout.dir} changed since serve fetched it (${problem}); serve does not run it, goes on with ${runningName(this.factory)} and fetches it afresh in ${Math.round(PIN_RETRY_MS / 60_000)} minutes`);
+      return false;
+    }
+    log(`no stage runs here: serve starts again on clockgrove/factory@${r.ref} from ${r.checkout.dir}, in this process; it resumes the Objectives this loop holds paused`);
+    const env = { ...process.env, [SWITCHED_ENV]: String(Date.now()), [SWITCHED_FROM_ENV]: this.factory?.root || "" };
+    // The new release's skills and agents, from beside its own scripts.
+    delete env.FACTORY_PLUGIN_ROOT;
+    try {
+      (this.execve ?? process.execve)(process.execPath, [process.execPath, ...process.execArgv, script, ...process.argv.slice(2)], env);
+    } catch (e) {
+      r.state = "manual";
+      log(`serve could not start again on clockgrove/factory@${r.ref} (${String(e?.message || e).slice(0, 200)}): it goes on with ${runningName(this.factory)}; restart it with ${join(r.checkout.dir, "plugin", "bin", "factory")} serve`);
+    }
+    return false;
+  }
+
   /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, up to this box's limit. */
   async serve({ once = false, intervalMs = 30_000 } = {}) {
     const running = new Map();
@@ -1835,8 +2035,18 @@ export class Local {
         const why = stopHold(r);
         if (why) stopped.set(n, { why });
       });
-    const limit = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
-    log(`at most ${limit} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+    // This box's limit, read again at each tick from the settings as they are then (refreshSettings), said when it changes.
+    let limit = 0;
+    const takeLimit = () => {
+      const now = localMaxConcurrent(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT);
+      if (now !== limit) log(`at most ${now} Objective stage(s) at once on this box (FACTORY_LOCAL_MAX_CONCURRENT)`);
+      limit = now;
+    };
+    takeLimit();
+    this.factory ??= runningFactory();
+    log(`serve runs Factory ${runningName(this.factory)} from ${this.factory.root}`);
+    // A release checkout serve fetched stays while this process runs from it: no serve on this machine prunes it.
+    markInUse(this.factory.root, this.releaseOpts);
     // This machine's network (lib/network.mjs): serve's own GitHub calls wait for it to come back, with no bound, one log
     // line when it is lost and one when it answers; its stages wait in place for fifteen minutes and then pause. GitHub's
     // primary rate limit spent is waited out the same way, to its reset: no tick reads, resumes or starts anything until
@@ -1870,6 +2080,14 @@ export class Local {
         this.opts.token = now;
         refused = null;
       }
+      // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
+      await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
+      takeLimit();
+      // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
+      const switching = await this.followPin(running.size, { once }).catch((e) => {
+        log(`pin: ${e.message.slice(0, 160)}`);
+        return false;
+      });
       // Every 10 minutes, and at start: closed Objectives' directories go.
       if (Date.now() - cleaned > 10 * 60_000) {
         cleaned = Date.now();
@@ -1879,7 +2097,8 @@ export class Local {
       // Failed starts whose holder was unknown: read their claims again once their backoff ends.
       await this.recheckStarts(running).catch((e) => log(`start recheck: ${e.message.slice(0, 160)}`));
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
-      const resumes = (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
+      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : null;
+      const resumes = switching ? [] : (await this.pausedHere(running)).slice(0, Math.max(0, limit - running.size));
       for (const n of resumes) {
         log(`#${n}: resuming (this machine held it when it went away)`);
         running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
@@ -1888,13 +2107,13 @@ export class Local {
       // An account whose usage limit is spent (limitPaused, in any serve on this machine): no review and no new work on
       // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
       const free = pending.filter((r) => !this.limitHold(r.labels));
-      const reviews = free.slice(0, Math.max(0, limit - running.size));
+      const reviews = switching ? [] : free.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : Math.max(0, limit - running.size - reviews.length), localFull: waitLine, localHeld, localHold: (issue) => this.limitHold(issue.labels), localStopped }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -1919,8 +2138,8 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (free.length > reviews.length) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
+      if (free.length > reviews.length && !switching) log(`${free.length - reviews.length} review(s) wait for a free slot on this box`);
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
       for (const n of picks) running.set(n, track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       for (const r of reviews) running.set(r.issue, track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(r.issue)));
       if (once) {
@@ -2464,6 +2683,8 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     process.stderr.write(`[factory] local: ${e.message}\n`);
+    // Right after a switch to a new pinned release (restartOn): say so, and how to go back.
+    if (SWITCHED_FROM) process.stderr.write(`[factory] local: serve stopped at the start of the release it switched to, ${PLUGIN_ROOT}, from ${SWITCHED_FROM}; start serve from ${join(SWITCHED_FROM, "plugin", "bin", "factory")} to run that one again\n`);
     process.exit(1);
   });
 }

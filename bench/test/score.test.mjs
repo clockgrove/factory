@@ -420,6 +420,10 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   const rows = JSON.parse(read(join(dir, "rows.json"))).rows;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].issue, 42);
+  // The row names the checkout's skills by the digest computed from bench/skills.json's entries, as --check prints it.
+  const check = execFileSync("node", [join(BENCH, "skills.mjs"), "--check"], { encoding: "utf8" });
+  assert.equal(`skills unchanged: ${rows[0].skills.digest}\n`, check);
+  assert.deepEqual(Object.keys(rows[0].skills), ["digest"]);
   const card = JSON.parse(read(standing));
   assert.deepEqual(card.rows.map((r) => r.issue), [7, 42]);
   assert.equal(card.rows[1].walkAway.value, true); // replaced, not duplicated

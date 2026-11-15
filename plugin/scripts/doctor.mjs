@@ -1374,7 +1374,7 @@ export function machineChecks({ env = process.env, local, home = homedir(), proc
   const holders = slotHolders(slotsDir(home), { reap: false });
   const pressure = readPressure({ root: proc });
   const sat = saturation(pressure);
-  const what = (h) => `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
+  const what = (h) => h.pid === undefined ? `a holder whose record cannot be read yet (${h.file})` : `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
   const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
   const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
   return [

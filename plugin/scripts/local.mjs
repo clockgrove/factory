@@ -68,6 +68,8 @@ export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer 
 export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
 /** The Blocked reason when the sandboxes' scan for protected paths fails its check at a stage's start (lib/local.mjs writeNestedGitScan). */
 export const loginLinkReason = "local mode: a login file of the harness login this stage runs on links into another harness login on this machine (login-link), which the stage's harness would then read; the local loop's log names the path; make that login's files its own";
+/** The Blocked reason when a harness-state path Factory makes before a stage is a link to nothing outside the harness homes it manages (lib/local.mjs ensureHarnessHomes). */
+export const homeLinkReason = "local mode: a path in the harness's state folder that Factory makes before each stage is a link to a missing target outside the harness homes Factory manages (home-link); the local loop's log names the link and its target; create the target or remove the link";
 export const sandboxScanReason = "local mode: the sandboxes' scan for protected paths (ripgrep, sandbox-scan) failed its check on this machine; the local loop's log says why; check that `rg` on PATH runs";
 const list = (v) => String(v || "").split(/[\s,]+/).filter(Boolean);
 
@@ -830,8 +832,20 @@ export class Local {
     return { COPILOT_HOME: home, COPILOT_GITHUB_TOKEN: this.copilotToken || copilotToken(), GIT_CONFIG_GLOBAL: "/dev/null" };
   }
 
-  /** Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. */
+  /**
+   * Run worker.mjs or review.mjs as a child; its lines are echoed with the issue and stage. Rejects only before its process
+   * starts, with the error marked as Factory's own set-up of stage `name` failing (`stageSetup`), which lapse names: never
+   * the work's, and never another stage's.
+   */
   async stage(issue, name, script, args) {
+    try {
+      return await this.startStage(issue, name, script, args);
+    } catch (e) {
+      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageSetup: name });
+    }
+  }
+
+  async startStage(issue, name, script, args) {
     // Stopping: nothing new starts (the claim stays and this machine's next serve resumes the Objective).
     if (this.stopping) return { code: null, exit: null, usd: null, usageDir: null };
     // A harness a dead stage of this Objective left running (a killed loop, a SIGKILL) goes before a new one starts.
@@ -872,9 +886,14 @@ export class Local {
     // start; one a killed loop left is cleared when the next stage on this machine makes its own (lib/local.mjs stageTemp).
     const stageTmp = stageTemp(`${issue}-`);
     // The gateway relay's socket directory, when stageEnv made one (handSocketDir's record): removed with the stage.
+    // Factory's teardown: a failure here is logged, never the stage's end.
     const dropStage = () => {
-      dropOwned(stageTmp);
-      dropSocketDir(usageDir);
+      try {
+        dropOwned(stageTmp);
+        dropSocketDir(usageDir);
+      } catch (e) {
+        log(`#${issue}: the ${name} stage's temp or relay socket directory could not be removed (${String(e?.message || e).slice(0, 160)}); left in place`);
+      }
     };
     let env;
     try {
@@ -887,7 +906,7 @@ export class Local {
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();
-      const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason, "login-link": loginLinkReason }[e.code];
+      const reason = { "outer-sandbox": copilotOuterReason, "sandbox-scan": sandboxScanReason, "login-link": loginLinkReason, "home-link": homeLinkReason }[e.code];
       if (!reason) throw e;
       log(`#${issue}: refusing to run: ${e.message}`);
       await this.block(issue, name, reason);
@@ -1113,23 +1132,25 @@ export class Local {
   /**
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
    * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
-   * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. The count is
-   * this loop's memory: another serve on the machine resumes the Objective afresh.
+   * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. A throw names
+   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work. The
+   * count is this loop's memory: another serve on the machine resumes the Objective afresh.
    */
   async lapse(issue, result, failure) {
-    const stage = result?.stage || "work";
-    const how = failure ? `threw (${String(failure?.message || failure).slice(0, 200)})` : `ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})`;
+    const stage = result?.stage || failure?.stageSetup || "local";
+    const error = `(${String(failure?.message || failure).slice(0, 200)})`;
+    const what = !failure ? `the ${stage} stage ended with no exit record (${result?.signal ? `signal ${result.signal}` : `exit code ${result?.code ?? "none"}`})` : failure.stageSetup ? `Factory's set-up of the ${stage} stage failed ${error}` : `Factory's local loop threw ${error}`;
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
     if (!lapsed.has(issue)) {
       lapsed.set(issue, 1);
-      log(`#${issue}: the ${stage} stage ${how}; the claim stays and this loop resumes it once${where}`);
+      log(`#${issue}: ${what}; the claim stays and this loop resumes it once${where}`);
       return;
     }
     lapsed.delete(issue);
-    log(`#${issue}: the ${stage} stage ${how} again; Blocking it${where}`);
+    log(`#${issue}: ${what} again; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `the ${stage} stage ${how} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory" });
+      await this.block(issue, stage, `${what} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);

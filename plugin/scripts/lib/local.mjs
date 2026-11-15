@@ -1513,19 +1513,78 @@ const HOME_SEEDS = { "config.toml": "", "managed_config.toml": "", "requirements
  */
 export const copilotHomeFiles = () => ({ "config.json": `${JSON.stringify({ firstLaunchAt: new Date().toISOString() })}\n`, "mcp-config.json": '{"mcpServers":{}}\n' });
 export const ensureHarnessHomes = (harness, env = {}, home = homedir()) => {
+  const roots = homeLinkRoots(env, home);
   // And the guarded directories, which srt would otherwise stand in for with a file the harness cannot read as one.
-  for (const d of [...harnessHomes(harness, env, home).filter((p) => !p.endsWith(".json")), ...harnessHomeGuards(harness, env, home, { dirsOnly: true })]) mkdirSync(d, { recursive: true, mode: 0o700 });
+  for (const d of [...harnessHomes(harness, env, home).filter((p) => !p.endsWith(".json")), ...harnessHomeGuards(harness, env, home, { dirsOnly: true })]) ensureStateDir(d, roots);
   const seeds = { ...HOME_SEEDS, ...(harness === "copilot" ? copilotHomeFiles() : {}) };
   for (const f of harnessHomeGuards(harness, env, home, { staticOnly: true })) {
     const seed = seeds[basename(f)];
     if (seed === undefined) continue;
+    let at = f;
+    for (let hops = 0; lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink() && !resolves(at); hops += 1) at = danglingTarget(at, roots, hops);
+    if (at !== f) ensureStateDir(dirname(at), roots);
     try {
-      writeFileSync(f, seed, { flag: "wx", mode: 0o600 });
+      writeFileSync(at, seed, { flag: "wx", mode: 0o600 });
     } catch {
       // there already
     }
   }
 };
+
+/**
+ * Where the target of a link to nothing among the harness-state paths ensureHarnessHomes makes may be made: the harness
+ * homes Factory manages (CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME) and the default Claude Code and Codex homes. A
+ * second Claude Code config folder whose `plans` links into the first, which has none, gets it made there.
+ */
+export const homeLinkRoots = (env = {}, home = homedir()) => [...new Set([...["claude", "codex", "copilot"].map((h) => harnessStateDir(h, env, home)), join(home, ".claude"), join(home, ".codex")].filter(Boolean))];
+/** The links a chain to nothing may take before the stage refuses it (a loop of links never resolves). */
+const HOME_LINK_HOPS = 8;
+const resolves = (p) => {
+  try {
+    statSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** Where `p` really is: its nearest ancestor that resolves, at its real path, and the rest as written (realish goes one up). */
+const realPlace = (p) => {
+  const tail = [];
+  for (let q = resolve(p); ; q = dirname(q)) {
+    try {
+      return join(realpathSync(q), ...tail);
+    } catch {
+      if (q === dirname(q)) return resolve(p);
+      tail.unshift(basename(q));
+    }
+  }
+};
+/**
+ * The target of `link`, a link to nothing, where it really lies inside one of `roots`; else the stage refuses
+ * (`home-link`), naming the link and its target for this machine's log only (local.mjs homeLinkReason is GitHub's).
+ */
+function danglingTarget(link, roots, hops) {
+  const target = resolve(dirname(link), readlinkSync(link));
+  const real = realPlace(target);
+  const inside = roots.some((r) => within(real, realPlace(r)));
+  if (hops >= HOME_LINK_HOPS || !inside) throw Object.assign(new Error(`${link} is a link to ${target}, which does not exist${inside ? " (a chain of links that never resolves)" : " and lies outside the harness homes Factory manages"}; create the target or remove the link`), { code: "home-link", link, target });
+  return target;
+}
+/** Make the directory `p` and its parents; a link to nothing on the way has its target made (danglingTarget). */
+function ensureStateDir(p, roots, hops = 0) {
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (st?.isSymbolicLink()) {
+    if (!resolves(p)) ensureStateDir(danglingTarget(p, roots, hops), roots, hops + 1);
+    return;
+  }
+  if (st) return;
+  if (dirname(p) !== p) ensureStateDir(dirname(p), roots, hops);
+  try {
+    mkdirSync(p, { mode: 0o700 });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+  }
+}
 
 /**
  * What in a harness's own state runs code or steers a later session, the developer's own included, and must stay

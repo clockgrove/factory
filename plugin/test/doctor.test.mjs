@@ -307,7 +307,7 @@ test("doctor and serve warn when the installed plugin is older than the release 
   // serve's start: the default branch's committed workflow, read through git.
   const git = (text) => (args) => (args[0] === "show" ? (text === null ? { status: 128, stdout: "" } : { status: 0, stdout: text }) : args[0] === "ls-remote" ? { status: 0, stdout: "ref: refs/heads/main\tHEAD\n" } : { status: 0, stdout: "" });
   const line = pluginLine(committedWorkflowEnv("/clone", { git: git(flow(newer)) }));
-  assert.match(line, new RegExp(`^the installed plugin is v${FACTORY_VERSION.replace(/\./g, "\\.")}, older than clockgrove/factory@${newer.replace(/\./g, "\\.")}`));
+  assert.ok(line.startsWith(`the installed plugin is v${FACTORY_VERSION}, older than clockgrove/factory@${newer}, `), line);
   assert.match(line, /; update the plugin, then start a new session: /);
   assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(flow(`v${FACTORY_VERSION}`)) })), null);
   assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(null) })), null, "no workflow on the default branch: nothing to compare");

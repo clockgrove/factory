@@ -15,7 +15,7 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
-import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
+import { OUTAGE, githubOrigin, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -988,9 +988,18 @@ export function providerOrigin(harness, env = {}) {
  * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
  * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
  * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
+ * In a process that gave up waiting (stoppedWaiting), a pass that failed while a host it gave up on still does not answer
+ * (network.mjs givenUp) is no death and runs no more: it throws that outage, which the stage ends on (session.mjs
+ * outageExit). With every such host answering again, the outage it gave up on cut the pass off as any other would.
  */
 async function outageCut(rec, { harness, env }) {
-  if (!waitingOutages() || rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  const gaveUp = stoppedWaiting();
+  if (gaveUp) {
+    const down = await givenUp();
+    if (down) throw down;
+  }
+  if (!gaveUp && !waitingOutages()) return null;
   const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
   const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
   return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);

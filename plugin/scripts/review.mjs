@@ -26,7 +26,7 @@ import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilo
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
-import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, outageMet, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
@@ -54,7 +54,9 @@ import {
   maskFile,
   mirrorDiff,
   earlyOutageEnd,
+  exitStep,
   outageExit,
+  outageFirst,
   usageLimitExit,
   restoreTranscript,
   saveTranscript,
@@ -794,6 +796,8 @@ async function main() {
   try {
     ({ decisions, unread } = await unreadNow(repo, { issue, prNumber: pr.number, self: await progress.self() }, token));
   } catch (e) {
+    // Unread because of an outage (network.mjs outageMet): the stage ends on it, its label kept (outageExit).
+    if (outageMet(e)) throw e;
     const reason = `the maintainers' comments could not be read, so Factory cannot tell whether one asks for a change: ${e.message.slice(0, 160)}`;
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "factory", notify: inputs.notify, stage: "review" }, token);
@@ -1420,22 +1424,13 @@ async function main() {
     decision.reason = `PR #${pr.number} conflicts with ${defaultBranch} after a sibling merged; the dispatcher sends it back for a rebase`;
     log(decision.reason);
   } else if (decision.exit === "delivered" && !decision.rerun) {
-    try {
-      const late = (await unreadNow(repo, { issue, prNumber: pr.number, self: await progress.self() }, token, jobRead)).unread;
-      if (late.length) {
-        log(`${late.length} maintainer decision(s) arrived during this review; not merging, the review runs again to apply them`);
-        decision.rerun = true;
-        decision.reason = `${late.length} maintainer comment(s) arrived during the review; the review runs again to apply them`;
-        await addLabels(repo, pr.number, [REVIEW_LABEL], token).catch((e) => {
-          decision.exit = "blocked";
-          decision.cause = "factory";
-          decision.reason = `${late.length} maintainer comment(s) arrived during the review and the review label could not be re-applied to run it again: ${e.message.slice(0, 120)}`;
-        });
-      }
-    } catch (e) {
-      decision.exit = "blocked";
-      decision.cause = "factory";
-      decision.reason = `the maintainers' comments could not be re-read before the merge: ${e.message.slice(0, 160)}`;
+    // Each of these exit steps that fails Blocks, tagged with the outage it met, if any (session.mjs exitStep, outageFirst).
+    const late = (await exitStep(decision, "the maintainers' comments could not be re-read before the merge", async () => unreadNow(repo, { issue, prNumber: pr.number, self: await progress.self() }, token, jobRead)))?.unread || [];
+    if (late.length) {
+      log(`${late.length} maintainer decision(s) arrived during this review; not merging, the review runs again to apply them`);
+      decision.rerun = true;
+      decision.reason = `${late.length} maintainer comment(s) arrived during the review; the review runs again to apply them`;
+      await exitStep(decision, `${late.length} maintainer comment(s) arrived during the review and the review label could not be re-applied to run it again`, () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }
   }
   let stoppedAtMerge = null;
@@ -1478,9 +1473,8 @@ async function main() {
         // dispatcher's merge pass (ticked as this stage ends) merges it. A transient error requeues; it never Blocks.
         if (recorded && transientError(e)) log(`PR #${pr.number}: the merge pass failed for now (${code}); the dispatcher merges it on its next tick`);
         else {
-          decision.exit = "blocked";
-          decision.cause = "factory";
-          decision.reason = `the merge failed (${code}); the job log has GitHub's answer`;
+          // Tagged with the outage it met, if any (network.mjs outageMet, session.mjs outageFirst).
+          Object.assign(decision, { exit: "blocked", cause: "factory", reason: `the merge failed (${code}); the job log has GitHub's answer`, outage: outageMet(e) });
         }
       }
     } else log(`auto_merge is false: PR #${pr.number} is ready for a human merge`);
@@ -1492,6 +1486,9 @@ async function main() {
   }
   // Hosts the answer pass's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
   const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;
+  // A Block that came from an outage (a merge-path step that met it) ends the stage on that outage instead (session.mjs
+  // outageFirst, outageExit); with its label already off, serve's resume runs the review again (local.mjs resume).
+  outageFirst(decision);
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
   await finish(decision.exit, decision.reason);
   }

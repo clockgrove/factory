@@ -225,6 +225,25 @@ export const downFor = (origin) => {
   return g ? new NetworkDown(g) : null;
 };
 
+/**
+ * A host this process gave up waiting for (past its limit, or stopped waiting while it was lost) that still fails a probe
+ * now, as the NetworkDown its requests fail with: its host, code and first loss. Null when there is none, or each such host
+ * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass that fails and
+ * a run left with no exit record are that outage's (harness.mjs outageCut, session.mjs exitRecord).
+ */
+export async function givenUp() {
+  const hosts = [...GIVEN_UP.values()].filter((g) => !Number.isFinite(g.resetAt)).sort((a, b) => b.since - a.since);
+  for (const g of hosts) if ((await probe(g.origin)) !== null) return new NetworkDown(g);
+  return null;
+}
+
+/**
+ * The outage a failed call met, as its error: a host this machine could not reach (unreachable: a NetworkDown, or a bare
+ * connect-level failure), or GitHub's core REST quota spent, the one every write of Factory's goes against. Else null: a
+ * spent GraphQL or search quota is no outage of the stage's writes, and any answer from the host is no outage at all.
+ */
+export const outageMet = (e) => (unreachable(e) && (e.code !== RATE_LIMIT_SPENT || quotaName(e.key) === "core") ? e : null);
+
 /** Record that quota `key` (quotaKey) answered spent until `resetAt` (ms), its latest answer; any process (spentUntil). */
 export function noteSpent(key, resetAt) {
   if (key && Number.isFinite(resetAt)) SPENT.set(key, resetAt);

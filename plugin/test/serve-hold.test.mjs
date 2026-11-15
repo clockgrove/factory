@@ -367,6 +367,50 @@ for (const [stage, end, how] of [
   });
 }
 
+test("outagePaused: pauses on GitHub's spent rate limit one after another count from the first, however long the runs between, so the 12-hour bound holds (#337)", async () => {
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    const first = Date.parse("2026-11-15T22:40:00Z");
+    let t = first;
+    loop.clock = () => t;
+    const paused = (at) => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "RATE_LIMIT_SPENT", since: new Date(at).toISOString(), reset: new Date(at + 40 * 60_000).toISOString(), quota: "core" } });
+    await loop.withClaim(7, paused(first));
+    // Resumed after the reset; the run lasts an hour, then meets the spent quota again.
+    t = first + 41 * 60_000;
+    loop.offline.get(7).resumedAt = t;
+    t += 60 * 60_000;
+    await loop.withClaim(7, paused(t));
+    assert.equal(loop.offline.get(7).since, first, "the same pause, counted from the first");
+    // A network pause long after a resume is still a new outage of its own.
+    loop.offline.get(7).resumedAt = t;
+    const net = t + OUTAGE.stageWaitMs + 60_000;
+    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "EAI_AGAIN", since: new Date(net).toISOString() } }));
+    assert.equal(loop.offline.get(7).since, net);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("resume: a review paused on an outage after its label came off (on its merge path) runs again; with no such pause here, nothing runs (#337)", async () => {
+  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "factory/7" }, labels: [] } });
+  try {
+    const since = Date.parse("2026-11-15T22:40:39Z");
+    const reviewed = [];
+    const loop = Object.assign(await claimLoop(), { clock: () => since + 16 * 60_000, review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
+    const paused = async () => ({ exit: "paused", stage: "review", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "EAI_AGAIN", since: new Date(since).toISOString() } });
+    assert.equal((await loop.withClaim(7, paused)).exit, "paused");
+    assert.equal((await loop.resume(7)).exit, "delivered");
+    assert.deepEqual(reviewed, [[7, 9]], "the review runs again, though its PR has no review label");
+    // Another loop holds no such pause: the PR waits for its merge, and nothing runs.
+    const other = Object.assign(await claimLoop(), { review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
+    assert.equal((await other.resume(7)).exit, "skipped");
+    assert.equal(reviewed.length, 1);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("withClaim: Factory's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
   const { mkdirSync } = await import("node:fs");
   const { gitPinFile, pinGitDir } = await import("../scripts/lib/local.mjs");

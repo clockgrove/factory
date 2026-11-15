@@ -1650,8 +1650,9 @@ export class Local {
    * host, origin, code, since, and `reset` for GitHub's spent rate limit) is kept in this loop's memory. A pause that
    * comes within OUTAGE.stageWaitMs of this loop resuming the Objective from an earlier one is the same outage (a network
    * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
-   * the network. No lapse is counted; the claim stays. The memory is this loop's: another serve on the machine resumes
-   * the Objective with the bound counted afresh.
+   * the network. A pause on GitHub's spent rate limit after an earlier one, with no other end between, is the same however
+   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. No lapse is counted; the
+   * claim stays. The memory is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
    */
   outagePaused(issue, result) {
     if (result?.usageLimit) return this.limitPaused(issue, result);
@@ -1660,9 +1661,10 @@ export class Local {
     const at = Date.parse(o.since);
     const own = Number.isFinite(at) ? at : (this.clock ?? Date.now)();
     const earlier = this.offline?.get(issue);
-    const same = earlier && Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs;
-    const since = same ? Math.min(own, earlier.since) : own;
     const reset = Date.parse(o.reset);
+    const quotaAgain = Number.isFinite(reset) && Number.isFinite(earlier?.reset) && !earlier?.harness;
+    const same = earlier && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
+    const since = same ? Math.min(own, earlier.since) : own;
     (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(Number.isFinite(reset) ? { reset } : {}) });
     this.lapsed?.delete(issue);
     const what = Number.isFinite(reset) ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
@@ -2144,6 +2146,9 @@ export class Local {
     const next = stageFor({ pr, issue: data });
     if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
     if (next === "work") return this.runObjective(issue);
+    // A review this loop holds paused after its label came off (an outage met on its merge path: session.mjs outageFirst)
+    // ends nothing by the label: the review runs again, and its exit or merge follows.
+    if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});

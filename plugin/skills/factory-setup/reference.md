@@ -11,3 +11,7 @@ The workflow does nothing until `.github/workflows/factory.yml` is on the defaul
 5. Print the pull request's URL. Merging is the user's: do not merge it or turn on auto-merge unless they ask.
 
 A re-render on an upgrade lands the same way, on a branch `upgrade-factory`, with the release notes linked in the body.
+
+## Skills in the repository
+
+Offer to commit the Factory skills and agent definitions, which only vendors' cloud sessions need: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say plainly: committed copies override the plugin's and never update; copy again on every upgrade.

@@ -1294,30 +1294,32 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
 }
 /**
  * A Codex run's own rollout, its `token_count` lines only, for its usage limit (usage.mjs providerRefusal): on a runner
- * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from every
- * rollout file of the thread under the CODEX_HOME in `env` (a resumed thread can have more than one), each a regular
- * file of at most MAX_ROLLOUT_BYTES. Null when there is none; never throws: a failed read is logged, and the run's
- * failure stays what its stream says.
+ * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from the
+ * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
+ * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
  */
 export async function codexPassRollout(threadId, runner, env, { label = "run" } = {}) {
   try {
     if (!plainThread(threadId)) return null;
-    let text = "";
+    const counts = (text) => String(text).split("\n").filter((l) => l.includes('"token_count"')).join("\n") || null;
     if (runner) {
       const a = capturedSession(threadId);
       if (!a) return null;
       if (a.truncated || a.tar.length > MAX_ROLLOUT_BYTES + 1024 * 1024) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
       const t = await exec("tar", ["-xOf", "-"], { env, input: a.tar, timeoutMs: THREAD_READ_MS });
       if (t.code !== 0 || t.timedOut) throw new Error(t.timedOut ? "unpacking timed out" : "unpacking failed");
-      text = String(t.stdout);
-    } else {
-      const root = codexSessionRoot(env);
-      for (const f of codexRolloutFiles(root, threadId)) {
-        const st = lstatSync(join(root, f), { throwIfNoEntry: false });
-        if (st?.isFile() && st.size <= MAX_ROLLOUT_BYTES) text += `${readFileSync(join(root, f), "utf8")}\n`;
-      }
+      return counts(t.stdout);
     }
-    return text.split("\n").filter((l) => l.includes('"token_count"')).join("\n") || null;
+    // The newest rollout of the thread, the one this pass wrote (codexRolloutReader reads the same): one file, so the
+    // read is bounded by MAX_ROLLOUT_BYTES.
+    const root = codexSessionRoot(env);
+    const newest = codexRolloutFiles(root, threadId)
+      .map((f) => ({ f, st: lstatSync(join(root, f), { throwIfNoEntry: false }) }))
+      .filter((x) => x.st?.isFile())
+      .sort((a, b) => b.st.mtimeMs - a.st.mtimeMs)[0];
+    if (!newest) return null;
+    if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
+    return counts(readFileSync(join(root, newest.f), "utf8"));
   } catch (e) {
     log(`${label}: Codex's rollout could not be read for a usage limit (${String(e?.message || e).slice(0, 160)})`);
     return null;

@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -353,5 +353,23 @@ test("codexPassRollout: on a runner the rollout is the copy captured after the r
   } finally {
     dropSessions();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("codexPassRollout: locally only the thread's newest rollout is read, its token_count lines only", async () => {
+  const home = mkdtempSync(join(tmpdir(), "codex-limit-local-"));
+  const dir = join(home, "sessions", "2026", "11", "14");
+  mkdirSync(dir, { recursive: true });
+  const old = join(dir, `rollout-2026-11-13T08-00-00-${CODEX_THREAD}.jsonl`);
+  writeFileSync(old, `${JSON.stringify({ timestamp: "2026-11-13T08:00:01.000Z", type: "event_msg", payload: { type: "token_count", info: null, rate_limits: { primary: { used_percent: 3 } } } })}\n`);
+  utimesSync(old, new Date("2026-11-13T08:00:02Z"), new Date("2026-11-13T08:00:02Z"));
+  writeFileSync(join(dir, `rollout-2026-11-14T21-00-00-${CODEX_THREAD}.jsonl`), CODEX_ROLLOUT);
+  try {
+    const text = await codexPassRollout(CODEX_THREAD, null, { CODEX_HOME: home });
+    assert.equal(text.split("\n").length, 2, "the newest file's two token_count lines, none of the older file's");
+    assert.ok(!text.includes('"used_percent":3'));
+    assert.equal(await codexPassRollout("01a1d3a0-0000-7000-8000-000000000000", null, { CODEX_HOME: home }), null);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

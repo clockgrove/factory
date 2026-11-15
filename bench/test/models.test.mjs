@@ -54,7 +54,7 @@ test("#263: the row's accounts come from the usage artifacts and the local stage
   assert.deepEqual(score(c).accounts, ["alpha", "beta"], "deduplicated");
 });
 
-test("#266: the row gives each local account its stages, dollars and usage-limit pauses, from the stages' progress lines or, given, their own result.json, never both; the Harness cell shows them", () => {
+test("#266: the row gives each local account its stages, dollars and usage-limit pauses, from the stages' progress lines and, given, their own result.json, each stage once; the Harness cell shows them", () => {
   const c = localMerge(63);
   const mark = (account) => `\n${harnessMarker("codex", "gpt-6.1-sol", { ...ran("gpt-6.1-sol", null, "gpt-6.1-sol"), harness: "codex", account })}`;
   const paused = { ...c.issueComments[0], id: 1700000000, body: `<!-- factory:63:progress:work:1700000000 -->\nFactory work run 1700000000\n- 00:50Z exit: paused\n<!-- factory:spend {"usd":0.5,"limitPaused":true} -->${mark("alpha")}` };
@@ -67,14 +67,27 @@ test("#266: the row gives each local account its stages, dollars and usage-limit
     { account: "beta", stages: 2, usd: 1.5, limitPauses: 0 },
   ]);
   assert.match(markdownTable([row]), /; accounts alpha \(1 stage, \$0\.50, 1 limit pause\), beta \(2 stages, \$1\.50\) \|/);
+  // Mixed: two stages' own result.json given (each naming its progress comment), and the review stage's line alone.
   c.usage = [
-    { artifact: "usage-work-1/result.json", harness: "codex", account: "alpha", usd: 0.5, exit: "paused", usageLimit: { harness: "codex", reset: "2031-03-02T05:00:00Z", since: "2031-03-02T00:50:00Z" } },
-    { artifact: "usage-work-2/result.json", harness: "codex", account: "beta", usd: 1.25, exit: "delivered" },
+    { artifact: "usage-work-1/result.json", progressRun: "1700000000", harness: "codex", account: "alpha", usd: 0.5, exit: "paused", usageLimit: { harness: "codex", reset: "2031-03-02T05:00:00Z", since: "2031-03-02T00:50:00Z" } },
+    { artifact: "usage-work-2/result.json", progressRun: "1700000001", harness: "codex", account: "beta", usd: 1.3, exit: "delivered" },
   ];
   assert.deepEqual(score(c).accountUse, [
     { account: "alpha", stages: 1, usd: 0.5, limitPauses: 1 },
-    { account: "beta", stages: 1, usd: 1.25, limitPauses: 0 },
+    { account: "beta", stages: 2, usd: 1.55, limitPauses: 0 },
+  ], "the records' figures for their stages, the review's line added, nothing twice");
+  // No dollars anywhere (no spend lines, no usage): the stages and pauses still count.
+  const bare = localMerge(65);
+  bare.issueComments = bare.issueComments.map((x) => ({ ...x, body: x.body.replace(/\n<!-- factory:spend [^\n]* -->/, "") }));
+  bare.issueComments[0].body += `${mark("beta")}`;
+  bare.issueComments[2].body += `${mark("beta")}`;
+  bare.issueComments.unshift({ ...paused, body: paused.body.replace(":63:", ":65:").replace(/<!-- factory:spend [^\n]* -->/, "<!-- factory:spend-x -->") });
+  bare.issueComments[0].body = bare.issueComments[0].body.replace("<!-- factory:spend-x -->", "");
+  assert.deepEqual(score(bare).accountUse, [
+    { account: "alpha", stages: 1, usd: null, limitPauses: 0 },
+    { account: "beta", stages: 2, usd: null, limitPauses: 0 },
   ]);
+  assert.match(markdownTable([score(bare)]), /accounts alpha \(1 stage, unmetered\), beta \(2 stages, unmetered\)/);
   assert.deepEqual(score(localMerge(64)).accountUse, [], "no account named: none");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", usageLimit: { harness: "claude" } }).parts, { limitPaused: true }, "the spend line marks a usage-limit pause");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, {}, "not an outage's");

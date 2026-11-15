@@ -727,6 +727,15 @@ export function accountUse(usage) {
   return [...by.values()];
 }
 
+/**
+ * The usage records given and the stages' progress-line records (spendRecords) together, each stage once: a line whose
+ * progress comment a given record names (its `progressRun`, plugin session.mjs writeUsage) is left out for that record.
+ */
+export const withLines = (records = [], lines = []) => {
+  const named = new Set(records.map((r) => r?.progressRun).filter((k) => typeof k === "string"));
+  return [...records, ...lines.filter((l) => !named.has(l.progressRun))];
+};
+
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20, 1 limit pause)". */
 const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${u.usd === null ? "unmetered" : `$${u.usd.toFixed(2)}`}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
 
@@ -763,7 +772,7 @@ export function objectiveHarness(collected, { app = null } = {}) {
  * line carries them itself. A stage whose comment has no spend line is an unmetered part. The harness and model are
  * the stage's own (stageHarnessOf), carried to the review stages; dollars are the worker's own pricing.
  */
-export function spendRecords(collected, { app = null } = {}) {
+export function spendRecords(collected, { app = null, all = false } = {}) {
   const n = collected.issue.number;
   const stages = factoryStages(collected, { app });
   const vendors = vendorComments(collected, { app });
@@ -796,10 +805,10 @@ export function spendRecords(collected, { app = null } = {}) {
     const sandbox = booking && Object.hasOwn(booking, "vendorUsd") ? { usd: num(booking.vendorUsd), ...(booking.vendorUpperBound === true && num(booking.vendorUsd) !== null ? { upperBound: true } : {}) } : vendor !== null ? { usd: vendor } : null;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
-  if (!out.some((r) => r.usd !== null || r.vendor)) return [];
+  if (!all && !out.some((r) => r.usd !== null || r.vendor)) return [];
   // The first stage names the harness; a review stage before any work line takes the Objective's.
   return out.map((r) => ({ ...r, harness: r.harness ?? harness, model: r.model ?? model }));
 }
@@ -1032,9 +1041,9 @@ export function scoreObjective(collected, opts = {}) {
     // The accounts from both: a stage run locally (`factory review`) on an Objective whose work ran on Actions is only in
     // its progress line. The dollars stay the artifacts' alone (cost above).
     accounts: objectiveAccounts(artifacts.length ? [...usage, ...spendRecords(collected, { app })] : usage),
-    // Per account: local stages upload no artifact, so their progress comments' lines, unless the usage given holds
-    // local stages' own result.json (an artifact naming an account), which then counts alone, never both.
-    accountUse: accountUse(artifacts.some((r) => typeof r?.account === "string") ? artifacts : artifacts.length ? spendRecords(collected, { app }) : usage),
+    // Per account: the usage given (a local stage's own result.json names its account) and every local stage's progress
+    // line, dollars or none, but a line whose stage a given record names (its `progressRun`) counts once, as the record.
+    accountUse: accountUse(withLines(artifacts, spendRecords(collected, { app, all: true }))),
     exit,
     parked,
     pr: (merged ?? open ?? pulls[0])?.number ?? null,

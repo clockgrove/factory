@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,7 @@ writeFileSync(
 );
 process.env.FACTORY_PLUGIN_ROOT = root;
 const { RETRY } = await import("../scripts/lib/github.mjs");
+const { logTo } = await import("../scripts/lib/inputs.mjs");
 const { accountHolds, holdsDir } = await import("../scripts/lib/holds.mjs");
 const { Local, holderId, machineIdentity, pauseNoticeBody } = await import("../scripts/local.mjs");
 const { accountLabelNote, accountPin, accountsFile, autoAccountSetting, chooseAccount, harnessAccounts, loadAccounts, pinnedAccount } = await import("../scripts/lib/accounts.mjs");
@@ -690,6 +691,166 @@ test("#266: on, an Objective pinned by a label stays on its account: paused ther
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
       loop.result = delivered;
       assert.equal((await work(loop)).account, "beta");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#266: an account whose harness checks fail is passed over, checked again after a while; only with none ready does the stage Block, naming the accounts; a Blocked or held start is no turn", async () => {
+  const { UNREADY_RETRY_MS } = await import("../scripts/local.mjs");
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      loop.result = delivered;
+      const broken = new Set(["beta"]);
+      let checks = 0;
+      loop.harnessReady = (harness, a) => (checks++, broken.has(a.name) ? [`${a.name}'s login at ${h} is broken`] : []);
+      const order = [];
+      for (let i = 0; i < 3; i++, t += 1000) order.push((await loop.stage(8, "work", "worker.mjs", [])).account);
+      assert.deepEqual(order, ["alpha", "gamma", "alpha"], "beta passed over, nothing Blocked");
+      assert.equal(gh.blocked().length, 0);
+      const probed = checks;
+      // Fixed, but its failure is kept a while: still passed over, and not checked again.
+      broken.clear();
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      assert.equal(checks, probed + 2, "the chosen account's own checks only");
+      t += UNREADY_RETRY_MS + 1;
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "checked again, and its turn");
+      // None ready (each one's failure kept from now): the stage Blocks once, naming the accounts and never a path.
+      for (const n of ["alpha", "beta", "gamma"]) broken.add(n);
+      t += UNREADY_RETRY_MS + 1;
+      const startsBefore = ["alpha", "beta", "gamma"].map((n) => loop.holds.startedAt(n, t));
+      const r = await loop.stage(8, "work", "worker.mjs", []);
+      assert.equal(r.exit, "blocked");
+      const block = gh.blocked()[0].body;
+      assert.match(block, /local mode on this machine cannot run Claude Code on any of its accounts \(`alpha`, `beta`, `gamma`\); the loop's log names what is missing for each/);
+      assert.ok(!block.includes(h), "no path");
+      assert.ok(!block.includes("harness label asks for"), "not the harness label's text");
+      assert.deepEqual(["alpha", "beta", "gamma"].map((n) => loop.holds.startedAt(n, t)), startsBefore, "a Blocked start is no turn");
+      // A held start is no turn either.
+      broken.clear();
+      t += UNREADY_RETRY_MS + 1;
+      for (const n of ["alpha", "beta", "gamma"]) loop.holds.limit({ harness: "claude", account: n, reset: t + 60 * MIN, now: t });
+      const held = await loop.stage(8, "work", "worker.mjs", []);
+      assert.deepEqual([held.exit, held.usageLimit.held], ["paused", true]);
+      assert.deepEqual(["alpha", "beta", "gamma"].map((n) => loop.holds.startedAt(n, t)), startsBefore);
+      assert.equal(loop.ran().length, 5, "nothing ran on a Blocked or held start");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#266: a usage limit with no reset reported Blocks as before, and automatic choice, in every serve, passes that account over for 1, 4, then 24 hours, until a pass on it is served; with the setting off nothing holds on it", async () => {
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "usage-"))), "u");
+  const refused = { harness: "copilot", status: 429, type: null, code: "usage_limit_reached", message: "spent" };
+  assert.deepEqual(writeUsage(dir, { harness: "copilot", model: null, records: [{ usd: 0, refusal: refused }], passes: 1, exit: "blocked", reason: "x", credentialBasis: null }).limitRefused, { harness: "copilot" });
+  assert.equal(writeUsage(dir, { harness: "copilot", model: null, records: [{ usd: 0, refusal: { ...refused, resetAt: Date.now() } }], passes: 1, exit: "blocked", reason: "x", credentialBasis: null }).limitRefused, undefined, "a reset reported: a hold, not a guess");
+  assert.deepEqual(writeUsage(dir, { harness: "copilot", model: null, records: [{ usd: 0, refusal: { ...refused, code: null, type: "quota" } }], passes: 1, exit: "blocked", reason: "x", credentialBasis: null }).limitRefused, { harness: "copilot" }, "a quota refusal too");
+  assert.equal(writeUsage(dir, { harness: "copilot", model: null, records: [{ usd: 0, refusal: { ...refused, status: 401, code: "invalid_api_key" } }], passes: 1, exit: "blocked", reason: "x", credentialBasis: null }).limitRefused, undefined, "not a refused key");
+  const t = Date.now();
+  const holds = accountHolds({ dir: join(dir, "..", "holds") });
+  assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t }), t + 60 * MIN);
+  assert.equal(holds.until("seat", t), null, "no hold");
+  assert.equal(holds.held("copilot", t), false);
+  assert.equal(holds.held("copilot", t, true), true);
+  assert.equal(accountHolds({ dir: join(dir, "..", "holds") }).avoidUntil("seat", t), t + 60 * MIN, "every serve reads it");
+  assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t + 61 * MIN }), t + 61 * MIN + 240 * MIN);
+  holds.served({ harness: "copilot", account: "seat", now: t + 62 * MIN, started: t + 61 * MIN + 1 });
+  assert.equal(holds.avoidUntil("seat", t + 62 * MIN), null, "a served pass ends it");
+  assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t + 63 * MIN }), t + 123 * MIN, "and the count starts again");
+
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let now = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => now);
+      loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      loop.result = delivered;
+      const order = [];
+      for (let i = 0; i < 3; i++) order.push((await loop.stage(8, "work", "worker.mjs", [])).account, (now += 1000));
+      assert.deepEqual(order.filter((x) => typeof x === "string"), ["beta", "gamma", "beta"], "alpha passed over for its hour");
+      assert.ok(!loop.freeAccounts("claude", "none").includes("alpha"));
+      // Off: alpha is the default and nothing holds it; its pass is served, which ends the guess for every serve.
+      const off = serveOn(h, () => now);
+      off.result = delivered;
+      assert.equal(off.limitHold(["factory:objective"], 8, "u"), null);
+      assert.equal((await off.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.ok(loop.freeAccounts("claude", "none").includes("alpha"));
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#266: a start record dated after now counts as long ago; records of names no longer declared go, and any not written for a long while", () => {
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t = Date.now();
+  const holds = accountHolds({ dir });
+  holds.started({ harness: "claude", account: "beta", now: t });
+  writeFileSync(join(dir, "beta.started.json"), JSON.stringify({ harness: "claude", account: "beta", at: t + 365 * 24 * 60 * MIN }), { mode: 0o600 });
+  const fresh = accountHolds({ dir });
+  assert.equal(fresh.startedAt("beta", t), 0, "another clock's future time: long ago, as a hold record's");
+  const list = ["alpha", "beta"].map((name) => ({ name }));
+  assert.equal(chooseAccount(list, { until: () => null, startedAt: (a) => (a.name === "alpha" ? t - 1000 : fresh.startedAt(a.name, t)) }).name, "beta", "so it never blocks its turn");
+  fresh.started({ harness: "claude", account: "old", now: t });
+  fresh.started({ harness: "claude", account: "claude@0123456789ab", now: t });
+  fresh.forgetStarts(["alpha", "beta"]);
+  assert.equal(fresh.startedAt("old", t), t, "this process's memory");
+  assert.equal(accountHolds({ dir }).startedAt("old", t), null, "the file is gone: no longer declared");
+  assert.equal(accountHolds({ dir }).startedAt("claude@0123456789ab", t), t, "a login's stays: another serve may run on it");
+  const stale = join(dir, "claude@0123456789ab.started.json");
+  const long = new Date(t - 9 * 24 * 60 * MIN);
+  utimesSync(stale, long, long);
+  accountHolds({ dir }).until("alpha", t);
+  assert.equal(accountHolds({ dir }).startedAt("claude@0123456789ab", t), null, "not written for over eight days: gone");
+});
+
+test("#266: a paused Objective's move and its stage weigh the same account; when a pin comes off, the notice says the loop moves it now", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      gh.apply("factory:account:beta");
+      loop.result = limited(t + 60 * MIN, t);
+      assert.equal((await work(loop)).account, "beta");
+      assert.match(gh.notices()[0].body, /\(apply `factory:account:alpha`\)/);
+      gh.remove("factory:account:beta");
+      assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+      assert.match(gh.notices()[0].body, /This machine chooses accounts by itself, so `factory serve` here resumes this Objective on a free one at its next tick/, "said again once the pin is gone");
+      assert.ok(!gh.notices()[0].body.includes("(apply"));
+      // A pause held on gamma at its start, after a stage that paused on beta: once beta and alpha are free, the move and
+      // the stage both weigh beta first (where the session is), though alpha has no limit remembered.
+      t += 61 * MIN;
+      gh.apply("factory:account:beta");
+      loop.holds.limit({ harness: "claude", account: "beta", reset: t + 20 * MIN, now: t });
+      loop.result = limited(t + 20 * MIN, t);
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
+      gh.remove("factory:account:beta");
+      t += 21 * MIN;
+      loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 60 * MIN, now: t });
+      const off = { harness: "claude", hold: "gamma", account: "gamma", reset: t + 60 * MIN, pinned: false, pin: null };
+      const lines = [];
+      logTo({ write: (x) => lines.push(x) });
+      let due;
+      try {
+        due = await loop.movesEarly(8, off, ["factory:objective"], "u9");
+      } finally {
+        logTo(null);
+      }
+      assert.equal(due, true);
+      assert.ok(lines.some((l) => l.includes("moving to claude account beta, which is free")), lines.join(""));
+      loop.result = delivered;
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
     });
   } finally {
     gh.restore();

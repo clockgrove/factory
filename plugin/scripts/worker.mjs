@@ -93,8 +93,9 @@ async function main() {
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
   // in place for its host to answer, up to fifteen minutes on the local route (then the stage ends paused, for serve to
-  // resume) and up to the work's deadline elsewhere, where nothing resumes a stage. GitHub's primary rate limit spent is
-  // the same wait, to its reset: one past that bound ends the stage at once (paused locally, Blocked elsewhere).
+  // resume) and up to the work's deadline elsewhere, where the dispatcher relaunches a stage the network ended. GitHub's
+  // primary rate limit spent is the same wait, to its reset: one past that bound ends the stage at once (paused locally,
+  // Blocked elsewhere).
   const local = backend().name === "local";
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
@@ -197,9 +198,10 @@ async function main() {
       return;
     }
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
-    // (`outage`, or `provider-quota` for the rate limit: session.mjs outageExit).
+    // (session.mjs outageExit): `outage`, which mentions no one (the dispatcher relaunches the stage, and its own notice
+    // mentions the person once that is used up), or `provider-quota`, which waits for the person it mentions.
     if (unreachable(e)) {
-      await outageExit(e, { local, records, finish, deadlineAt, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) });
+      await outageExit(e, { local, records, finish, deadlineAt, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: cause === "outage" ? null : inputs.notify, stage: "outage" }, token) });
       return;
     }
     log(`worker crashed: ${e.message.slice(0, 300)}`);

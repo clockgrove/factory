@@ -56,6 +56,7 @@ import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bo
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
+import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -1569,6 +1570,13 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
 }
 
 /**
+ * What an outage Block off the local route says next: the dispatcher relaunches the stage (dispatch.mjs, lib/relaunch.mjs
+ * RELAUNCH_MAX), so the notice mentions no one (the stage passes no `notify`); the dispatcher's own notice does, once
+ * the relaunches are used up.
+ */
+export const RELAUNCH_NOTE = `Factory relaunches a stage lost to its network, at most ${RELAUNCH_MAX} times since the Objective was last started; past that it Blocks it for you.`;
+
+/**
  * The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` and `quota`
  * for a rate limit).
  */
@@ -1592,7 +1600,7 @@ async function afterReset(lost, deadlineAt) {
 const outageBlock = (lost) =>
   Number.isFinite(lost.resetAt)
     ? { reason: `${outageReason(lost)}, past the stage's deadline. Re-apply the label to run it again after the reset.`, cause: "provider-quota" }
-    : { reason: `${outageReason(lost)}; the stage waited for the network until its time ran out. Re-apply the label to run it again.`, cause: "outage" };
+    : { reason: `${outageReason(lost)}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`, cause: "outage" };
 
 /**
  * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level
@@ -1601,10 +1609,10 @@ const outageBlock = (lost) =>
  * again. Its records are every pass it ran (stagePasses, the ones still running at their live reading), so the usage
  * counts a pass the outage cut off. On the local route (`local`) the stage ends `paused` with the outage in result.json
  * (a rate limit's `reset` in it) and nothing written to GitHub: serve keeps the claim and resumes the Objective once the
- * host answers, or once the reset has passed (local.mjs). On any other route nothing resumes a stage, so it Blocks
- * through `block(reason, cause)` (one try, which lands only if GitHub answers again by then) with an External cause:
- * `outage`, or `provider-quota` naming the reset, written after the reset when that comes before the job's end (afterReset,
- * from `deadlineAt`).
+ * host answers, or once the reset has passed (local.mjs). On any other route it Blocks through `block(reason, cause)`
+ * (one try, which lands only if GitHub answers again by then) with an External cause: `outage`, which the dispatcher
+ * relaunches (RELAUNCH_NOTE), or `provider-quota` naming the reset, which waits for a person and is written after the
+ * reset when that comes before the job's end (afterReset, from `deadlineAt`).
  */
 export async function outageExit(e, { local, records, finish, block, deadlineAt = Infinity }) {
   stopWaiting();

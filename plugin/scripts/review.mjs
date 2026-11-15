@@ -272,7 +272,7 @@ async function main() {
   } catch (e) {
     if (!unreachable(e)) throw e;
     const dir = args.usage_dir || process.env.FACTORY_USAGE_DIR || (issue ? join(factoryTree, "..", `factory-usage-${issue}-review`) : null);
-    await earlyOutageEnd(e, { local, deadlineAt, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token) : null });
+    await earlyOutageEnd(e, { local, deadlineAt, usageDir: dir ? resolve(dir) : null, harness: inputs.harness, model: inputs.reviewerModel, block: issue && token ? (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: cause === "outage" ? null : inputs.notify, stage: "outage" }, token) : null });
     if (issue) setOutput("issue", String(issue));
     return;
   }
@@ -353,7 +353,8 @@ async function main() {
       return;
     }
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally (its review label stays, for
-    // serve's resume), an External Block elsewhere (`outage` or `provider-quota`: session.mjs outageExit).
+    // serve's resume), an External Block elsewhere (session.mjs outageExit): `outage`, which mentions no one since the
+    // dispatcher relaunches the Objective's work, or `provider-quota`, which waits for the person it mentions.
     if (unreachable(e)) {
       await outageExit(e, {
         local,
@@ -362,7 +363,7 @@ async function main() {
         deadlineAt,
         block: async (reason, cause) => {
           await dropLabel();
-          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "outage" }, token);
+          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: cause === "outage" ? null : inputs.notify, stage: "outage" }, token);
         },
       });
       return;

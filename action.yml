@@ -174,7 +174,7 @@ inputs:
     description: The decision model the drift advisory asks (an AI Gateway decision model id); `baseten/elephant-1` when empty.
     required: false
   vars:
-    description: 'The repository''s variables as JSON, `${{ toJSON(vars) }}` (every `uses:` step of the workflow template passes it). Each `FACTORY_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
+    description: 'The repository''s variables as JSON: the workflow passes toJSON of the vars context (every `uses:` step of the workflow template does). Each `FACTORY_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
     required: false
   github_token:
     description: 'The job''s GITHUB_TOKEN; Factory reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'

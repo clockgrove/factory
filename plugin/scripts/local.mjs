@@ -1580,7 +1580,8 @@ export class Local {
    * it still running on this machine, or a GitHub read that keeps failing (retried first): never a work pass on a branch
    * whose state could not be read. `gh`: the GitHub reads, `waitMs` the retry wait (a test's own).
    */
-  async runIssue(issue, { wait = false, gh = { findPr, getIssue, listComments }, waitMs = 2_000 } = {}) {
+  async runIssue(issue, { wait = false, gh: given = {}, waitMs = 2_000 } = {}) {
+    const gh = { findPr, getIssue, listComments, ...given };
     this.reapHere(issue);
     const live = liveStage(this.ws(issue));
     if (live) throw new Error(`${liveStageLine(issue, live)}, then run again`);

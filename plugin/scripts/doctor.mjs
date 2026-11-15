@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Factory doctor: the checks under "Doctor" in PLAN.md, each PASS, WARN or FAIL
 // with the fix. Changes nothing.
-//   node scripts/doctor.mjs --repo OWNER/NAME [--json] [--checkout DIR] [--probe] [--local]
+//   node scripts/doctor.mjs --repo OWNER/NAME [--checkout CLONE] [--json] [--probe] [--run-setup] [--local]
 // Runs from the plugin (`/factory doctor`) and, through jobChecks(), as the first
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { homedir, platform } from "node:os";
@@ -17,8 +17,8 @@ import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
-import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, organizationVariableNames, repoOf, repositoryVariables, rest } from "./lib/github.mjs";
-import { FACTORY_VERSION, appliedLayers, ignoredLines, input, layerLines, mask, organizationVariablesLine, parseArgs, resolveInputs, settingLayers, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { FACTORY_VERSION, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -1548,6 +1548,23 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
   }
 }
 
+/** doctor's flags (lib/inputs.mjs readFlags: `--dir` is `--checkout`, as on `factory`). */
+const DOCTOR_FLAGS = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" }, json: "bool", probe: "bool", "run-setup": "bool", local: "bool" };
+const DOCTOR_USAGE = "usage: node scripts/doctor.mjs --repo OWNER/NAME [--checkout CLONE] [--json] [--probe] [--run-setup] [--local]\n";
+
+/**
+ * doctor's command line, checked before any check runs: {help} for --help or -h anywhere, else its flags. Throws an
+ * error with `usage` set for an unknown flag or an argument, a flag's missing value, or a value given to a flag that
+ * takes none.
+ */
+export function doctorArgs(argv) {
+  if (argv.some((a) => a === "--help" || a === "-h")) return { help: true };
+  const fail = (why) => Object.assign(new Error(`${why}\n${DOCTOR_USAGE}`), { usage: true });
+  const flags = readFlags(argv, DOCTOR_FLAGS, fail);
+  if (flags._.length) throw fail(`unexpected argument ${JSON.stringify(flags._[0])}`);
+  return flags;
+}
+
 /**
  * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row; and a WARN naming the
  * repository variables that are ignored: a setting only the reviewed workflow file sets, no setting at all, or a value
@@ -1563,9 +1580,20 @@ export function settingsRows(layers) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = doctorArgs(process.argv.slice(2));
+  } catch (e) {
+    if (!e.usage) throw e;
+    process.stderr.write(`doctor: ${e.message}`);
+    process.exit(64);
+  }
+  if (args.help) {
+    process.stdout.write(DOCTOR_USAGE);
+    return;
+  }
   const checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
-  const local = args.local === "true" || backend().name === "local";
+  const local = !!args.local || backend().name === "local";
   const found = !process.env.GITHUB_ACTIONS && local ? committedWorkflowEnv(checkout) : null;
   // The repository and the App's credentials doctorSettings reads GitHub with: this shell's, else the local workflow's.
   const pre = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(found ? found.wf : readWorkflowEnv(checkout)).kept, ...process.env } });
@@ -1605,7 +1633,7 @@ async function main() {
   results.push(...(await githubChecks({ inputs, repo, token, app, local })));
   results.push(...(await objectiveHostChecks({ inputs, repo, token })));
   results.push(...(await sandboxStorageChecks({ inputs, repo, token })));
-  results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args.run_setup, local, wf })));
+  results.push(...(await repositoryChecks({ inputs, checkout, runSetup: !!args["run-setup"], local, wf })));
   results.push(...(await runnerChecks({ inputs })));
   const fails = results.filter((r) => r.status === "FAIL").length;
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);

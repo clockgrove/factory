@@ -82,21 +82,28 @@ test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
   assert.deepEqual(uncapped.ready, [1], "daily_usd 0 means no daily cap");
 });
 
-test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back once, then Blocks; drafts and clean PRs are left alone", async () => {
-  const { staleDecision } = await import("../scripts/lib/logic.mjs");
+test("integration failure: a behind (no queue) or conflicting (any) In-review PR goes back each time, Blocking only when stuck or at the bound; drafts and clean PRs are left alone", async () => {
+  const { REBASE_LIMIT, staleDecision } = await import("../scripts/lib/logic.mjs");
   const behind = { draft: false, auto_merge: null, mergeable_state: "behind" };
+  const dirty = { ...behind, mergeable_state: "dirty" };
+  const stuck = { from: "a".repeat(40), base: "b".repeat(40), files: ["docs/decisions.md"] };
+  assert.equal(REBASE_LIMIT, 5);
   assert.equal(staleDecision({ pr: behind }), "update", "no queue: GitHub updates a behind branch; no worker");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" } }), "rebase");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, rebaseMarkers: 1 }), "blocked", "second conflict is integration failed twice");
+  assert.equal(staleDecision({ pr: dirty }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, rebases: 1 }), "rebase", "a conflict after a rebase, on a new base, goes back again");
+  assert.equal(staleDecision({ pr: dirty, rebases: REBASE_LIMIT - 1 }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, rebases: REBASE_LIMIT }), "limit", "the bound");
+  assert.equal(staleDecision({ pr: dirty, rebases: 1, stuck }), "stuck", "the same conflict on the same base");
   assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "clean" } }), "ignore");
   // A review job that began before a sibling's merge made the PR conflict is still running: no send-back to race it.
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: true }), "ignore");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, reviewing: true, reviewRunning: false }), "rebase", "labelled but no review job alive: back to rebase");
+  assert.equal(staleDecision({ pr: dirty, reviewing: true, reviewRunning: true }), "ignore");
+  assert.equal(staleDecision({ pr: dirty, reviewing: true, reviewRunning: false }), "rebase", "labelled but no review job alive: back to rebase");
   assert.equal(staleDecision({ pr: { ...behind, draft: true } }), "ignore");
   assert.equal(staleDecision({ pr: null }), "ignore");
   assert.equal(staleDecision({ pr: behind, queue: true }), "ignore", "with a queue, behind is the queue's job");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
-  assert.equal(staleDecision({ pr: { ...behind, mergeable_state: "dirty" }, queue: true, rebaseMarkers: 1 }), "blocked");
+  assert.equal(staleDecision({ pr: dirty, queue: true }), "rebase", "with a queue, an evicted conflicting PR goes back");
+  assert.equal(staleDecision({ pr: dirty, queue: true, rebases: 1 }), "rebase");
+  assert.equal(staleDecision({ pr: dirty, queue: true, rebases: REBASE_LIMIT }), "limit");
 });
 
 test("conflictsAt: only GitHub's conflict on the head the stage pushed ends the check wait", async () => {

@@ -20,7 +20,7 @@ import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
-import { waitState } from "./lib/third-party-review.mjs";
+import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
@@ -404,10 +404,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     );
   };
   const unreadReason = (hold, what) => `${what} for over a day and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
-  // In review with its review owed (an open PR, not a draft, labelled factory:review): only a local loop runs that
-  // review, so it waits as a Running one does, counted from the later of its entering In review and the PR's last
-  // factory:review label (a re-review owes a new one). The issue's own time is read first, so an Objective inside its
-  // day costs one read a tick. True when Blocked.
+  // In review with its review owed (an open PR, not a draft, labelled factory:review, or unlabelled with a third-party
+  // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
+  // as a Running one does, counted from the later of its entering In review and the PR's last factory:review label (a
+  // re-review owes a new one) or the wait record's last write. The issue's own time is read first, so an Objective
+  // inside its day costs one read a tick. True when Blocked.
   const reviewLapsed = async (issue) => {
     const n = issue.number;
     const entered = await objectiveLabeledAt(repo, n, "factory:in-review", opts).then((at) => ({ at }), () => null);
@@ -434,13 +435,27 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       return false;
     }
     const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-    if (!pr || pr.draft || !(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return false;
+    if (!pr || pr.draft) return false;
+    // Unlabelled: owed only when its review stage ended waiting for a third-party reviewer (a loop stopped meanwhile).
+    let waited = null;
+    if (!(pr.labels || []).some((l) => l.name === REVIEW_LABEL)) {
+      const comments = await listComments(repo, pr.number, opts).catch(() => null);
+      if (!comments) {
+        retry(`PR #${pr.number}'s comments`);
+        return false;
+      }
+      waited = waitOf(comments, n);
+      if (!waited) return false;
+    }
     const owed = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts).then((at) => ({ at }), () => null);
     if (!owed) {
       retry(`PR #${pr.number}'s review label time`);
       return false;
     }
-    const since = owed.at && Date.parse(owed.at) > Date.parse(entered.at) ? owed.at : entered.at;
+    // A review label applied since the record's last write: a review took the wait up, so none is owed for it.
+    if (waited && owed.at && Date.parse(owed.at) >= waited.updatedAt) return false;
+    const from = waited ? new Date(waited.updatedAt).toISOString() : owed.at;
+    const since = from && Date.parse(from) > Date.parse(entered.at) ? from : entered.at;
     if (Date.now() - Date.parse(since) < CLAIM_PAUSE_MS || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
       due(n, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
       return false;

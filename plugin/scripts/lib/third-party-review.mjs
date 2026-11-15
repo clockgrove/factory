@@ -174,12 +174,17 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   if (!names.length) return { logins: [], wait: null };
   const { logins, refused } = thirdPartyReviewers(names, await own());
   if (refused.length) log(`third_party_reviewers: ${refused.join(", ")} left out (no login, or Factory's own)`);
-  if (!logins.length || skip) return { logins, wait: null };
+  // No wait here (the cap spent: no answer pass runs): a record an earlier stage left goes, so it holds no later merge.
+  if (!logins.length || skip) {
+    await clearWait({ repo, issue, prNumber, token });
+    return { logins, wait: null };
+  }
   const opts = { token };
   const head = String(sha).slice(0, 7);
   // Factory's own login unknown: its record could not be told from a pasted one, so a stage started again would post a
   // new record with a new bound every time. No wait.
   if (!selfLogin()) {
+    await clearWait({ repo, issue, prNumber, token });
     await progress(`third-party review: Factory's own login is unknown, so its wait record could not be read back; going on without waiting`);
     return { logins, wait: null };
   }
@@ -214,6 +219,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
       if (record && !current) await dropWait(repo, record, opts);
     }
   } catch (e) {
+    await dropWait(repo, record, opts);
     await progress(`third-party review: the wait could not be recorded on the PR (${String(e?.message || e).slice(0, 80)}); going on without ${seen.missing.join(", ")}`);
     return { logins, wait: null };
   }

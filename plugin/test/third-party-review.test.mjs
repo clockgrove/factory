@@ -223,7 +223,7 @@ test("#303: none named reads nothing; with the cap spent nothing waits; a record
     assert.deepEqual(await thirdPartyStep({ repo, issue: 7, prNumber: 7, sha: HEAD, names: [], own: async () => assert.fail("no login read"), progress, token: "t" }), { logins: [], wait: null });
     assert.deepEqual(await thirdPartyStep({ repo, issue: 7, prNumber: 7, sha: HEAD, names: [GREPTILE, "factory[bot]"], own: async () => ["factory[bot]"], skip: true, progress, token: "t" }), { logins: [GREPTILE], wait: null });
   });
-  assert.deepEqual(gh.asked, []);
+  assert.deepEqual(gh.asked, ["GET /repos/o/r/issues/7/comments?per_page=100"], "the cap spent: no reviews read, only a record an earlier stage left is looked for");
   // GitHub refuses the record: the stage goes on without the reviewer rather than end with nothing to start it again.
   const refusing = github({ reviews: [] });
   const fetch = refusing.fetch;
@@ -690,4 +690,48 @@ test("#311: a writer's record counts on every route (a local loop writes as its 
   assert.ok(r.wait);
   assert.deepEqual(gh.writes(), ["POST /repos/o/r/issues/7/comments"]);
   assert.equal(gh.comments.length, 2);
+});
+
+// #311 re-review: a local wait no loop takes up, and a record left when a stage goes on without waiting.
+
+/** waitWorld as a factory:local Objective In review since `inReviewAgo`, no claim on it. */
+function localWaitWorld({ inReviewAgo, ...opts }) {
+  const w = waitWorld(opts);
+  const iso = (ago) => new Date(Date.now() - ago).toISOString();
+  const inner = w.fetch;
+  w.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const get = (init.method || "GET") === "GET";
+    if (get && u.pathname === `/repos/${W_REPO}/issues/7/timeline`) return json(200, [{ event: "labeled", label: { name: "factory:objective" }, created_at: iso(inReviewAgo + 3600_000) }, { event: "labeled", label: { name: "factory:in-review" }, created_at: iso(inReviewAgo) }]);
+    if (get && u.pathname === `/repos/${W_REPO}/issues`) {
+      const list = await (await inner(url, init)).json();
+      for (const i of list) if (!i.labels.some((l) => l.name === "factory:local")) i.labels.push({ name: "factory:local" });
+      return json(200, list);
+    }
+    return inner(url, init);
+  };
+  return w;
+}
+
+test("#311: a factory:local PR left waiting with no loop to take it up is Blocked after the day, as an owed review is", async () => {
+  const DAY = 24 * 3600_000;
+  const t = await waitTick(localWaitWorld({ inReviewAgo: 2 * DAY, recordAgo: 2 * DAY }));
+  assert.ok(t.r.vanished.includes(7), "Blocked: no local loop ran its review for over a day");
+  assert.ok(t.writes.some((x) => x.startsWith("POST /issues/7/comments")), "the Block's notice");
+  // Within the day of the record's last write (a loop rewrote it lately): not yet.
+  const recent = await waitTick(localWaitWorld({ inReviewAgo: 2 * DAY, recordAgo: 2 * 3600_000 }));
+  assert.deepEqual(recent.r.vanished, []);
+  // A review took the wait up since the record (the label went back on after it): no review is owed for it.
+  const taken = await waitTick(localWaitWorld({ inReviewAgo: 2 * DAY, recordAgo: 2 * DAY, labelledAgo: DAY + 3600_000 }));
+  assert.deepEqual(taken.r.vanished, []);
+});
+
+test("#311: a stage that goes on without waiting (the cap spent) drops a record an earlier stage left, so it holds no later merge", async () => {
+  const clock = { t: T0 };
+  const gh = github({ reviews: [], clock: () => clock.t });
+  await step(gh, clock);
+  assert.equal(gh.comments.length, 1);
+  clock.t = T0 + 5 * MIN;
+  assert.deepEqual(await step(gh, clock, { skip: true }), { logins: [GREPTILE], wait: null });
+  assert.equal(gh.comments.length, 0);
 });

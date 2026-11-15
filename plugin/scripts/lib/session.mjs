@@ -976,7 +976,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // Factory's own catch-up merges (outbox.mjs caughtUp) validated red: each gets one fix pass that is not counted.
   const caughtRed = new Set();
   // The red heads given a fresh worker pass after a fix pass changed nothing on them (freshPassDenied), each with that
-  // first unchanged reading for the Block that names both attempts: once per head.
+  // first unchanged reading (`unchanged`, for the Block that names both attempts) and the worker's session before it
+  // (`session`, the thread a fresh pass that commits nothing hands back): once per head in a stage.
   const freshHeads = new Map();
   // The last fix pass's red: what it was handed (failures, detail, fence) and its run, for a fresh worker pass.
   let lastFix = null;
@@ -1070,7 +1071,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // when the red is the work's (the loop below).
     if (sha === redHead && !r.green && !r.timedOut && r.failedRuns?.length) {
       // The fresh worker pass changed nothing either: the head's rerun was decided before it, so the Block names both passes.
-      if (freshHeads.has(sha)) return { green: false, again: true, unchanged: { ...freshHeads.get(sha), fresh: true }, command };
+      if (freshHeads.has(sha)) return { green: false, again: true, unchanged: { ...freshHeads.get(sha).unchanged, fresh: true }, command };
       const said = `the fix pass changed nothing; rerunning the failed jobs on ${sha.slice(0, 7)}`;
       log(`${label}: ${said}`);
       if (onPhase) await onPhase(`${label}: ${said}`);
@@ -1129,7 +1130,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         if (r.green && onPhase) await onPhase(`triage rerun on ${sha.slice(0, 7)} turned green: ${(t.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
       }
     }
-    return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, refusal: triaged, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
+    // `waitedMs`: how long this head's checks took, triage's rerun included (a fresh worker pass's floor, freshPassDenied).
+    return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, refusal: triaged, waitedMs: Date.now() - waitedFrom, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
   };
   /**
    * What a red hands a fix pass: for one the required checks found, each failing job's whole log, whether the default
@@ -1210,6 +1212,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (rec.sessionId) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex has no in-run cap; Copilot's is checked again here
     if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
+    // A fresh pass that reached its dollar or time cap: the caller Blocks with the unchanged red, the work's.
+    if (fresh && !rec.refusal && !rec.unmetered && (rec.timedOut || rec.budgetExceeded)) return { capped: rec.timedOut ? "time" : "dollar" };
     const end = (more) => ({ green: false, passes, lastOutput: red.tail, command: red.command, usage, ...more });
     if (rec.timedOut || rec.budgetExceeded || rec.refusal) return end({ harness: rec });
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
@@ -1229,28 +1233,52 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // The same head as the red the fix pass had: not a pass of its own.
     if (v.again) passes -= 1;
     if (v.unchanged) {
-      const block = unchangedBlock(v.unchanged, lastLead);
-      // A red that is the work's gets one fresh worker pass, a new session, before the Block: once per head, under the
-      // stage's max_usd and wall clock. An outage or a setup gap Blocks at once, as no code can fix it.
-      if (block.cause === "work" && !v.unchanged.fresh && lastFix) {
-        const head = v.unchanged.sha;
-        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage) : 0, leftMs: remainingMs(deadlineAt) });
+      const head = v.unchanged.sha;
+      let block = unchangedBlock(v.unchanged, lastLead);
+      // A fresh pass that committed nothing hands the stage back the worker's own thread, the one that carries the work.
+      if (v.unchanged.fresh && freshHeads.get(head)?.session) session.id = freshHeads.get(head).session;
+      // A red that is the work's gets one fresh worker pass, a new session, before the Block: once per head, when what
+      // is left of max_usd and the wall clock carries a whole pass. An outage or a setup gap Blocks at once, as no code
+      // can fix it.
+      if (block.cause === "work" && !v.unchanged.fresh && lastFix && !freshHeads.has(head)) {
+        // The red as it stands after the head's rerun, when one was made: it can fail another way than the red the fix
+        // pass had, and the fresh pass and the Block quote that one. One the default branch fails the same way is
+        // handed back, as any red is.
+        let red = lastFix;
+        if (v.rerunRed?.failedRuns?.length) {
+          const now = await redOf(v.rerunRed);
+          if (allOnBase(now.detail)) {
+            const reason = baseFailureReason(now.detail);
+            log(`${label} pass ${passes} red after its rerun: ${reason}`);
+            if (onPhase) await onPhase(`${label} pass ${passes} red after its rerun: ${reason}; handed back, no fresh worker pass`);
+            return { green: false, passes, lastOutput: String(v.rerunRed.failed.output || "").slice(-6000), command: v.command, usage, baseFailure: reason };
+          }
+          red = { ...lastFix, ...now, command: v.rerunRed.failed.command, rec: lastFix.rec };
+          lastLead = now.lead || lastLead;
+          last = { ...last, failed: v.rerunRed.failed };
+          block = unchangedBlock(v.unchanged, lastLead);
+        }
+        // Read after the rerun's red (its reads can wait on a rate limit): what is left now.
+        const runMs = Math.max(0, Date.parse(lastFix.rec?.ended) - Date.parse(lastFix.rec?.started)) || 0;
+        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage) : 0, needUsd: sumSpend([lastFix.rec]), leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
         const said = denied ? `the fix pass changed nothing on ${head.slice(0, 7)}; no fresh worker pass (${denied})` : `the fix pass changed nothing on ${head.slice(0, 7)}; one fresh worker pass, a new session with the failing checks' output, before Blocking`;
         log(`${label}: ${said}`);
         if (onPhase) await onPhase(`${label}: ${said}`);
         if (!denied) {
-          freshHeads.set(head, v.unchanged);
-          // The red as it stands after the head's rerun, when one was made: the fresh pass and the Block quote that one.
-          let red = lastFix;
-          if (v.rerunRed?.failedRuns?.length) {
-            const now = await redOf(v.rerunRed);
-            red = { ...lastFix, ...now, rec: lastFix.rec };
-            lastLead = now.lead || lastLead;
-          }
+          freshHeads.set(head, { unchanged: v.unchanged, session: session.id });
+          // The scope fence names what this red names, as a fix pass's does.
+          if (red !== lastFix && outbox?.fence) await outbox.fence({ plan: "", texts: red.failures.map((f) => f.output || "") }).catch((e) => log(`fresh-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
           const ended = await fixPass(red, { fresh: true });
+          if (ended?.capped) {
+            const reason = `${block.reason}; the fresh worker pass after it reached the ${ended.capped} cap`;
+            log(`${label}: ${reason}`);
+            if (onPhase) await onPhase(`${label}: ${reason}`);
+            return { green: false, passes, lastOutput: red.tail, command: v.command, usage, unchanged: { reason, cause: "work" } };
+          }
           if (ended) return ended;
           continue;
         }
+        block = { ...block, reason: `${block.reason}; no fresh worker pass: ${denied}` };
       }
       log(`${label}: ${block.reason}`);
       if (onPhase) await onPhase(`${label}: ${block.reason}`);
@@ -1308,7 +1336,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const scope = io?.scope?.() ?? { plan: "", texts: [] };
     const fenced = { plan: scope.plan, texts: [...scope.texts, ...failures.map((f) => f.output || "")] };
     if (outbox?.fence) await outbox.fence(fenced).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
-    lastFix = { passes, sha: v.sha, failures, detail, tail, command: failed.command, rec: null };
+    lastFix = { passes, sha: v.sha, failures, detail, tail, command: failed.command, checksMs: v.waitedMs ?? 0, rec: null };
     const ended = await fixPass(lastFix);
     if (ended) return ended;
   }

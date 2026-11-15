@@ -88,16 +88,20 @@ export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catc
 /**
  * Why a red head a fix pass left unchanged gets no fresh worker pass before the stage Blocks (session.mjs
  * validationLoop), or "" when it gets one. Only a red that is the work's (unchangedBlock's cause `work`; an outage or a
- * setup gap is no code's to fix), once per head (`tried`: the heads already given one), with dollars left under max_usd
- * (`leftUsd`, when `maxUsd` is set) and a minute of the stage's wall clock (`leftMs`).
+ * setup gap is no code's to fix), once per head in a stage (`tried`: the heads already given one), and only when what is
+ * left can carry a whole pass: with `maxUsd` set, `leftUsd` at least `needUsd` (what the fix pass cost: Codex has no
+ * in-run cap, so a sliver would be overspent), and `leftMs` of the wall clock at least `needMs` (a pass, its checks
+ * and the exit's reserve).
  */
-export function freshPassDenied({ cause, head, tried, maxUsd, leftUsd, leftMs }) {
+export function freshPassDenied({ cause, head, tried, maxUsd, leftUsd, needUsd = 0, leftMs, needMs = 60_000 }) {
   if (cause !== "work") return `the red is not the work's (${cause})`;
   if (tried?.has(head)) return "a fresh worker pass already ran on this head";
   if (maxUsd > 0 && !(leftUsd > 0)) return "max_usd is spent";
-  if (!(leftMs >= 60_000)) return "the stage's wall clock is spent";
+  if (maxUsd > 0 && leftUsd < needUsd) return `$${leftUsd.toFixed(2)} of max_usd is left, under the fix pass's $${needUsd.toFixed(2)}`;
+  if (!(leftMs >= needMs)) return `${spanText(leftMs)} of the stage's wall clock is left, under a pass, its checks and the exit (${spanText(needMs)})`;
   return "";
 }
+const spanText = (ms) => (ms < 120_000 ? `${Math.max(0, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`);
 
 /**
  * Whether a protected entry covers `path` (from the repository root). A directory entry ends with `/` and matches from

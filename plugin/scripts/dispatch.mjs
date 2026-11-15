@@ -22,7 +22,7 @@ import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { orderSiblings, waitReason } from "./lib/overlap.mjs";
+import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -664,6 +664,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const merged = [];
   // PRs the merge pass left in the merge queue: the queue-watch job reads them until each merges or leaves.
   const queueWatch = [];
+  // Each In-review Objective's open PR (null for none) as this pass read it.
+  const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
     let liveJobs = null;
@@ -679,7 +681,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
       if (restarting[issue.number]) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
-      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
+      let prRead = true;
+      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+      // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
+      if (prRead) prsSeen[issue.number] = open;
       if (!open) {
         // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
         if (dryRun) continue;
@@ -871,9 +876,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
   // Siblings on the same files (#277, lib/overlap.mjs): a pick whose known files overlap a Running or In-review
   // Objective's heavily waits for it to merge, and its slot goes to the next Queued one. One named by hand never waits.
+  // Objectives Factory merges itself are waited for In review too; without auto_merge a person merges them, so not.
+  let order = null;
   if (!inputs.issue && picked.ready.length) {
     const waiting = picked.skipped.filter((x) => x.reason === "max_concurrent reached").map((x) => x.number);
-    const order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length }, opts, { dryRun, log });
+    order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length, prs: prsSeen, autoMerge: !!inputs.autoMerge }, opts, { dryRun, log });
     if (order.waits.length) {
       const moved = new Set([...order.ready, ...order.waits.map((w) => w.number)]);
       picked.skipped = [...picked.skipped.filter((x) => !moved.has(x.number)), ...order.waits.map((w) => ({ number: w.number, reason: waitReason(w) }))];
@@ -984,6 +991,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   watch.mark("locks");
+  // The notes of the Objectives that start (overlap.mjs): only the final picks, once every later hold has had its say.
+  if (!dryRun && !inputs.issue) await announceStarts(repo, { started: picked.ready.filter((n) => !sentBack.includes(n)), issues, order }, opts, { log });
   // Mark the picked issues Running now, so the next cron tick does not pick them again
   // before their matrix jobs start; the worker's doctor step re-marks on failure.
   if (!dryRun) {

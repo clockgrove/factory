@@ -173,14 +173,15 @@ async function main() {
       const line = stageSpendLine(usage, { records, known });
       progress.spend(line.usd, line.parts);
     }
-    // A rebase's dollars on every route: 0 for a clean one (no harness ran), its harness's for a conflict pass.
+    // A rebase's dollars on every route: 0 when no harness pass ran, else its passes' (a conflict pass, fix passes).
     let rebaseText = "";
     if (rebaseStage) {
       const usd = typeof usage.usd === "number" ? usage.usd : records.length ? null : 0;
-      // The earlier rebases are read from the issue, but not through an outage this stage is ending on.
-      const before = rebaseTally(outage ? [] : await listComments(repo, issue, token).catch(() => []), issue);
+      // The earlier rebases are read from the issue, but not through an outage this stage is ending on; unread, the
+      // line names this rebase alone.
+      const comments = outage ? null : await listComments(repo, issue, token).catch(() => null);
       progress.rebase({ usd, conflict: rebaseStage.conflict });
-      rebaseText = `; ${rebaseLine({ usd, conflict: rebaseStage.conflict }, before)}`;
+      rebaseText = `; ${rebaseLine({ usd, conflict: rebaseStage.conflict, passes: records.length }, comments ? rebaseTally(comments, issue) : null)}`;
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
     // The stage's last write is done: a request still waiting for the network (a background one) ends now, not at its limit.

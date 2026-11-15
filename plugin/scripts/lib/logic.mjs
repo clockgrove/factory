@@ -2154,12 +2154,19 @@ export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.str
  */
 export const rebaseCostMarker = ({ usd, conflict }) => `<!-- factory:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict })} -->`;
 
-/** The send-back stage's words on its exit line: which rebase of the Objective this is, its cost and all of them so far. */
-export function rebaseLine({ usd, conflict }, before = { count: 0, usd: 0, unmetered: 0 }) {
+/**
+ * The send-back stage's words on its exit line: how it went by the harness passes that ran (`passes`: none is a clean
+ * rebase with no model run; a `conflict` rebase's are its conflict pass, any other's are fix passes), its cost, and,
+ * when the earlier rebases could be read (`before`, rebaseTally; null unread), which rebase of the Objective it is and
+ * what all of them cost.
+ */
+export function rebaseLine({ usd, conflict, passes = 0 }, before = null) {
   const fmt = (n) => `$${n.toFixed(2)}`;
+  const how = !passes ? "clean, no model run" : conflict ? "a conflict pass" : `clean, ${passes} fix pass(es)`;
+  const cost = usd === null ? "unmetered" : fmt(usd);
+  if (!before) return `rebase (${how}): ${cost}`;
   const unmetered = before.unmetered + (usd === null ? 1 : 0);
-  const total = before.usd + (usd ?? 0);
-  return `rebase ${before.count + 1} of this Objective (${conflict ? "a conflict pass" : "clean, no model run"}): ${usd === null ? "unmetered" : fmt(usd)}; all its rebases: ${fmt(total)}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
+  return `rebase ${before.count + 1} of this Objective (${how}): ${cost}; all its rebases: ${fmt(before.usd + (usd ?? 0))}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
 }
 
 /** The rebase line in one comment body: {usd, conflict}, or null when it has none (or a broken one). */

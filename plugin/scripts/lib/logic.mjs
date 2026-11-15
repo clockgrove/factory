@@ -645,7 +645,7 @@ export function clip(text, max = REASON_MAX) {
 export const BLOCK_CAUSES = Object.freeze({
   "max-usd": Object.freeze({ external: true, what: "Factory's max_usd cap reached" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
-  "provider-quota": Object.freeze({ external: true, what: "a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, or the sandbox vendor's plan" }),
+  "provider-quota": Object.freeze({ external: true, what: "a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan" }),
   outage: Object.freeze({ external: true, what: "a provider or GitHub outage Factory waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
   setup: Object.freeze({ external: false, what: "a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access" }),
   work: Object.freeze({ external: false, what: "the work: the worker's own Block, validation red, review findings, a protected path, the Objective's size, an edit to the Objective after its plan" }),

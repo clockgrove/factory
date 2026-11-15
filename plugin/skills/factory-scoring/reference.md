@@ -23,7 +23,7 @@ Each Blocked notice ends with a cause line, `<!-- factory:block {"cause":"<code>
 
 - `max-usd`: Factory's own `max_usd` cap reached.
 - `gateway-budget`: the AI Gateway refused for its own budget or credits.
-- `provider-quota`: a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, or the sandbox vendor's plan after the bounded wait.
+- `provider-quota`: a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan after the bounded wait.
 - `outage`: a provider or GitHub outage Factory handled by its rules (a required job GitHub never started, waited for in place, then Blocked as infrastructure; the same in the merge queue after one re-enqueue; the stage's machine unable to reach GitHub or the model provider past the outage's bound, its notice naming the host and since when).
 
 Not external: `setup` (a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access), `work` (the worker's own Block, validation red, review findings, a protected path, the Objective's size, an edit to the Objective after its plan) and `factory` (Factory itself, or any Block it did not place).

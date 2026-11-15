@@ -55,7 +55,7 @@ import { log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
 import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
-import { outageOf, outageReason, stopWaiting } from "./network.mjs";
+import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
@@ -1371,8 +1371,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     passes,
     exit,
     reason,
-    // A stage this machine's network ended (outageExit): the host it could not reach, the code and since when (ISO). A
-    // local serve reads it to resume the Objective once the host answers, or to Block it past OUTAGE.blockMs.
+    // A stage this machine's network ended (outageExit): the host it could not reach, the code and since when (ISO), and
+    // for GitHub's spent rate limit its `reset` (ISO). A local serve reads it to resume the Objective once the host
+    // answers or the reset has passed, or to Block it past OUTAGE.blockMs.
     ...(outage ? { outage } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
@@ -1576,49 +1577,82 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
 export const RELAUNCH_NOTE = `Factory relaunches a stage lost to its network, at most ${RELAUNCH_MAX} times since the Objective was last started; past that it Blocks it for you.`;
 
 /**
+ * The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` and `quota`
+ * for a rate limit).
+ */
+const outageRecord = (lost) => ({ host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}), ...(Number.isFinite(lost.resetAt) ? { reset: new Date(lost.resetAt).toISOString(), quota: lost.quota } : {}) });
+
+/**
+ * Off the local route, a stage that ended on GitHub's spent rate limit: its Block is a GitHub write too, so it waits for the
+ * reset when that comes before the stage's `deadlineAt` plus OUTAGE.exitWaitMs (the part of the job's reserve after its
+ * deadline it may spend); a later reset leaves the Block's one try to fail, logged.
+ */
+async function afterReset(lost, deadlineAt) {
+  const now = OUTAGE.now();
+  const left = lost.resetAt - now;
+  if (!(left > 0)) return;
+  if (lost.resetAt > Math.max(Number.isFinite(deadlineAt) ? deadlineAt : now, now) + OUTAGE.exitWaitMs) return void log(`the rate limit resets at ${new Date(lost.resetAt).toISOString()}, past this job's time: its Block cannot be written before then`);
+  log(`waiting for the rate limit's reset at ${new Date(lost.resetAt).toISOString()} to write the Block`);
+  await OUTAGE.sleep(left + 1000);
+}
+
+/** What ends a stage off the local route on an outage: its reason, and its External cause (logic.mjs BLOCK_CAUSES). */
+const outageBlock = (lost) =>
+  Number.isFinite(lost.resetAt)
+    ? { reason: `${outageReason(lost)}, past the stage's deadline. Re-apply the label to run it again after the reset.`, cause: "provider-quota" }
+    : { reason: `${outageReason(lost)}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`, cause: "outage" };
+
+/**
  * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level
- * failure), which is no crash. The process stops waiting first, so what it still writes fails at once rather than waiting
+ * failure), which is no crash; or GitHub's primary rate limit, spent until a reset past that wait (a NetworkDown with
+ * `resetAt`). The process stops waiting first, so what it still writes fails at once rather than waiting
  * again. Its records are every pass it ran (stagePasses, the ones still running at their live reading), so the usage
  * counts a pass the outage cut off. On the local route (`local`) the stage ends `paused` with the outage in result.json
- * and nothing written to GitHub: serve keeps the claim and resumes the Objective once the host answers (local.mjs). On
- * any other route it Blocks with the External cause `outage` through `block(reason)` (one try, which lands only if
- * GitHub answers again by then), and the dispatcher relaunches it (RELAUNCH_NOTE).
+ * (a rate limit's `reset` in it) and nothing written to GitHub: serve keeps the claim and resumes the Objective once the
+ * host answers, or once the reset has passed (local.mjs). On any other route it Blocks through `block(reason, cause)`
+ * (one try, which lands only if GitHub answers again by then) with an External cause: `outage`, which the dispatcher
+ * relaunches (RELAUNCH_NOTE), or `provider-quota` naming the reset, which waits for a person and is written after the
+ * reset when that comes before the job's end (afterReset, from `deadlineAt`).
  */
-export async function outageExit(e, { local, records, finish, block }) {
+export async function outageExit(e, { local, records, finish, block, deadlineAt = Infinity }) {
   stopWaiting();
   const lost = outageOf(e);
   const reason = outageReason(lost);
-  const outage = { host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}) };
+  const outage = outageRecord(lost);
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
   if (local) {
-    log(`paused: ${reason}; the claim stays, and serve resumes the stage once ${lost.host} answers`);
+    log(`paused: ${reason}; the claim stays, and serve resumes the stage ${Number.isFinite(lost.resetAt) ? "after the reset" : `once ${lost.host} answers`}`);
     await finish("paused", reason, outage);
     return;
   }
-  const blocked = `${reason}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`;
-  log(`blocked: ${blocked}`);
-  await block(blocked).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
-  await finish("blocked", blocked, outage);
+  const end = outageBlock(lost);
+  log(`blocked: ${end.reason}`);
+  if (Number.isFinite(lost.resetAt)) await afterReset(lost, deadlineAt);
+  await block(end.reason, end.cause).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
+  await finish("blocked", end.reason, outage);
 }
 
 /**
- * The same end as outageExit for a stage the network ended before its usual end exists (its token's mint, its first
- * reads): its usage written to `usageDir` when it is known, its exit and reason as step outputs, no progress comment. On
- * the local route `paused`, for serve's resume; elsewhere `blocked`, through `block(reason)` when the stage knows its
- * issue and holds a token (one try), and its record says so either way.
+ * The same end as outageExit for a stage the network (or a spent rate limit) ended before its usual end exists (its
+ * token's mint, its first reads): its usage written to `usageDir` when it is known, its exit and reason as step outputs,
+ * no progress comment. On the local route `paused`, for serve's resume; elsewhere `blocked`, through `block(reason,
+ * cause)` when the stage knows its issue and holds a token (one try), and its record says so either way.
  */
-export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null }) {
+export async function earlyOutageEnd(e, { local, usageDir = null, harness, model, block = null, deadlineAt = Infinity }) {
   stopWaiting();
   const lost = outageOf(e);
-  const reason = local ? outageReason(lost) : `${outageReason(lost)}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`;
-  const outage = { host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}) };
+  const end = local ? { reason: outageReason(lost) } : outageBlock(lost);
+  const outage = outageRecord(lost);
   const exit = local ? "paused" : "blocked";
-  log(`${exit} before the stage began: ${reason}`);
-  if (!local && block) await block(reason).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
-  if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason, outage, credentialBasis: "none" });
+  log(`${exit} before the stage began: ${end.reason}`);
+  if (!local && block) {
+    if (Number.isFinite(lost.resetAt)) await afterReset(lost, deadlineAt);
+    await block(end.reason, end.cause).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
+  }
+  if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason: end.reason, outage, credentialBasis: "none" });
   setOutput("exit", exit);
-  setOutput("reason", reason);
+  setOutput("reason", end.reason);
 }
 
 /** Mark the issue Running (card and label) before the harness starts. */

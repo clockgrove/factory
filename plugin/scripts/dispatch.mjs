@@ -22,6 +22,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
+import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
@@ -72,6 +73,9 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
   // A record whose stage also wrote a spend line (a cloud sandbox stage) is counted there, once.
   return { spentToday: usageError ? Number.POSITIVE_INFINITY : sumSpend(records.filter((r) => !r?.spendInProgress)) + localUsd, records, usageError };
 }
+
+/** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
+const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new Date(resetAt).toISOString()}; no new stage starts until then`;
 
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
@@ -870,6 +874,16 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     picked.ready = [];
     picked.reason = why;
   }
+  // GitHub's REST quota for this token spent (a read above met it and went on without its answer): nothing new starts
+  // until its reset, since the new stages' first reads would meet it too. Said once. Its GraphQL quota alone holds nothing.
+  const spent = spentUntil(quotaKey(`${githubOrigin()}/repos`, token));
+  if (spent && picked.ready.length) {
+    const why = rateLimitLine(spent);
+    log(why);
+    picked.skipped = [...picked.skipped, ...picked.ready.map((n) => ({ number: n, reason: why }))];
+    picked.ready = [];
+    picked.reason = why;
+  }
   // A local loop's own capacity (local.mjs serve): it starts no more than the box runs, so none is labelled Running idle.
   if (Number.isFinite(localSlots) && picked.ready.length > localSlots) {
     picked.ready = picked.ready.slice(0, Math.max(0, localSlots));
@@ -1170,6 +1184,9 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   return summary;
 }
 
+// Whether main() has written this tick's picks (the `issues` output): a later failure never overwrites them.
+let picksWritten = false;
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = resolveInputs({ args });
@@ -1206,6 +1223,7 @@ async function main() {
   const named = [...result.ready, ...(result.relaunch || [])];
   for (const n of result.relaunch || []) if (!result.relaunched?.includes(n)) log(`  #${n}: its launch was lost; launching again`);
   setOutput("issues", named);
+  picksWritten = true;
   setOutput("count", String(named.length));
   setOutput("reason", result.reason || "");
   setOutput("queue_watch", watchOutput(result.queueWatch));
@@ -1244,6 +1262,15 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
+    // GitHub's primary rate limit spent (lib/github.mjs, this process does not wait for it): no failure, the tick starts
+    // nothing, said once, and a wake at the reset dispatches again. Picks already written stand (dispatch() marked them
+    // Running): only the wake is added.
+    if (e?.code === RATE_LIMIT_SPENT && Number.isFinite(e.resetAt)) {
+      log(rateLimitLine(e.resetAt));
+      const wake = [["wake_at", new Date(e.resetAt + WAKE_SLACK_MS).toISOString()], ["wake_kind", "retry"]];
+      for (const [k, v] of picksWritten ? wake : [["issues", []], ["count", "0"], ["reason", rateLimitLine(e.resetAt)], ["queue_watch", ""], ...wake, ["image_owed", ""]]) setOutput(k, v);
+      return;
+    }
     process.stderr.write(`[factory] dispatch failed: ${e.message}\n`);
     process.exit(1);
   });

@@ -83,10 +83,11 @@ test("objective trust: the stage Blocks (stage author) before any harness, with 
   assert.equal(stranger.ok, false);
   assert.equal(stranger.issueData, undefined, "no text for a harness");
   assert.deepEqual(order, ["before", "apply"], "the review job's label comes off first");
-  assert.deepEqual(applied[0].exit, { issue: 7, pr: { number: 9 }, exit: "blocked", reason: stranger.reason, fix: AUTHOR_FIX.author, cause: "setup", notify: "boss", stage: "author" });
+  assert.deepEqual(applied[0].exit, { issue: 7, pr: { number: 9 }, exit: "blocked", reason: stranger.reason, fix: AUTHOR_FIX.author, cause: "setup", next: "none", notify: "boss", stage: "author" });
   assert.deepEqual(applied[0].opts, { token: "t" });
   const edited = await authorGate({ repo, issue: 7, issueData: rest, notify: "boss", opts: {}, apply, gh: gh({ author: user("kirk"), editor: user("stranger") }) });
   assert.equal(applied[1].exit.fix, AUTHOR_FIX["last editor"]);
+  assert.equal(applied[1].exit.next, undefined, "a last editor's Block is resumed once a writer saves the body: its cause says resume");
   assert.equal(applied[1].exit.pr, null);
   assert.equal(edited.ok, false);
   const ok = await authorGate({ repo, issue: 7, issueData: rest, notify: "boss", opts: {}, apply, gh: gh({ author: user("kirk"), body: "Checked body.", title: "Checked title" }) });
@@ -100,6 +101,8 @@ test("objective trust: the Blocked notice never tells anyone to edit an issue wh
   const author = blockedLine({ issue: 7, stage: "author", reason: "the issue's author `stranger` cannot push to acme/app and is not a pinned maintainer, so Factory acts on none of its text", fix: AUTHOR_FIX.author });
   assert.doesNotMatch(author, /editing the issue|re-save|save it/);
   assert.match(author, /files the Objective as a new issue/);
+  // Neither a resume nor a restart gets past an untrusted author: the notice says so, never "resume" (#274).
+  assert.match(blockedLine({ issue: 7, stage: "author", reason: "x", fix: AUTHOR_FIX.author, cause: "setup", next: "none" }), /\n\nNeither a resume nor a restart gets past this: both check the issue's author again\.$/);
   const editor = blockedLine({ issue: 7, stage: "author", reason: "x", fix: AUTHOR_FIX["last editor"] });
   assert.match(editor, /person who can push read the body and save it .* re-apply `factory:objective`/);
   assert.match(blockedLine({ issue: 7, pr: { number: 9 }, stage: "work", reason: "x" }), /^Blocked \(work\): x — PR #9 is a draft with what exists\. Fix by pushing to `factory\/7` or editing the issue/, "every other Block keeps its fix");
@@ -284,7 +287,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   try {
     const r = await run(["post-review", "9", file], envFor(fake.url, c.root), c.work);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /nothing posted: the Objective's title, body or harness and model labels .* changed after its plan was made/);
+    assert.match(r.stderr, /nothing posted: the Objective's title, body or harness, model and host labels .* changed after its plan was made/);
     assert.deepEqual(writes(fake.calls), [], "no review posted");
   } finally {
     await fake.close();
@@ -293,7 +296,7 @@ test("session route: `factory post-review` posts nothing on an Objective edited 
   const same = await fakeGitHub({ author: user("kirk"), issueComments: plan(CHECKED.body) });
   try {
     const r = await run(["post-review", "9", file], envFor(same.url, c.root), c.work);
-    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title, body or harness and model labels/);
+    assert.doesNotMatch(r.stderr, /nothing posted: the Objective's title, body or harness, model and host labels/);
   } finally {
     await same.close();
   }

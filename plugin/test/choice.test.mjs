@@ -115,7 +115,7 @@ test("choiceTrusted: a label counts only when the person who last applied it can
     setMaintainers("other/repo", []);
   }
   const none = await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no choice label: no timeline read") });
-  assert.deepEqual(none, { ok: true, choice: {}, labels: [] });
+  assert.deepEqual(none, { ok: true, choice: {}, labels: [], hosts: [], foundation: false });
   assert.equal((await choiceTrusted(repo, 7, ["factory:model:a", "factory:model:b"], {}, { labelers: async () => assert.fail("refused on the names first") })).ok, false);
 });
 
@@ -331,7 +331,7 @@ test("the usage record names the models the stage ran on and the labels that cho
   const inputs = chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-6.1-terra" } }).inputs;
   const r = writeUsage(dir, { harness: inputs.harness, model: inputs.model, records: [], passes: 0, exit: "blocked", reason: "x", credentialBasis: null, ran: ranWith(inputs, ["factory:harness:codex", "factory:model:gpt-6.1-terra"]) });
   const stored = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
-  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"] });
+  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["factory:harness:codex", "factory:model:gpt-6.1-terra"], hosts: [] });
   assert.deepEqual(r.ran, stored.ran);
 });
 
@@ -389,7 +389,7 @@ test("local mode, the real path: harnessFor reads the issue's labels and their a
       globalThis.fetch = real;
     }
   };
-  assert.deepEqual(await run("dev"), { ok: true, harness: "claude" });
+  assert.deepEqual(await run("dev"), { ok: true, harness: "claude", hosts: [] });
   const refused = await run("reader");
   assert.equal(refused.ok, false);
   assert.match(refused.reason, /`factory:model:claude-sonnet-5-5` was applied by `reader`/);

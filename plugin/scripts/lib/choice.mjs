@@ -3,8 +3,11 @@
 // Objective only, and an issue with none runs on the defaults. Labels, not the body: who applied each one is on the
 // issue's timeline (objective-trust.mjs choiceTrusted), and the plan's record covers them (objective-trust.mjs
 // objectiveSha), so one added, removed or changed after the plan stops the Objective like an edit.
+// A `factory:host:<host>` label (#278) opens one more network host to that Objective's sandboxes alone, under the same
+// rule: it counts once a person who can push applied it, and the plan's record covers it.
 import { DEFAULTS, MODEL_DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
+import { isSandboxHost } from "./local.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
 /** Each choice's label prefix, keyed by the input it overrides; the rest of the name is the harness or the model id. */
@@ -14,14 +17,30 @@ export const CHOICE_PREFIXES = Object.freeze({ harness: "factory:harness:", mode
  * prefix (34 for a harness, 36 for a worker model, 27 for a sub-agent or reviewer model). USAGE.md says so.
  */
 export const LABEL_MAX = 50;
+/**
+ * The label that marks an Objective as a foundation (#275): later work builds on what it adds, so its review gets a
+ * second pass that checks the shared contracts the diff changes against their callers (review.mjs foundationPrompt).
+ * Trusted as the choice labels are (objective-trust.mjs choiceTrusted); not in the plan's record, since it changes only
+ * the review, which reads it when it starts.
+ */
+export const FOUNDATION_LABEL = "factory:foundation";
+/** The foundation label's own name among `names` (names, or GitHub's label objects), or null. */
+export const foundationLabel = (names = []) => (names || []).map((n) => (typeof n === "string" ? n : n?.name)).find((n) => typeof n === "string" && n.trim().toLowerCase() === FOUNDATION_LABEL) ?? null;
+
 /** The words a reason uses for each choice. */
 const WHAT = { harness: "harness", model: "worker model", subagent_model: "sub-agent model", reviewer_model: "reviewer model" };
 const tick = (s) => `\`${s}\``;
 
+/**
+ * The prefix of a host label: `factory:host:huggingface.co` lets this Objective's sandboxes reach huggingface.co, and
+ * `factory:host:*.hf.co` its subdomains. A host fits in LABEL_MAX less the prefix (37 characters).
+ */
+export const HOST_PREFIX = "factory:host:";
 const kindOf = (name) => Object.entries(CHOICE_PREFIXES).find(([, p]) => String(name ?? "").toLowerCase().startsWith(p))?.[0] ?? null;
-/** Whether a label name is one of the four choice labels. */
-export const isChoiceLabel = (name) => kindOf(name) !== null;
-/** The choice labels among `names` (names, or GitHub's label objects), sorted: the set the plan's record covers. */
+const isHostLabel = (name) => String(name ?? "").toLowerCase().startsWith(HOST_PREFIX);
+/** Whether a label name is one of the four choice labels or a host label: what the plan's record and the trust check cover. */
+export const isChoiceLabel = (name) => kindOf(name) !== null || isHostLabel(name);
+/** The choice and host labels among `names` (names, or GitHub's label objects), sorted: the set the plan's record covers. */
 export const choiceLabels = (names = []) => [...new Set((names || []).map((n) => (typeof n === "string" ? n : n?.name)).filter((n) => typeof n === "string" && isChoiceLabel(n)))].sort();
 
 /**
@@ -32,7 +51,7 @@ export const choiceLabels = (names = []) => [...new Set((names || []).map((n) =>
 export function choiceOf(names = []) {
   const labels = choiceLabels(names);
   const by = {};
-  for (const l of labels) (by[kindOf(l)] ||= []).push(l);
+  for (const l of labels) if (kindOf(l)) (by[kindOf(l)] ||= []).push(l);
   const choice = {};
   for (const kind of Object.keys(CHOICE_PREFIXES)) {
     const list = by[kind];
@@ -47,6 +66,23 @@ export function choiceOf(names = []) {
     } else choice[kind] = value;
   }
   return { ok: true, choice, labels };
+}
+
+/**
+ * The hosts the issue's host labels open for this Objective: {ok: true, hosts, labels} (`hosts` lower case, sorted, once
+ * each; `labels` the host labels), or {ok: false, labels, reason, fix} for a label that names no host a sandbox enforces as
+ * written (local.mjs isSandboxHost: a host name or `*.` and one; never an IP address, a port, a scheme or path, or
+ * `localhost`). Decided on the names alone; who applied each is objective-trust.mjs choiceTrusted's check.
+ */
+export function hostsOf(names = []) {
+  const labels = choiceLabels(names).filter(isHostLabel);
+  const hosts = new Set();
+  for (const l of labels) {
+    const host = l.slice(HOST_PREFIX.length).trim().toLowerCase();
+    if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Factory's sandboxes can allow`, fix: `Name one host after the prefix, as \`factory:host:example.com\` or \`factory:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`factory:objective\`.` };
+    hosts.add(host);
+  }
+  return { ok: true, hosts: [...hosts].sort(), labels };
 }
 
 const CLAUDE_ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
@@ -131,5 +167,23 @@ export function routeProblem(prepared, harness) {
   return { reason: `this stage was prepared for ${p} (its CLI, credential and sandbox) but the Objective now runs on ${harness}: its harness label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage is prepared for the harness the labels name." };
 }
 
-/** What a stage records of the harness and models it ran (the usage record's `choice`, the progress comment's harness line). */
-export const ranWith = (inputs, labels = []) => ({ harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels) });
+/**
+ * What a stage records of the harness and models it ran and the hosts its labels opened (the usage record's `ran`, the
+ * progress comment's harness line).
+ */
+export const ranWith = (inputs, labels = []) => {
+  const h = hostsOf(labels);
+  return { harness: inputs.harness, worker: inputs.model || null, subagent: inputs.subagentModel || null, reviewer: inputs.reviewerModel || null, labels: choiceLabels(labels), hosts: h.ok ? h.hosts : [] };
+};
+
+/**
+ * Why a stage cannot run with the hosts its labels now open where its route prepared its sandboxes for others
+ * (`prepared`: FACTORY_STAGE_HOSTS, the hosts local mode's loop opened for this stage, comma separated; undefined on a
+ * route whose stage opens its own), or null. A host label added or removed while the stage started.
+ */
+export function hostsProblem(prepared, hosts = []) {
+  if (prepared === undefined || prepared === null) return null;
+  const was = [...new Set(String(prepared).split(",").map((h) => h.trim()).filter(Boolean))].sort();
+  if (was.join(",") === [...hosts].sort().join(",")) return null;
+  return { reason: `this stage's sandboxes were set up for the hosts ${was.length ? was.map(tick).join(", ") : "of no host label"} but the Objective's host labels now name ${hosts.length ? hosts.map(tick).join(", ") : "none"}: a \`factory:host:\` label changed while the stage started`, fix: "Re-apply `factory:objective`: the next stage's sandboxes are set up for the hosts the labels name." };
+}

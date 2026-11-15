@@ -416,8 +416,8 @@ export function prepareProtectedPaths(clone) {
 // checked out: each gitlink's .git and .git/modules removed, then checked: exit 3 when git would still read another
 // directory), HARNESS_EXEC_CONFIG back to HEAD (a tracked file restored, anything else removed, never followed through a
 // symlink), and the submodule names .gitmodules gives printed as JSON for the harness's git env. Fresh, at a stage's
-// start: the untracked files an earlier stage or run left in this reused clone (never pushed) removed, best effort;
-// ignored ones (dependencies, Factory's plugin) and the paths Factory makes here stay. Its changes to tracked files are
+// start: the untracked files an earlier stage or run left in this reused clone (never pushed) removed, best effort
+// ("fresh-strict", a fresh work stage's: a removal that fails exits 4); ignored ones (dependencies, Factory's plugin) and the paths Factory makes here stay. Its changes to tracked files are
 // the checkout's to discard (outbox.mjs putOn).
 const PREPARE_CLONE = String.raw`
 const fs = require("fs"), path = require("path"), cp = require("child_process");
@@ -469,10 +469,13 @@ if (clear === "1") {
   for (const x of X) if (realParents(x)) sweep(x);
   if (head.length) git("checkout", "HEAD", "--", ...head);
 }
-if (clear === "fresh" && gst && gst.isDirectory()) {
+if ((clear === "fresh" || clear === "fresh-strict") && gst && gst.isDirectory()) {
   const keep = [...P.dirs, ...H.dirs, ...P.files, ...H.files].flatMap((p) => ["-e", "/" + p]);
   try { cp.execFileSync("git", ["-C", clone, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "clean", "-q", "-f", "-d", ...keep], { stdio: ["ignore", "ignore", "pipe"] }); }
-  catch (e) { process.stderr.write("warning: the clone's leftovers could not all be removed: " + String(e.stderr || e.message).trim().split("\n")[0].slice(0, 200) + "\n"); }
+  catch (e) {
+    process.stderr.write("warning: the clone's leftovers could not all be removed: " + String(e.stderr || e.message).trim().split("\n")[0].slice(0, 200) + "\n");
+    if (clear === "fresh-strict") process.exit(4);
+  }
 }
 for (const d of [...P.dirs, ...H.dirs].map((d) => path.join(clone, d)).concat(dirs)) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
 const made = [];
@@ -492,8 +495,10 @@ process.stdout.write(JSON.stringify({ submodules: names, locks: removed }));
  * `locks`: the stale git locks to remove first (staleGitLocks), each re-checked there as a regular `.lock` file under
  * `.git` with no symlink on its path. Returns {submodules, locks}: the names .gitmodules gives and the locks removed.
  */
-export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, locks = [] } = {}) {
-  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? "fresh" : "0", JSON.stringify(locks), ...dirs]);
+export async function prepareClone(clone, dirs, run, { clear = false, fresh = false, strict = false, locks = [] } = {}) {
+  const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? (strict ? "fresh-strict" : "fresh") : "0", JSON.stringify(locks), ...dirs]);
+  // `strict` (a fresh work stage, worker.mjs): leftovers that could not all be removed are a failure, code clone-clean.
+  if (r.code === 4) throw Object.assign(new Error(`the clone's leftovers could not all be removed: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`), { code: "clone-clean" });
   if (r.code !== 0) throw new Error(`the clone could not be prepared in its sandbox: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
   try {
     return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };
@@ -1193,8 +1198,8 @@ export function claudeRunnerSettings({ domains = LOCAL_DOMAINS, clone, writable,
 
 /**
  * The hosts a runner's sandboxed commands may reach: LOCAL_DOMAINS plus the `allowed_domains` input (the Actions and
- * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space. An entry is a host name or
- * `*.` and one; anything else is dropped.
+ * cloud sandbox counterpart of FACTORY_LOCAL_DOMAINS), split on commas and white space, plus `hosts`, the stage's
+ * Objective's own (openedStageHosts). An entry is a host name or `*.` and one; anything else is dropped.
  */
 const DOMAIN_ENTRY = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
 const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean);
@@ -1204,9 +1209,23 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-export function runnerDomains(value = "") {
-  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry)])];
+/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+export function runnerDomains(value = "", hosts = []) {
+  return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }
+
+/**
+ * The hosts this stage's Objective opens with its `factory:host:` labels (choice.mjs hostsOf), once the stage's choice
+ * check has passed (worker.mjs, review.mjs: openStageHosts). A runner's sandboxes add them to `allowed_domains`
+ * (harness.mjs claudeRunner, codexRunner, copilotRunner); a stage process works one Objective, and nothing else sets
+ * them, so no other Objective's sandbox ever gets them. Local mode's loop opens them itself (Local.stageEnv).
+ */
+let stageHosts = [];
+export const openStageHosts = (hosts = []) => {
+  stageHosts = [...new Set(hosts.filter(isSandboxHost))];
+};
+export const openedStageHosts = () => stageHosts;
 
 /** The `allowed_domains` entries runnerDomains drops (doctor names each). */
 export const droppedDomains = (value = "") => domainEntries(value).filter((d) => !hostEntry(d));
@@ -2062,8 +2081,8 @@ export function readWorkflowEnv(dir) {
 /**
  * The workflow's env block as committed on the default branch (#122), which local mode reads its settings from: never
  * the working tree, whatever branch is checked out there, as the Action runs the reviewed workflow. The default branch is
- * origin's HEAD (else the remote's last known one), fetched first; offline, the last fetched commit. {wf, branch, error}:
- * `error` says why there is none (no default branch, no workflow file there), with `wf` empty.
+ * origin's HEAD (else the remote's last known one), fetched first; offline, the last fetched commit. {wf, branch, error,
+ * text}: `error` says why there is none (no default branch, no workflow file there), with `wf` empty and no `text`.
  */
 export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] }) } = {}) {
   const ok = (r) => (r.status === 0 ? String(r.stdout) : null);
@@ -2073,7 +2092,7 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
   if (!branch) return { wf: {}, branch: null, error: "origin's default branch could not be read" };
   git(["fetch", "-q", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
   const text = ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`]));
-  return text === null ? { wf: {}, branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), branch, error: null };
+  return text === null ? { wf: {}, branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), branch, error: null, text };
 }
 
 /**

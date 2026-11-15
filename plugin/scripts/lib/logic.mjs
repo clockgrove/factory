@@ -86,6 +86,24 @@ export function protectedPaths(additions = []) {
 export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catchUps = 0 }) => passes < maxPasses + catchUps + (fromChecks && !checksFixed ? 1 : 0);
 
 /**
+ * Why a red head a fix pass left unchanged gets no fresh worker pass before the stage Blocks (session.mjs
+ * validationLoop), or "" when it gets one. Only a red that is the work's (unchangedBlock's cause `work`; an outage or a
+ * setup gap is no code's to fix), once per head in a stage (`tried`: the heads already given one), and only when what is
+ * left can carry a whole pass: with `maxUsd` set, `leftUsd` at least `needUsd` (what the fix pass cost: Codex has no
+ * in-run cap, so a sliver would be overspent), and `leftMs` of the wall clock at least `needMs` (a pass, its checks
+ * and the exit's reserve).
+ */
+export function freshPassDenied({ cause, head, tried, maxUsd, leftUsd, needUsd = 0, leftMs, needMs = 60_000 }) {
+  if (cause !== "work") return `the red is not the work's (${cause})`;
+  if (tried?.has(head)) return "a fresh worker pass already ran on this head";
+  if (maxUsd > 0 && !(leftUsd > 0)) return "max_usd is spent";
+  if (maxUsd > 0 && leftUsd < needUsd) return `$${leftUsd.toFixed(2)} of max_usd is left, under the fix pass's $${needUsd.toFixed(2)}`;
+  if (!(leftMs >= needMs)) return `${spanText(leftMs)} of the stage's wall clock is left, under a pass, its checks and the exit (${spanText(needMs)})`;
+  return "";
+}
+const spanText = (ms) => (ms < 120_000 ? `${Math.max(0, Math.round(ms / 1000))} s` : `${Math.round(ms / 60_000)} min`);
+
+/**
  * Whether a protected entry covers `path` (from the repository root). A directory entry ends with `/` and matches from
  * the root; a file entry matches at any depth (`build.mjs` covers `packages/web/build.mjs`) unless it starts with `/`,
  * which anchors it at the root (`/build.mjs` covers `build.mjs` only). A leading `./` is dropped and anchors nothing.
@@ -736,20 +754,25 @@ export const deniedHostsOf = (v) => [...new Set((Array.isArray(v) ? v : []).filt
 const allowedBy = (host, domains) => domains.some((d) => d === host || (typeof d === "string" && d.startsWith("*.") && host.endsWith(d.slice(1))));
 
 /**
- * The fix line of a Block whose worker named the hosts its sandbox denied: allow them in FACTORY_LOCAL_DOMAINS (local
- * mode) or the `allowed_domains` input (`route` "runner": Claude Code on Actions or in a cloud sandbox), then re-apply
- * the label. Hosts the sandboxes already allow (`domains`) are left out, since allowing them again fixes
- * nothing; null when none is left, so the Block keeps the generic fix.
+ * The fix line of a Block whose worker named the hosts its sandbox denied. For this Objective alone: a person who can
+ * push applies a `factory:host:<host>` label for each (choice.mjs HOST_PREFIX; a host too long for GitHub's 50-character
+ * label limit is left to the setting), then re-applies the label. For every Objective: FACTORY_LOCAL_DOMAINS (local
+ * mode) or the `allowed_domains` input (`route` "runner": Actions or a cloud sandbox). Hosts the sandboxes already allow
+ * (`domains`) are left out, since allowing them again fixes nothing; null when none is left, so the Block keeps the
+ * generic fix.
  */
 export function deniedHostsFix(hosts, domains = [], route = "local") {
   const left = deniedHostsOf(hosts).filter((h) => !allowedBy(h, domains));
   if (!left.length) return null;
   const them = left.length === 1 ? "it" : "them";
-  const named = left.map((h) => `\`${h}\``).join(", ");
-  // On Actions and in a cloud sandbox, Claude Code's or Codex's sandbox: the workflow's `allowed_domains` input
-  // (harness.mjs claudeRunner, codexRunner).
-  if (route === "runner") return `The harness's sandbox denied ${named}. If the Objective needs ${them}, add ${them} to the Factory workflow's \`allowed_domains\` input (or \`FACTORY_ALLOWED_DOMAINS\` in its env block), then re-apply \`factory:objective\`.`;
-  return `The local sandbox denied ${named}. If the Objective needs ${them}, add ${them} to \`FACTORY_LOCAL_DOMAINS\` (a running \`serve\` reads it when it restarts), then re-apply \`factory:objective\`.`;
+  const tick = (h) => `\`${h}\``;
+  const labels = left.map((h) => `factory:host:${h}`).filter((l) => l.length <= 50);
+  const short = labels.length < left.length ? " (the rest are too long for a label)" : "";
+  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then re-applies \`factory:objective\`. To open ${them} to every Objective, ` : "";
+  // On Actions and in a cloud sandbox, each harness's sandbox: the workflow's `allowed_domains` input (harness.mjs
+  // claudeRunner, codexRunner, copilotRunner).
+  const setting = route === "runner" ? "the Factory workflow's `allowed_domains` input (or `FACTORY_ALLOWED_DOMAINS` in its env block)" : "`FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts)";
+  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then re-apply \`factory:objective\`.`;
 }
 
 /**
@@ -760,7 +783,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
  *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
- *              committed nothing on a red head: session.mjs unchangedBlock)}
+ *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
+ *              pass was given after a fix pass changed nothing on it, when the red after it is the last)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -838,7 +862,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
-    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}`;
+    // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
+    const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
+    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }
@@ -1451,6 +1477,20 @@ export function parseFindings(text) {
 }
 
 /**
+ * A parsed JSON value as the reviewer's answer (parseReview's shape): an array is its comments; an object with a
+ * `comments` or `acceptance` list is the answer, whatever other keys it has and in any order; anything else is
+ * `parsed: false`.
+ */
+export function reviewOfValue(v) {
+  if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
+  if (!v || typeof v !== "object" || !(Array.isArray(v.comments) || Array.isArray(v.acceptance))) return { comments: [], acceptance: null, parsed: false };
+  const acceptance = Array.isArray(v.acceptance)
+    ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
+    : null;
+  return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
+}
+
+/**
  * The reviewer's whole answer: `comments` (line-tied findings) and `acceptance` (one judgment per acceptance entry,
  * {entry, met, path, line, evidence}; null when the answer has no such list), and `parsed`: whether any JSON answer was
  * found. From a fenced ```json block or a bare object.
@@ -1464,14 +1504,8 @@ export function parseReview(text) {
   for (const m of s.matchAll(/\{\s*"(?:acceptance|comments)"/g)) if (m.index < end) candidates.push(s.slice(m.index, end + 1));
   for (const c of candidates.reverse()) {
     try {
-      const v = JSON.parse(c.trim());
-      if (Array.isArray(v)) return { comments: v, acceptance: null, parsed: true };
-      if (v && (Array.isArray(v.comments) || Array.isArray(v.acceptance))) {
-        const acceptance = Array.isArray(v.acceptance)
-          ? v.acceptance.filter((a) => a && (typeof a.entry === "string" || typeof a.entry === "number") && typeof a.met === "boolean").map((a) => ({ entry: String(a.entry).trim(), met: a.met, path: typeof a.path === "string" ? a.path : null, line: Number.isInteger(a.line) ? a.line : null, evidence: typeof a.evidence === "string" ? a.evidence : "", ...(a.deferred === true ? { deferred: true } : {}) }))
-          : null;
-        return { comments: Array.isArray(v.comments) ? v.comments : [], acceptance, parsed: true };
-      }
+      const r = reviewOfValue(JSON.parse(c.trim()));
+      if (r.parsed) return r;
     } catch {
       // try the next candidate
     }
@@ -2171,11 +2205,12 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
  */
 /**
  * The progress comment's harness line: the stage's harness and its own model (the worker's, or the reviewer's), and with
- * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default) and the harness and model
- * labels that chose them (`labels`, none on the repository's defaults).
+ * `ran` (choice.mjs ranWith) the Objective's three models (`models`, null for a harness default), the harness, model and
+ * host labels that chose them (`labels`, none on the repository's defaults) and, when its host labels open any, those
+ * hosts (`hosts`).
  */
 export const harnessMarker = (harness, model = "", ran = null) =>
-  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [] } : {}) })} -->`;
+  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}) })} -->`;
 const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
 /** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
 export function spendOf(body) {

@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
-import { choiceLabels, choiceOf, chosenInputs, isChoiceLabel, routeProblem } from "./choice.mjs";
+import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, stampPlan } from "./handoff.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
@@ -23,7 +23,7 @@ const labelNames = (node) => (node?.labels?.nodes || []).map((l) => l?.name).fil
 export const settled = (s) => String(s ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").trimEnd();
 /**
  * The Objective's text as one value: the SHA-256 of its title and body as GitHub returns them, settled, and of its
- * harness and model labels (choice.mjs choiceLabels) when it has any: one added, removed or changed is an edit too.
+ * harness, model and host labels (choice.mjs choiceLabels) when it has any: one added, removed or changed is an edit too.
  */
 export const objectiveSha = (title, body, labels = []) => {
   const chosen = choiceLabels(labels);
@@ -81,7 +81,8 @@ export const AUTHOR_FIX = {
  */
 export async function trustedIssue(repo, issue, issueData, opts, gh) {
   const t = await objectiveTrusted(repo, issue, opts, { what: "Factory acts on none of its text", ...(gh ? { gh } : {}) });
-  if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role] };
+  // An untrusted author is checked again on a resume and on a restart alike: the notice says neither gets past it.
+  if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role], ...(t.role === "author" ? { next: "none" } : {}) };
   return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, labels: t.labels, sha: t.sha, editedAt: t.editedAt, people: t.people };
 }
 
@@ -94,13 +95,13 @@ export async function authorGate({ repo, issue, issueData, pr = null, notify, op
   const t = await trustedIssue(repo, issue, issueData, opts, gh);
   if (t.ok) return t;
   if (before) await before();
-  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", notify, stage: "author" }, opts);
+  await apply(repo, { issue, pr, exit: "blocked", reason: t.reason, fix: t.fix, cause: "setup", ...(t.next ? { next: t.next } : {}), notify, stage: "author" }, opts);
   return t;
 }
 
 /** The Blocked reason and fix when the Objective's text changed after its plan was made (planGate). */
-export const EDITED_REASON = "the Objective's title, body or harness and model labels (`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`) changed after its plan was made, and its plan and code follow the earlier ones, so Factory does not go on with the two mixed";
-export const EDITED_FIX = "Re-apply `factory:objective` to work from the issue as it is now, its text and its harness and model labels: the worker makes its plan again from it, on the same branch and PR. To start over from it instead (the earlier PR closed, a new branch from the default one), apply `factory:restart`.";
+export const EDITED_REASON = "the Objective's title, body or harness, model and host labels (`factory:harness:`, `factory:model:`, `factory:subagent-model:`, `factory:reviewer-model:`, `factory:host:`) changed after its plan was made, and its plan and code follow the earlier ones, so Factory does not go on with the two mixed";
+export const EDITED_FIX = "Re-apply `factory:objective` to work from the issue as it is now, its text and its harness, model and host labels: the worker makes its plan again from it, on the same branch and PR.";
 
 /** Factory's own login, read once (logic.mjs selfLogin): unknown, no plan comment could be told apart, so a stage stops. */
 export async function knowSelf(opts) {
@@ -207,34 +208,54 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
   return planTextState({ sha, plan: posted, editedAt }) === "changed";
 }
 
-/** What a Blocked notice tells a person to do about a harness or model label Factory did not act on. */
-export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective on the repository's defaults, then re-applies `factory:objective`.";
+/** What a Blocked notice tells a person to do about a harness, model or foundation label Factory did not act on. */
+export const CHOICE_FIX = "A person who can push removes the label and applies it again, or removes it to run this Objective without it (on the repository's defaults, with the one-pass review), then re-applies `factory:objective`.";
 
 /**
- * The harness and model labels among `names` (the issue's, read with its text) as Factory may act on them: choice.mjs
- * choiceOf, and each label's latest `labeled` event on the timeline by a person who can push or a pinned maintainer.
- * Returns {ok, choice, labels} or {ok: false, reason, fix}, the reason naming the label. `gh` (labelers, permission) is a
- * test's own.
+ * The harness, model and host labels among `names` (the issue's, read with its text) as Factory may act on them:
+ * choice.mjs choiceOf and hostsOf, and each label's latest `labeled` event on the timeline by a person who can push or a
+ * pinned maintainer. The foundation label (choice.mjs FOUNDATION_LABEL) is checked the same way: `foundation` is true
+ * when it is on the issue. Returns {ok, choice, hosts, labels, foundation} or {ok: false, reason, fix}, the reason naming
+ * the label. `gh` (labelers, permission) is a test's own.
  */
 export async function choiceTrusted(repo, issue, names, opts, gh = {}) {
-  const parsed = choiceOf(names);
-  if (!parsed.ok || !parsed.labels.length) return parsed;
+  const chose = choiceOf(names);
+  const opened = hostsOf(names);
+  const foundation = foundationLabel(names);
+  if (!chose.ok) return chose;
+  if (!opened.ok) return opened;
+  const parsed = { ...chose, hosts: opened.hosts };
+  if (!parsed.labels.length && !foundation) return { ...parsed, foundation: false };
   const read = { labelers: labelersOf, permission: collaboratorPermission, ...gh };
-  const by = await read.labelers(repo, issue, parsed.labels, opts);
-  for (const label of parsed.labels) {
+  const vouched = [...parsed.labels, ...(foundation ? [foundation] : [])];
+  const by = await read.labelers(repo, issue, vouched, opts);
+  for (const label of vouched) {
     const a = by?.[label]?.actor;
     // The REST timeline's actor, in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches.
     const actor = a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null;
     if (!actor) return { ok: false, labels: parsed.labels, reason: `who applied \`${label}\` could not be read from the issue's timeline, so Factory does not run on its choice`, fix: CHOICE_FIX };
     if (!(await vouches(repo, actor, opts, read))) return { ok: false, labels: parsed.labels, reason: `\`${label}\` was applied by \`${actor.login}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so Factory does not run on its choice`, fix: CHOICE_FIX };
   }
-  return parsed;
+  return { ...parsed, foundation: !!foundation };
+}
+
+/**
+ * Whether the Objective is a foundation one as Factory may act on it, from its label names (read with its text): no
+ * `factory:foundation` is {ok, foundation: false} with no timeline read; one is vouched for as choiceTrusted vouches for a
+ * choice label. {ok, foundation} or {ok: false, reason, fix}. A session's route (local.mjs `issue`, `post-review`) uses it.
+ */
+export async function foundationTrusted(repo, issue, names, opts, gh = {}) {
+  const label = foundationLabel(names);
+  if (!label) return { ok: true, foundation: false };
+  const t = await choiceTrusted(repo, issue, [label], opts, gh);
+  return t.ok ? { ok: true, foundation: true } : { ok: false, reason: t.reason, fix: t.fix };
 }
 
 /**
  * The inputs an Objective runs on before any stage starts (the launcher, the local loop): its labels read now,
  * choiceTrusted, then choice.mjs chosenInputs over `args` and `env` (`gateway`: whether Codex has the AI Gateway key, when
- * `env` no longer holds it). {ok, inputs, labels} or {ok: false, reason, fix}.
+ * `env` no longer holds it). {ok, inputs, labels, hosts} or {ok: false, reason, fix}: `hosts` those its approved host
+ * labels open (local mode's loop sets the stage's sandboxes up with them).
  * `gh` (issue, labelers, permission) is a test's own.
  */
 export async function objectiveInputs({ repo, issue, args = {}, env = process.env, opts, gateway, gh = {} }) {
@@ -242,22 +263,24 @@ export async function objectiveInputs({ repo, issue, args = {}, env = process.en
   const t = await choiceTrusted(repo, issue, names, opts, gh);
   if (!t.ok) return t;
   const c = chosenInputs({ args, env, choice: t.choice, gateway });
-  return c.ok ? { ...c, labels: t.labels } : c;
+  return c.ok ? { ...c, labels: t.labels, hosts: t.hosts } : c;
 }
 
 /**
  * Every stage's harness and models (the worker, the review job), after authorGate: `labels` (trustedIssue's, read with
  * the text) through choiceTrusted and chosenInputs, then against the harness this stage's route prepared
  * (FACTORY_STAGE_HARNESS: the Action's install, the launcher's sandbox credential, the local loop's sandbox; none on a
- * route that prepares every harness alike). A refusal Blocks (cause setup) through `apply` after `before`, before any
- * harness, and returns {ok: false, reason}; else {ok, inputs, labels}, the stage running on `inputs` (choice.mjs
- * CHOSEN_FIELDS). `gh` (labelers, permission) is a test's own.
+ * route that prepares every harness alike), and its host labels against the hosts local mode's loop set its sandboxes
+ * up with (FACTORY_STAGE_HOSTS; on a runner the stage opens its own). A refusal Blocks (cause setup) through `apply`
+ * after `before`, before any harness, and returns {ok: false, reason}; else {ok, inputs, labels, hosts}, the stage
+ * running on `inputs` (choice.mjs CHOSEN_FIELDS) and opening `hosts` (local.mjs openStageHosts). `gh` (labelers,
+ * permission) is a test's own.
  */
 export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {
   const t = await choiceTrusted(repo, issue, labels, opts, gh);
   const c = t.ok ? chosenInputs({ args, env, choice: t.choice }) : t;
-  const refusal = c.ok ? routeProblem(env.FACTORY_STAGE_HARNESS, c.inputs.harness) : c;
-  if (!refusal) return { ...c, labels: t.labels };
+  const refusal = c.ok ? routeProblem(env.FACTORY_STAGE_HARNESS, c.inputs.harness) || hostsProblem(env.FACTORY_STAGE_HOSTS, t.hosts) : c;
+  if (!refusal) return { ...c, labels: t.labels, hosts: t.hosts, foundation: t.foundation };
   if (before) await before();
   await apply(repo, { issue, pr, exit: "blocked", reason: refusal.reason, fix: refusal.fix, cause: "setup", notify, stage }, opts);
   return { ok: false, reason: refusal.reason };

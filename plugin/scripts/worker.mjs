@@ -20,7 +20,7 @@ import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness,
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { log, parseArgs, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, decisionsShown, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, trustedAuthor } from "./lib/logic.mjs";
+import { REVIEW_LABEL, restartedAt, conflictFiles, ontoRecord, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, outageExit, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postValidated, progressReporter, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -28,11 +28,11 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
-import { agentUser } from "./lib/proc.mjs";
+import { agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
-import { refusalExit } from "./lib/local.mjs";
+import { openStageHosts, prepareClone, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
-import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverOnIssue, handoverUpFront, isSplitPart, openHandoff, reviewsCover, partsRecord, postNote, publishPr, recordPart } from "./lib/handoff.mjs";
 import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
@@ -40,6 +40,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
+import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -134,6 +135,9 @@ async function main() {
   const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
   let reentry = null;
+  // While the work pass runs on the local route (not a send-back's): the pause's record a usage limit leaves for the next
+  // work stage to continue (lib/continue.mjs), read as the stage ends on it.
+  let pauseNow = null;
   // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
   let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
@@ -200,7 +204,8 @@ async function main() {
     // The harness's usage limit, past what the stage waits for in place: paused locally until its reset, a
     // `provider-quota` Block elsewhere (session.mjs usageLimitExit).
     if (e?.code === USAGE_LIMIT) {
-      await usageLimitExit(e, { local, records, finish, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
+      const pause = local && pauseNow ? await pauseNow().catch((x) => log(`the pause's record could not be read, so the next stage starts fresh: ${String(x?.message || x).slice(0, 160)}`) ?? null) : null;
+      await usageLimitExit(e, { local, records, finish, pause, block: (reason, cause) => applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "work" }, token) });
       return;
     }
     // This machine's network or GitHub's spent rate limit, not the stage: paused locally, an External Block elsewhere
@@ -314,6 +319,11 @@ async function main() {
   }
   Object.assign(inputs, chosen.inputs);
   chosenLabels = chosen.labels;
+  // A foundation Objective (`factory:foundation`): its rebased PR keeps its review only when that covers the foundation pass.
+  const foundation = !!chosen.foundation;
+  // The hosts its approved `factory:host:` labels open, for this stage's sandboxes alone (local.mjs openStageHosts).
+  openStageHosts(chosen.hosts);
+  if (chosen.hosts.length) log(`this Objective's host labels open ${chosen.hosts.join(", ")} to its sandboxes`);
   progress.ran(ranWith(inputs, chosenLabels));
   if (chosen.labels.length) log(`this Objective's labels choose ${chosen.labels.join(", ")}: ${inputs.harness}${inputs.model ? ` ${inputs.model}` : ""}`);
 
@@ -374,9 +384,45 @@ async function main() {
   outbox.author = botWho;
   await configureGit(checkout, { ...identity, protectedList, credentialHelper: access.readHelper || null, env: childBase });
   await outbox.feed();
+  // Local mode, the one decision on the reused clone (lib/continue.mjs enterStage): continue the work pass a usage limit
+  // paused here, on its kept checkout, when the branch on GitHub, the newest restart record, the Running stint and the
+  // Objective's text are all as the pause recorded them; else start fresh, its untracked leftovers cleaned in the clone's
+  // sandbox (lib/local.mjs prepareClone).
   // Whatever an earlier stage or run left in a reused checkout (local mode) is discarded (outbox.mjs putOn).
-  const onBranch = await outbox.putOn(resumed ? `refs/remotes/origin/${branch}` : `refs/remotes/origin/${defaultBranch}`);
-  if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
+  const putOn = async () => {
+    const onBranch = await outbox.putOn(resumed ? `refs/remotes/origin/${branch}` : `refs/remotes/origin/${defaultBranch}`);
+    if (onBranch.code !== 0) throw new Error(`the checkout could not be put on ${branch}: ${onBranch.error}`);
+  };
+  // What an abandoned pass left untracked, once the checkout is on the branch: a clean that fails leaves it, and a
+  // later `git add -A` could push it, so the stage Blocks (setup) rather than run on such a clone.
+  const clean = () =>
+    prepareClone(checkout, [], (inner) => exec(...backend(childBase).sandbox.git(inner, childBase), { env: childBase }), { fresh: true, strict: true }).catch((e) => {
+      log(`the clone's leftovers could not be removed: ${String(e?.message || e).slice(0, 200)}`);
+      throw Object.assign(new Error(CLEAN_REFUSED), { code: "clone-clean" });
+    });
+  let entry = null;
+  try {
+    entry = local
+      ? await enterStage({
+          ws: join(usageDir, ".."),
+          own: usageDir,
+          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
+          holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
+          putOn,
+          clean,
+          restore: (from) => restoreTranscript({ checkout, workDir: join(usageDir, ".."), harness: inputs.harness, only: from }),
+        })
+      : await putOn();
+  } catch (e) {
+    if (e?.code !== "clone-clean") throw e;
+    log(e.message);
+    await applyExit(repo, { issue, pr: null, exit: "blocked", reason: e.message, cause: "setup", notify: inputs.notify, stage: "branch" }, token);
+    await finish("blocked", e.message);
+    return;
+  }
+  const continued = entry?.continue ? entry : null;
+  if (entry?.reason) log(`the paused work pass in ${entry.from} is not continued: ${entry.reason}; starting fresh from the branch`);
+  if (continued) log(`continuing the work pass paused in ${continued.from} on its kept checkout${continued.carry ? `, in a fresh session (${continued.carry})` : ""}`);
   log(`branch ${branch} from ${defaultBranch}@${base.slice(0, 7)}${resumed ? " (existing branch resumed)" : ""}`);
   // Git LFS before any harness: filters set up in the checkout, the branch's objects handed over (outbox.mjs lfsSetup).
   const lfs = await outbox.lfsSetup(resumed ? outbox.expected() : base, { timeoutMs: remainingMs(deadlineAt) });
@@ -404,8 +450,8 @@ async function main() {
   // Factory's own marker only (isSelf): a writer's pasted one is no send-back.
   if (openPr) await progress.self();
   const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => isSelf(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
-  // A plan made again needs the harness: no rebase-only stage for it.
-  if (openPr && sentBack && planned.state !== "replan") {
+  // A plan made again needs the harness: no rebase-only stage for it. A continued pause was no send-back: it goes on.
+  if (openPr && sentBack && planned.state !== "replan" && !continued) {
     const behind = await outbox.behind();
     if (behind > 0) {
       rebaseMode = true;
@@ -459,16 +505,24 @@ async function main() {
     allowAgentEnv(Object.keys(wrote));
   }
   const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // A continued stage's install that failed on its kept checkout: the pass is told, and finishes it (continue.mjs installEnd).
+  let installNote = "";
   if (install) {
     log(`install: ${install}`);
     await progress(first ? "install (first time on this machine)" : "install");
     const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
-    if (!i.ok) {
-      const reason = i.reason;
+    const ended = installEnd(i, { continued: !!continued, command: install });
+    if (ended.block) {
+      const reason = ended.block;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "install" }, token);
       await finish("blocked", reason);
       return;
+    }
+    if (ended.note) {
+      log(`${i.reason}; the continued pass finishes its dependency change on the kept checkout`);
+      await progress("install failed on the kept checkout; the continued pass finishes it");
+      installNote = ended.note;
     }
   }
 
@@ -530,13 +584,20 @@ async function main() {
   // Resume policy: under fix-passes, a rebase send-back that conflicts resumes the worker's saved
   // session (on Actions it rides the usage artifact; locally it is on the box); every other entry starts fresh.
   let restored = null;
-  if (inputs.resumePolicy === "fix-passes" && rebaseConflict) {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
-    if (restored.id) session.id = restored.id;
-  }
-  // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.
-  reentry = restored ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason } : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
-  await progress(`re-entry: ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
+  // A continued pause resumes its own session when it carries over (enterStage restored it), whatever the policy.
+  if (continued) restored = continued.session ?? { id: null, from: continued.from, reason: continued.carry };
+  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+  if (restored?.id) session.id = restored.id;
+  // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json: a continued pause
+  // (`continued`), or a pause not continued, naming the guards that changed (`changed`).
+  reentry = continued
+    ? { resumed: !!restored.id, continued: true, from: continued.from, reason: restored.id ? null : continued.carry }
+    : entry?.reason
+      ? { resumed: false, from: entry.from, reason: entry.reason, changed: entry.changed }
+      : restored
+        ? { resumed: !!restored.id, from: restored.from ?? null, reason: restored.id ? null : restored.reason }
+        : { resumed: false, from: null, reason: inputs.resumePolicy !== "fix-passes" ? "resume policy is fresh" : rebaseMode ? "a clean rebase runs no session" : "a new run" };
+  await progress(`re-entry: ${continued ? `continued the paused work pass from ${reentry.from} on its kept checkout, ${reentry.resumed ? `resumed session ${restored.id.slice(0, 8)}` : `fresh session (${reentry.reason})`}` : reentry.resumed ? `resumed session ${restored.id.slice(0, 8)} from ${reentry.from}` : `fresh (${reentry.reason})`}`);
   const unpriced = unpricedCodex(inputs.harness, inputs.model, { gateway: !!inputs.codexGatewayKey });
   if (unpriced) {
     log(`warning: ${unpriced}`);
@@ -551,6 +612,10 @@ async function main() {
   // The plan.md the mid-run stop read (the hand-off tick), when it stopped the harness.
   let stoppedPlan = null;
   const conflictPrompt = conflictPassPrompt({ prompt, branch, defaultBranch });
+  // A continued pause: its resumed session is told where it stands and the new hand-off folders; a fresh session on the
+  // kept checkout gets the task card and what the checkout holds (lib/continue.mjs).
+  const workPrompt = continued ? keptPrompt(prompt, { note: installNote }) : prompt;
+  const resumedPrompt = continued ? continuePrompt(io.dirs, { note: installNote }) : conflictPrompt.split("\n\n---\n\n").at(-1);
   // The plan's Needs-Workflow lines (handover.mjs plannedWorkflows): the hand-over notice goes on the issue as the plan
   // is written, once, unless one is there already.
   let workflowsNoticed = false;
@@ -563,6 +628,9 @@ async function main() {
       (e) => log(`hand-over notice: ${e.message.slice(0, 120)}`),
     );
   };
+  // The work pass's pause, while it runs (not a send-back's conflict pass): the four guards as they stand when it ends on
+  // its usage limit, which the next work stage here weighs (lib/continue.mjs).
+  if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: trusted.sha, harness: inputs.harness });
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
@@ -584,8 +652,10 @@ async function main() {
     const full = !(attempt === 1 && restored?.id) && (attempt === 1 || !session.id);
     // Recorded before the run: a comment posted while it works is unread, and the review's answer pass applies it.
     // Only the decisions that fit the card are recorded; those cut for length stay unread.
-    if (full && !rebaseConflict && !fedDecisions) {
-      await progress.decisionsRead(decisionsRead(decisionsShown(decisions)));
+    // A continued session's resumed pass reads them all again from $FACTORY_IN/decisions.md (continue.mjs decisionsFed).
+    const fed = fedDecisions ? null : decisionsFed({ decisions, full, continued: !!continued, rebaseConflict });
+    if (fed) {
+      await progress.decisionsRead(decisionsRead(fed));
       fedDecisions = true;
     }
     rec = await runHarness({
@@ -594,9 +664,9 @@ async function main() {
       harness: inputs.harness,
       model: inputs.model,
       effort: inputs.effort,
-      prompt: attempt === 1 && restored?.id ? conflictPrompt.split("\n\n---\n\n").at(-1) : full ? (rebaseConflict ? conflictPrompt : prompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
+      prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
       // A resume the provider refuses for a rotated credential runs fresh with the whole card (harness.mjs runHarness).
-      freshPrompt: (attempt === 1 && restored?.id) || rebaseConflict ? conflictPrompt : prompt,
+      freshPrompt: (attempt === 1 && restored?.id && !continued) || rebaseConflict ? conflictPrompt : workPrompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
       cwd: checkout,
@@ -612,7 +682,7 @@ async function main() {
     // The restored session ran fresh instead (harness.mjs runHarness: the provider refused it for a rotated credential).
     if (rec.resumeRefused && attempt === 1 && restored?.id) {
       restored = { ...restored, id: null, reason: "resume refused by the provider (another credential)" };
-      reentry = { resumed: false, from: restored.from ?? null, reason: restored.reason };
+      reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: restored.reason };
     }
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported
     // no priced credits leaves the cap unenforceable, so nothing more runs.
@@ -627,13 +697,15 @@ async function main() {
       log(`resumed session ${restored.id.slice(0, 8)} failed (${rec.error}); running fresh`);
       await progress("re-entry: resume failed; running fresh");
       restored = { ...restored, id: null, reason: "resume failed" };
-      reentry = { resumed: false, from: restored.from ?? null, reason: "resume failed" };
+      reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: "resume failed" };
       session.id = null;
     }
     died += 1;
     log(`harness process died (${rec.error}); ${died < 2 ? "retrying once" : "second death"}`);
     if (died >= 2) break;
   }
+  // Every pass after the work pass (a conflict, a validation fix, the exit record's ask) starts fresh after a pause.
+  pauseNow = null;
 
   // 6. What the run left behind: the hand-off files, commits, protected paths, the PR. Factory pushes and opens the PR;
   // pushes carry no model secret. A stopped Objective's stage goes no further: its stop writes the end.
@@ -781,7 +853,7 @@ async function main() {
     harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged } : undefined,
+    validation: validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     unresolved,
     record: asked.record,
@@ -835,7 +907,10 @@ async function main() {
     // then add) so the review job fires now.
     // Only Factory's own clean rebase keeps the review: a head the harness made (a conflict resolved, a validation fix)
     // goes back to the reviewer, and nothing of it is recorded mergeable.
-    let reviewed = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? (await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => [])).some((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review"))) : false;
+    // A foundation Objective's review covers the foundation pass too (handoff.mjs reviewsCover): one reviewed before the
+    // label goes back to the review job, which runs that pass alone.
+    const cover = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => []), issue) : null;
+    let reviewed = !!cover?.reviewed && (!foundation || cover.foundation);
     // A maintainer's comment no pass has read (a change asked for after the review) has not reached the code: no merge.
     // The review job runs instead (relabel below) and its answer pass applies it. Unreadable comments Block.
     if (rebaseMode && reviewed) {

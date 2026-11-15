@@ -76,7 +76,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalField
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -334,12 +334,13 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
- * alone: locally the live session is the newer copy. Returns `{id, from, reason}`: `id` is the session to resume,
- * or null with the reason it is not.
+ * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
+ * stage continuing its pause, continue.mjs). Returns `{id, from, reason}`: `id` is the session to resume, or null with
+ * the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness }) {
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
-  const sources = fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir });
+  const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
   // newest first, to the most recent one that did.
@@ -777,11 +778,35 @@ export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
 export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
   /^[A-Za-z0-9-]{1,60}$/.test(env.FACTORY_PROGRESS_RUN || "") ? env.FACTORY_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
-/** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`factory:host:\` labels).` : "");
+/**
+ * A send-back rebase stage's end (#277): its rebase line (`cost`, logic.mjs rebaseCost: its dollars and bound marks;
+ * `conflict`) is set on the progress comment first, so a stop's write (progress.flushNow) carries it even when the read
+ * after it outlasts the stop; then the earlier rebases are read (`read`, the issue's comments; null reads none) for the
+ * exit line's words (logic.mjs rebaseLine), `passes` the harness passes that ran.
+ */
+export async function rebaseExitLine(progress, issue, { cost, conflict, passes = 0 }, read = null) {
+  progress.rebase({ ...cost, conflict });
+  const comments = read ? await read().catch(() => null) : null;
+  return rebaseLine({ ...cost, conflict, passes }, comments ? rebaseTally(comments, issue) : null);
+}
+
+/**
+ * The rebase line of a stopped rebase stage whose end ran out of time (worker endNow), unless the end set it already:
+ * its passes' dollars as the stop read them (stop.mjs stoppedRecords: a pass cut short counts at its live reading, a
+ * lower bound), with their bound marks (logic.mjs rebaseCost); a pass with no figure leaves the sum a lower bound.
+ */
+export function stoppedRebase(progress, conflict, recs = []) {
+  if (progress.rebased()) return;
+  const priced = recs.some((r) => r && !r.noRun && typeof r.usd === "number" && Number.isFinite(r.usd));
+  const usage = { usd: priced ? Math.round(sumSpend(recs) * 1e4) / 1e4 : null, usdLowerBound: recs.some((r) => r?.usdLowerBound), usdUpperBound: recs.some((r) => r?.usdUpperBound) };
+  progress.rebase({ ...rebaseCost(usage, { records: recs }), conflict });
+}
+
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 
@@ -805,6 +830,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let read = null;
   let triage = null;
   let asked = null;
+  let rebase = null;
   // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
   let ran = null;
   let lastWrite = 0;
@@ -812,6 +838,9 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   // The comment as the last write that landed left it: its id and the spend its line shows.
   let commentId = null;
   let shown = 0;
+  // The spend part of the last body that landed (bodyOf `interim`), and whether that body carried the rebase line.
+  let shownInterim = {};
+  let rebaseShown = false;
   let stopHook = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
@@ -820,7 +849,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ran, ...interim, read, triage, asked });
+    const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
     return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
@@ -835,25 +864,32 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     if (spend !== null || commentId === null) return;
     let live = null;
     try {
-      live = soFarNow();
+      live = soFarNow ? soFarNow() : null;
     } catch {
-      return;
+      live = null;
     }
-    if (!Number.isFinite(live?.usd) || !(live.usd > shown)) return;
-    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(interimOf(live))}` }, token }, { ms: STOP_WRITE_MS });
-    if (!r.ok) log(`progress: the stopped stage's spend line ($${live.usd}) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
-    if (r.ok || r.sent) live.commit?.();
+    const more = Number.isFinite(live?.usd) && live.usd > shown;
+    // A rebase line set since the last write that landed (progress.rebase) is written now too, the spend part kept.
+    const withRebase = rebase !== null;
+    if (!more && !(withRebase && !rebaseShown)) return;
+    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(more ? interimOf(live) : shownInterim)}` }, token }, { ms: STOP_WRITE_MS });
+    if (!r.ok) log(`progress: the stopped stage's ${more ? `spend line ($${live.usd})` : "rebase line"} ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+    if (r.ok && withRebase) rebaseShown = true;
+    if (more && (r.ok || r.sent)) live.commit?.();
   };
   const write = async () => {
     const live = spend === null && soFar ? await soFar().catch(() => null) : null;
     const counted = spend === null && Number.isFinite(live?.usd);
     const interim = counted ? interimOf(live) : { spend, spendParts };
     const body = bodyOf(interim);
+    const withRebase = rebase !== null;
     lastWrite = Date.now();
     const wrote = await upsertComment(repo, issue, key, body, { token }).then(
       (c) => {
         if (Number.isInteger(c?.id)) commentId = c.id;
         shown = Number(interim.spend) || 0;
+        shownInterim = interim;
+        if (withRebase) rebaseShown = true;
         return true;
       },
       (e) => {
@@ -898,12 +934,25 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   progress.flushNow = () => {
     if (spend === null) return stopWrite();
-    // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once.
-    if (commentId === null || !(spend > shown)) return;
+    // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once,
+    // with the rebase line when that has not landed either.
+    const withRebase = rebase !== null;
+    if (commentId === null || (!(spend > shown) && !(withRebase && !rebaseShown))) return;
     const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf({ spend, spendParts })}` }, token }, { ms: STOP_WRITE_MS });
-    if (r.ok) shown = spend;
-    else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+    if (r.ok) {
+      shown = spend;
+      if (withRebase) rebaseShown = true;
+    } else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
   };
+  /**
+   * A send-back's rebase stage: its rebase line (logic.mjs rebaseCostMarker), written with the next write, or by a stop's
+   * write (flushNow) when the stage's end runs out of time.
+   */
+  progress.rebase = (r) => {
+    rebase = r;
+  };
+  /** Whether the rebase line is set (progress.rebase). */
+  progress.rebased = () => rebase !== null;
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
@@ -1792,14 +1841,15 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
  * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
  * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
  * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
- * (`usageLimit`: harness, reset, since) and nothing written to GitHub: serve keeps the claim, starts no stage on that
- * harness until the reset and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
+ * (`usageLimit`: harness, reset, since, and `continue`, the work pass's `pause` record for the next work stage to weigh:
+ * continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no stage on that harness until the reset
+ * and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
  * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
  */
-export async function usageLimitExit(e, { local, records, finish, block }) {
+export async function usageLimitExit(e, { local, records, finish, block, pause = null }) {
   const ran = stoppedRecords(stagePasses(), openPasses());
   if (ran.length) records.splice(0, records.length, ...ran);
-  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}) };
+  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString(), ...(e.refusal.limitType ? { limitType: e.refusal.limitType } : {}), ...(local && pause ? { continue: pause } : {}) };
   if (local) {
     const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
     log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);
@@ -2111,9 +2161,12 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
   return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue) };
 }
 
-/** The send-back's notice on the PR: its marker (naming the head it saw) and why the worker rebases it. */
-export function rebaseNotice(issue, pr) {
-  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate.`;
+/**
+ * The send-back's notice on the PR: its marker (naming the head it saw), why the worker rebases it, and which of the
+ * REBASE_LIMIT send-backs in 24 h this is (`recent`, rebaseMarkers: the ones before it that pushed).
+ */
+export function rebaseNotice(issue, pr, recent = 0) {
+  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h; the issue's progress comments show each rebase's cost).`;
 }
 
 /**

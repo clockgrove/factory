@@ -18,7 +18,7 @@ import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest } from "./lib/github.mjs";
-import { input, mask, parseArgs, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
+import { FACTORY_VERSION, input, mask, parseArgs, resolveInputs, workflowDriftLines, workflowSettings } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -307,6 +307,49 @@ export async function rerunProbeCheck({ repo, token }) {
   return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
 }
 
+/**
+ * The ref the workflow's first `uses: clockgrove/factory@<ref>` calls (a step's, or a job's), read from the parsed YAML,
+ * so a commented-out line is not one and a quoted value is; "" when there is none or the file does not parse.
+ */
+export function factoryRef(text) {
+  let doc;
+  try {
+    doc = parseYaml(String(text ?? ""));
+  } catch {
+    return "";
+  }
+  const jobs = doc && typeof doc.jobs === "object" ? Object.values(doc.jobs || {}) : [];
+  for (const job of jobs) {
+    for (const node of [job, ...(Array.isArray(job?.steps) ? job.steps : [])]) {
+      const ref = /^clockgrove\/factory@(\S+)$/.exec(typeof node?.uses === "string" ? node.uses.trim() : "")?.[1];
+      if (ref) return ref;
+    }
+  }
+  return "";
+}
+
+/** A `vX.Y.Z` release's numbers, or null for any other ref (a commit, a floating vX.Y, a branch). */
+export const releaseOf = (ref) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(ref || ""))?.slice(1).map(Number) ?? null;
+
+/** Update commands for the plugin, per harness: each marketplace is named `clockgrove` (README, Install). */
+export const PLUGIN_UPDATE =
+  "update the plugin, then start a new session: Claude Code `claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove`; Codex `codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove`; Copilot `copilot plugin update factory@clockgrove`";
+
+/**
+ * The installed plugin (this process's, `version`) against the release the workflow pins: a session's skills and
+ * scripts, and local mode's stages, are the plugin's, so one older than the pin follows an older Factory than the Action
+ * runs. WARN when older, PASS otherwise; null when the workflow pins no `vX.Y.Z` release (a commit, a floating tag).
+ */
+export function pluginVersionCheck(text, version = FACTORY_VERSION) {
+  const pin = releaseOf(factoryRef(text));
+  const have = releaseOf(`v${version}`);
+  if (!pin || !have) return null;
+  const i = have.findIndex((n, k) => n !== pin[k]);
+  const pinned = `v${pin.join(".")}`;
+  if (i < 0 || have[i] > pin[i]) return PASS("plugin version", `the installed plugin is v${version}; the workflow pins clockgrove/factory@${pinned}`);
+  return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/factory@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -333,12 +376,15 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     const ro = /contents:\s*read/.test(text) && !/contents:\s*write/.test(text);
     out.push(ro ? PASS("job token", "contents: read in the workflow") : FAIL("job token", "the workflow grants contents: write", "set permissions: contents: read; writes go through the App"));
     // A pin older than local mode does not know factory:local, so its jobs would also run Objectives a local loop holds.
-    const pin = /uses:\s*clockgrove\/factory@v(\d+)\.(\d+)\.(\d+)\b/.exec(text);
+    const pin = releaseOf(factoryRef(text));
     if (pin) {
-      const [maj, min, pat] = pin.slice(1).map(Number);
+      const [maj, min, pat] = pin;
       const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
-      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.slice(1).join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.slice(1).join(".")}`));
+      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.join(".")}`));
     }
+    // A session's skills and scripts are the installed plugin's, not the Action's: in a job they are the same tree.
+    const plugin = job ? null : pluginVersionCheck(text);
+    if (plugin) out.push(plugin);
     if (/pull_request_target|on:\s*\n\s*pull_request\s*:/.test(text) && !/factory:factory-review/.test(text)) out.push(WARN("workflow triggers", "pull_request trigger without the factory:review label guard", "the review job must be guarded by the label the App applies"));
     out.push(mergeTickCheck(text, env, { job }));
     out.push(ownedTickCheck(text, env, { job }));
@@ -732,7 +778,7 @@ function workflowPath(env) {
 
 /** The Factory ref a workflow calls (a release tag, or a commit shortened), or "". */
 const pinOf = (text) => {
-  const ref = /uses:\s*clockgrove\/factory@([\w.\-/]+)/.exec(text || "")?.[1] || "";
+  const ref = factoryRef(text);
   return /^[0-9a-f]{40}$/.test(ref) ? ref.slice(0, 7) : ref;
 };
 

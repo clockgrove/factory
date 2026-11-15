@@ -420,6 +420,10 @@ test("collect over a snapshot gives the fixture back, and score.mjs --replay wri
   const rows = JSON.parse(read(join(dir, "rows.json"))).rows;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].issue, 42);
+  // The row names the checkout's skills by the digest computed from bench/skills.json's entries, as --check prints it.
+  const check = execFileSync("node", [join(BENCH, "skills.mjs"), "--check"], { encoding: "utf8" });
+  assert.equal(`skills unchanged: ${rows[0].skills.digest}\n`, check);
+  assert.deepEqual(Object.keys(rows[0].skills), ["digest"]);
   const card = JSON.parse(read(standing));
   assert.deepEqual(card.rows.map((r) => r.issue), [7, 42]);
   assert.equal(card.rows[1].walkAway.value, true); // replaced, not duplicated
@@ -529,7 +533,7 @@ test("phaseMinutes: minutes between progress lines go to the earlier line's phas
   assert.equal(f.modelMinutes, 10);
   const row = scoreObjective(cleanMerge(42, usage("claude")), { prices, now: NOW });
   assert.equal(row.phases.runs, 0);
-  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Dispatch s \(max\) \| Slot wait s \| Setup s \(max\) \| Model min \| CI wait min \| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
 });
 
 test("dispatchLatency: each run's pickup against the latest trigger since the previous run; skipped duplicates and Running are not triggers", () => {
@@ -578,7 +582,7 @@ test("activity: turns, harness calls, sessions and run counts come from the arti
   assert.equal(row.activity.workRuns, 1);
   assert.equal(row.activity.reviewRuns, 1);
   assert.equal(row.activity.turns, 87 + (usage("review")[0].turns ?? 0));
-  assert.match(markdownTable([row]), /\| Turns \| Runs \| Sessions \| Harness \|/);
+  assert.match(markdownTable([row]), /\| Turns \| Runs \| Sessions \| Rebases \| Harness \|/);
   assert.match(markdownTable([row]), /\| 1\+1 \|/);
 });
 

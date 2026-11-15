@@ -56,7 +56,7 @@ import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inp
 import { EXIT_PROMPT, activityLine, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
-import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
+import { OUTAGE, givenUp, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
@@ -1958,6 +1958,20 @@ export async function earlyOutageEnd(e, { local, usageDir = null, harness, model
   setOutput("reason", end.reason);
 }
 
+/**
+ * A Block a stage decides after its process gave up on an outage (network.mjs givenUp: the stage's wait for a host ran
+ * out, or a spent rate limit's reset lies past it) is that outage's, whichever step met it (a GitHub write on the delivery
+ * path, a pass it cut off, a harness's own account of a run it stopped): throws the outage's NetworkDown, which the stage
+ * ends on (outageExit: paused on the local route, an `outage` or `provider-quota` Block elsewhere). Any other exit stands.
+ */
+export function outageFirst(exit) {
+  const down = exit === "blocked" ? givenUp() : null;
+  if (down) {
+    log(`a Block decided after this stage gave up waiting for ${outageOf(down).host}: the stage ends on that outage instead`);
+    throw down;
+  }
+}
+
 /** Mark the issue Running (card and label) before the harness starts. */
 export async function markRunning(repo, issue, { token }) {
   const project = await findProject(repo, { token }).catch(() => null);
@@ -1969,7 +1983,8 @@ export async function markRunning(repo, issue, { token }) {
  * The harness's exit record: `text`, the exit.json it left in $FACTORY_OUT (handoff.mjs readOut),
  * else one more harness call answering EXIT_PROMPT (resumed where the harness can), parsed as
  * JSON. Neither reads the PR body or the plan comment. Returns {record, usage: [records], basis, checked};
- * `record` is {exit: "blocked", reason} when the harness left nothing and could not answer.
+ * `record` is {exit: "blocked", reason} when the harness left nothing and could not answer. With no record left and an
+ * outage this process gave up on (network.mjs givenUp), nothing is asked: it throws that outage's NetworkDown.
  * A question exit whose questions name no test of the Question rule (parseExitRecord `unfounded`) gets one more
  * call, questionCheckPrompt: the harness keeps what meets a test and records the rest as assumptions in pr.md and
  * plan.md. `checked` is true when that call ran, so the caller re-reads $FACTORY_OUT and updates the PR body.
@@ -1990,10 +2005,16 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   };
   let record = null;
   let basis = "exit file";
-  if (typeof text === "string") {
-    record = parseExitRecord(text);
-    if (!record) log("$FACTORY_OUT/exit.json is not a JSON object with exit in delivered|question|blocked; asking the harness");
-  } else log("no $FACTORY_OUT/exit.json; asking the harness");
+  if (typeof text === "string") record = parseExitRecord(text);
+  const missing = typeof text === "string" ? "$FACTORY_OUT/exit.json is not a JSON object with exit in delivered|question|blocked" : "no $FACTORY_OUT/exit.json";
+  // The process gave up on an outage (network.mjs givenUp): that is what ended the run, so the harness is not asked,
+  // and its own account of an interrupted run cannot stand in for the outage. The stage ends on it (outageExit).
+  const down = record ? null : givenUp();
+  if (down) {
+    log(`${missing}; not asking the harness: this stage gave up waiting for ${outageOf(down).host}, and ends on that outage`);
+    throw down;
+  }
+  if (!record) log(`${missing}; asking the harness`);
   if (!record) {
     const asked = await ask(EXIT_PROMPT, "exit");
     const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", unmetered: "unmetered: max_usd cannot be enforced", budget: "no exit record and no budget left to ask" }[asked.refused];

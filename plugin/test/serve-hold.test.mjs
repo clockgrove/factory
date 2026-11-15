@@ -367,6 +367,25 @@ for (const [stage, end, how] of [
   });
 }
 
+test("resume: a review paused on an outage after its label came off (on its merge path) runs again; with no such pause here, nothing runs (#337)", async () => {
+  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "factory/7" }, labels: [] } });
+  try {
+    const since = Date.parse("2026-11-15T22:40:39Z");
+    const reviewed = [];
+    const loop = Object.assign(await claimLoop(), { clock: () => since + 16 * 60_000, review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
+    const paused = async () => ({ exit: "paused", stage: "review", code: 0, outage: { host: "api.github.com", origin: "https://api.github.com", code: "EAI_AGAIN", since: new Date(since).toISOString() } });
+    assert.equal((await loop.withClaim(7, paused)).exit, "paused");
+    assert.equal((await loop.resume(7)).exit, "delivered");
+    assert.deepEqual(reviewed, [[7, 9]], "the review runs again, though its PR has no review label");
+    // Another loop holds no such pause: the PR waits for its merge, and nothing runs.
+    const other = Object.assign(await claimLoop(), { review: async (issue, pr) => (reviewed.push([issue, pr]), { exit: "delivered" }) });
+    assert.equal((await other.resume(7)).exit, "skipped");
+    assert.equal(reviewed.length, 1);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("withClaim: Factory's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
   const { mkdirSync } = await import("node:fs");
   const { gitPinFile, pinGitDir } = await import("../scripts/lib/local.mjs");

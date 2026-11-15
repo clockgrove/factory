@@ -55,6 +55,7 @@ import {
   mirrorDiff,
   earlyOutageEnd,
   outageExit,
+  outageFirst,
   usageLimitExit,
   restoreTranscript,
   saveTranscript,
@@ -1371,6 +1372,9 @@ async function main() {
   });
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });
+  // A Block decided after this stage gave up on an outage is the outage's: the stage ends on it, its review label kept
+  // for serve's resume (session.mjs outageFirst, outageExit).
+  outageFirst(decision.exit);
   // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no
   // merge, no ready mark, no label); the stop's end stands.
   await holdIfStopped();
@@ -1475,6 +1479,9 @@ async function main() {
   }
   // Hosts the answer pass's sandbox denied: the backend names the operator's fix (local mode: FACTORY_LOCAL_DOMAINS).
   const fix = decision.exit === "blocked" && decision.deniedHosts ? backend().sandbox.deniedFix(decision.deniedHosts, process.env, inputs.harness) : null;
+  // The same after the label came off (a merge-path write the outage failed): serve's resume runs the review again
+  // (local.mjs resume).
+  outageFirst(decision.exit);
   await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
   await finish(decision.exit, decision.reason);
   }

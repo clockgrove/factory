@@ -2086,6 +2086,9 @@ export class Local {
     const next = stageFor({ pr, issue: data });
     if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
     if (next === "work") return this.runObjective(issue);
+    // A review this loop holds paused after its label came off (an outage met on its merge path: session.mjs outageFirst)
+    // ends nothing by the label: the review runs again, and its exit or merge follows.
+    if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});

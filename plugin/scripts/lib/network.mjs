@@ -225,6 +225,17 @@ export const downFor = (origin) => {
   return g ? new NetworkDown(g) : null;
 };
 
+/**
+ * The outage this process gave up waiting for, as the NetworkDown its requests to that host now fail with: the latest
+ * host it stopped waiting for, or a quota whose spent rate limit it gave up on while that reset is still ahead. Null when
+ * there is none. What a stage decides after that point (a Block, the harness asked for an exit record) is the outage's to
+ * decide: the stage ends on it instead (session.mjs outageFirst).
+ */
+export const givenUp = () => {
+  const g = [...GIVEN_UP.values()].findLast((x) => !Number.isFinite(x.resetAt) || x.resetAt > OUTAGE.now());
+  return g ? new NetworkDown(g) : null;
+};
+
 /** Record that quota `key` (quotaKey) answered spent until `resetAt` (ms), its latest answer; any process (spentUntil). */
 export function noteSpent(key, resetAt) {
   if (key && Number.isFinite(resetAt)) SPENT.set(key, resetAt);

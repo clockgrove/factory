@@ -15,7 +15,7 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, mergeUsage, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
-import { OUTAGE, githubOrigin, minutesText, networkBack, passCutOff, waitBound, waitingOutages } from "./network.mjs";
+import { OUTAGE, githubOrigin, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -983,9 +983,14 @@ export function providerOrigin(harness, env = {}) {
  * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
  * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
  * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
+ * A pass that failed after the process gave up waiting for a host (network.mjs givenUp; a spent rate limit cuts no pass
+ * off) is no death and runs no more: it throws that outage's NetworkDown, which the stage ends on (session.mjs outageExit).
  */
 async function outageCut(rec, { harness, env }) {
-  if (!waitingOutages() || rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  const down = stoppedWaiting() ? givenUp() : null;
+  if (down && !Number.isFinite(down.resetAt)) throw down;
+  if (!waitingOutages()) return null;
   const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
   const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
   return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);

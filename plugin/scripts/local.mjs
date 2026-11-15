@@ -81,6 +81,12 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
   return [`Factory: the ${stage} stage paused on a usage limit. ${who} reached it${named ? ` (window \`${named}\`)` : " (its window was not reported)"}, which resets at ${new Date(reset).toISOString()}; Factory resumes this Objective on this machine after then.`, "", moves, ...(note ? ["", note] : [])].join("\n");
 }
 
+/**
+ * How often a loop writes again the claim of an Objective it holds paused (Local.beatPaused): well inside the dispatcher's
+ * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
+ */
+export const PAUSED_BEAT_MS = 60 * 60_000;
+
 /** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
 
@@ -1565,7 +1571,49 @@ export class Local {
   async pinWaiting(issue, result) {
     (this.offline ??= new Map()).set(issue, { since: (this.clock ?? Date.now)(), stage: result?.stage || "work", origin: null, host: "its account labels", code: "two account labels", pinWait: true });
     this.lapsed?.delete(issue);
+    (this.twoNoted ??= new Set()).add(issue);
     await this.saidPin(issue, result.pinWait, { note: true });
+  }
+
+  /** The two-label line (twoPinsLine) for `issue`, said once in the log and on the issue; twoCleared takes it back. */
+  async sayTwo(issue, labels) {
+    (this.twoNoted ??= new Set()).add(issue);
+    await this.saidPin(issue, twoPinsLine(labels), { note: true });
+  }
+
+  /**
+   * The issue's account labels are down to one or none after the two-label line was said: the issue's note says the
+   * Objective goes on (the pause notice without that line, while it is paused on a usage limit), and the line would be
+   * said again if it came back. Nothing written when no such line was said.
+   */
+  async twoCleared(issue) {
+    if (!this.twoNoted?.delete(issue)) return;
+    this.pinClear(issue);
+    const pause = this.offline?.get(issue)?.harness ? this.pauses?.get(issue) : null;
+    if (pause) {
+      const { note: _note, ...plain } = pause;
+      return this.pauseNotice(issue, plain);
+    }
+    if (!this.repo) return;
+    await upsertComment(this.repo, issue, marker(issue, "account-limit"), "Factory: one account label or none is left, so the Objective goes on.", this.opts).catch((e) => log(`#${issue}: the account note could not be written (${String(e?.message || e).slice(0, 120)})`));
+  }
+
+  /** A note write from a path that cannot wait on it (limitHold): kept in `notesInFlight` until it settles. */
+  noting(p) {
+    const set = (this.notesInFlight ??= new Set());
+    const kept = p.finally(() => set.delete(kept));
+    set.add(kept);
+  }
+
+  /**
+   * A claim this loop holds on an Objective it keeps paused (a usage limit's reset, its account labels: pausedHere),
+   * written again once its comment is PAUSED_BEAT_MS old (`claim`, localClaim's read: its heartbeat is GitHub's update
+   * time). No stage runs to heartbeat it, and a claim a day old is a loop gone away, which the dispatcher Blocks. A
+   * write that fails is logged; the next tick tries again.
+   */
+  async beatPaused(issue, claim) {
+    if (!claim?.heartbeat || (this.clock ?? Date.now)() - Date.parse(claim.heartbeat) < PAUSED_BEAT_MS) return;
+    await writeClaim(this.repo, issue, this.holder, this.opts).catch((e) => log(`#${issue}: the paused claim's heartbeat could not be written (${String(e?.message || e).slice(0, 120)}); next tick tries again`));
   }
 
   /**
@@ -1693,10 +1741,10 @@ export class Local {
     const harness = (c.ok && c.choice.harness) || this.harness;
     const pin = accountPin(labels);
     if (pin.two) {
-      const line = twoPinsLine(pin.two);
-      if (issue !== null) void this.saidPin(issue, line, { note: true });
-      return line;
+      if (issue !== null) this.noting(this.sayTwo(issue, pin.two));
+      return twoPinsLine(pin.two);
     }
+    if (issue !== null && this.twoNoted?.has(issue)) this.noting(this.twoCleared(issue));
     const now = (this.clock ?? Date.now)();
     if (!this.holdStore().held(harness, now) && !this.ownHolds?.held(harness, now)) return null;
     let account;
@@ -1767,11 +1815,15 @@ export class Local {
         // reset too, until one is left; said once. Never Blocked for it.
         const two = accountPin(names).two;
         if (two && (off.pinWait || off.harness)) {
-          await this.saidPin(issue.number, twoPinsLine(two), { note: true });
+          await this.sayTwo(issue.number, two);
+          await this.beatPaused(issue.number, c);
           continue;
         }
+        await this.twoCleared(issue.number);
         const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
         if (due) out.push(issue.number);
+        // Waiting on a usage limit's reset or on its account labels: its claim kept alive while this loop is.
+        else if (off.harness) await this.beatPaused(issue.number, c);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);

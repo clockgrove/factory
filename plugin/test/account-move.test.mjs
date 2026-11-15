@@ -55,7 +55,7 @@ async function withHome(h, fn) {
  * `updated_at` moves as GitHub's does: on a label change and a new comment. Every write is kept in `writes`.
  */
 function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:running"]) {
-  const state = { labels: new Set(labels), timeline: [], comments: [], writes: [], timelineReads: 0, writers: new Set(["maintainer", "kirk"]), updated: 0 };
+  const state = { labels: new Set(labels), timeline: [], comments: [], writes: [], timelineReads: 0, writers: new Set(["maintainer", "kirk"]), updated: 0, now: () => Date.now() };
   const touch = () => (state.updated += 1);
   let id = 100;
   const realFetch = globalThis.fetch;
@@ -78,7 +78,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
     if (method === "GET" && p === "/issues") return json(state.labels.has(u.searchParams.get("labels")) ? [issue()] : []);
     if (method === "GET" && p === "/issues/8/comments") return json(state.comments);
     if (method === "POST" && p === "/issues/8/comments") {
-      const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };
+      const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date(state.now()).toISOString() };
       state.comments.push(c);
       touch();
       return json(c, 201);
@@ -86,7 +86,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
     const one = /^\/issues\/comments\/(\d+)$/.exec(p);
     if (one && method === "PATCH") {
       const c = state.comments.find((x) => String(x.id) === one[1]);
-      Object.assign(c, { body: JSON.parse(init.body).body, updated_at: new Date().toISOString() });
+      Object.assign(c, { body: JSON.parse(init.body).body, updated_at: new Date(state.now()).toISOString() });
       return json(c);
     }
     if (one && method === "DELETE") {
@@ -290,7 +290,7 @@ test("#265: someone who cannot push moves nothing: removing a trusted pin leaves
       // The pin back, and a stranger adds a second label: two labels, it waits, past beta's reset too, said once.
       gh.apply("factory:account:beta");
       gh.apply("factory:account:gamma", "stranger");
-      const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/")).length;
+      const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/") && w.includes("account-limit")).length;
       const before = patches();
       t += 121 * MIN;
       for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
@@ -304,11 +304,13 @@ test("#265: someone who cannot push moves nothing: removing a trusted pin leaves
       // One left: it goes on, on that one.
       gh.remove("factory:account:gamma");
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
+      assert.match(gh.notices()[0].body, /^<!-- factory:8:account-limit -->\nFactory: one account label or none is left, so the Objective goes on\.$/, "the note no longer says it waits");
       loop.result = delivered;
       assert.equal((await work(loop)).account, "beta");
       assert.equal(gh.blocked().length, 0, "never Blocked for it");
       // The dispatcher holds a queued Objective with two labels, whatever its accounts' holds.
       assert.match(loop.limitHold(["factory:objective", "factory:account:beta", "factory:account:gamma"], 8, "x"), /more than one account label moves nothing/);
+      await Promise.all(loop.notesInFlight ?? []);
     });
   } finally {
     gh.restore();
@@ -432,7 +434,7 @@ for (const [what, apply, says] of [
         loop.result = limited(t + 60 * MIN, t);
         await work(loop);
         apply(gh);
-        const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/")).length;
+        const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/") && w.includes("account-limit")).length;
         const before = patches();
         for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
         assert.equal(patches() - before, 1, "said once");
@@ -470,3 +472,39 @@ for (const [what, apply, says] of [
 }
 
 const accountLabelsOf = (gh) => [...gh.state.labels].filter((l) => l.startsWith("factory:account:"));
+
+for (const what of ["a usage limit's reset a week out", "two account labels"]) {
+  test(`#265: a paused Objective's claim stays alive while its loop is, so ${what} is never Blocked as a loop gone away after a day; its claim is written about once an hour`, async () => {
+    const { BACKENDS } = await import("../scripts/lib/backend.mjs");
+    const { PAUSED_BEAT_MS } = await import("../scripts/local.mjs");
+    const h = fakeHome();
+    const gh = fakeGitHub();
+    let t = Date.now();
+    gh.state.now = () => t;
+    try {
+      await withHome(h, async () => {
+        const loop = serveOn(h, () => t);
+        if (what === "two account labels") {
+          gh.apply("factory:account:beta");
+          gh.apply("factory:account:gamma");
+        } else loop.result = limited(t + 7 * 24 * 60 * MIN, t, "seven_day");
+        assert.equal((await work(loop)).exit, "paused");
+        const claimWrites = () => gh.state.writes.filter((w) => w.includes("factory:8:local")).length;
+        const before = claimWrites();
+        for (let i = 0; i < 60; i++) {
+          t += 30 * MIN;
+          assert.deepEqual(await loop.pausedHere(new Map()), [], "still waiting");
+        }
+        const hold = await BACKENDS.local.trigger.localHold(REPO, 8, { token: "t" }, t);
+        assert.notEqual(hold.state, "expired", "30 hours on: the dispatcher sees this loop's claim, not one a day old");
+        assert.equal(hold.holder, loop.holder);
+        const beats = claimWrites() - before;
+        assert.ok(beats >= 29 && beats <= 31, `about one claim write an hour: ${beats} in 30 h`);
+        assert.equal(PAUSED_BEAT_MS, 60 * MIN);
+        assert.equal(gh.blocked().length, 0);
+      });
+    } finally {
+      gh.restore();
+    }
+  });
+}

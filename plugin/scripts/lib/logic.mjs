@@ -2283,7 +2283,8 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * no dollars, the figure is the larger of the record's and `known` (the stage's spend so far, harness.mjs
  * stageSpendSoFar, which holds that pass's live reading), marked `usdLowerBound`; or `usdUpperBound` when that reading
  * was priced at the table's dearest rates (`known.estimated`, a model with no price row). The record's own bounds are
- * kept. `workerKeyUsd`: the relayed key's share, already in `usd`.
+ * kept. `workerKeyUsd`: the relayed key's share, already in `usd`. `limitPaused`: the stage ended paused on its
+ * harness's usage limit (local mode), which the scorecard counts per account (#266).
  */
 export function stageSpendLine(usage, { records = [], known = null } = {}) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
@@ -2293,7 +2294,7 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
   const estimated = unreported && !!known?.estimated;
   const lower = !!usage?.usdLowerBound || (unreported && !estimated);
   const upper = !!usage?.usdUpperBound || estimated;
-  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}), ...(upper ? { usdUpperBound: true } : {}) } };
+  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}), ...(upper ? { usdUpperBound: true } : {}), ...(usage?.exit === "paused" && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer

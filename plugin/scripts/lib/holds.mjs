@@ -4,7 +4,9 @@
 // limit another already met. Each limit met is one file of its own, written whole under a dot-name and renamed into
 // place, never rewritten: writers at the same time each add theirs and lose none, with no lock. A hold is the latest
 // reset any file names for the account; its back-off streak is the newest file's. The record holds no secret: a
-// harness, an account's name, times, a count and the limit's window when the harness named it. The folder is outside
+// harness, an account's name, times, a count and the limit's window when the harness named it. With automatic account
+// choice on (#266), each account also has one `<key>.started.json`, replaced whole at each stage start on it: the
+// machine's round-robin, where the last writer wins and nothing else depends on it. The folder is outside
 // every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
 // file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
@@ -19,6 +21,14 @@ export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
 export const HOLD_FORGET_MS = 60 * 60_000;
 /** The longest a hold lasts past now: a week's window and a day more. A record naming a later end is held to it. */
 export const HOLD_MAX_MS = 8 * 24 * 60 * 60_000;
+/**
+ * How long automatic account choice (#266) avoids an account whose usage limit Blocked a stage with no reset reported
+ * (Copilot's always, Codex's when its rollout holds no snapshot: accountHolds.spent), by how many in a row: 1, 4, then 24
+ * hours. Nothing else holds on it: with no reset known, such a limit Blocks as it always did.
+ */
+export const SPENT_GUESS_MS = [1, 4, 24].map((h) => h * 60 * 60_000);
+/** A stage-start record (accountHolds.started) of an account no stage started on this long is removed. */
+export const START_FORGET_MS = HOLD_MAX_MS;
 
 /** The machine's holds: under Factory's cache folder, never ~/.config/factory (no secret is in them). */
 export const holdsDir = (home = homedir()) => join(home, ".cache", "factory", "holds");
@@ -29,19 +39,20 @@ const KEY_SRC = "[a-z0-9][a-z0-9-]{0,49}(?:@(?:[0-9a-f]{12}|env))?";
 const KEY = new RegExp(`^${KEY_SRC}$`);
 const FILE = new RegExp(`^(${KEY_SRC})\\.[0-9a-f]{16}\\.json$`);
 const TEMP = new RegExp(`^\\.${KEY_SRC}\\.[0-9a-f]{16}\\.tmp$`);
+const STARTED = new RegExp(`^(${KEY_SRC})\\.started\\.json$`);
 const MAX_BYTES = 4096;
 
 /** A usage limit's window as the harness names it (usage.mjs providerRefusal `limitType`: `five_hour`, `codex/primary`), else null. */
 const WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 export const windowOf = (w) => (typeof w === "string" && WINDOW.test(w) ? w : null);
 
-/** One record, checked: {harness, account, until, streak, at, window?}, or null. */
+/** One record, checked: {harness, account, until, streak, at, window?, served?, guess?}, or null. */
 function recordOf(v, account) {
   if (!v || typeof v !== "object" || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness)) return null;
   const { until, at, streak } = v;
   if (![until, at].every(Number.isSafeInteger) || !Number.isSafeInteger(streak) || streak < 0) return null;
   const window = windowOf(v.window);
-  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}) };
+  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}), ...(v.served === true ? { served: true } : {}), ...(v.guess === true ? { guess: true } : {}) };
 }
 
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
@@ -49,7 +60,8 @@ const ours = (st, uid) => !!st && !st.isSymbolicLink() && (uid === undefined || 
 
 /**
  * The records in `dir`, read leniently (an unreadable or foreign file is left out, never thrown on). A record forgotten
- * (its hold ended HOLD_FORGET_MS ago) is removed, as is a writer's temp file older than that (a killed writer's).
+ * (its hold ended HOLD_FORGET_MS ago) is removed, as is a writer's temp file older than that (a killed writer's), and a
+ * stage-start record not written for START_FORGET_MS (an account no longer declared, a login no serve runs on now).
  */
 function readDir(dir, now, uid) {
   let names;
@@ -69,6 +81,10 @@ function readDir(dir, now, uid) {
         if (now - st.mtimeMs > HOLD_FORGET_MS) rmSync(file, { force: true });
         continue;
       }
+      if (STARTED.test(name)) {
+        if (now - st.mtimeMs > START_FORGET_MS) rmSync(file, { force: true });
+        continue;
+      }
       const m = FILE.exec(name);
       if (!m || st.size > MAX_BYTES || st.nlink !== 1) continue;
       const r = recordOf(JSON.parse(readFileSync(file, "utf8")), m[1]);
@@ -85,16 +101,31 @@ function readDir(dir, now, uid) {
 }
 
 /**
- * An account's hold from its records: the latest reset any names (and that record's window, when it names one), and
- * the newest record's streak (of two made in the same millisecond, the longer streak); null with none.
+ * An account's hold from its records: the latest reset any names (`until`, and that record's window, when it names one;
+ * null with only guesses), the newest such record's back-off streak and time (`streak`, `at`: of two made in the same
+ * millisecond, the longer streak; 0 and null with none), when the newest usage limit was met (`limitedAt`: a served
+ * pass's record is no limit), and the guess (`guess`: accountHolds.spent) its no-reset limits since the last served pass
+ * stand for, {until, streak, at} (their own count, apart from the back-off's), or null; null with no record.
  */
 function fold(records, account, now) {
   const mine = records.filter((r) => r.account === account && now - r.until <= HOLD_FORGET_MS);
   if (!mine.length) return null;
-  const newest = mine.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a));
-  const latest = mine.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a));
-  return { harness: newest.harness, until: latest.until, streak: newest.streak, at: newest.at, window: latest.window ?? null };
+  const newestOf = (list) => (list.length ? list.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a)) : null);
+  const hard = mine.filter((r) => !r.guess);
+  const newest = newestOf(hard);
+  // A served pass's record holds nothing: its end only keeps it as long as the hold and the guess it outlives.
+  const limitsMet = hard.filter((r) => !r.served);
+  const latest = limitsMet.length ? limitsMet.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a)) : null;
+  const limits = mine.filter((r) => !r.served).map((r) => r.at);
+  // A served pass after a no-reset limit shows the account is not spent: that guess is over.
+  const served = Math.max(-Infinity, ...mine.filter((r) => r.served).map((r) => r.at));
+  const guesses = mine.filter((r) => r.guess && r.at > served);
+  const guess = newestOf(guesses);
+  return { harness: newestOf(mine).harness, until: latest?.until ?? null, streak: newest?.streak ?? 0, at: newest?.at ?? null, window: latest?.window ?? null, limitedAt: limits.length ? Math.max(...limits) : null, guess: guess ? { until: Math.max(...guesses.map((r) => r.until)), streak: guess.streak, at: guess.at } : null };
 }
+
+/** A stage-start record's file (accountHolds.started): one per account, replaced whole at each start. */
+const START = (key) => `${key}.started.json`;
 
 /**
  * The machine's holds in `dir` (holdsDir), or in this process's memory alone with no `dir`. The files are the record: a
@@ -102,13 +133,25 @@ function fold(records, account, now) {
  * kept in this process's memory instead, so this process still holds the account, and `onError` hears why.
  * - `until(account, now)`: the reset (ms) the account is held until, when still ahead; else null.
  * - `window(account, now)`: the window of the usage limit that holds it that long (`five_hour`), or null when unknown.
- * - `held(harness, now)`: whether any account of that harness is held now.
+ * - `held(harness, now, guesses)`: whether any account of that harness is held now (with `guesses`, avoided: `spent`).
  * - `limit({harness, account, reset, now, window})`: a stage on the account met its usage limit, reset at `reset` (ms, the
  *   provider's), of `window` when the harness named one. A provider that refuses again past the reset it stated (or states one no more than LIMIT_BACKOFF_MS's
  *   last ahead) is not taken at its word: the hold is at least now plus a backoff that grows with each such pause in
  *   a row on that account (2, 5, 10, then 15 minutes); a reset further out starts the count again. Returns the hold's end.
  * - `served({harness, account, now, started})`: a pass on the account completed, its stage started at `started` (ms):
- *   the streak ends (its hold, if any, stays) when that start is after the newest record's.
+ *   the streak ends (its hold, if any, stays) when that start is after the newest record's, and a guess (`spent`) made
+ *   before that start is over.
+ * - `limitedAt(account, now)`: when a stage last met the account's usage limit (ms), while its records are kept; else null.
+ * - `spent({harness, account, now, window})`: a stage on the account was Blocked on its usage limit with no reset reported.
+ *   Only automatic account choice (#266) weighs it (`avoidUntil`), for SPENT_GUESS_MS by how many in a row, until a pass
+ *   on the account is served; `until` and `held`'s holds never include it. Returns the guess's end.
+ * - `avoidUntil(account, now)`: `until`, or the guess's end when that is later; null when neither is ahead.
+ * - `started({harness, account, now})`: a stage starts on the account now (automatic account choice's round-robin, #266):
+ *   one small file per account, replaced whole, so every serve on the machine takes turns from the same record.
+ * - `forgetStarts(keep)`: the start records of declared accounts' names not in `keep` (no longer declared) are removed;
+ *   a login's (`<harness>@…`) goes START_FORGET_MS after its last start, since another serve may run on it.
+ * - `startedAt(account, now)`: when a stage last started on the account (ms), or null; a time after `now` (another clock's,
+ *   or a hand-made file) counts as long ago, as a hold record's does.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).
  */
 export function accountHolds({ dir = null, uid = process.getuid?.(), onError = () => {} } = {}) {
@@ -121,6 +164,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     }
   }
   let kept = [];
+  const starts = new Map();
   const records = (now) => {
     kept = kept.filter((r) => now - r.until <= HOLD_FORGET_MS);
     return dir ? [...kept, ...readDir(dir, now, uid)] : kept;
@@ -149,14 +193,26 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     dir,
     until(account, now) {
       const h = of(account, now);
-      return h && h.until > now ? h.until : null;
+      return h && h.until !== null && h.until > now ? h.until : null;
     },
     window(account, now) {
       const h = of(account, now);
       return h && h.until > now ? h.window : null;
     },
-    held(harness, now) {
-      return records(now).some((r) => r.harness === harness && r.until > now);
+    held(harness, now, guesses = false) {
+      return records(now).some((r) => r.harness === harness && !r.served && (guesses || !r.guess) && r.until > now);
+    },
+    avoidUntil(account, now) {
+      const h = of(account, now);
+      const end = Math.max(h?.until ?? -Infinity, h?.guess?.until ?? -Infinity);
+      return end > now ? end : null;
+    },
+    spent({ harness, account, now, window = null }) {
+      const n = (of(account, now)?.guess?.streak ?? 0) + 1;
+      const until = now + SPENT_GUESS_MS[Math.min(n, SPENT_GUESS_MS.length) - 1];
+      const w = windowOf(window);
+      put({ harness, account, until, streak: n, at: now, guess: true, ...(w ? { window: w } : {}) });
+      return until;
     },
     limit({ harness, account, reset, now, window = null }) {
       const n = reset - now > LIMIT_BACKOFF_MS.at(-1) ? 0 : (of(account, now)?.streak ?? 0) + 1;
@@ -168,8 +224,52 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     served({ harness, account, now, started }) {
       const h = of(account, now);
       // Only a pass that started after the newest limit met: one that ran before it says nothing of the account now.
-      // Its record lasts as long as the hold, so the older streak never becomes the newest again when it is forgotten.
-      if (h?.streak > 0 && started > h.at) put({ harness, account, until: Math.max(now, h.until), streak: 0, at: now });
+      // Its record lasts as long as the hold and the guess it ends, so neither older record stands again once it is gone.
+      const backoff = h?.streak > 0 && started > h.at;
+      const guess = !!h?.guess && started > h.guess.at;
+      if (backoff || guess) put({ harness, account, until: Math.max(now, h.until ?? now, h.guess?.until ?? now), streak: 0, at: now, served: true });
+    },
+    limitedAt(account, now) {
+      return of(account, now)?.limitedAt ?? null;
+    },
+    started({ harness, account, now }) {
+      starts.set(account, now);
+      if (!dir || !KEY.test(account) || !NAME.test(harness)) return;
+      const temp = join(dir, `.${account}.${randomBytes(8).toString("hex")}.tmp`);
+      try {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        if (!ours(lstatSync(dir), uid)) throw new Error("the holds folder is a link, another user's, or writable by others");
+        writeNew(temp, `${JSON.stringify({ harness, account, at: now })}\n`);
+        renameSync(temp, join(dir, START(account)));
+      } catch (e) {
+        rmSync(temp, { force: true });
+        onError(e);
+      }
+    },
+    forgetStarts(keep) {
+      if (!dir) return;
+      try {
+        if (!ours(lstatSync(dir, { throwIfNoEntry: false }), uid)) return;
+        for (const name of readdirSync(dir)) {
+          const key = STARTED.exec(name)?.[1];
+          if (key && !key.includes("@") && !keep.includes(key)) rmSync(join(dir, name), { force: true });
+        }
+      } catch (e) {
+        onError(e);
+      }
+    },
+    startedAt(account, now = Date.now()) {
+      const mine = starts.get(account) ?? null;
+      if (!dir || !KEY.test(account)) return mine;
+      try {
+        const file = join(dir, START(account));
+        const st = lstatSync(file, { throwIfNoEntry: false });
+        if (!st?.isFile() || !ours(st, uid) || st.nlink !== 1 || st.size > MAX_BYTES || !ours(lstatSync(dir), uid)) return mine;
+        const v = JSON.parse(readFileSync(file, "utf8"));
+        return v?.account === account && Number.isSafeInteger(v.at) ? Math.max(v.at > now ? 0 : v.at, mine ?? -Infinity) : mine;
+      } catch {
+        return mine;
+      }
     },
   };
 }

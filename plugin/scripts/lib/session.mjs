@@ -52,8 +52,8 @@ import {
   upsertComment,
   transientError,
 } from "./github.mjs";
-import { commandFailed, log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { EXIT_PROMPT, activityLine, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
@@ -919,6 +919,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    * The harness and models the stage runs on (choice.mjs ranWith), as the Objective's labels chose them: the harness line
    * names them from the next write. `model` stays the stage's own: the reviewer's on a review stage.
    */
+  /** The comment's key (its run id), which the stage's usage record names too (writeUsage `progressRun`). */
+  progress.runId = runId;
   progress.ran = (r) => {
     ran = r;
     harness = r.harness;
@@ -1577,8 +1579,12 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
   mkdirSync(usageDir, { recursive: true });
+  // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
+  // rollout): the provider's structured refusal on a pass (logic.mjs refusalCause), never its prose. A local serve keeps
+  // automatic account choice off that account for a while.
+  const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find((r) => r && refusalCause(r) === "provider-quota" && !Number.isFinite(r.resetAt)) : null;
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1608,6 +1614,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // A stage a harness's usage limit ended (usageLimitExit): the harness, the reset and when it was met (ISO). A local
     // serve reads it to start no stage on that harness until the reset, and to resume the Objective after it.
     ...(usageLimit ? { usageLimit } : {}),
+    // A Block on a usage limit or quota with no reset reported (`spent` above): the harness and the window when named.
+    ...(spent ? { limitRefused: { harness: spent.harness, ...(typeof spent.limitType === "string" ? { limitType: spent.limitType } : {}) } } : {}),
+    // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once.
+    ...(progressRun ? { progressRun } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,

@@ -141,21 +141,29 @@ export function noReviewReason(recs, reviewOf) {
  * left unjudged is named in the body and returned in `unjudged`. With no comment at all, Factory's placeholder goes on
  * the first line the diff shows, and `placeholder` is true: nothing to answer. The placeholder only ever stands for a
  * pass that ran and answered: a failed call (`ok` false) or an answer with no reviewer JSON throws, so no caller can
- * post a review that did not happen (reviewAnswer; the review job Blocks instead).
+ * post a review that did not happen (reviewAnswer; the review job Blocks instead). `foundation`: a foundation Objective's
+ * second pass (review.mjs foundationReview), parsed: its comments go up with the first pass's, the body counts them and
+ * carries the foundation marker (reviewsCover). `review` null with `foundation`: the foundation pass alone, on a PR whose
+ * first pass was posted before the Objective was labelled a foundation one; it judges no entry.
  */
-export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false }) {
+export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
+  if (!review && !foundation) throw new Error("no review to post: no pass answered");
   if (review?.parsed === false) throw new Error("no review to post: the reviewer's answer held no findings JSON");
+  if (foundation?.parsed === false) throw new Error("no review to post: the foundation pass's answer held no findings JSON");
   const judged = review?.acceptance || [];
-  const raw = (review?.comments || []).filter((c) => c && typeof c === "object");
-  const commented = new Set(raw.map(commentEntry).filter(Boolean));
+  const own = (list) => (list || []).filter((c) => c && typeof c === "object");
+  const extra = own(foundation?.comments);
+  const raw = [...own(review?.comments), ...extra];
+  // Only the first pass's comments cover its not-met judgments: a foundation comment on the same entry is another finding.
+  const commented = new Set(own(review?.comments).map(commentEntry).filter(Boolean));
   // On a split part that is not the last, an entry judged deferred (a later part delivers it) gets no comment.
   const unmet = judged.filter((a) => !a.met && !(splitPart && a.deferred) && !commented.has(entryKey(a.entry))).map((a) => ({ path: a.path ?? undefined, line: a.line, body: `acceptance ${a.entry.replace(/^\s*acceptance\s+/i, "")}: not met.${a.evidence ? ` ${a.evidence}` : ""}` }));
   let comments = snapComments(
     [...raw, ...unmet].map((c) => ({ path: c.path, line: c.line, body: typeof c.body === "string" ? sanitize(c.body) : c.body })),
     diff,
   );
-  const unjudged = unjudgedEntries(review, entries);
+  const unjudged = review ? unjudgedEntries(review, entries) : [];
   let placeholder = false;
   if (!comments.length) {
     // On the first line the diff shows; a diff that only deletes shows none, and postReview puts the placeholder in the
@@ -169,12 +177,27 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
         : "no findings; the pass ran and returned nothing line-tied.";
     comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nFactory reviewer: ${said}` }];
   }
-  const lines = [`${marker(issue, "review")}`, `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`];
-  if (judged.length || entries.length) {
+  const checked = "checked the shared contracts the diff changes against their callers";
+  const lines = !foundation
+    ? [marker(issue, "review"), `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`]
+    : review
+      ? [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: one comment-only review of two passes, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
+      : [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
+  if (review && (judged.length || entries.length)) {
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
   }
   return { body: lines.join("\n"), comments, placeholder, unjudged };
+}
+
+/**
+ * What Factory's reviews on a PR (`reviews`, GitHub's list) already cover: `reviewed`, one carries its review marker (the
+ * first pass ran); `foundation`, one also carries the foundation marker (the foundation pass ran, with the first pass or
+ * after it). Only reviews from Factory or someone who can push count.
+ */
+export function reviewsCover(reviews, issue) {
+  const own = (reviews || []).filter((r) => trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")));
+  return { reviewed: own.length > 0, foundation: own.some((r) => (r.body || "").includes(marker(issue, "foundation"))) };
 }
 
 /** pr.md as {title, body}: its first non-empty line is the title (a leading `#` heading mark dropped), the rest the body. */

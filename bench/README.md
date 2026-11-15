@@ -102,7 +102,7 @@ Local mode's sandbox bar, probed on this machine. One probe script runs under sr
 
 ## Skills, versioned
 
-`node bench/skills.mjs` records every plugin skill (SHA-256, lines, words of its SKILL.md, and the same for each other file in its directory, such as a `reference.md` it loads on demand) and a digest over all of them in `bench/skills.json`; each scorecard row carries that digest, so a row names the skills it ran on. `node bench/skills.mjs --check` fails when a skill changed without a new record, and both forms fail when a SKILL.md is over the one-page cap (60 lines, 700 words). Detail a run looks up rather than follows every time goes in a reference file beside the SKILL.md, which names it with a pointer saying when to load it; every route that installs a skill copies its whole directory. Record after the scored Objective that justified the change, never before.
+`node bench/skills.mjs` records every plugin skill (SHA-256, lines, words of its SKILL.md, and the same for each other file in its directory, such as a `reference.md` it loads on demand) and a digest over all of them in `bench/skills.json`. Every skill change re-records and commits `bench/skills.json` in the same PR: CI runs `node bench/skills.mjs --check`, which fails when a skill changed without a new record. Both forms fail when a SKILL.md is over the one-page cap (60 lines, 700 words). Detail a run looks up rather than follows every time goes in a reference file beside the SKILL.md, which names it with a pointer saying when to load it; every route that installs a skill copies its whole directory. Each scorecard row carries the digest and `recordedAt` of the `bench/skills.json` in the checkout that scores it, so the row names the skills that checkout ships.
 
 ## Score
 

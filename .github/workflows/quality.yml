@@ -53,5 +53,5 @@ jobs:
         run: |
           left="$(ls -A "$RUNNER_TEMP/tests")"
           if [ -n "$left" ]; then echo "::error::the tests left these in their temp folder: $(echo $left)"; exit 1; fi
-      - name: Skills within the one-page cap
-        run: node bench/skills.mjs
+      - name: Skills within the one-page cap and recorded in bench/skills.json
+        run: node bench/skills.mjs --check

@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,9 @@ import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
-import { LIMIT_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
+import { LIMIT_PASS_PROMPT, USAGE_LIMIT, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
+import { captureSession, dropSessions } from "../scripts/lib/claude-runner.mjs";
+import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
 import { OUTAGE, resetNetwork, waitOutages } from "../scripts/lib/network.mjs";
 
 // #254: a harness pass that ends on its subscription's usage limit is read from the harness's structured fields, never
@@ -195,4 +197,161 @@ test("runHarness, real, fake claude: a wait never reruns past the dollar cap; th
     assert.equal(c.length, 2);
     assert.equal(Number(c[1].args[c[1].args.indexOf("--max-budget-usd") + 1]), 1.5);
   });
+});
+
+// #256: Codex (codex-cli 0.167, ChatGPT login) reports its usage limit on its stream as prose only (an `error` event's
+// `message`, exit 1). The structure is the rate-limit snapshot it records in the thread's rollout when the backend
+// refuses with `usage_limit_reached` (codex-rs rust-v0.167.0: codex-api/src/api_bridge.rs builds it from the 429's
+// x-codex-* headers, core/src/session/turn.rs `update_rate_limits` emits it as a `token_count` event, and
+// rollout/src/policy.rs persists that event). The fixtures follow those shapes: the stream as
+// exec/src/event_processor_with_jsonl_output.rs writes it, with the message protocol/src/error.rs makes for a Pro plan;
+// the rollout's `token_count` lines in the shape a real 0.167 rollout holds, at the window's limit with no credits left.
+const CODEX_STREAM = readFileSync(join(fixtures, "codex-0.167-usage-limit.jsonl"), "utf8");
+const CODEX_ROLLOUT = readFileSync(join(fixtures, "codex-0.167-usage-limit-rollout.jsonl"), "utf8");
+const CODEX_THREAD = "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0256";
+const PASS_START = "2026-11-14T21:00:00.000Z";
+const codexRec = (rollout = CODEX_ROLLOUT, since = PASS_START, stream = CODEX_STREAM) => ({ ...parseUsage("codex", stream, "gpt-6.1-sol", 1, { rollout, since }), exitCode: 1, signal: null, timedOut: false });
+/** The fixture's last snapshot (the refusal's) with its rate_limits changed by `edit`. */
+const editLimit = (edit) => {
+  const lines = CODEX_ROLLOUT.trim().split("\n");
+  const o = JSON.parse(lines.at(-1));
+  edit(o.payload.rate_limits);
+  return [...lines.slice(0, -1), JSON.stringify(o)].join("\n");
+};
+
+test("codex: the usage limit is read from the rollout's rate-limit snapshot, never the prose; no crash, Blocked provider-quota naming the reset", () => {
+  const rec = codexRec();
+  assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "codex", status: null, type: "usage_limit_reached", code: null, message: undefined, limitType: "codex/primary", resetAt: Date.parse(RESET) });
+  assert.equal(crashed(rec), false, "no death, so the worker does not retry it");
+  const d = decideExit({ harness: { ...rec, died: 0 }, pr: null, commits: 0 });
+  assert.equal(d.exit, "blocked");
+  assert.equal(d.cause, "provider-quota");
+  assert.match(d.reason, new RegExp(`^codex reached its subscription's usage limit \\(usage_limit_reached\\), which resets at ${RESET.replaceAll(".", "\\.")}; not run again on another model`));
+  assert.ok(!/crash|3:00 PM|credits/.test(d.reason), "structure only: none of the provider's prose");
+  // The stream alone (no rollout read) holds no structure: the failure stays a death, as before.
+  const bare = { ...parseUsage("codex", CODEX_STREAM, null, 1), exitCode: 1, signal: null, timedOut: false };
+  assert.equal(bare.refusal, undefined);
+  assert.equal(crashed(bare), true);
+});
+
+test("codex: no usage limit on credits, below the limit, from an earlier pass, or after a completed turn", () => {
+  const onCredits = editLimit((rl) => (rl.credits = { has_credits: true, unlimited: false, balance: "62494.47" }));
+  assert.equal(codexRec(onCredits).refusal, undefined, "on credits Codex runs on past a full window");
+  assert.equal(codexRec(editLimit((rl) => (rl.credits = { has_credits: false, unlimited: true, balance: null }))).refusal, undefined);
+  assert.equal(codexRec(editLimit((rl) => (rl.primary.used_percent = 99))).refusal, undefined);
+  assert.equal(codexRec(CODEX_ROLLOUT, "2026-11-14T21:00:10.000Z").refusal, undefined, "the snapshot is an earlier pass's");
+  assert.equal(codexRec(CODEX_ROLLOUT, null).refusal, undefined, "no pass start, no reading");
+  const recovered = `${CODEX_STREAM}{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}\n`;
+  assert.equal(codexRec(CODEX_ROLLOUT, PASS_START, recovered).refusal, undefined);
+  // Missing credits read as none: the full window is the limit.
+  assert.equal(codexRec(editLimit((rl) => (rl.credits = null))).refusal.resetAt, Date.parse(RESET));
+});
+
+test("codex: the reset is the latest full window's; a workspace's credits or spend cap has none", () => {
+  const weekly = Date.parse(RESET) / 1000 + 3 * 86_400;
+  const both = codexRec(editLimit((rl) => (rl.secondary = { used_percent: 100, window_minutes: 43200, resets_at: weekly }))).refusal;
+  assert.equal(both.resetAt, weekly * 1000);
+  assert.equal(both.limitType, "codex/secondary");
+  const typed = codexRec(editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "rate_limit_reached" }))).refusal;
+  assert.equal(typed.code, "rate_limit_reached");
+  assert.equal(typed.resetAt, Date.parse(RESET));
+  // A reached type with no window at its limit: the limit, with no reset.
+  const workspace = codexRec(editLimit((rl) => Object.assign(rl, { rate_limit_reached_type: "workspace_member_credits_depleted", primary: { used_percent: 40, window_minutes: 10080, resets_at: RESET_S } }))).refusal;
+  assert.equal(workspace.code, "workspace_member_credits_depleted");
+  assert.equal(workspace.resetAt, undefined);
+  assert.equal(refusalCause(workspace), "provider-quota");
+  assert.match(refusalReason(workspace), /^codex reached its subscription's usage limit \(usage_limit_reached workspace_member_credits_depleted\), with no reset time reported/);
+  // A spend cap at a full window: still no reset, since the window's end does not lift it.
+  assert.equal(codexRec(editLimit((rl) => (rl.rate_limit_reached_type = "workspace_owner_usage_limit_reached"))).refusal.resetAt, undefined);
+});
+
+/**
+ * A fake codex: its first `limited` runs write the usage-limit rollout under CODEX_HOME (stamped now, its reset at
+ * `resetS`), print the usage-limit stream and exit 1; later ones print a completed turn. argv and stdin logged.
+ */
+function fakeCodex({ limited = 1, resetS = RESET_S } = {}) {
+  const bin = mkdtempSync(join(tmpdir(), "factory-codex-limit-"));
+  const home = join(bin, "codex-home");
+  const log = join(bin, "calls.jsonl");
+  writeFileSync(join(bin, "limit.jsonl"), CODEX_STREAM);
+  writeFileSync(join(bin, "rollout.jsonl"), CODEX_ROLLOUT.replaceAll(`"resets_at":${RESET_S}`, `"resets_at":${resetS}`));
+  const ok = [{ type: "thread.started", thread_id: CODEX_THREAD }, { type: "turn.started" }, { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "done" } }, { type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5 } }];
+  writeFileSync(join(bin, "ok.jsonl"), ok.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, "utf8");
+const n = fs.existsSync(${JSON.stringify(log)}) ? fs.readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").length : 0;
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt }) + "\\n");
+if (n < ${limited}) {
+  const dir = path.join(process.env.CODEX_HOME, "sessions", "2026", "11", "14");
+  fs.mkdirSync(dir, { recursive: true });
+  const now = new Date().toISOString();
+  const text = fs.readFileSync(${JSON.stringify(join(bin, "rollout.jsonl"))}, "utf8").replace(/"timestamp":"[^"]*"/g, '"timestamp":"' + now + '"');
+  fs.appendFileSync(path.join(dir, "rollout-2026-11-14T21-00-00-${CODEX_THREAD}.jsonl"), text);
+  process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "limit.jsonl"))}, "utf8"));
+  process.exit(1);
+}
+process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "ok.jsonl"))}, "utf8"));
+`, { mode: 0o755 });
+  const calls = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  return { bin, home, calls };
+}
+
+const codexPass = (f, extra = {}) => ({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: f.bin, env: { PATH: process.env.PATH, CODEX_HOME: f.home }, timeoutMs: 24 * 60 * 60_000, label: "work-1", ...extra });
+
+test("runHarness, real, fake codex: a reset within the stage's in-place bound is waited for, then the thread resumes on the same model", async () => {
+  const f = fakeCodex();
+  await inStage(f.bin, Date.parse(RESET) - 10 * 60_000, async ({ now }) => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    const rec = await runHarness(codexPass(f, { env: { PATH: process.env.PATH, CODEX_HOME: f.home } }));
+    const c = f.calls();
+    assert.equal(c.length, 2);
+    assert.deepEqual(c[0].args.slice(0, 1), ["exec"]);
+    assert.equal(c[0].args[c[0].args.indexOf("-m") + 1], "gpt-6.1-sol");
+    assert.deepEqual(c[1].args.slice(0, 3), ["exec", "resume", CODEX_THREAD], "the same thread, so the same model");
+    assert.equal(c[1].prompt, LIMIT_PASS_PROMPT);
+    assert.ok(now() >= Date.parse(RESET), "the rerun starts after the reset");
+    assert.equal(rec.ok, true);
+    assert.equal(rec.limitWaits, 1);
+  });
+});
+
+test("runHarness, real, fake codex: a reset past the in-place bound throws USAGE_LIMIT naming it; nothing runs again", async () => {
+  const f = fakeCodex({ limited: 9 });
+  await inStage(f.bin, Date.parse(RESET) - 2 * 60 * 60_000, async () => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    await assert.rejects(runHarness(codexPass(f)), (e) => e.code === USAGE_LIMIT && e.resetAt === Date.parse(RESET) && e.refusal.harness === "codex" && e.refusal.type === "usage_limit_reached");
+    assert.equal(f.calls().length, 1);
+  });
+  // Outside a stage's wait (a reviewer's call, say) the refusal comes back: no fallback model, no crash.
+  await inStage(f.bin, Date.parse(RESET) - 2 * 60 * 60_000, async () => {
+    const rec = await runHarness(codexPass(f, { label: "review", reviewer: true }));
+    assert.equal(f.calls().length, 2);
+    assert.equal(rec.refusal?.type, "usage_limit_reached");
+    assert.equal(reviewRerun({ missed: true, refusal: rec.refusal, retryTimeout: 10 * 60_000 }), false);
+    assert.equal(crashed({ ...rec, died: 0 }), false);
+  });
+});
+
+test("codexPassRollout: on a runner the rollout is the copy captured after the run, never the agent's home by then", async () => {
+  dropSessions();
+  const root = mkdtempSync(join(tmpdir(), "codex-limit-runner-"));
+  const layout = codexRunnerLayout({ home: join(root, "agent"), tmp: join(root, "agent", "tmp") }, join(root, "codex-home"));
+  const file = join(layout.sessions, "2026", "11", "14", `rollout-2026-11-14T21-00-00-${CODEX_THREAD}.jsonl`);
+  mkdirSync(join(file, ".."), { recursive: true });
+  writeFileSync(file, CODEX_ROLLOUT);
+  try {
+    assert.equal(await codexPassRollout(CODEX_THREAD, layout, process.env), null, "nothing captured yet");
+    await captureSession(layout, CODEX_THREAD);
+    // Written after the capture (the agent's validation runs next): not what is read.
+    appendFileSync(file, `${JSON.stringify({ timestamp: "2026-11-14T21:00:20.000Z", type: "event_msg", payload: { type: "token_count", info: null, rate_limits: { primary: { used_percent: 5 } } } })}\n`);
+    const text = await codexPassRollout(CODEX_THREAD, layout, process.env);
+    assert.equal(text.split("\n").length, 2, "the token_count lines only");
+    assert.equal(parseUsage("codex", CODEX_STREAM, null, 1, { rollout: text, since: PASS_START }).refusal.resetAt, Date.parse(RESET));
+  } finally {
+    dropSessions();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -1164,8 +1164,12 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
   // stage's saved transcript use this copy, never what the agent's home holds by then.
-  const ranSession = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId : null;
+  const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
+  const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
+  // A failed Codex run's usage limit is in its rollout only (usage.mjs providerRefusal): read when the stream names no
+  // refusal of its own, from the copy just captured on a runner.
+  const rollout = harness === "codex" && ranSession && !ran.ok && !ran.refusal ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
   const found = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : { threads: [], missed: [] };
@@ -1176,7 +1180,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd });
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout, since: started });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
   const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
@@ -1288,6 +1292,38 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
     return { threads: [], missed: [{ id: null, why: "the read failed" }] };
   }
 }
+/**
+ * A Codex run's own rollout, its `token_count` lines only, for its usage limit (usage.mjs providerRefusal): on a runner
+ * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from every
+ * rollout file of the thread under the CODEX_HOME in `env` (a resumed thread can have more than one), each a regular
+ * file of at most MAX_ROLLOUT_BYTES. Null when there is none; never throws: a failed read is logged, and the run's
+ * failure stays what its stream says.
+ */
+export async function codexPassRollout(threadId, runner, env, { label = "run" } = {}) {
+  try {
+    if (!plainThread(threadId)) return null;
+    let text = "";
+    if (runner) {
+      const a = capturedSession(threadId);
+      if (!a) return null;
+      if (a.truncated || a.tar.length > MAX_ROLLOUT_BYTES + 1024 * 1024) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
+      const t = await exec("tar", ["-xOf", "-"], { env, input: a.tar, timeoutMs: THREAD_READ_MS });
+      if (t.code !== 0 || t.timedOut) throw new Error(t.timedOut ? "unpacking timed out" : "unpacking failed");
+      text = String(t.stdout);
+    } else {
+      const root = codexSessionRoot(env);
+      for (const f of codexRolloutFiles(root, threadId)) {
+        const st = lstatSync(join(root, f), { throwIfNoEntry: false });
+        if (st?.isFile() && st.size <= MAX_ROLLOUT_BYTES) text += `${readFileSync(join(root, f), "utf8")}\n`;
+      }
+    }
+    return text.split("\n").filter((l) => l.includes('"token_count"')).join("\n") || null;
+  } catch (e) {
+    log(`${label}: Codex's rollout could not be read for a usage limit (${String(e?.message || e).slice(0, 160)})`);
+    return null;
+  }
+}
+
 /**
  * A Codex thread's rollout lines that carry its usage (live-spend.mjs rolloutTotal: `token_usage_record` lines and the last
  * `token_count` one), read as the run's Codex wrote it: on a runner as the agent from its CODEX_HOME, locally from the

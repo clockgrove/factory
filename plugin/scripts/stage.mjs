@@ -402,6 +402,12 @@ export function killedUsage({ harness, model, events, maxUsd }) {
  * clock, the Objective Blocked with a reason of codes and times only. A lost claim applies nothing: another launcher
  * holds the Objective now. The agent's processes are reaped by the caller.
  */
+/**
+ * The PR a wall-clock Block names: the review stage's was delivered (`draft: false`); the work stage's as `found` (findPr)
+ * reads it. applyExit says which (a delivered PR, or a draft with what exists).
+ */
+export const wallClockPr = (stage, prNumber, found) => (stage === "review" ? { number: prNumber, draft: false } : found?.number ? { number: found.number, draft: !!found.draft } : null);
+
 async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDir, secrets }) {
   await reapNamespace(AGENT_USER).catch((e) => log(`reap: ${String(e.message).slice(0, 120)}`));
   const masked = maskFile(join(usageDir, "events.jsonl"), secrets);
@@ -418,10 +424,10 @@ async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDi
     }
   }
   if (why !== "wall clock") return;
-  const pr = stage === "review" ? { number: prNumber } : await findPr(repo, `factory/${issue}`, opts).catch(() => null);
+  const pr = wallClockPr(stage, prNumber, stage === "review" ? null : await findPr(repo, `factory/${issue}`, opts).catch(() => null));
   const minutes = Number(env.FACTORY_TIMEOUT_MINUTES) || null;
   const cap = sessionCapNote(env.FACTORY_STAGE_SESSION_CAP);
-  await applyExit(repo, { issue, pr: pr?.number ? { number: pr.number } : null, exit: "blocked", cause: "work", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.FACTORY_NOTIFY || "", stage }, { token: opts.token() }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
+  await applyExit(repo, { issue, pr, exit: "blocked", cause: "work", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.FACTORY_NOTIFY || "", stage }, { token: opts.token() }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

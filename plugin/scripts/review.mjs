@@ -19,7 +19,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, listComments, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
+import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
@@ -1020,7 +1020,7 @@ async function main() {
   let stoppedAtMerge = null;
   if (decision.exit === "delivered" && !decision.rerun && !conflict) {
     // A harness may have converted the PR to a draft (the task card keeps PRs drafts until Factory's pass); delivered means ready.
-    if (pr.draft) await setDraft(repo, pr.number, false, token).catch((e) => log(`ready: ${e.message.slice(0, 120)}`));
+    pr = await markReady(repo, pr, token).catch((e) => (log(`ready: ${e.message.slice(0, 120)}`), pr));
     // The merge closes the issue only through a closing reference GitHub itself parsed; add one when it is missing (a
     // split part that leaves work for the next says `Refs #N` and closes nothing).
     const closes = splitPart ? null : await closingIssues(repo, pr.number, token).catch(() => null);

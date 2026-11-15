@@ -307,6 +307,30 @@ export async function rerunProbeCheck({ repo, token }) {
   return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
 }
 
+/**
+ * The ref the workflow's first `uses: clockgrove/factory@<ref>` calls (a step's, or a job's), read from the parsed YAML,
+ * so a commented-out line is not one and a quoted value is; "" when there is none or the file does not parse.
+ */
+export function factoryRef(text) {
+  let doc;
+  try {
+    doc = parseYaml(String(text ?? ""));
+  } catch {
+    return "";
+  }
+  const jobs = doc && typeof doc.jobs === "object" ? Object.values(doc.jobs || {}) : [];
+  for (const job of jobs) {
+    for (const node of [job, ...(Array.isArray(job?.steps) ? job.steps : [])]) {
+      const ref = /^clockgrove\/factory@(\S+)$/.exec(typeof node?.uses === "string" ? node.uses.trim() : "")?.[1];
+      if (ref) return ref;
+    }
+  }
+  return "";
+}
+
+/** A `vX.Y.Z` release's numbers, or null for any other ref (a commit, a floating vX.Y, a branch). */
+export const releaseOf = (ref) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(ref || ""))?.slice(1).map(Number) ?? null;
+
 /** Update commands for the plugin, per harness: each marketplace is named `clockgrove` (README, Install). */
 export const PLUGIN_UPDATE =
   "update the plugin, then start a new session: Claude Code `claude plugin marketplace update clockgrove && claude plugin update factory@clockgrove`; Codex `codex plugin marketplace upgrade clockgrove && codex plugin add factory@clockgrove`; Copilot `copilot plugin update factory@clockgrove`";
@@ -317,8 +341,8 @@ export const PLUGIN_UPDATE =
  * runs. WARN when older, PASS otherwise; null when the workflow pins no `vX.Y.Z` release (a commit, a floating tag).
  */
 export function pluginVersionCheck(text, version = FACTORY_VERSION) {
-  const pin = /uses:\s*clockgrove\/factory@v(\d+)\.(\d+)\.(\d+)\b/.exec(text || "")?.slice(1).map(Number);
-  const have = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version || ""))?.slice(1).map(Number);
+  const pin = releaseOf(factoryRef(text));
+  const have = releaseOf(`v${version}`);
   if (!pin || !have) return null;
   const i = have.findIndex((n, k) => n !== pin[k]);
   const pinned = `v${pin.join(".")}`;
@@ -352,11 +376,11 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     const ro = /contents:\s*read/.test(text) && !/contents:\s*write/.test(text);
     out.push(ro ? PASS("job token", "contents: read in the workflow") : FAIL("job token", "the workflow grants contents: write", "set permissions: contents: read; writes go through the App"));
     // A pin older than local mode does not know factory:local, so its jobs would also run Objectives a local loop holds.
-    const pin = /uses:\s*clockgrove\/factory@v(\d+)\.(\d+)\.(\d+)\b/.exec(text);
+    const pin = releaseOf(factoryRef(text));
     if (pin) {
-      const [maj, min, pat] = pin.slice(1).map(Number);
+      const [maj, min, pat] = pin;
       const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
-      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.slice(1).join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.slice(1).join(".")}`));
+      out.push(old ? FAIL("factory pin", `the workflow calls clockgrove/factory@v${pin.join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled factory:local too") : PASS("factory pin", `clockgrove/factory@v${pin.join(".")}`));
     }
     // A session's skills and scripts are the installed plugin's, not the Action's: in a job they are the same tree.
     const plugin = job ? null : pluginVersionCheck(text);
@@ -748,7 +772,7 @@ function workflowPath(env) {
 
 /** The Factory ref a workflow calls (a release tag, or a commit shortened), or "". */
 const pinOf = (text) => {
-  const ref = /uses:\s*clockgrove\/factory@([\w.\-/]+)/.exec(text || "")?.[1] || "";
+  const ref = factoryRef(text);
   return /^[0-9a-f]{40}$/.test(ref) ? ref.slice(0, 7) : ref;
 };
 

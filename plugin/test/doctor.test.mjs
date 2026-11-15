@@ -253,11 +253,12 @@ test("doctor and serve warn when the installed plugin is older than the release 
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   let pinned = newer;
+  let flowText = null;
   globalThis.fetch = async (url) => {
     const path = new URL(String(url)).pathname;
     const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
     if (path === "/repos/o/r") return json(200, { default_branch: "main" });
-    if (path === "/repos/o/r/contents/.github/workflows/factory.yml") return new Response(flow(pinned), { status: 200 });
+    if (path === "/repos/o/r/contents/.github/workflows/factory.yml") return new Response(flowText ?? flow(pinned), { status: 200 });
     if (path === "/repos/o/r/rulesets") return json(200, []);
     if (path === "/graphql") return json(200, { data: {} });
     return json(404, { message: "Not Found" });
@@ -275,6 +276,13 @@ test("doctor and serve warn when the installed plugin is older than the release 
     assert.deepEqual(await row(true), [], "a job's plugin is the Action it pins");
     pinned = `v${FACTORY_VERSION}`;
     assert.equal((await row(false))[0].status, "PASS");
+    const pinRow = async (text) => {
+      flowText = text;
+      return (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env, job: true })).filter((c) => c.name === "factory pin");
+    };
+    assert.deepEqual((await pinRow(`# - uses: clockgrove/factory@v0.7.1\n${flow("v0.9.30")}`)).map((c) => c.status), ["PASS"], "a commented-out old pin fails nothing");
+    assert.deepEqual((await pinRow(flow("v0.7.1").replace("clockgrove/factory@v0.7.1", "'clockgrove/factory@v0.7.1'"))).map((c) => c.status), ["FAIL"], "a quoted old pin is read");
+    flowText = null;
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;
@@ -286,6 +294,16 @@ test("doctor and serve warn when the installed plugin is older than the release 
   assert.equal(pluginVersionCheck(flow("v1.0.0"), "0.10.2").status, "WARN");
   assert.equal(pluginVersionCheck(flow("v0.9"), "0.9.4"), null);
   assert.equal(pluginVersionCheck(flow("0123456789abcdef0123456789abcdef01234567"), "0.9.4"), null);
+  // The parsed YAML decides: a commented-out pin is none, a quoted one counts, the first call wins.
+  const { factoryRef } = await import("../scripts/doctor.mjs");
+  const commented = `# - uses: clockgrove/factory@v9.9.9\n${flow("v0.9.4")}`;
+  assert.equal(factoryRef(commented), "v0.9.4");
+  assert.equal(pluginVersionCheck(commented, "0.9.4").status, "PASS", "a comment pins nothing");
+  assert.equal(factoryRef("on: issues\n# uses: clockgrove/factory@v9.9.9\njobs: {}\n"), "");
+  const quoted = flow('"v0.9.31"').replace('clockgrove/factory@"v0.9.31"', '"clockgrove/factory@v0.9.31"');
+  assert.equal(factoryRef(quoted), "v0.9.31");
+  assert.equal(pluginVersionCheck(quoted, "0.9.30").status, "WARN");
+  assert.equal(factoryRef("jobs: [unclosed"), "", "a file that does not parse pins nothing");
   // serve's start: the default branch's committed workflow, read through git.
   const git = (text) => (args) => (args[0] === "show" ? (text === null ? { status: 128, stdout: "" } : { status: 0, stdout: text }) : args[0] === "ls-remote" ? { status: 0, stdout: "ref: refs/heads/main\tHEAD\n" } : { status: 0, stdout: "" });
   const line = pluginLine(committedWorkflowEnv("/clone", { git: git(flow(newer)) }));

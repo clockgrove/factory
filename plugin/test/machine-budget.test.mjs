@@ -100,68 +100,113 @@ test("slots: processes share the budget, and a holder killed with SIGKILL frees 
   try {
     assert.deepEqual([a.taken, b.taken, c.taken], [true, true, false], "the third process finds the budget of 2 full");
     assert.deepEqual(slotHolders(dir).map((h) => [h.pid, h.repo, h.issue]), [[a.child.pid, "o/a", 1], [b.child.pid, "o/b", 2]]);
+    assert.deepEqual(readdirSync(dir).sort(), ["0.0.json", "1.0.json"], "one file per slot, its first generation");
     await killed(a.child);
     assert.deepEqual(slotHolders(dir).map((h) => h.pid), [b.child.pid], "the killed holder's slot is gone");
-    assert.equal(readdirSync(dir).length, 1, "and its file removed");
     const d = await holder(dir, 2, { repo: "o/d", issue: 4 });
     assert.equal(d.taken, true, "its slot is free again");
+    assert.deepEqual(slotHolders(dir).map((h) => [h.slot, h.pid]), [[0, d.child.pid], [1, b.child.pid]], "taken as the slot's next generation");
+    assert.deepEqual(readdirSync(dir).sort(), ["0.1.json", "1.0.json"], "the killed holder's generation removed");
     await killed(d.child);
   } finally {
     for (const p of [a, b, c]) if (p.child.exitCode === null && p.child.signalCode === null) await killed(p.child);
   }
 });
 
-test("slots: loops taking the last slot at once leave exactly one of them holding it (#309)", async () => {
+/**
+ * `n` processes that wait for one shared moment, then each take a slot of `budget` with the real takeSlot and hold what
+ * they got: {child, taken} for each.
+ */
+function racers(dir, budget, n) {
   const lib = pathToFileURL(join(here, "..", "scripts", "lib", "machine.mjs")).href;
-  for (let round = 0; round < 6; round += 1) {
+  const at = Date.now() + 700;
+  return Promise.all(
+    Array.from({ length: n }, () => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", `import { takeSlot } from ${JSON.stringify(lib)}; while (Date.now() < ${at}); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: ${budget} }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
+      return new Promise((ok, fail) => {
+        let out = "";
+        child.stdout.on("data", (c) => ((out += c), out.includes("\n") && ok({ child, taken: out.startsWith("taken") })));
+        child.on("exit", (code) => fail(new Error(`racer exited ${code}`)));
+      });
+    }),
+  );
+}
+
+test("slots: loops taking the last slot at once leave exactly one of them holding it (#309, #323)", async () => {
+  for (let round = 0; round < 8; round += 1) {
     const dir = slotsDir(home());
-    // Each racer waits for one shared moment, then takes a slot of a budget of 1.
-    const at = Date.now() + 700;
-    const racers = await Promise.all(
-      Array.from({ length: 5 }, () => {
-        const child = spawn(process.execPath, ["--input-type=module", "-e", `import { takeSlot } from ${JSON.stringify(lib)}; while (Date.now() < ${at}); const s = takeSlot({ dir: ${JSON.stringify(dir)}, budget: 1 }); process.stdout.write(s ? "taken\\n" : "full\\n"); setInterval(() => {}, 60000);`], { stdio: ["ignore", "pipe", "inherit"] });
-        return new Promise((ok) => {
-          let out = "";
-          child.stdout.on("data", (c) => ((out += c), out.includes("\n") && ok({ child, taken: out.startsWith("taken") })));
-        });
-      }),
-    );
-    try {
-      const taken = racers.filter((r) => r.taken);
-      assert.equal(taken.length, 1, `round ${round}: one racer keeps the slot`);
-      assert.deepEqual(slotHolders(dir).map((h) => h.pid), [taken[0].child.pid]);
-    } finally {
-      for (const r of racers) await killed(r.child);
+    // Odd rounds race for the last of a budget of 3, two slots held already (one of them let go and taken again).
+    const budget = round % 2 ? 3 : 1;
+    const mine = [];
+    if (budget === 3) {
+      mine.push(takeSlot({ dir, budget }), takeSlot({ dir, budget }));
+      mine[0].release();
+      mine[0] = takeSlot({ dir, budget });
     }
+    const raced = await racers(dir, budget, 8);
+    try {
+      const taken = raced.filter((r) => r.taken);
+      assert.equal(taken.length, 1, `round ${round}: one racer keeps the slot`);
+      assert.deepEqual(slotHolders(dir).map((h) => h.pid).sort(), [...mine.map(() => process.pid), taken[0].child.pid].sort(), `round ${round}: the budget's holders`);
+    } finally {
+      for (const r of raced) await killed(r.child);
+      for (const s of mine) s.release();
+    }
+  }
+});
+
+test("slots: a loop whose clock reads earlier than the holder's cannot take the slot it holds (#323)", () => {
+  // A take stalled between reading the clock and writing its slot, or another process's clock behind this one's: either
+  // way the later take reads an earlier time. Who holds a slot is the file system's to say, not a clock's.
+  const dir = slotsDir(home());
+  const held = takeSlot({ dir, budget: 1, holder: { repo: "o/a" } });
+  const now = performance.now;
+  performance.now = () => -1e9;
+  let late;
+  try {
+    late = takeSlot({ dir, budget: 1, holder: { repo: "o/b" } });
+  } finally {
+    performance.now = now;
+  }
+  try {
+    assert.equal(late, null, "the budget is full");
+    assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/a"]);
+  } finally {
+    late?.release();
+    held.release();
   }
 });
 
 test("slots: without a boot id, a recorded start time that differs from the pid's own means the holder is gone", () => {
   const dir = slotsDir(home());
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "1-reused.json"), JSON.stringify({ pid: process.pid, start: "1", boot: null, repo: "o/a" }));
-  writeFileSync(join(dir, "2-same.json"), JSON.stringify({ pid: process.pid, start: startTime(process.pid), boot: null, repo: "o/b" }));
+  writeFileSync(join(dir, "0.0.json"), JSON.stringify({ pid: process.pid, start: "1", boot: null, repo: "o/a" }));
+  writeFileSync(join(dir, "1.0.json"), JSON.stringify({ pid: process.pid, start: startTime(process.pid), boot: null, repo: "o/b" }));
   assert.deepEqual(slotHolders(dir).map((h) => h.repo), ["o/b"]);
-  assert.deepEqual(readdirSync(dir), ["2-same.json"]);
 });
 
 test("slots: a record from another boot, or a pid now running another process, holds nothing", () => {
   const dir = slotsDir(home());
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "1-old.json"), JSON.stringify({ pid: process.pid, start: "1", boot: "another-boot", repo: "o/a" }));
-  writeFileSync(join(dir, "2-reused.json"), JSON.stringify({ pid: process.pid, start: "1", boot: bootId(), repo: "o/a" }));
+  writeFileSync(join(dir, "0.0.json"), JSON.stringify({ pid: process.pid, start: "1", boot: "another-boot", repo: "o/a" }));
+  writeFileSync(join(dir, "1.0.json"), JSON.stringify({ pid: process.pid, start: "1", boot: bootId(), repo: "o/a" }));
   assert.deepEqual(slotHolders(dir), []);
-  assert.deepEqual(readdirSync(dir), []);
   const s = takeSlot({ dir, budget: 1, holder: { repo: "o/a" } });
   assert.ok(s);
   assert.equal(takeSlot({ dir, budget: 1, holder: { repo: "o/b" } }), null, "the budget is full");
   const forced = takeSlot({ dir, budget: 1, force: true, holder: { repo: "o/b" } });
   assert.ok(forced, "force takes one whatever the count");
   s.assign({ issue: 9, stage: "work" });
-  assert.deepEqual(slotHolders(dir).map((h) => [h.repo, h.issue ?? null, h.stage ?? null]).sort(), [["o/a", 9, "work"], ["o/b", null, null]]);
+  assert.deepEqual(slotHolders(dir).map((h) => [h.slot, h.repo, h.issue ?? null, h.stage ?? null]), [[0, "o/a", 9, "work"], [1, "o/b", null, null]]);
+  assert.deepEqual(readdirSync(dir).sort(), ["0.1.json", "1.1.json"], "each gone holder's slot taken as its next generation");
   s.release();
+  assert.equal(takeSlot({ dir, budget: 1, holder: { repo: "o/c" } }), null, "a forced slot counts against the budget");
   forced.release();
-  assert.deepEqual(readdirSync(dir), []);
+  assert.deepEqual(slotHolders(dir), []);
+  assert.deepEqual(readdirSync(dir).sort(), ["0.1.json", "1.1.json"], "a slot let go keeps its file, which says free");
+  const again = takeSlot({ dir, budget: 1, holder: { repo: "o/c" } });
+  assert.deepEqual(readdirSync(dir).sort(), ["0.2.json", "1.1.json"]);
+  again.release();
 });
 
 /**

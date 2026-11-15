@@ -2,14 +2,17 @@
 // harness login): the machine's stage budget, the slots its loops hold against it, and how loaded the machine is now.
 // Both live under the user's ~/.cache/factory, which no sandbox may write:
 //   machine.json   {"stages": N}: the budget, set once per machine; without it, from the machine's size (defaultStages)
-//   slots/         one file per slot held: <pid>-<nonce>.json, its holder's process record (pid, start time, boot) and
-//                  what it runs (repository, issue, stage)
-// A slot frees itself when its holder dies: a record whose process is gone (another boot, no such pid, or a pid whose
-// start time differs) is removed by the next reader, so a crash, a SIGKILL or a reboot leaves nothing held.
+//   slots/         numbered slots, each a file <slot>.<generation>.json: its holder's process record (pid, start time,
+//                  boot) and what it runs (repository, issue, stage), or {"free": true} once let go
+// A slot's highest generation says who holds it. Taking a slot is creating its next generation, which the file system
+// lets exactly one loop do (a hard link, refused when the name exists), so two loops never hold one slot. A slot frees
+// itself when its holder dies: a record whose process is gone (another boot, no such pid, or a pid whose start time
+// differs) holds nothing, so a crash, a SIGKILL or a reboot leaves nothing held. The highest generation is never
+// removed (a name removed could be taken again by a loop that read the slot before), only the generations below it.
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { availableParallelism, homedir, loadavg, totalmem } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { writeNew } from "./fsafe.mjs";
 import { processRecord, sameProcess, startTime } from "./proc.mjs";
 
@@ -76,101 +79,191 @@ const holderGone = (rec) => {
   return !!now && /^\d+$/.test(String(rec.start ?? "")) && now !== String(rec.start);
 };
 
-/** The order slots were taken in: their precise time, then their file name, so every reader orders them alike. */
-const takenOrder = (a, b) => (Number(a.at) || 0) - (Number(b.at) || 0) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0);
+const SLOT = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.json$/;
+const slotName = (slot, gen) => `${slot}.${gen}.json`;
 
 /**
- * The slots held on this machine now: each live holder's record with its `file`. A record whose holder is gone is
- * removed, as is a half-written one (a dot file) older than a minute; with `reap` false (doctor, a reader only) neither
- * is removed, and a gone holder is just not listed.
+ * The slot files in `dir`: a Map of slot number to its generations, highest first. A dot file (one being written) older
+ * than a minute is a leftover of a killed writer and is removed when `reap`.
  */
-export function slotHolders(dir = slotsDir(), { reap = true } = {}) {
-  const drop = (file) => {
-    try {
-      if (reap) rmSync(file, { force: true });
-    } catch {
-      // another reader removed it, or this process may not: it is not counted either way
-    }
-  };
-  let names;
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const name of names) {
-    const file = join(dir, name);
+function slotFiles(dir, reap) {
+  const by = new Map();
+  for (const name of readdirSync(dir)) {
     if (name.startsWith(".")) {
       try {
-        if (Date.now() - statSync(file).mtimeMs > 60_000) drop(file);
+        if (reap && Date.now() - statSync(join(dir, name)).mtimeMs > 60_000) rmSync(join(dir, name), { force: true });
       } catch {
-        // gone already
+        // gone already, or this process may not remove it
       }
       continue;
     }
-    if (!name.endsWith(".json")) continue;
-    let rec;
-    try {
-      rec = JSON.parse(readFileSync(file, "utf8"));
-    } catch {
-      continue;
-    }
-    if (holderGone(rec)) {
-      drop(file);
-      continue;
-    }
-    out.push({ ...rec, file });
+    const m = SLOT.exec(name);
+    if (!m) continue;
+    const slot = Number(m[1]);
+    by.set(slot, [...(by.get(slot) || []), Number(m[2])]);
   }
-  return out.sort(takenOrder);
+  for (const gens of by.values()) gens.sort((a, b) => b - a);
+  return by;
+}
+
+/**
+ * A slot file's content: its record or `{free: true}`; undefined when the file is gone (a higher generation replaced
+ * it), null when it cannot be read (it names no holder, and no loop takes the slot over it).
+ */
+const readSlot = (file) => {
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    return e?.code === "ENOENT" ? undefined : null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // every slot file is written whole (writeSlot, linkSlot): one that does not parse names no holder
+    return { free: true };
+  }
+};
+
+/** Whether a slot's content holds it: a record whose holder still runs. */
+const holds = (rec) => !!rec && !rec.free && !holderGone(rec);
+
+/** Remove a slot's generations below its highest: none of them says anything any more. */
+const dropBelow = (dir, slot, gens) => {
+  for (const gen of gens.slice(1)) {
+    try {
+      rmSync(join(dir, slotName(slot, gen)), { force: true });
+    } catch {
+      // this process may not remove it: a lower generation is never read
+    }
+  }
+};
+
+/**
+ * The slots held on this machine now, by slot number: each live holder's record with its `file` and `slot`. A slot whose
+ * holder is gone holds nothing; when `reap`, the generations below each slot's highest are removed, as are dot files a
+ * killed writer left. Doctor reads with `reap` false and removes nothing.
+ */
+export function slotHolders(dir = slotsDir(), { reap = true } = {}) {
+  let out = [];
+  for (let look = 0; look < 5; look += 1) {
+    let by;
+    try {
+      by = slotFiles(dir, reap);
+    } catch {
+      return [];
+    }
+    out = [];
+    let moved = false;
+    for (const [slot, gens] of [...by].sort((a, b) => a[0] - b[0])) {
+      const file = join(dir, slotName(slot, gens[0]));
+      const rec = readSlot(file);
+      if (rec === undefined) {
+        // a loop took this slot's next generation since the listing: list again
+        moved = true;
+        break;
+      }
+      if (reap) dropBelow(dir, slot, gens);
+      if (holds(rec)) out.push({ ...rec, file, slot });
+    }
+    if (!moved) break;
+  }
+  return out;
 }
 
 let self = null;
 /** This process's record, read once: its pid, start time and boot. */
 const selfRecord = () => (self ??= processRecord(process.pid));
 
-/** Write a slot file whole: a dot file first, renamed into place, so a reader never sees half of one. */
-const writeSlot = (dir, name, rec) => {
-  const tmp = join(dir, `.${name}.${randomBytes(4).toString("hex")}`);
+/** A dot file beside slot file `file` to write it whole in: readers skip dot files. */
+const tempFor = (file) => join(dirname(file), `.${basename(file)}.${randomBytes(4).toString("hex")}`);
+
+/** Replace a slot file whole: a dot file first, renamed into place, so a reader never sees half of one. */
+const writeSlot = (file, rec) => {
+  const tmp = tempFor(file);
   writeNew(tmp, JSON.stringify(rec));
-  renameSync(tmp, join(dir, name));
+  renameSync(tmp, file);
+};
+
+/** Create slot file `file` whole, only if no file has that name: true when this call created it. */
+const linkSlot = (file, rec) => {
+  const tmp = tempFor(file);
+  writeNew(tmp, JSON.stringify(rec));
+  try {
+    linkSync(tmp, file);
+    return true;
+  } catch (e) {
+    if (e?.code === "EEXIST") return false;
+    throw e;
+  } finally {
+    rmSync(tmp, { force: true });
+  }
 };
 
 /**
- * Take one slot of the machine's budget for this process: a slot handle, or null when the budget is full. The slot is
- * written first and the live slots counted after; when they are over the budget, the slot stays only if it is among the
- * `budget` taken first (`at`, the time it was taken to the microsecond, then its file name). Loops that take the last
- * slot at once all order the slots alike, so one of them keeps it and the others let go. `force`: taken whatever the
- * count (a loop holding no slot always runs one stage). `holder`: what it runs, {repo, issue, stage, cmd}.
+ * Take slot `slot` for `rec` when nobody holds it: its file, or null when a live holder has it. The slot's next
+ * generation is created only if no file has that name, so of loops taking it at once exactly one creates it. When a
+ * higher generation turns up after (this loop read a listing older than a generation since removed), the new file is
+ * withdrawn and the slot read again.
+ */
+function claimSlot(dir, slot, rec) {
+  for (let look = 0; look < 8; look += 1) {
+    const gens = slotFiles(dir, false).get(slot) || [];
+    if (gens.length) {
+      const cur = readSlot(join(dir, slotName(slot, gens[0])));
+      if (cur === undefined) continue;
+      if (cur === null || holds(cur)) return null;
+    }
+    const gen = gens.length ? gens[0] + 1 : 0;
+    const file = join(dir, slotName(slot, gen));
+    if (!linkSlot(file, rec)) continue;
+    const now = slotFiles(dir, false).get(slot) || [];
+    if (now[0] !== gen) {
+      rmSync(file, { force: true });
+      continue;
+    }
+    dropBelow(dir, slot, now);
+    return file;
+  }
+  return null;
+}
+
+/**
+ * Take one slot of the machine's budget for this process: a slot handle, or null when the budget is full. When the
+ * live slots already reach the budget, none is taken; otherwise the first free slot of 0 .. budget-1 is, and loops
+ * taking the last one at once cannot both have it (claimSlot), so one keeps it and the others find the budget full.
+ * `force`: taken whatever the count, as the first free slot of any number (a loop holding no slot always runs one
+ * stage). `holder`: what it runs, {repo, issue, stage, cmd}.
  */
 export function takeSlot({ dir = slotsDir(), budget, force = false, holder = {} }) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const name = `${process.pid}-${randomBytes(6).toString("hex")}.json`;
-  // `at`: this machine's clock in milliseconds with microseconds (performance's), so two takes in one millisecond order.
-  let rec = { ...selfRecord(), ...holder, since: new Date().toISOString(), at: performance.timeOrigin + performance.now() };
-  writeSlot(dir, name, rec);
-  const file = join(dir, name);
-  if (!force) {
-    const live = slotHolders(dir);
-    const rank = live.findIndex((h) => h.file === file);
-    if (live.length > budget && (rank < 0 || rank >= budget)) {
-      rmSync(file, { force: true });
-      return null;
-    }
-  }
+  let rec = { ...selfRecord(), ...holder, since: new Date().toISOString() };
+  if (!force && slotHolders(dir).length >= budget) return null;
+  let file = null;
+  for (let slot = 0; !file && (force || slot < budget); slot += 1) file = claimSlot(dir, slot, rec);
+  if (!file) return null;
+  let held = true;
   return {
     file,
     /** Name what the slot now runs (an issue and its stage). */
     assign(fields) {
+      if (!held) return;
       rec = { ...rec, ...fields };
       try {
-        writeSlot(dir, name, rec);
+        writeSlot(file, rec);
       } catch {
         // the slot still counts; only its label is older
       }
     },
+    /** Let the slot go: its file says free (the file stays, the slot's highest generation). */
     release() {
-      rmSync(file, { force: true });
+      if (!held) return;
+      held = false;
+      try {
+        writeSlot(file, { free: true });
+      } catch {
+        // the record still names this process, which frees the slot when it ends
+      }
     },
   };
 }

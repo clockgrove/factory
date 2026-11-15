@@ -20,6 +20,8 @@ Show the run link from `gh run list --workflow factory.yml --limit 3`. The dispa
 
 Never run the plugin's `scripts/dispatch.mjs` from this session except as `node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" --repo OWNER/NAME --dry-run` to preview the next tick's picks: a real run here marks issues Running with no worker job to run them.
 
+Supervise with `factory wait` (`/factory:factory-serve`).
+
 If `/factory:factory-doctor` has not run here this session, run it first: a misconfigured repository Blocks every Objective with one reason, a runner minute each.
 
 ## Routes off this machine

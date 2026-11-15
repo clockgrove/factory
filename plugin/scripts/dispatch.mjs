@@ -6,7 +6,8 @@
 // (GitHub's blocked-by relations via REST when the endpoint answers, else
 // "Blocked by #N" lines in the body); drop Running, Blocked, Question and In review
 // (Project card Status, falling back to the factory:* labels the worker also sets);
-// order P0, P1, P2, then number; cap at max_concurrent minus running; start
+// order P0, P1, P2, then number; cap at max_concurrent minus running; hold one
+// whose known files overlap a Running or In-review one's heavily (lib/overlap.mjs); start
 // nothing when today's spend (usage artifacts uploaded today) has reached
 // daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
@@ -16,11 +17,12 @@ import { activeFactoryJobs, activeWorkIssues, blockedByRelations, checksOn, find
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
+import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -660,8 +662,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const updated = [];
   const nextParts = [];
   const merged = [];
+  // The In-review Objectives whose PR this tick merged (merged holds the queued ones too).
+  const landed = [];
   // PRs the merge pass left in the merge queue: the queue-watch job reads them until each merges or leaves.
   const queueWatch = [];
+  // Each In-review Objective's open PR (null for none) as this pass read it.
+  const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
   {
     let liveJobs = null;
@@ -677,7 +683,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
       if (restarting[issue.number]) continue;
       if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
-      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
+      let prRead = true;
+      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+      // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
+      if (prRead) prsSeen[issue.number] = open;
       if (!open) {
         // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
         if (dryRun) continue;
@@ -768,7 +777,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
               if (instead === "rebase") {
                 log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
                 sentBack.push(issue.number);
-                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it.`, opts);
+                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h).`, opts);
               } else {
                 statuses[issue.number] = "Blocked";
                 await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
@@ -778,7 +787,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
       } else if (decision === "rebase") {
         sentBack.push(issue.number);
-        if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr), opts);
+        if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
       } else if (decision === "stuck" || decision === "limit") {
         statuses[issue.number] = "Blocked";
         if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
@@ -792,6 +801,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           return null;
         });
         if (how === "merged" || how === "queued") merged.push(issue.number);
+        // Merged now (not only queued): no longer a sibling anything waits for this tick.
+        if (how === "merged") landed.push(issue.number);
         if (report.watch) queueWatch.push(open.number);
         if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
@@ -867,6 +878,20 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   });
   // Queued work daily_usd held back starts when the UTC day turns (a spend that could not be read is a retry, above).
   if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
+  // Siblings on the same files (#277, lib/overlap.mjs): a pick whose known files overlap a Running or In-review
+  // Objective's heavily waits for it to merge, and its slot goes to the next Queued one. One named by hand never waits.
+  // Objectives Factory merges itself are waited for In review too; without auto_merge a person merges them, so not.
+  let order = null;
+  if (!inputs.issue && picked.ready.length) {
+    const waiting = picked.skipped.filter((x) => x.reason === "max_concurrent reached").map((x) => x.number);
+    order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { dryRun, log });
+    if (order.waits.length) {
+      const moved = new Set([...order.ready, ...order.waits.map((w) => w.number)]);
+      picked.skipped = [...picked.skipped.filter((x) => !moved.has(x.number)), ...order.waits.map((w) => ({ number: w.number, reason: waitReason(w) }))];
+      picked.ready = order.ready;
+      if (!picked.ready.length) picked.reason = "waiting for siblings on the same files";
+    }
+  }
   // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);
@@ -971,6 +996,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
 
   watch.mark("locks");
+  // The notes of the Objectives that start (overlap.mjs): only the final picks, once every later hold has had its say.
+  if (!dryRun && !inputs.issue) await announceStarts(repo, { started: picked.ready.filter((n) => !sentBack.includes(n)), issues, order }, opts, { log });
   // Mark the picked issues Running now, so the next cron tick does not pick them again
   // before their matrix jobs start; the worker's doctor step re-marks on failure.
   if (!dryRun) {

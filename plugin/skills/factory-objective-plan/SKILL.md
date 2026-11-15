@@ -5,28 +5,28 @@ description: First step of working a Clockgrove Factory Objective (an issue labe
 
 # Plan the Objective
 
-Read the whole issue (`$FACTORY_IN/issue.md`) and the owner's recorded decisions (`$FACTORY_IN/decisions.md`). Read the repository instructions (AGENTS.md or CLAUDE.md), any repository skill that names Objectives, and the runbooks they point to. Read only the contract documents for the code you touch.
+Read the whole issue (`$FACTORY_IN/issue.md`) and the owner's recorded decisions (`$FACTORY_IN/decisions.md`). Read the repository instructions (AGENTS.md or CLAUDE.md), any repository skill that names Objectives, the runbooks they point to, and only the contract documents for the code you touch.
 
 ## The plan
 
-Write the plan to `$FACTORY_OUT/plan.md` before code, and edit it as the work moves. Factory posts it on the issue as the plan comment. On a rerun, start from `$FACTORY_IN/plan.md`, the plan as it stands. It holds, in this order:
+Write the plan to `$FACTORY_OUT/plan.md` before code; edit it as the work moves. Factory posts it as the plan comment. On a rerun, start from `$FACTORY_IN/plan.md`, the plan as it stands. It holds, in this order:
 
-1. **Goal in your own words.** Two or three sentences; where they disagree with the issue, the issue wins.
-2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to at least one item and name which. Mark each item done as it lands.
-3. **Assumptions.** Every one, numbered: a default you chose, a behaviour the issue left unsaid, a library you picked, a name you invented.
+1. **Goal in your own words.** Two or three sentences; where they disagree, the issue wins.
+2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns on a line `Files: src/a.ts, docs/b.md` (Factory orders Objectives sharing files by them); an item that changes no file has no Files: line. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to an item and name which. Mark each item done as it lands.
+3. **Assumptions.** Every one, numbered: a default you chose, a behaviour left unsaid, a library, an invented name.
 4. **Design note.** When the repository has a design checklist, answer it here.
 
 ## The simplest-reading rule
 
-Where the issue admits more than one reading, take the simplest one that satisfies every acceptance entry and every recorded decision, and record which under Assumptions. Do not build for a reading the issue does not ask for. Do not ask.
+Where the issue admits more than one reading, take the simplest one that satisfies every acceptance entry and every recorded decision, and record which under Assumptions. Do not build for a reading nobody asked for. Do not ask.
 
 ## The Question rule
 
-An assumption that would change or remove an existing public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format), so that a use that works on the base commit breaks or behaves differently, that contradicts a recorded decision in the issue, or that grants new access (a permission, a credential, a service reachable from outside that was not), is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The factory-deliver-pr skill then puts the question in pr.md's body and writes a `question` exit record naming, for each question, the test it meets; Factory keeps the PR a draft, so the queue moves on and a human answers in the PR. Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, never a Question, and so is a reversible choice the issue leaves open (a placeholder, a stand-in, a default, a label). Raise it only when one of these tests is met.
+An assumption that would change or remove an existing public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format), so that a use that works on the base commit breaks or behaves differently, that contradicts a recorded decision in the issue, or that grants new access (a permission, a credential, a service reachable from outside that was not), is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The factory-deliver-pr skill then puts the question in pr.md's body and writes a `question` exit record naming, for each question, the test it meets; Factory keeps the PR a draft, so the queue moves on and a human answers in the PR. Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, never a Question, and so is a reversible choice the issue leaves open (a placeholder, a default, a label). Raise one only when a test is met.
 
 ## Another repository
 
-Factory works in one repository per Objective. If the Objective needs a change in another repository, do not work around it here. Add the plan line `Needs-Repository: OWNER/NAME` and why, write a `question` exit record (test `access`), and stop before any code. Once a recorded decision takes that change out of scope, delete the line from plan.md.
+Factory works in one repository per Objective. If it needs a change in another repository, do not work around it. Add the plan line `Needs-Repository: OWNER/NAME` and why, write a `question` exit record (test `access`), and stop before any code. Once a recorded decision takes that change out of scope, delete the line from plan.md.
 
 ## Workflow files
 
@@ -38,4 +38,4 @@ If an acceptance entry needs a mechanism the base commit does not have (a table,
 
 ## Before leaving
 
-Confirm every acceptance entry maps to an item, every item names its files, every assumption is listed and plan.md is written. Then load factory-implement-split.
+Confirm every acceptance entry maps to an item, every changing item has its `Files:` line, every assumption is listed and plan.md is written. Then load factory-implement-split.

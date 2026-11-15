@@ -1590,7 +1590,7 @@ export class Local {
         await gh.applyExit(this.repo, rebaseBlock({ issue, pr, why, record: seen.stuck || seen.record, since: seen.since, notify: inputs.notify, stage: "merge" }), this.opts);
         return false;
       }
-      if (!seen.already) await gh.prComment(this.repo, prNumber, rebaseNotice(issue, pr), this.opts);
+      if (!seen.already) await gh.prComment(this.repo, prNumber, rebaseNotice(issue, pr, seen.recent), this.opts);
     } catch (e) {
       return this.sendBackFailed(issue, pr, e, inputs, gh);
     }

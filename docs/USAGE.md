@@ -100,7 +100,15 @@ Code lands with no human read. The gate is your CI workflow's checks on the revi
 
 ## Siblings that touch the same files
 
-Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
+Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run.
+
+The dispatcher orders siblings whose files it knows. An Objective's known files are its open PR's changed files (the first 100) and the `Files:` lines of its plan comment, one per checklist item (the plan skill writes them); prose is never read for paths. Before it starts a Queued Objective with known files, it compares them with every Running and In-review Objective's known files:
+
+- **Heavy overlap** (3 or more shared files, or at least half of the smaller list): the Objective waits for that sibling to merge or stop, and a comment on the waiting issue names the sibling and the shared files. Its slot goes to the next Queued Objective. Two picks of the same tick are ordered the same way, the first by priority starting.
+- **Light overlap** (fewer shared files): it starts, and a comment says which siblings it shares files with; whichever merges second rebases.
+- **Unknown files:** it starts as before, with nothing said. A first run has no plan or PR before it starts, so a batch of fresh Objectives filed together starts together; the ordering applies once an Objective has a plan or a PR (a rerun after a Question or a Block, the next part of a split), and a running sibling counts once its plan comment is posted.
+
+A run named by hand for an issue never waits. Each send-back notice on the PR says which rebase it is (of at most 5 in 24 hours), and each rebase stage's progress comment says what it cost and what all of the Objective's rebases cost so far; the scorecard's Rebases column carries the same. When you know two fresh Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch.
 
 ## One repository per Objective
 

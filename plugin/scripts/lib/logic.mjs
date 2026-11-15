@@ -2146,6 +2146,53 @@ export function decisionsSection(decisions, cap = 12_000) {
  * dispatcher reads the number, never the prose exit line. Parsed by spendOf().
  */
 export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
+
+/**
+ * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
+ * dollars (0 for a clean rebase with no harness run, null unmetered) and whether it was a conflict pass. The worker
+ * sums the earlier ones on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
+ */
+export const rebaseCostMarker = ({ usd, conflict }) => `<!-- factory:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict })} -->`;
+
+/** The send-back stage's words on its exit line: which rebase of the Objective this is, its cost and all of them so far. */
+export function rebaseLine({ usd, conflict }, before = { count: 0, usd: 0, unmetered: 0 }) {
+  const fmt = (n) => `$${n.toFixed(2)}`;
+  const unmetered = before.unmetered + (usd === null ? 1 : 0);
+  const total = before.usd + (usd ?? 0);
+  return `rebase ${before.count + 1} of this Objective (${conflict ? "a conflict pass" : "clean, no model run"}): ${usd === null ? "unmetered" : fmt(usd)}; all its rebases: ${fmt(total)}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
+}
+
+/** The rebase line in one comment body: {usd, conflict}, or null when it has none (or a broken one). */
+export function rebaseCostOf(body) {
+  const m = /^<!-- factory:rebase-cost (\{[^\n]*\}) -->$/m.exec(body || "");
+  if (!m) return null;
+  try {
+    const v = JSON.parse(m[1]);
+    return { usd: typeof v.usd === "number" && Number.isFinite(v.usd) && v.usd >= 0 ? v.usd : null, conflict: v.conflict === true };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Issue `issue`'s send-back rebases so far, from the rebase lines in the work stages' progress comments `comments`
+ * written by `mine` (Factory's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`,
+ * `usd` the metered stages' sum.
+ */
+export function rebaseTally(comments, issue, mine = trustedAuthor) {
+  const out = { count: 0, usd: 0, unmetered: 0, conflicts: 0 };
+  const head = `<!-- factory:${issue}:progress:work`;
+  for (const c of comments || []) {
+    if (!mine(c) || !(c.body || "").startsWith(head)) continue;
+    const r = rebaseCostOf(c.body);
+    if (!r) continue;
+    out.count += 1;
+    if (r.conflict) out.conflicts += 1;
+    if (r.usd === null) out.unmetered += 1;
+    else out.usd = Math.round((out.usd + r.usd) * 1e4) / 1e4;
+  }
+  return out;
+}
 /**
  * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage) and its pass `records`:
  * `{usd, parts}` for progress.spend. Every stage gets one; no harness pass (none, or only `noRun` placeholders) is a

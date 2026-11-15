@@ -75,7 +75,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalField
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCostMarker, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -769,9 +769,9 @@ export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
 export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
   /^[A-Za-z0-9-]{1,60}$/.test(env.FACTORY_PROGRESS_RUN || "") ? env.FACTORY_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
-/** The progress comment's structured tail: the stage's harness, then its spend, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
 
@@ -795,6 +795,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let read = null;
   let triage = null;
   let asked = null;
+  let rebase = null;
   // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
   let ran = null;
   let lastWrite = 0;
@@ -810,7 +811,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ran, ...interim, read, triage, asked });
+    const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
     return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${lines.join("\n")}${tail}`;
   };
   /**
@@ -891,6 +892,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf({ spend, spendParts })}` }, token }, { ms: STOP_WRITE_MS });
     if (r.ok) shown = spend;
     else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
+  };
+  /** A send-back's rebase stage: its rebase line (logic.mjs rebaseCostMarker), written with the next write. */
+  progress.rebase = (r) => {
+    rebase = r;
   };
   progress.spend = (usd, parts = null) => {
     if (Number.isFinite(usd)) {
@@ -1960,9 +1965,12 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
   return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck };
 }
 
-/** The send-back's notice on the PR: its marker (naming the head it saw) and why the worker rebases it. */
-export function rebaseNotice(issue, pr) {
-  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate.`;
+/**
+ * The send-back's notice on the PR: its marker (naming the head it saw), why the worker rebases it, and which of the
+ * REBASE_LIMIT send-backs in 24 h this is (`recent`, rebaseMarkers: the ones before it that pushed).
+ */
+export function rebaseNotice(issue, pr, recent = 0) {
+  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h; the issue's progress comments show each rebase's cost).`;
 }
 
 /**

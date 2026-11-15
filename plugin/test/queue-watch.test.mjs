@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { approvalPolicyCheck, githubChecks } from "../scripts/doctor.mjs";
 import { HUNG_CODE, marker, setSelf } from "../scripts/lib/logic.mjs";
-import { mergeBlockReason, mergeReadyOne, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed } from "../scripts/lib/session.mjs";
+import { mergeBlockCause, mergeBlockReason, mergeReadyOne, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed } from "../scripts/lib/session.mjs";
 import { openTriage } from "../scripts/lib/triage.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +41,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     annotations: {}, // check-run annotations by check-run id
     labels: [], // the PR's label writes, in order: "+name" or "-name"
     logs: {}, // Actions job logs by job id
+    prFiles: [{ filename: "src/add.js", patch: "+export const add = (a, b) => a - b;" }], // the PR's files
   };
   let id = 200;
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -80,7 +81,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     }
     if (method === "GET" && /\/repos\/o\/r$/.test(u)) return json(200, { default_branch: "main" });
     if (method === "GET" && (m = /\/actions\/jobs\/(\d+)\/logs$/.exec(u))) return new Response(s.logs[m[1]] ?? "", { status: 200 });
-    if (method === "GET" && /\/pulls\/\d+\/files/.test(u)) return json(200, [{ filename: "src/add.js", patch: "+export const add = (a, b) => a - b;" }]);
+    if (method === "GET" && /\/pulls\/\d+\/files/.test(u)) return json(200, s.prFiles);
     if (method === "GET" && (m = /\/actions\/jobs\/(\d+)$/.exec(u))) return s.jobs[m[1]] ? json(200, s.jobs[m[1]]) : json(404, { message: "Not Found" });
     if (method === "GET" && (m = /\/actions\/runs\/(\d+)\/jobs/.exec(u))) {
       const steps = s.history[Number(m[1]) - 1000] || {};
@@ -462,11 +463,15 @@ test("queue drops: a Block on drops whose merge_group jobs GitHub never started 
     assert.match(why, /infrastructure, not the change/);
     assert.doesNotMatch(why, /Check that the required checks run/, "not blamed on the checks");
 
-    // A job that ran and failed on the queue's commit is the checks': the queue's own words stay.
+    // A job that ran and failed on the queue's commit: the Block names it and its first failure line, the work's (#312).
     for (const k of [1, 2]) fake.s.jobs[700 + k] = { ...fake.s.jobs[700 + k], steps: [{ name: "Run npm test", conclusion: "failure" }], runner_id: 5, runner_name: "r" };
+    fake.s.logs[702] = testLog;
     const ran = {};
     assert.equal(await merge(ran), "dropped");
-    assert.match(mergeBlockReason("dropped", ran), /Check that the required checks run on the queue's merge_group commits/);
+    const said = mergeBlockReason("dropped", ran);
+    assert.match(said, /its run on the queue's commit failed: `Quality`: .+\. Fix that on the branch/);
+    assert.doesNotMatch(said, /Check that the required checks run/, "they ran and failed: the cause is named, not the wiring");
+    assert.equal(mergeBlockCause("dropped", ran), "work");
   });
 });
 
@@ -634,5 +639,37 @@ test("queue red: a flake, a job GitHub never started or no readable run is enque
     const step = await reviewReads(none);
     assert.equal(step.state, "requeued");
     assert.equal(records(none)[0].kind, "none");
+  });
+});
+
+test("queue red: a deterministic failure only the queue's jobs run (another OS) is the PR's own change, judged from the log, and its fix pass gets that job's log (#312, assetgrove#174)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    // The PR's checks run Linux only and were green; the queue runs Windows too. The PR's new test expects SIGKILL,
+    // which Windows reports as null: red on Windows only, every time.
+    fake.s.prFiles = [{ filename: "test/kill.test.mjs", patch: '+test("kills", () => assert.equal(child.signalCode, "SIGKILL"));' }];
+    const sha = "7".repeat(40);
+    const at = ago(10 * MIN);
+    const winLog = ["##[group]Run npm test", "# Subtest: kills", "not ok 3 - kills", "  AssertionError [ERR_ASSERTION]: null == 'SIGKILL'", "      at TestContext.<anonymous> (file:///D:/a/app/app/test/kill.test.mjs:12:10)", "##[error]Process completed with exit code 1."].join("\n");
+    fake.s.queueRuns.push({ id: 951, event: "merge_group", head_branch: `gh-readonly-queue/main/pr-${PR}-${"f".repeat(40)}`, head_sha: sha, created_at: at, conclusion: "failure" });
+    fake.s.runs[sha] = [
+      { id: 620, name: "test (windows-latest)", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 801 }, started_at: at, completed_at: ago(8 * MIN) },
+      { id: 621, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 801 }, started_at: ago(7 * MIN), completed_at: ago(7 * MIN) },
+    ];
+    fake.s.jobs[620] = { id: 620, run_id: 951, name: "test (windows-latest)", status: "completed", conclusion: "failure", steps: [{ name: "Run npm test", conclusion: "failure", number: 4 }], runner_id: 7, runner_name: "w" };
+    fake.s.jobs[621] = { id: 621, run_id: 951, name: "Quality", status: "completed", conclusion: "failure", steps: [{ name: "Run test \"$RESULT\" = success", conclusion: "failure", number: 2 }], runner_id: 8, runner_name: "l" };
+    fake.s.logs[620] = winLog;
+    fake.s.logs[621] = 'test "$RESULT" = success\n##[error]Process completed with exit code 1.';
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    // Even a decider that calls every job a flake does not decide it: the failure names a test the PR changed.
+    const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+    assert.equal(step.state, "fixed", "the PR's own change: one fix pass, no re-enqueue");
+    assert.equal(step.red.sha, sha);
+    const win = step.red.failures.find((f) => f.command === "CI job test (windows-latest)");
+    assert.ok(win, step.red.failures.map((f) => f.command).join(", "));
+    assert.ok(win.full.includes("AssertionError [ERR_ASSERTION]: null == 'SIGKILL'"), "the failed job's whole log");
+    assert.match(step.red.lead, /test \(windows-latest\)[^\n]*\n?[\s\S]*null == 'SIGKILL'/, "the job named, with its first failing test");
+    assert.match(step.line, /test \(windows-latest\)/);
   });
 });

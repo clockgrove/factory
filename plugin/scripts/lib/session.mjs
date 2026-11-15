@@ -13,6 +13,7 @@ import {
   addLabels,
   awaitChecks,
   checkRuns,
+  jobLog,
   checksOn,
   collaboratorPermission,
   getCommit,
@@ -73,7 +74,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalFields, transcriptTotal } from "./usage.mjs";
-import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
 import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
@@ -2372,6 +2373,26 @@ export async function readQueueRed({ repo, issue, prNumber, base, names = async 
   return { state, line, red: state === "fixed" ? q.red : null };
 }
 
+/**
+ * The failed jobs of the PR's newest failed merge-queue run since `since`, each with its first failure line (triage.mjs
+ * failureSignature), at most three: "`<job>`: <line>; ...", "" when none could be read (Actions read with
+ * `actionsToken`, else `opts.token`).
+ */
+export async function queueFailureLines(repo, { prNumber, base, since, actionsToken = null }, opts) {
+  if (!base) return "";
+  const aopts = { ...opts, token: actionsToken || opts.token };
+  const run = (await mergeGroupRuns(repo, prNumber, base, since, aopts).catch(() => []))[0];
+  if (!run) return "";
+  const failedRuns = (await checkRuns(repo, run.sha, opts).catch(() => [])).filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
+  const out = [];
+  for (const r of failedRuns.slice(0, 6)) {
+    const line = failureSignature(r.name, await jobLog(repo, r.id, aopts).catch(() => "")).line;
+    if (line) out.push(`${checkName(r.name)}: ${line.slice(0, 200)}`);
+    if (out.length >= 3) break;
+  }
+  return out.join("; ");
+}
+
 /** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
 export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
 
@@ -2614,7 +2635,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       const stuck = hung ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
       // GitHub never started the queue's jobs, through Factory's re-enqueue: an outage handled by the rules.
       if (!hung && stuck.length) report.cause = "outage";
-      report.reason = hung
+      // The queue's jobs ran and failed: the Block names the failed jobs and their first failure lines, the work's.
+      const failed = !hung && !stuck.length && retry.codes.includes(QUEUE_RED_CODE) ? await queueFailureLines(repo, { prNumber, base: pr.base?.ref, since, actionsToken }, opts) : "";
+      if (failed) report.cause = "work";
+      report.reason = failed
+        ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}); its run on the queue's commit failed: ${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label`
+        : hung
         ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
         : stuck.length
           ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then re-apply the label`

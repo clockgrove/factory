@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { GITHUB_TOKEN_KEYS, LOCAL_WORKFLOW_SETTINGS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, WORKFLOW_SETTINGS, workflowSettings } from "../scripts/lib/inputs.mjs";
+import { GITHUB_TOKEN_KEYS, LOCAL_WORKFLOW_SETTINGS, MODEL_SECRET_KEYS, PER_RUN_INPUTS, RUNNER_SECRET_KEYS, SECRET_INPUTS, WORKFLOW_SETTINGS, workflowSettings } from "../scripts/lib/inputs.mjs";
 import { FACTORY_CHILD_KEYS, FACTORY_CONTROL_KEYS, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { workflowEnv } from "../scripts/lib/local.mjs";
 import { Local } from "../scripts/local.mjs";
@@ -21,7 +21,7 @@ function actionInputs() {
 test("the workflow settings are the Action's inputs under their env names, but secrets and a run's own, and local mode's documented settings (#119)", () => {
   const inputs = actionInputs();
   assert.ok(inputs.length > 40 && inputs.includes("validation"));
-  const expected = new Set([...inputs.filter((n) => !SECRET_INPUTS.has(n) && !["mode", "issue", "pr"].includes(n)).map((n) => `FACTORY_${n.toUpperCase()}`), ...LOCAL_WORKFLOW_SETTINGS]);
+  const expected = new Set([...inputs.filter((n) => !SECRET_INPUTS.has(n) && !PER_RUN_INPUTS.includes(n)).map((n) => `FACTORY_${n.toUpperCase()}`), ...LOCAL_WORKFLOW_SETTINGS]);
   assert.deepEqual([...WORKFLOW_SETTINGS].sort(), [...expected].sort(), "derived from DEFAULTS, which must match action.yml");
   const local = readFileSync(join(ROOT, "docs", "LOCAL.md"), "utf8");
   for (const n of LOCAL_WORKFLOW_SETTINGS) assert.ok(local.includes(`\`${n}`), `${n} is documented in docs/LOCAL.md`);

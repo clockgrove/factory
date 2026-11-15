@@ -238,6 +238,51 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
 /** The account a `harness` stage runs on: its first declared one, else the one named after the harness. */
 export const defaultAccount = (loaded, harness) => loaded?.accounts?.[harness]?.[0] ?? implicitAccount(harness);
 
+/** An account label as a notice shows it: code-quoted when its name is an account name, else not echoed at all. */
+export const pinLabelText = (label) => (validAccountName(label.slice(ACCOUNT_LABEL_PREFIX.length).trim().toLowerCase()) ? `\`${label}\`` : "an account label whose name is no account name");
+
+/** The account labels among `names` (names, or GitHub's label objects), sorted, once each. */
+export const accountLabels = (names = []) => [...new Set((names || []).map((n) => (typeof n === "string" ? n : n?.name)).filter((n) => typeof n === "string" && n.toLowerCase().startsWith(ACCOUNT_LABEL_PREFIX)))].sort();
+
+/**
+ * The account an Objective's labels pin it to (#265), decided on the names alone: {label: null} with none; {label, name}
+ * with one (the name lower case, as declared); {label: null, two: [labels]} with more than one, which moves nothing.
+ */
+export function accountPin(names = []) {
+  const labels = accountLabels(names);
+  if (labels.length > 1) return { label: null, two: labels };
+  if (!labels.length) return { label: null };
+  return { label: labels[0], name: labels[0].slice(ACCOUNT_LABEL_PREFIX.length).trim().toLowerCase() };
+}
+
+/**
+ * The account `name` is for a `harness` stage, from a declaration loadAccounts accepted: {account}, or {problem} (a fixed
+ * line naming the label and no path) for a name this machine declares for no harness, or declares for another one. A
+ * harness that declares none has its one account, named after it.
+ */
+export function pinnedAccount(loaded, harness, name) {
+  const label = pinLabelText(`${ACCOUNT_LABEL_PREFIX}${name}`);
+  const mine = loaded?.accounts?.[harness]?.length ? loaded.accounts[harness] : [implicitAccount(harness)];
+  const hit = mine.find((a) => a.name === name);
+  if (hit) return { account: hit };
+  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && (loaded?.accounts?.[h]?.length ? loaded.accounts[h] : [implicitAccount(h)]).some((a) => a.name === name));
+  if (other) return { problem: `${label} names a ${HARNESS_NAMES[other]} account, and this Objective runs on ${HARNESS_NAMES[harness]}` };
+  return { problem: `${label} names no ${HARNESS_NAMES[harness]} account this machine declares (${mine.map((a) => `\`${a.name}\``).join(", ")})` };
+}
+
+/**
+ * The progress line a stage off local mode (GitHub Actions, the cloud sandbox) writes once when the Objective carries an
+ * account label, which only local mode acts on; "" in local mode or with none.
+ */
+export function accountLabelNote(names = [], local = false) {
+  const labels = accountLabels(names);
+  if (local || !labels.length) return "";
+  return `${labels.map(pinLabelText).join(", ")} does nothing on this route: accounts are a local-mode setting (\`factory serve\` on one machine), so this stage runs on the repository's own credential.`;
+}
+
+/** The harnesses by the names a person reads. */
+export const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", copilot: "Copilot" };
+
 /**
  * A stage's env for `account`: with a declared Claude Code or Codex account, its folder set explicitly (never what
  * serve's own environment held): CODEX_HOME, or CLAUDE_CONFIG_DIR unset for the default `~/.claude` (Claude Code keeps

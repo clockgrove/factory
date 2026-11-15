@@ -220,7 +220,10 @@ function pruneCase(linked) {
   try {
     markInUse(join(root, "v1.0.1-b"), { home, pid: other.pid });
     markInUse(join(root, "v1.0.2-c"), { home, pid: 2 ** 22 + 7 });
+    // A live process's name another serve removed while this one reads it (here: one that does not read).
+    mkdirSync(join(root, ".in-use", String(process.pid)));
     pruneReleases(home, [join(root, "v1.0.0-a")]);
+    rmSync(join(root, ".in-use", String(process.pid)), { recursive: true });
   } finally {
     other.kill();
   }

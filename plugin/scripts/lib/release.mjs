@@ -203,8 +203,14 @@ function inUse(home) {
     } catch (e) {
       alive = e.code === "EPERM";
     }
-    if (alive) roots.push(readFileSync(file, "utf8").trim());
-    else rmSync(file, { force: true });
+    // Another serve's prune may remove a name as this one reads it: a name that does not read keeps nothing.
+    if (!alive) rmSync(file, { force: true });
+    else
+      try {
+        roots.push(readFileSync(file, "utf8").trim());
+      } catch {
+        // gone meanwhile
+      }
   }
   return roots;
 }
@@ -279,7 +285,12 @@ export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_UR
     const { version } = JSON.parse(readFileSync(join(dir, "plugin", ".claude-plugin", "plugin.json"), "utf8"));
     // Its manifest, kept in this process only: what restartOn checks the checkout against before it runs it.
     const manifest = treeManifest(dir);
-    pruneReleases(home, [dir, ...(running?.root ? [running.root] : [])]);
+    // Tidying the cache never fails a fetch that succeeded.
+    try {
+      pruneReleases(home, [dir, ...(running?.root ? [running.root] : [])]);
+    } catch {
+      // left for the next fetch
+    }
     return { dir, commit, ref, version, manifest };
   } finally {
     rmSync(part, { recursive: true, force: true });

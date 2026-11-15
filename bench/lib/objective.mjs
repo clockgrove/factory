@@ -25,7 +25,7 @@
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, factoryLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
-import { BLOCK_CAUSES, blockCauseOf } from "../../plugin/scripts/lib/logic.mjs";
+import { BLOCK_CAUSES, blockCauseOf, rebaseTally } from "../../plugin/scripts/lib/logic.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 
 export const ROW_VERSION = 1;
@@ -756,14 +756,38 @@ export function spendRecords(collected, { app = null } = {}) {
     const bookedSpend = booked && !own ? spendOf(booked.body) : null;
     const total = num(spend?.usd);
     const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
+    // The vendor comment's own figure and marks (plugin logic.mjs vendorBody): at the session's ceiling an upper bound,
+    // with no figure unpriced.
+    const booking = own ? spend : bookedSpend;
+    const sandbox = booking && Object.hasOwn(booking, "vendorUsd") ? { usd: num(booking.vendorUsd), ...(booking.vendorUpperBound === true && num(booking.vendorUsd) !== null ? { upperBound: true } : {}) } : vendor !== null ? { usd: vendor } : null;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(vendor !== null ? { vendor: { usd: vendor } } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(spend?.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(spend?.usdUpperBound === true ? { usdUpperBound: true } : {}), tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, basis: spend ? "factory:spend line (the worker's own pricing)" : "unmetered: no factory:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!out.some((r) => r.usd !== null || r.vendor)) return [];
   // The first stage names the harness; a review stage before any work line takes the Objective's.
   return out.map((r) => ({ ...r, harness: r.harness ?? harness, model: r.model ?? model }));
+}
+
+/**
+ * The Objective's send-back rebases (#277): `sentBack`, Factory's send-back notices on its PRs (each names the head it
+ * saw, `<!-- factory:<n>:rebase:<sha> -->`), and from its own work stages' rebase lines (plugin logic.mjs
+ * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their metered dollars with their
+ * sandboxes', also in the row's cost; `usdLowerBound` / `usdUpperBound` when a summed figure carries that mark),
+ * `unmetered` and `conflicts` (the ones a harness resolved). A stage from before the rebase line is in `sentBack` only.
+ */
+export function rebasesOf(collected, { app = null } = {}) {
+  const n = collected.issue.number;
+  const self = factoryLogin(collected.issueTimeline, app);
+  const local = localLogin(collected);
+  const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
+  // The stages' own vendor comments ride along: a sandbox rebase's dollars include its sandbox's (rebaseTally).
+  const tally = rebaseTally([...factoryStages(collected, { app }), ...vendorComments(collected, { app })], n, () => true);
+  const notice = `<!-- factory:${n}:rebase:`;
+  let sentBack = 0;
+  for (const pr of branchPulls(collected)) sentBack += (collected.pullDetails?.[pr.number]?.comments || []).filter((c) => mine(c) && (c.body || "").startsWith(notice)).length;
+  return { sentBack, stages: tally.count, usd: tally.usd, unmetered: tally.unmetered, conflicts: tally.conflicts, ...(tally.usdLowerBound ? { usdLowerBound: true } : {}), ...(tally.usdUpperBound ? { usdUpperBound: true } : {}) };
 }
 
 /**
@@ -985,6 +1009,7 @@ export function scoreObjective(collected, opts = {}) {
     phases,
     dispatch,
     activity: cost.activity,
+    rebases: rebasesOf(collected, { app }),
     runnerMinutes: runner.minutes,
     runnerBasis: runner.basis,
     wallMinutes: wall,
@@ -1011,12 +1036,19 @@ const fmtMin = (n) => (n === null || n === undefined ? "unknown" : typeof n === 
 /** One table cell: no pipe, no line break (a Blocked reason may carry either). */
 const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
+/**
+ * The Rebases cell: the send-backs, and the rebase stages' dollars when any recorded them ("3, $4.10"), with their bound
+ * marks ("3, at least $4.10"); "?" for an old row.
+ */
+const rebaseBound = (r) => (r.usdLowerBound && r.usdUpperBound ? "about " : r.usdLowerBound ? "at least " : r.usdUpperBound ? "at most " : "");
+export const rebaseCell = (r) => (!r ? "?" : `${r.sentBack}${r.stages ? `, ${rebaseBound(r)}${fmtUsd(r.usd)}${r.unmetered ? ` + ${r.unmetered} unmetered` : ""}` : ""}`);
+
 /** The Markdown table: one row per Objective, oldest issue first. */
 /** An External row's stops, by cause: "Blocked: max-usd, provider-quota". */
 export const externalWhy = (r) => `Blocked: ${[...new Set((r.walkAway.blocks || []).map((b) => b.cause))].join(", ")}`;
 
 export function markdownTable(rows) {
-  const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Owner step min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Review beside CI min", "Turns", "Runs", "Sessions", "Harness"];
+  const head = ["Issue", "Exit", "Walk-away", "Walk-away (asked only)", "Asked / unprompted", "Quality", "Operator min", "Owner step min", "Cost", "Unit", "Basis", "Runner min", "Wall min (filed→merged)", "Dispatch s (max)", "Slot wait s", "Setup s (max)", "Model min", "CI wait min", "Review beside CI min", "Turns", "Runs", "Sessions", "Rebases", "Harness"];
   const lines = [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`];
   for (const r of [...rows].sort((a, b) => a.issue - b.issue)) {
     const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
@@ -1028,7 +1060,7 @@ export function markdownTable(rows) {
     const cost = r.cost.vendorUsd === null || r.cost.vendorUsd === undefined ? `${model}${keyNote}` : `${model}${keyNote} + ${r.cost.vendor?.upperBound ? "≤" : ""}${fmtUsd4(r.cost.vendorUsd)} sandbox = ${fmtUsd(r.cost.totalUsd)}`;
     const askedOnly = r.walkAway.askedOnly ? (r.walkAway.askedOnly.value ? "yes" : `no: ${r.walkAway.askedOnly.reason}`) : "?";
     const split = r.walkAway.interventions ? `${r.walkAway.interventions.asked} / ${r.walkAway.interventions.unprompted}` : "?";
-    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), ownerCell(r), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.phases?.overlapMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), harnessCell(r)];
+    const cells = [`#${r.issue}`, r.parked ? `${r.exit} (parked)` : r.exit, walk, askedOnly, split, q, fmtMin(r.operator.minutes), ownerCell(r), cost, r.cost.unit ?? "?", r.cost.basis ?? "", fmtMin(r.runnerMinutes), fmtMin(r.wallMinutes), fmtMin(r.dispatch?.maxSeconds), fmtMin(r.dispatch?.slotWaitSeconds), fmtMin(r.phases?.setupSeconds), fmtMin(r.phases?.modelMinutes), fmtMin(r.phases?.ciWaitMinutes), fmtMin(r.phases?.overlapMinutes), fmtMin(r.activity?.turns), `${r.activity?.workRuns ?? 0}+${r.activity?.reviewRuns ?? 0}`, fmtMin(r.activity?.sessions), rebaseCell(r.rebases), harnessCell(r)];
     lines.push(`| ${cells.map(cell).join(" | ")} |`);
   }
   const notes = [];

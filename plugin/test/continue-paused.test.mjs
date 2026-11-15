@@ -4,7 +4,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -416,4 +416,20 @@ test("a continued session's resumed pass is recorded as reading every decision i
   assert.equal(decisionsFed({ decisions, full: true, continued: false, rebaseConflict: true }), null, "a conflict pass only rebases");
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
   assert.match(src, /decisionsFed\(\{ decisions, full, continued: !!continued, rebaseConflict \}\)/, "worker.mjs records what decisionsFed says");
+});
+
+test("a review stage's directory counts from the moment it exists: its start cleans the clone before its process runs", async () => {
+  const ws = mkdtempSync(join(tmpdir(), "cont-review-"));
+  await pausedStage(ws, 1, { pause: pauseRecord(guardsNow()) });
+  // serve stopped right after this review start cleaned the clone: no process record, no log, no result.
+  mkdirSync(join(ws, `usage-review-${STAMP(2)}`));
+  assert.equal(lastStage(ws, join(ws, `usage-work-${STAMP(3)}`)).name, `usage-review-${STAMP(2)}`);
+  let cleaned = 0;
+  const entry = await enterStage({ ws, own: join(ws, `usage-work-${STAMP(3)}`), now: async () => guardsNow(), holds: async () => "", putOn: async () => {}, clean: async () => (cleaned += 1), restore: async () => assert.fail("the paused session is not resumed on a cleaned tree") });
+  assert.deepEqual(entry, { continue: false, from: null, changed: [], reason: null });
+  assert.equal(cleaned, 1, "fresh, and cleaned");
+  // The same left by a work start is skipped: that start leaves the clone alone.
+  rmSync(join(ws, `usage-review-${STAMP(2)}`), { recursive: true });
+  mkdirSync(join(ws, `usage-work-${STAMP(2)}`));
+  assert.equal(lastStage(ws, join(ws, `usage-work-${STAMP(3)}`)).name, `usage-work-${STAMP(1)}`);
 });

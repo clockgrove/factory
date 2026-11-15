@@ -117,13 +117,25 @@ What to do with each:
 
 A comment counts when its author has write access to the repository or is a maintainer the workflow names (`notify`, and the optional `maintainers` list), since an App cannot always see an organization member's access.
 
+An agent that supervises the queue for you can wait on it instead of watching logs: `factory wait` exits with one JSON line per Objective that Blocked, asked a Question, went In review, merged or closed since the last read, or when the queue drains, within a poll (30 seconds) of the change, on every route ([LOCAL.md](LOCAL.md), Run it). The @mention to a person stays as it is.
+
 ## Factory merges on its own
 
 Code lands with no human read. The gate is your CI workflow's checks on the reviewed head and the integrated commit, the comment-only reviewer pass, and the merge queue's own re-run where you have one. Set `FACTORY_AUTO_MERGE: false` for ready-for-review PRs instead.
 
 ## Siblings that touch the same files
 
-Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run. When you know two Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch. Factory does not guess file overlap from prose.
+Two Objectives running at once that edit the same lines can conflict: when one merges, the other goes back to its worker for a rebase, an extra run that costs model time, again each time another sibling merges, up to 5 rebases in 24 hours; then it Blocks naming the files. Without a merge queue, a PR that only fell behind is brought up to date by GitHub's update-branch, with no worker run.
+
+The dispatcher orders siblings whose files it knows. An Objective's known files are its open PR's changed files (the first 100, from this repository's own `factory/<issue>` branch) and the `Files:` lines of its plan comment, one per checklist item (the plan skill writes them); prose is never read for paths, and a placeholder (`none`, `n/a`, `TBD`, a dash), a glob or a directory on a `Files:` line is no file. Before it starts a Queued Objective with known files, it compares them with every active Objective's known files: Running ones, and In-review ones when Factory merges (`auto_merge`; without it an In-review PR waits for a person, so nothing waits for it):
+
+- **Heavy overlap** (3 or more shared files, or at least half of the smaller list): the Objective waits for that sibling to merge or stop, and a comment on the waiting issue names the sibling and the shared files. Its slot goes to the next Queued Objective. Two picks of the same tick are ordered the same way, the first by priority starting. A wait lasts 6 hours at most, counted from its comment's start: then the Objective starts beside the sibling, and the comment says it stopped waiting.
+- **Light overlap** (fewer shared files): it starts, and a comment says which siblings it shares files with; whichever merges second rebases.
+- **Unknown files:** it starts as before, with nothing said. A first run has no plan or PR before it starts, so a batch of fresh Objectives filed together starts together; the ordering applies once an Objective has a plan or a PR (a rerun after a Question or a Block, the next part of a split), and a running sibling counts once its plan comment is posted.
+
+When a waiting Objective starts, its comment says it no longer waits. The comparison reads each Objective's comments (a call per 100 comments) and its PR's changed files, and one listing of the open PRs per tick, reusing the PRs the merge pass read; a local loop keeps what it read while an issue's update time and comment count, and a PR's head, stay the same, so on an unchanged queue a tick costs that one listing at most. It compares nothing when no slot is free, or when no sibling is active and at most one Objective can start; then only an Objective that starts has its comments read, for a waiting comment to close.
+
+A run named by hand for an issue never waits. Each send-back notice on the PR says which rebase it is (of at most 5 in 24 hours), and each rebase stage's progress comment says what it cost and what all of the Objective's rebases cost so far; the scorecard's Rebases column carries the same. When you know two fresh Objectives share an area, say so: add the GitHub issue dependency (`blocked_by`) and the dispatcher orders them; or set `max_concurrent: 1` for the stretch.
 
 ## One repository per Objective
 
@@ -160,4 +172,4 @@ With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in pl
 | "Apply the Clockgrove Factory workflow hand-over for Objective 12." | `/factory:factory-handover <issue>` | Puts the workflow change Factory handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
 | "Show the Clockgrove Factory scorecard." | `/factory:factory-score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
 
-On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, and local mode has `factory serve`, `factory run <issue>` and `factory review <pr>` ([LOCAL.md](LOCAL.md), Run it).
+On the command line, `gh workflow run factory.yml -f issue=<number>` starts one Objective now, local mode has `factory serve`, `factory run <issue>` and `factory review <pr>`, and `factory wait` waits for the queue's next event on any route ([LOCAL.md](LOCAL.md), Run it).

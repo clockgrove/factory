@@ -29,7 +29,7 @@ import { openStageHosts, refusalExit } from "./lib/local.mjs";
 import { OUTAGE, stopWaiting, unreachable, waitOutages } from "./lib/network.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
-import { routeInputs } from "./lib/accounts.mjs";
+import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
@@ -699,6 +699,8 @@ async function main() {
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
+  // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
+  LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
   if (acct.note) await progress(acct.note);
   // The chosen harness's credential (doctor.mjs credentialChecks), as the worker's job checks have it: a missing one Blocks

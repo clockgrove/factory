@@ -1,29 +1,30 @@
-// Usage-limit holds per account on GitHub Actions and the cloud sandbox, and automatic account choice there (#268). Local
-// mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so the same
-// records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own holds issue
-// (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
+// Usage-limit holds per account on GitHub Actions and the cloud sandbox, and automatic account choice there (#268).
+// Local mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so
+// the same records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own
+// holds issue (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
 // findRecordIssue; normally one, two only after a race at the first limit until a writer moves the newer one's records
 // over and retires it). Only comments by Factory's own login there count (isSelf), and only as written: a record is
 // never edited, so one edited since (its updated_at is not its created_at: a person who can edit comments did it) holds
-// nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one who
-// unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at once
-// each add theirs and lose none; a writer deletes the records forgotten (HOLD_FORGET_MS after their end). A reader makes
-// one labelled issues query (a miss is "no holds") and lists that issue's comments; only a writer searches Factory's own
-// issues past the label before it opens the issue, on its first limit. Only a stage whose harness has more than one
-// account and the setting on reads or writes anything: with FACTORY_AUTO_ACCOUNT off, or one account, nothing here runs
-// and every stage runs exactly as before. The records hold no secret: a harness, an account's name, times, a count and
-// the limit's window.
+// nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one
+// who unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at
+// once each add theirs and lose none; a writer deletes the records forgotten (holds.mjs forgotten: an hour after a
+// hold's end, a day after a guess's). A reader makes one labelled issues query (a miss is "no holds") and lists that
+// issue's comments; only a writer searches Factory's own issues past the label before it opens the issue, on its first
+// limit. Only a stage whose harness has more than one account and the setting on reads or writes anything: with
+// FACTORY_AUTO_ACCOUNT off, or one account, nothing here runs and every stage runs exactly as before. The records hold
+// no secret: a harness, an account's name, times, a count and the limit's window.
 //
 // Hold semantics are holds.mjs's own (accountHolds over these records): a limit holds its account until the provider's
 // reset, with the back-off floor for a provider that refuses again past its reset; a usage limit with no reset reported
-// (Copilot's, Codex's with no snapshot) is a guess automatic choice avoids for 1, 4, then 24 hours. These routes write no
-// served-pass record (a pass's end would cost a read on every stage): a back-off streak or a guess ends when its records
-// are forgotten instead.
+// (Copilot's, Codex's with none in its snapshot) is a guess automatic choice avoids for 1, 4, then 24 hours, and the
+// Objective that met it moves to a free account as on a known reset (#332). These routes write no served-pass record
+// (a pass's end would cost a read on every stage): a back-off streak or a guess ends when its records are forgotten
+// instead.
 import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
-import { HOLD_FORGET_MS, accountHolds, heldRecord } from "./holds.mjs";
+import { accountHolds, forgotten as forgottenAt, heldRecord } from "./holds.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf, selfLogin } from "./logic.mjs";
 
@@ -50,7 +51,7 @@ const rawRecord = (c) => {
 
 /**
  * The holds recorded on issue `number` at `now`: {records (heldRecord's), forgotten (ids of Factory's own record comments
- * a writer deletes: past HOLD_FORGET_MS, or edited since written, which count for nothing)}.
+ * a writer deletes: forgotten (holds.mjs), or edited since written, which count for nothing)}.
  */
 async function recordsOn(repo, number, opts, now) {
   const records = [];
@@ -65,7 +66,7 @@ async function recordsOn(repo, number, opts, now) {
       if (!v) continue;
       const r = heldRecord(v, now);
       if (r) records.push(r);
-      else if (Number.isSafeInteger(v.until) && now - v.until > HOLD_FORGET_MS) forgotten.push(c.id);
+      else if (Number.isSafeInteger(v.until) && forgottenAt(v, now)) forgotten.push(c.id);
     }
   }
   return { records, forgotten };
@@ -209,6 +210,13 @@ export function pickRouteAccount({ names, store, issue, now = Date.now() }) {
   return { name: a.name, until: store.avoidUntil(a.name, now) };
 }
 
+/** An account's hold in a Block's words: until its reset, or about a guess's end when no reset was reported (holds.mjs spent). */
+const heldText = (store, name, t) => {
+  const hard = store.until(name, t);
+  const end = store.avoidUntil(name, t);
+  return end !== null && end !== hard ? `\`${name}\` passed over until about ${iso(end)} (no reset reported)` : `\`${name}\` held until ${iso(end ?? t)}`;
+};
+
 /**
  * A stage's usage-limit handling on these routes with automatic account choice on (#268), or null when it does not apply
  * (the setting off, one account of the harness, or a stage on no declared account). `account` is the one the stage runs
@@ -217,10 +225,14 @@ export function pickRouteAccount({ names, store, issue, now = Date.now() }) {
  * - `elsewhere()`: whether another account of the harness is free now (a failed read, or a pinned stage: no), so the
  *   stage ends on a limit it would otherwise wait out in place (harness.mjs runHarness, LIMIT.movePastMs).
  * - `limit(e)`: the stage met its usage limit (harness.mjs UsageLimitReached): its account is held (writeHold), pinned or
- *   not, so automatic choice passes it over for other Objectives. Unpinned, with another account free, the Objective goes
- *   on there ({goOn: line}: account-wait.mjs waitOnAccounts, the work back to Queued or In review, the review's label
- *   off until the dispatcher's next tick); else {note}, the sentence its Block adds (none for a pinned stage, or when the
- *   move itself failed).
+ *   not, so automatic choice passes it over for other Objectives; with no reset reported (`e.resetAt` null: a usage
+ *   limit or quota that ended the unpinned stage at once, harness.mjs LIMIT.moves, #332) the hold is the guess `spent`
+ *   writes. Unpinned, with another account free (read with this stage's own hold written, so the move never lands back
+ *   on it), the Objective goes on there ({goOn: line}: account-wait.mjs waitOnAccounts, the work back to Queued or In
+ *   review, the review's label off until the dispatcher's next tick); else {note}, the sentence its Block adds (none for
+ *   a pinned stage, or when the move itself failed), naming each other account's hold when no reset was reported. Each
+ *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
+ *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
  */
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
@@ -242,8 +254,9 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
     },
     async limit(e) {
       const t = now();
-      const { until, store } = await writeHold(repo, { kind: "limit", harness, account, reset: e.resetAt, window: e.refusal?.limitType ?? null, now: t }, opts);
-      const line = `${who} reached its usage limit on account \`${account}\`, which is held until ${iso(until)}`;
+      const noReset = !Number.isFinite(e.resetAt);
+      const { until, store } = await writeHold(repo, { kind: noReset ? "spent" : "limit", harness, account, reset: e.resetAt, window: e.refusal?.limitType ?? null, now: t }, opts);
+      const line = noReset ? `${who} reached its usage limit or quota on account \`${account}\` with no reset reported, so automatic account choice passes it over until about ${iso(until)}` : `${who} reached its usage limit on account \`${account}\`, which is held until ${iso(until)}`;
       if (pinned) return {};
       if (free(store, t).length) {
         try {
@@ -253,6 +266,7 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
           return {};
         }
       }
+      if (noReset) return { note: `Every other ${who} account this repository declares is held too: ${others.map((n) => heldText(store, n, t)).join("; ")}.` };
       const first = Math.min(...others.map((n) => store.avoidUntil(n, t)));
       return { note: `Every other ${who} account this repository declares is held too, the first until ${iso(first)}.` };
     },

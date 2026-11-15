@@ -143,6 +143,30 @@ const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "bil
 export const USAGE_LIMIT_KINDS = new Set(["usage_limit_reached"]);
 /** Whether a refusal (providerRefusal) is a subscription's usage limit. */
 export const usageLimited = (r) => !!r && (USAGE_LIMIT_KINDS.has(r.type) || USAGE_LIMIT_KINDS.has(r.code));
+
+/** Provider error types and codes (REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
+const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota"]);
+const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
+
+/**
+ * A provider refusal's cause (providerRefusal): the AI Gateway's budget or credits, the provider's quota or
+ * billing (those kinds, or HTTP 402), else a setup gap (a key, an authorization, a payment method, a request the
+ * settings make).
+ */
+export function refusalCause(r) {
+  const kinds = [r?.type, r?.code];
+  if (kinds.some((k) => GATEWAY_BUDGET_KINDS.has(k))) return "gateway-budget";
+  if (kinds.some((k) => PROVIDER_QUOTA_KINDS.has(k)) || r?.status === 402) return "provider-quota";
+  return "setup";
+}
+
+/**
+ * Whether a refusal (providerRefusal) is the account's usage limit or quota with no reset reported: Copilot's always,
+ * Codex's when its snapshot names none (a workspace's credits or spend cap). Automatic account choice passes that
+ * account over for a guessed while (holds.mjs spent) and, with another account free, moves the Objective there.
+ */
+export const noResetLimit = (r) => !!r && refusalCause(r) === "provider-quota" && !Number.isFinite(r.resetAt);
+
 /** An epoch time in seconds or ms as ms; null when it is no positive number. */
 const epochMs = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : null);
 

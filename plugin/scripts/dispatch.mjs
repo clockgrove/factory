@@ -832,7 +832,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const released = [];
   for (const key of Object.keys(localHeld || {})) held[Number(key)] ??= localHeld[key];
   // localHold(issue): the loop's hold read on the listing's own issue (its labels), never picked while it gives a reason
-  // (local.mjs limitHold: the Objective's harness has its usage limit spent).
+  // (local.mjs limitHold: the account the Objective runs on has its usage limit spent).
   if (localHold) for (const issue of wanted) {
     const why = localHold(issue);
     if (why) held[issue.number] ??= why;

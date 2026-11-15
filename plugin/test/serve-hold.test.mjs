@@ -9,6 +9,7 @@ import { Local } from "../scripts/local.mjs";
 import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
+import { accountHolds } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
 // fails every one of its tries.
@@ -64,6 +65,13 @@ async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => fals
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
   return { labels, timeline, writes, reads: () => reads, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((ok) => server.close(ok)) };
+}
+
+/** This machine's holds (in memory) with `account`'s usage limit spent for the next hour, as a stage here would leave it. */
+function heldOn(account) {
+  const holds = accountHolds();
+  holds.limit({ harness: account, account, reset: Date.now() + 60 * 60_000, now: Date.now() });
+  return holds;
 }
 
 /** The labels a listing from before the stage's exit labels landed shows: no state label at all. */
@@ -316,7 +324,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
 /** A loop with this machine's holder id and no waits between claim reads. */
 async function claimLoop(holderPid = process.pid) {
   const { holderId, machineIdentity } = await import("../scripts/local.mjs");
-  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", dev: mkdtempSync(join(tmpdir(), "claims-")), opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, claimSettleMs: 0, baseEnv: () => ({}) });
+  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", dev: mkdtempSync(join(tmpdir(), "claims-")), opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, claimSettleMs: 0, baseEnv: () => ({}), holdOf: (account) => ({ key: account.name, shared: true }) });
 }
 
 for (const [stage, end, how] of [
@@ -758,11 +766,11 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
     assert.equal(gh.comments.length, 1, "the claim stays");
     assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
-    assert.equal(loop.limitUntil("claude"), reset, "no stage starts on claude until the reset");
-    assert.equal(loop.limitUntil("codex"), null);
+    assert.equal(loop.limitUntil({ key: "claude", shared: true }), reset, "no stage starts on claude until the reset");
+    assert.equal(loop.limitUntil({ key: "codex", shared: true }), null);
     assert.deepEqual(await loop.pausedHere(new Map()), [], "not resumed before the reset");
     t = reset;
-    assert.equal(loop.limitUntil("claude"), null);
+    assert.equal(loop.limitUntil({ key: "claude", shared: true }), null);
     assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed once the reset has passed");
     // A weekly limit's reset is past the outage bound: still resumed after it, not Blocked as an outage.
     t = since + OUTAGE.blockMs + 60_000;
@@ -781,7 +789,9 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
     stopAfter: 3,
     stubs: {
       harness: "claude",
-      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      holds: heldOn("claude"),
+      accountFor: (harness) => ({ name: harness, harness, declared: false }),
+      holdOf: (account) => ({ key: account.name, shared: true }),
       pendingReviews: async () => [{ issue: 8, pr: 18 }],
       review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
     },
@@ -800,7 +810,9 @@ test("serve: one harness's spent usage limit holds only that harness's work; an 
     stopAfter: 3,
     stubs: {
       harness: "claude",
-      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      holds: heldOn("claude"),
+      accountFor: (harness) => ({ name: harness, harness, declared: false }),
+      holdOf: (account) => ({ key: account.name, shared: true }),
       pendingReviews: async () => [{ issue: 8, pr: 18 }],
       review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
     },

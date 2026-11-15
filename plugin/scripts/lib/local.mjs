@@ -17,6 +17,7 @@ import { exec } from "./proc.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { releasesDir } from "./release.mjs";
 import { declaredLogins } from "./accounts.mjs";
+import { holdsDir } from "./holds.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
@@ -1996,7 +1997,8 @@ export function harnessOuterSettings({ harness, domains = LOCAL_DOMAINS, writabl
       denyRead: [...(credentials ?? credentialPaths(home, env, { own: stageLogin(harness, env, home) })).filter((p) => !isOwn(p)), ...hostSockets(env, undefined, { keep: [...writable, ...(relaySocketDir ? [relaySocketDir] : [])] })],
       ...(install.length ? { allowRead: install } : {}),
       allowWrite: [...writable, ...writableOwn, ...(harness === "claude" && projectDir ? [projectDir] : [])],
-      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home)],
+      // This machine's usage-limit holds (holds.mjs): never in a writable path, and read-only even under a harness home around them.
+      denyWrite: [...(clone ? [...gitGuards(clone), ...harnessConfigPaths(clone)] : []), ...readOnly, ...SHARED_TMP, ...guards, ...install, ...factoryCodeDirs(home), holdsDir(home)],
     },
     allowNestedUserNamespaces: true,
     // Copilot: bubblewrap with /dev/net/tun for its sandbox's network (bwrapTunScript); srt runs it on the host.

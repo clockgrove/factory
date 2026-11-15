@@ -1387,9 +1387,10 @@ export class Local {
   async review(issue, prNumber, { wait = false, reruns = 0 } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
     log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
-    // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back; --wait,
-    // with no serve to do it, does the same here, and then follows the review as before.
-    if (wait && review.exit === "waiting") return (await this.thirdPartyWait(issue, prNumber)) ? this.review(issue, prNumber, { wait, reruns }) : review;
+    // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back. `run` and
+    // `review`, which may have no serve behind them, do the same here, so the label is never left off with nothing to
+    // put it back, and then review again.
+    if (!this.serving && review.exit === "waiting") return (await this.thirdPartyWait(issue, prNumber)) ? this.review(issue, prNumber, { wait, reruns }) : review;
     if (wait && review.exit === "delivered") {
       // A maintainer commented during the review: it re-applied the label instead of arming the merge. Run it again,
       // at most twice here; after that the label stays and the next serve tick (or a `review` run) takes it.
@@ -1405,16 +1406,18 @@ export class Local {
   }
 
   /**
-   * --wait, a review stage that ended waiting for a third-party reviewer: what serve's dispatcher does for it
-   * (third-party-review.mjs waitState), read once a minute: true once the review label is back on (that review of the
-   * head exists, or the bound has passed), false when there is nothing to wait for (no record for the PR's head, the PR
-   * closed, a review asked for since) or this loop is stopping. `gh` is for tests.
+   * `run` or `review` (not serve), a review stage that ended waiting for a third-party reviewer: what serve's dispatcher
+   * does for it (third-party-review.mjs waitState), read once a minute: true once the review label is back on (put back
+   * here, that review of the head existing, the bound passed or the head moved, or by another loop or the Action), false
+   * when there is nothing to wait for (no record, the PR closed, a review asked for since) or this loop is stopping.
+   * `gh` is for tests.
    */
   async thirdPartyWait(issue, prNumber, { pollMs = THIRD_PARTY_POLL_MS, gh = { getPr, listComments, addLabels } } = {}) {
     const reads = new Map();
     while (!this.stopping) {
       const pr = await gh.getPr(this.repo, prNumber, this.opts).catch(() => null);
       const comments = pr ? await gh.listComments(this.repo, prNumber, this.opts).catch(() => null) : null;
+      if (pr && (pr.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL)) return true;
       if (pr && comments) {
         const state = await waitState({ repo: this.repo, issue, pr, wait: waitOf(comments, issue), opts: this.opts, now: (this.clock ?? Date.now)(), reads });
         if (!state || state.stale) return false;
@@ -1737,6 +1740,8 @@ export class Local {
 
   /** The dispatcher's own rules (caps, order, blocking, send-backs, Done), every interval; picks run here, up to this box's limit. */
   async serve({ once = false, intervalMs = 30_000 } = {}) {
+    // A review that ends waiting for a third-party reviewer is resumed by this loop's dispatcher ticks, not in its slot.
+    this.serving = true;
     const running = new Map();
     // Objectives whose stage here ended with a Question or a Block: held until a trusted answer re-queues one or a
     // fresh read shows it Queued (dispatch.mjs localStopped), so a read from before the exit landed never re-claims one.

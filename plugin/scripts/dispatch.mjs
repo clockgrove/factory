@@ -78,6 +78,9 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
 /** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
 const rateLimitLine = (resetAt) => `GitHub's API rate limit is spent until ${new Date(resetAt).toISOString()}; no new stage starts until then`;
 
+/** Whether a dispatcher run on this event may build an owed image: never a pull request's or a review's (pull_request*), whose run reads the workflow from the PR. */
+export const imageTickEvent = (eventName) => !String(eventName || "").startsWith("pull_request");
+
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], sentBack: [], thirdPartyResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
@@ -712,12 +715,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
       // serve's review). The bound's end is a wake of its own; the reviewer's review ticks this job by its event.
       const waiting = !reviewing ? await waitState({ repo, issue: issue.number, pr, wait, opts, now: Date.now(), reads: thirdPartyReads }) : null;
+      // The PR's comments unread: with third-party reviewers named it may be waiting, so nothing else runs on it this tick.
+      if (unread && !reviewing && inputs.thirdPartyReviewers?.length) {
+        retry(`PR #${open.number}'s comments`);
+        continue;
+      }
       if (waiting?.resume) {
         if (dryRun) continue;
         try {
           await addLabels(repo, open.number, [REVIEW_LABEL], opts);
           thirdPartyResumed.push(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: ${waiting.resume === "reviewed" ? `${wait.logins.join(", ")} reviewed ${wait.sha.slice(0, 7)}` : `the third-party wait for ${wait.logins.join(", ")} has passed its bound`}; the review goes on`);
+          log(`  #${issue.number}: PR #${open.number}: ${{ reviewed: `${wait.logins.join(", ")} reviewed ${wait.sha.slice(0, 7)}`, deadline: `the third-party wait for ${wait.logins.join(", ")} has passed its bound`, head: `its head moved from ${wait.sha.slice(0, 7)} during the third-party wait` }[waiting.resume]}; the review goes on`);
         } catch (e) {
           log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
           retry(`#${issue.number}'s review label`);
@@ -1275,9 +1283,10 @@ async function main() {
   setOutput("wake_at", wake?.at ?? "");
   setOutput("wake_kind", wake?.kind ?? "");
   // On the sandbox route, an image build an earlier day left owed runs on this tick (the image job's `if:`): the
-  // first tick of the UTC day, an event's or a wake's (never a pull request's), not GitHub's nightly cron alone.
+  // first tick of the UTC day, an event's or a wake's (never a pull request's or a review's: those runs read the
+  // workflow from the PR), not GitHub's nightly cron alone.
   let owed = false;
-  if (inputs.sandbox && args.dry_run !== "true" && !inputs.issue && eventName !== "pull_request") {
+  if (inputs.sandbox && args.dry_run !== "true" && !inputs.issue && imageTickEvent(eventName)) {
     owed = await imageOwedNow(repoOf(inputs.repo), { refresh: inputs.imageRefresh, dailyMinutes: inputs.imageDailyMinutes }, { token }).catch((e) => {
       log(`the image record could not be read (${String(e.message).slice(0, 120)}); no owed build this tick`);
       return false;

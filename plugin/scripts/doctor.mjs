@@ -660,8 +660,8 @@ export function mergeTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
  * Whether the installed workflow carries the dispatcher's own ticks (workflow-template.yml): any issue closing (it may
  * block an Objective), the wake job (a stage's lease end, a quota retry, the UTC day's turn, one retry), and with a
  * sandbox the launch job's tick on its own failure, the sweep's own wakes (sweep-wake, image-wake) and the dispatcher's
- * owed image build (image_owed), and, with third-party reviewers named, a review on a Factory PR (pull_request_review),
- * which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
+ * owed image build (image_owed), and, with third-party reviewers named, an App's review on a Factory PR
+ * (pull_request_review, filtered to a Bot reviewer), which resumes a review stage that ended waiting for one. A workflow rendered before them leaves those waits to GitHub's cron,
  * which fires late or not at all. FAIL from a person's doctor run; WARN inside a run, as mergeTickCheck.
  */
 export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACTIONS } = {}) {
@@ -687,7 +687,7 @@ export function ownedTickCheck(text, env = process.env, { job = !!env.GITHUB_ACT
     ...(jobs["launch-gate"] && !ownWake("sweep") ? ["the sweep's own wake (sweep-wake)"] : []),
     ...(jobs["launch-gate"] && !(ownWake("image") && /cancelled\(\)|always\(\)/.test(String(jobs["image-wake"]?.if || ""))) ? ["the sweep's wake after an image build (image-wake) that runs past a skipped dispatcher"] : []),
     ...(jobs["launch-gate"] && !owedBuild ? ["the dispatcher's owed image build (image_owed)"] : []),
-    ...(thirdPartyNamed(doc, jobs) && !(on?.pull_request_review && /pull_request_review/.test(String(jobs.dispatch?.if || ""))) ? ["a dispatcher tick on a third-party reviewer's review (pull_request_review)"] : []),
+    ...(thirdPartyNamed(doc, jobs) && !(on?.pull_request_review && /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot'/.test(String(jobs.dispatch?.if || ""))) ? ["a dispatcher tick on a third-party reviewer's review (pull_request_review, from an App only)"] : []),
   ];
   if (!missing.length) return PASS("dispatcher ticks", `a closed issue, a failed launch and the waits only time ends tick the dispatcher on time${jobs["launch-gate"] ? "; the sandbox sweep arms its own wakes and an owed image build runs on the day's first tick" : ""}`);
   return (job ? WARN : FAIL)("dispatcher ticks", `the workflow lacks ${missing.join(", ")}: an Objective whose start failed or was deferred, whose blocker closed, or whose stage died, a review waiting for a third-party reviewer, a sandbox left to sweep or an image build an earlier day left, stalls until GitHub's cron fires, often hours late`, "re-run setup --apply workflow and commit the result");

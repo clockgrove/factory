@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { RETRY, resolveFactoryThreads } from "../scripts/lib/github.mjs";
 import { inFiles, postReplies } from "../scripts/lib/handoff.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
-import { setSelf } from "../scripts/lib/logic.mjs";
+import { selfLogin, setSelf } from "../scripts/lib/logic.mjs";
 import { unaddressedReviewComments } from "../scripts/lib/session.mjs";
 import { THIRD_PARTY_POLL_MS, THIRD_PARTY_WAIT_MS, exitUnaddressed, reviewedHead, thirdPartyLine, thirdPartyReviewers, thirdPartyStep, waitBody, waitOf, waitState } from "../scripts/lib/third-party-review.mjs";
 import { answerPrompt } from "../scripts/review.mjs";
@@ -256,8 +256,9 @@ test("#303: the dispatcher's read of a wait: held until the review of the head o
     // The label went back on after the record was written: that stage has the wait, so it is not resumed again.
     gh.state.labelled = new Date(T0 + 21 * MIN).toISOString();
     assert.deepEqual(await waitState({ repo, issue: 7, pr, wait, opts: { token: "t" }, now: T0 + 25 * MIN }), { stale: true });
-    // Not this head's, a draft, or none: no wait.
-    assert.equal(await waitState({ repo, issue: 7, pr: { ...pr, head: { sha: "2".repeat(40) } }, wait, opts: { token: "t" } }), null);
+    // A review asked for since: a new head too is that stage's.
+    assert.deepEqual(await waitState({ repo, issue: 7, pr: { ...pr, head: { sha: "2".repeat(40) } }, wait, opts: { token: "t" }, now: T0 + 2 * MIN }), { stale: true });
+    // A draft, or none: no wait.
     assert.equal(await waitState({ repo, issue: 7, pr: { ...pr, draft: true }, wait, opts: { token: "t" } }), null);
     assert.equal(await waitState({ repo, issue: 7, pr, wait: null, opts: { token: "t" } }), null);
   });
@@ -492,7 +493,7 @@ test("#303: the workflow ticks the dispatcher on a third-party review; doctor na
   for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
     const doc = parseYaml(renderWorkflow(template, v));
     assert.deepEqual(doc.on.pull_request_review.types, ["submitted"]);
-    assert.match(doc.jobs.dispatch.if, /github\.event_name == 'pull_request_review' && startsWith\(github\.event\.pull_request\.head\.ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository && !startsWith\(github\.event\.review\.body, '<!-- factory:'\)/);
+    assert.match(doc.jobs.dispatch.if, /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot' && startsWith\(github\.event\.pull_request\.head\.ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository && !startsWith\(github\.event\.review\.body, '<!-- factory:'\)/);
     assert.ok(!/pull_request_review/.test(doc.jobs.review?.if || ""), "no review job on the event itself: the label starts it");
   }
   const named = (text) => text.replace(/\nenv:\n/, "\nenv:\n  FACTORY_THIRD_PARTY_REVIEWERS: greptile-apps[bot]\n");
@@ -502,5 +503,114 @@ test("#303: the workflow ticks the dispatcher on a third-party review; doctor na
   assert.equal(ownedTickCheck(old, {}).status, "PASS", "with none named the tick is not needed");
   const by = ownedTickCheck(named(old), {});
   assert.equal(by.status, "FAIL");
-  assert.match(by.detail, /a dispatcher tick on a third-party reviewer's review \(pull_request_review\)/);
+  assert.match(by.detail, /a dispatcher tick on a third-party reviewer's review \(pull_request_review, from an App only\)/);
+});
+
+// #311 review: the cases a new head, a person's review, an unread comment list or an unknown login left stalled or open.
+
+test("#311: a head pushed during the wait (a maintainer's commit, GitHub's Update branch) gets its review label back, with no reviews read", async () => {
+  const w = waitWorld();
+  w.state.pr.mergeable_state = "clean";
+  w.state.pr.head = { ...w.state.pr.head, sha: "b".repeat(40) };
+  const t = await waitTick(w);
+  assert.deepEqual(t.writes, ["POST /issues/12/labels factory:review"]);
+  assert.deepEqual(t.r.thirdPartyResumed, [7]);
+  assert.equal(w.state.reviewReads, 0);
+  // The unit: a new head resumes at once, bound or not.
+  const pr = { number: 7, state: "open", draft: false, head: { sha: "2".repeat(40) }, labels: [] };
+  const gh = github({ reviews: [] });
+  await withGitHub(gh, async () => {
+    assert.deepEqual(await waitState({ repo, issue: 7, pr, wait: { id: 1, sha: HEAD, logins: [GREPTILE], since: T0, updatedAt: T0 }, opts: { token: "t" }, now: T0 + MIN }), { resume: "head", until: T0 + THIRD_PARTY_WAIT_MS });
+  });
+  assert.equal(gh.reads(), 0);
+});
+
+test("#311: run or review with a new head during the wait puts the label back itself, and stops waiting once the label is back from elsewhere", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const clock = { t: T0 };
+  const comments = [];
+  const gh = github({ reviews: [], comments, clock: () => clock.t });
+  await step(gh, clock);
+  const labels = [];
+  const pr = { number: 7, state: "open", draft: false, head: { sha: "c".repeat(40) }, labels: [] };
+  const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, clock: () => clock.t, pause: async () => assert.fail("no wait for a new head") });
+  const fakes = { getPr: async () => pr, listComments: async () => comments, addLabels: async (_r, n, l) => labels.push([n, ...l]) };
+  assert.equal(await withGitHub(gh, () => loop.thirdPartyWait(7, 7, { gh: fakes })), true);
+  assert.deepEqual(labels, [[7, "factory:review"]]);
+  // The Action's dispatcher (or another loop) put it back first: the review goes on here, no second label.
+  const labelled = { ...pr, head: { sha: HEAD }, labels: [{ name: "factory:review" }] };
+  assert.equal(await withGitHub(gh, () => loop.thirdPartyWait(7, 7, { gh: { ...fakes, getPr: async () => labelled } })), true);
+  assert.equal(labels.length, 1);
+});
+
+test("#311: run and review, which may have no serve behind them, never leave the label off: they wait in place; serve's own reviews do not", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const make = (serving) => {
+    const exits = ["waiting", "delivered"];
+    const seen = { waits: 0, stages: 0 };
+    const loop = Object.assign(Object.create(Local.prototype), {
+      repo,
+      opts: { token: "t" },
+      serving,
+      stage: async () => ({ exit: exits[seen.stages++], usd: null }),
+      thirdPartyWait: async () => (seen.waits++, true),
+    });
+    return { loop, seen };
+  };
+  const cli = make(false);
+  assert.equal((await cli.loop.review(7, 12)).exit, "delivered", "factory review / factory run without --wait");
+  assert.deepEqual(cli.seen, { waits: 1, stages: 2 });
+  const serve = make(true);
+  assert.equal((await serve.loop.review(7, 12)).exit, "waiting", "serve's slot is free: its dispatcher ticks resume it");
+  assert.deepEqual(serve.seen, { waits: 0, stages: 1 });
+});
+
+test("#311: comments the dispatcher could not read hold a PR that may be waiting (no merge pass on it this tick)", async () => {
+  const w = waitWorld();
+  w.state.pr.mergeable_state = "clean";
+  const fetch = w.fetch;
+  let reads = 0;
+  w.fetch = async (url, init = {}) => {
+    if ((init.method || "GET") === "GET" && new URL(url).pathname === `/repos/${W_REPO}/issues/12/comments`) {
+      reads += 1;
+      if (reads <= RETRY.tries) return new Response(JSON.stringify({ message: "Server Error" }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    return fetch(url, init);
+  };
+  const t = await waitTick(w);
+  assert.equal(reads, RETRY.tries, "one failed read (its tries), and no merge pass reading them again");
+  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"));
+  assert.deepEqual(t.writes, []);
+});
+
+test("#311: with Factory's own login unknown the step does not wait (its record could not be read back, so each start would post a new one)", async () => {
+  const gh = github({ reviews: [] });
+  const said = [];
+  const r = await withGitHub(gh, async () => {
+    setSelf(null);
+    assert.equal(selfLogin(), null);
+    return thirdPartyStep({ repo, issue: 7, prNumber: 7, sha: HEAD, names: [GREPTILE], progress: async (t) => said.push(t), token: "t" });
+  });
+  assert.deepEqual(r, { logins: [GREPTILE], wait: null });
+  assert.deepEqual(gh.writes(), []);
+  assert.match(said[0], /Factory's own login is unknown.*going on without waiting/);
+});
+
+test("#311: only an App's review ticks the dispatcher; no pull_request* event builds the sandbox image; doctor checks the App filter", async () => {
+  const { ownedTickCheck } = await import("../scripts/doctor.mjs");
+  const { renderWorkflow } = await import("../scripts/setup.mjs");
+  const { parseYaml } = await import("../scripts/lib/yaml.mjs");
+  const { imageTickEvent } = await import("../scripts/dispatch.mjs");
+  const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const sandbox = parseYaml(renderWorkflow(template, { ...values, sandbox: "vercel", default_branch: "main" }));
+  assert.match(sandbox.jobs.dispatch.if, /github\.event_name == 'pull_request_review' && github\.event\.review\.user\.type == 'Bot'/);
+  assert.match(sandbox.jobs.image.if, /needs\.dispatch\.outputs\.image_owed == 'true' && !startsWith\(github\.event_name, 'pull_request'\)/);
+  for (const e of ["pull_request", "pull_request_review", "pull_request_target"]) assert.equal(imageTickEvent(e), false, e);
+  for (const e of ["schedule", "workflow_dispatch", "issues", "push"]) assert.equal(imageTickEvent(e), true, e);
+  const named = (text) => text.replace(/\nenv:\n/, "\nenv:\n  FACTORY_THIRD_PARTY_REVIEWERS: greptile-apps[bot]\n");
+  const anyone = named(renderWorkflow(template, values)).replace(" && github.event.review.user.type == 'Bot'", "");
+  const by = ownedTickCheck(anyone, {});
+  assert.equal(by.status, "FAIL", "a tick any person's review fires");
+  assert.match(by.detail, /pull_request_review, from an App only/);
 });

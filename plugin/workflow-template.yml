@@ -42,7 +42,7 @@ on:
   issue_comment: # a maintainer's comment on an Objective: the answer to its Question
     types: [created]
   # {{/sandbox}}
-  pull_request_review: # a third-party reviewer's review of a Factory PR: the dispatcher puts back the review label a stage waiting for it took off
+  pull_request_review: # an App's review of a Factory PR (a third-party reviewer's): the dispatcher puts back the review label a stage waiting for it took off
     types: [submitted]
   check_suite: # CI from a GitHub App outside Actions finished on a factory/ branch: a stage waiting on it resumes, or the dispatcher's merge pass runs
     types: [completed]
@@ -87,8 +87,8 @@ jobs:
     # Ticks: the */10 cron only (a backstop: GitHub fires schedules late or not at all; other schedules are other
     # jobs'), a manual run, a new Objective's label or its removal (a stop), a restart's label, a draft's label applied or removed (a stop, a start), any issue closing (it may block an Objective), Factory's own jobs'
     # last steps (a slot freed, a failed or requeued start), a merged Factory PR, the merge queue dropping one
-    # (only GitHub and people with write access dequeue), a review on a Factory PR that is not Factory's own (a
-    # third-party reviewer's: a review stage may wait for it), the queue watch, and, without a sandbox, CI finishing on a
+    # (only GitHub and people with write access dequeue), an App's review on a Factory PR that is not Factory's own (a
+    # third-party reviewer's: a review stage may wait for it; a person's review ticks nothing), the queue watch, and, without a sandbox, CI finishing on a
     # factory/ branch (the merge pass merges a PR whose checks just went green; with a sandbox the gate job takes those
     # events and ticks this job itself).
     if: >-
@@ -101,7 +101,7 @@ jobs:
       (github.event_name == 'issues' && (github.event.action == 'closed' || github.event.label.name == 'factory:objective' || github.event.label.name == 'factory:draft' || (github.event.action == 'labeled' && github.event.label.name == 'factory:restart') || (github.event.action == 'opened' && contains(join(github.event.issue.labels.*.name, ','), 'factory:objective')))) ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'factory/')) ||
       (github.event_name == 'pull_request' && github.event.action == 'dequeued' && startsWith(github.head_ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository) ||
-      (github.event_name == 'pull_request_review' && startsWith(github.event.pull_request.head.ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.event.review.body, '<!-- factory:'))
+      (github.event_name == 'pull_request_review' && github.event.review.user.type == 'Bot' && startsWith(github.event.pull_request.head.ref, 'factory/') && github.event.pull_request.head.repo.full_name == github.repository && !startsWith(github.event.review.body, '<!-- factory:'))
       # {{^sandbox}}
       || (github.event_name == 'check_suite' && startsWith(github.event.check_suite.head_branch, 'factory/')) ||
       (github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'factory/') && github.event.workflow_run.head_repository.full_name == github.repository)
@@ -370,7 +370,7 @@ jobs:
       (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
       github.event.schedule == '41 10 * * *' ||
       (github.event_name == 'workflow_dispatch' && inputs.image == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
-      (needs.dispatch.outputs.image_owed == 'true' && github.event_name != 'pull_request')) && !cancelled()
+      (needs.dispatch.outputs.image_owed == 'true' && !startsWith(github.event_name, 'pull_request'))) && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions: { contents: read, actions: read } # the job token reads the default branch and the armed wakes; the record is the App's (a token for issues only)

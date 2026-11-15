@@ -12,7 +12,7 @@
 import { listComments, objectiveLabeledAt, rest } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL, isSelf } from "./logic.mjs";
+import { REVIEW_LABEL, isSelf, selfLogin } from "./logic.mjs";
 
 /** How long Factory waits for a named reviewer's review of the head, from its wait record (Greptile takes 10 to 15 minutes). */
 export const THIRD_PARTY_WAIT_MS = 20 * 60_000;
@@ -148,6 +148,12 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   if (!logins.length || skip) return { logins, wait: null };
   const opts = { token };
   const head = String(sha).slice(0, 7);
+  // Factory's own login unknown: its record could not be told from a pasted one, so a stage started again would post a
+  // new record with a new bound every time. No wait.
+  if (!selfLogin()) {
+    await progress(`third-party review: Factory's own login is unknown, so its wait record could not be read back; going on without waiting`);
+    return { logins, wait: null };
+  }
   const seen = reviewedHead(await readReviews(repo, prNumber, opts), sha, logins);
   let comments;
   try {
@@ -186,19 +192,21 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
 }
 
 /**
- * The dispatcher's read of an In-review PR's wait (thirdPartyStep's record, `wait`: waitOf over the PR's comments it
- * already read), on every route. Null when there is none for the PR's head (none, another head's, a draft). Otherwise:
+ * The dispatcher's read of an unlabelled In-review PR's wait (thirdPartyStep's record, `wait`: waitOf over the PR's
+ * comments it already read), on every route. Null when there is none (or the PR is a draft or closed). Otherwise:
  *  - {waiting, until}: the bound is ahead and a named reviewer has not reviewed the head (or the reviews are unread);
  *    the PR is left as it is (no merge pass, no update), and `until` is when time alone changes that;
- *  - {resume, until}: `reviewed` or `deadline`; the caller puts the review label back, which starts the review again;
+ *  - {resume, until}: `reviewed`, `deadline`, or `head`: the PR's head is no longer the one the record waits on (a
+ *    maintainer's commit, GitHub's "Update branch"), so that head needs its review; the caller puts the review label
+ *    back, which starts the review again (as the merge pass does for a head that is not GitHub's update of the reviewed one);
  *  - {stale}: a review was asked for since the record was last written, so its stage has taken the wait up already.
  * `reads` (serve's memory, `${pr}:${sha}` to ms) keeps the reviews read to one per THIRD_PARTY_POLL_MS per head; the
  * Action's dispatcher reads on its own ticks. `unread` is set when the review label's history could not be read.
  */
 export async function waitState({ repo, issue, pr, wait, opts, now = Date.now(), reads = null }) {
-  if (!wait || !pr || pr.draft || pr.state === "closed" || wait.sha !== pr.head?.sha) return null;
+  if (!wait || !pr || pr.draft || pr.state === "closed") return null;
   const until = waitUntil(wait);
-  let resume = now >= until ? "deadline" : null;
+  let resume = wait.sha !== pr.head?.sha ? "head" : now >= until ? "deadline" : null;
   if (!resume) {
     const key = `${pr.number}:${wait.sha}`;
     const last = reads?.get(key);

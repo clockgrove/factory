@@ -236,6 +236,41 @@ export function loadAccounts({ home = homedir(), env = process.env, roots = [], 
 /** The account a `harness` stage runs on: its first declared one, else the one named after the harness. */
 export const defaultAccount = (loaded, harness) => loaded?.accounts?.[harness]?.[0] ?? implicitAccount(harness);
 
+/** Every account a `harness` stage may run on: its declared ones in order, else the one named after the harness. */
+export const harnessAccounts = (loaded, harness) => (loaded?.accounts?.[harness]?.length ? loaded.accounts[harness] : [implicitAccount(harness)]);
+
+/**
+ * The machine setting that turns on automatic account choice (#266): set in the shell that runs `factory serve` only,
+ * never by the workflow file or a repository variable (both leave out a name that is no setting of theirs). `1` is on;
+ * unset, empty or `0` is off. {on, problem}: `problem` names any other value, which leaves it off.
+ */
+export const AUTO_ACCOUNT_ENV = "FACTORY_LOCAL_AUTO_ACCOUNT";
+export function autoAccountSetting(env = process.env) {
+  const v = env[AUTO_ACCOUNT_ENV];
+  if (v === "1") return { on: true, problem: null };
+  if (v === undefined || v === "" || v === "0") return { on: false, problem: null };
+  return { on: false, problem: `${AUTO_ACCOUNT_ENV} is neither 1 nor 0, so automatic account choice is off` };
+}
+
+/**
+ * The account a stage with no account label starts on when automatic choice is on (#266), from `list` (harnessAccounts,
+ * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones: `prefer` (a
+ * name: the account the Objective's last stage paused on, whose session carries over there); else the one whose latest
+ * usage limit was met least recently (`limitedAt(a)`, ms, null for none the machine remembers: those first); then the
+ * one a stage last started on least recently (`startedAt(a)`, ms or null: the machine's round-robin); then the first
+ * declared. With every account held, the one whose hold ends first: the stage is held on it until then.
+ */
+export function chooseAccount(list, { until, limitedAt = () => null, startedAt = () => null, prefer = null }) {
+  const rows = list.map((a, i) => ({ a, i, until: until(a) }));
+  const free = rows.filter((r) => r.until === null);
+  if (!free.length) return rows.reduce((x, y) => (y.until < x.until ? y : x)).a;
+  const own = prefer ? free.find((r) => r.a.name === prefer) : null;
+  if (own) return own.a;
+  const at = (v) => (Number.isFinite(v) ? v : -Infinity);
+  for (const r of free) [r.limited, r.started] = [at(limitedAt(r.a)), at(startedAt(r.a))];
+  return free.sort((x, y) => x.limited - y.limited || x.started - y.started || x.i - y.i)[0].a;
+}
+
 /** An account label as a notice shows it: code-quoted when its name is an account name, else not echoed at all. */
 export const pinLabelText = (label) => (validAccountName(label.slice(ACCOUNT_LABEL_PREFIX.length).trim().toLowerCase()) ? `\`${label}\`` : "an account label whose name is no account name");
 
@@ -260,10 +295,10 @@ export function accountPin(names = []) {
  */
 export function pinnedAccount(loaded, harness, name) {
   const label = pinLabelText(`${ACCOUNT_LABEL_PREFIX}${name}`);
-  const mine = loaded?.accounts?.[harness]?.length ? loaded.accounts[harness] : [implicitAccount(harness)];
+  const mine = harnessAccounts(loaded, harness);
   const hit = mine.find((a) => a.name === name);
   if (hit) return { account: hit };
-  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && (loaded?.accounts?.[h]?.length ? loaded.accounts[h] : [implicitAccount(h)]).some((a) => a.name === name));
+  const other = ACCOUNT_HARNESSES.find((h) => h !== harness && harnessAccounts(loaded, h).some((a) => a.name === name));
   if (other) return { problem: `${label} names a ${HARNESS_NAMES[other]} account, and this Objective runs on ${HARNESS_NAMES[harness]}` };
   return { problem: `${label} names no ${HARNESS_NAMES[harness]} account this machine declares (${mine.map((a) => `\`${a.name}\``).join(", ")})` };
 }

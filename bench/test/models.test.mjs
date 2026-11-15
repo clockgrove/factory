@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadPrices } from "../lib/cost.mjs";
 import { harnessCell, markdownTable, objectiveModels, scoreObjective, stageHarnessOf } from "../lib/objective.mjs";
-import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
+import { harnessMarker, stageSpendLine } from "../../plugin/scripts/lib/logic.mjs";
 import { localMerge } from "./fixtures/github.mjs";
 
 const prices = loadPrices();
@@ -52,4 +52,30 @@ test("#263: the row's accounts come from the usage artifacts and the local stage
   assert.equal(row.cost.usd, score({ ...localMerge(62), usage: c.usage }).cost.usd, "the progress lines' dollars are not added to the artifacts'");
   c.usage = [{ ...c.usage[0], account: "alpha" }, { ...c.usage[0], account: "beta" }];
   assert.deepEqual(score(c).accounts, ["alpha", "beta"], "deduplicated");
+});
+
+test("#266: the row gives each local account its stages, dollars and usage-limit pauses, from the stages' progress lines or, given, their own result.json, never both; the Harness cell shows them", () => {
+  const c = localMerge(63);
+  const mark = (account) => `\n${harnessMarker("codex", "gpt-6.1-sol", { ...ran("gpt-6.1-sol", null, "gpt-6.1-sol"), harness: "codex", account })}`;
+  const paused = { ...c.issueComments[0], id: 1700000000, body: `<!-- factory:63:progress:work:1700000000 -->\nFactory work run 1700000000\n- 00:50Z exit: paused\n<!-- factory:spend {"usd":0.5,"limitPaused":true} -->${mark("alpha")}` };
+  c.issueComments[0].body += mark("beta");
+  c.issueComments[2].body += mark("beta");
+  c.issueComments.unshift(paused);
+  const row = score(c);
+  assert.deepEqual(row.accountUse, [
+    { account: "alpha", stages: 1, usd: 0.5, limitPauses: 1 },
+    { account: "beta", stages: 2, usd: 1.5, limitPauses: 0 },
+  ]);
+  assert.match(markdownTable([row]), /; accounts alpha \(1 stage, \$0\.50, 1 limit pause\), beta \(2 stages, \$1\.50\) \|/);
+  c.usage = [
+    { artifact: "usage-work-1/result.json", harness: "codex", account: "alpha", usd: 0.5, exit: "paused", usageLimit: { harness: "codex", reset: "2031-03-02T05:00:00Z", since: "2031-03-02T00:50:00Z" } },
+    { artifact: "usage-work-2/result.json", harness: "codex", account: "beta", usd: 1.25, exit: "delivered" },
+  ];
+  assert.deepEqual(score(c).accountUse, [
+    { account: "alpha", stages: 1, usd: 0.5, limitPauses: 1 },
+    { account: "beta", stages: 1, usd: 1.25, limitPauses: 0 },
+  ]);
+  assert.deepEqual(score(localMerge(64)).accountUse, [], "no account named: none");
+  assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", usageLimit: { harness: "claude" } }).parts, { limitPaused: true }, "the spend line marks a usage-limit pause");
+  assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, {}, "not an outage's");
 });

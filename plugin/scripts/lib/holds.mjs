@@ -4,7 +4,9 @@
 // limit another already met. Each limit met is one file of its own, written whole under a dot-name and renamed into
 // place, never rewritten: writers at the same time each add theirs and lose none, with no lock. A hold is the latest
 // reset any file names for the account; its back-off streak is the newest file's. The record holds no secret: a
-// harness, an account's name, times, a count and the limit's window when the harness named it. The folder is outside
+// harness, an account's name, times, a count and the limit's window when the harness named it. With automatic account
+// choice on (#266), each account also has one `<key>.started.json`, replaced whole at each stage start on it: the
+// machine's round-robin, where the last writer wins and nothing else depends on it. The folder is outside
 // every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
 // file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
@@ -35,13 +37,13 @@ const MAX_BYTES = 4096;
 const WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 export const windowOf = (w) => (typeof w === "string" && WINDOW.test(w) ? w : null);
 
-/** One record, checked: {harness, account, until, streak, at, window?}, or null. */
+/** One record, checked: {harness, account, until, streak, at, window?, served?}, or null. */
 function recordOf(v, account) {
   if (!v || typeof v !== "object" || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness)) return null;
   const { until, at, streak } = v;
   if (![until, at].every(Number.isSafeInteger) || !Number.isSafeInteger(streak) || streak < 0) return null;
   const window = windowOf(v.window);
-  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}) };
+  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}), ...(v.served === true ? { served: true } : {}) };
 }
 
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
@@ -85,16 +87,21 @@ function readDir(dir, now, uid) {
 }
 
 /**
- * An account's hold from its records: the latest reset any names (and that record's window, when it names one), and
- * the newest record's streak (of two made in the same millisecond, the longer streak); null with none.
+ * An account's hold from its records: the latest reset any names (and that record's window, when it names one), the
+ * newest record's streak (of two made in the same millisecond, the longer streak), and when the newest usage limit was
+ * met (`limitedAt`: a served pass's record is no limit); null with none.
  */
 function fold(records, account, now) {
   const mine = records.filter((r) => r.account === account && now - r.until <= HOLD_FORGET_MS);
   if (!mine.length) return null;
   const newest = mine.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.streak > a.streak) ? b : a));
   const latest = mine.reduce((a, b) => (b.until > a.until || (b.until === a.until && b.window && !a.window) ? b : a));
-  return { harness: newest.harness, until: latest.until, streak: newest.streak, at: newest.at, window: latest.window ?? null };
+  const limits = mine.filter((r) => !r.served).map((r) => r.at);
+  return { harness: newest.harness, until: latest.until, streak: newest.streak, at: newest.at, window: latest.window ?? null, limitedAt: limits.length ? Math.max(...limits) : null };
 }
+
+/** A stage-start record's file (accountHolds.started): one per account, replaced whole at each start. */
+const START = (key) => `${key}.started.json`;
 
 /**
  * The machine's holds in `dir` (holdsDir), or in this process's memory alone with no `dir`. The files are the record: a
@@ -109,6 +116,10 @@ function fold(records, account, now) {
  *   a row on that account (2, 5, 10, then 15 minutes); a reset further out starts the count again. Returns the hold's end.
  * - `served({harness, account, now, started})`: a pass on the account completed, its stage started at `started` (ms):
  *   the streak ends (its hold, if any, stays) when that start is after the newest record's.
+ * - `limitedAt(account, now)`: when a stage last met the account's usage limit (ms), while its records are kept; else null.
+ * - `started({harness, account, now})`: a stage starts on the account now (automatic account choice's round-robin, #266):
+ *   one small file per account, replaced whole, so every serve on the machine takes turns from the same record.
+ * - `startedAt(account)`: when a stage last started on the account (ms), or null.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).
  */
 export function accountHolds({ dir = null, uid = process.getuid?.(), onError = () => {} } = {}) {
@@ -121,6 +132,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     }
   }
   let kept = [];
+  const starts = new Map();
   const records = (now) => {
     kept = kept.filter((r) => now - r.until <= HOLD_FORGET_MS);
     return dir ? [...kept, ...readDir(dir, now, uid)] : kept;
@@ -169,7 +181,37 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       const h = of(account, now);
       // Only a pass that started after the newest limit met: one that ran before it says nothing of the account now.
       // Its record lasts as long as the hold, so the older streak never becomes the newest again when it is forgotten.
-      if (h?.streak > 0 && started > h.at) put({ harness, account, until: Math.max(now, h.until), streak: 0, at: now });
+      if (h?.streak > 0 && started > h.at) put({ harness, account, until: Math.max(now, h.until), streak: 0, at: now, served: true });
+    },
+    limitedAt(account, now) {
+      return of(account, now)?.limitedAt ?? null;
+    },
+    started({ harness, account, now }) {
+      starts.set(account, now);
+      if (!dir || !KEY.test(account) || !NAME.test(harness)) return;
+      const temp = join(dir, `.${account}.${randomBytes(8).toString("hex")}.tmp`);
+      try {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        if (!ours(lstatSync(dir), uid)) throw new Error("the holds folder is a link, another user's, or writable by others");
+        writeNew(temp, `${JSON.stringify({ harness, account, at: now })}\n`);
+        renameSync(temp, join(dir, START(account)));
+      } catch (e) {
+        rmSync(temp, { force: true });
+        onError(e);
+      }
+    },
+    startedAt(account) {
+      const mine = starts.get(account) ?? null;
+      if (!dir || !KEY.test(account)) return mine;
+      try {
+        const file = join(dir, START(account));
+        const st = lstatSync(file, { throwIfNoEntry: false });
+        if (!st?.isFile() || !ours(st, uid) || st.nlink !== 1 || st.size > MAX_BYTES || !ours(lstatSync(dir), uid)) return mine;
+        const v = JSON.parse(readFileSync(file, "utf8"));
+        return v?.account === account && Number.isSafeInteger(v.at) ? Math.max(v.at, mine ?? -Infinity) : mine;
+      } catch {
+        return mine;
+      }
     },
   };
 }

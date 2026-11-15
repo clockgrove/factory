@@ -24,7 +24,7 @@ import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, g
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
-import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
+import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -59,7 +59,7 @@ export const hiddenFromShell = (shellSecrets = []) => SHELL_SECRET_KEYS.filter((
  * acts as, its progress comment's key, its read token, local mode's host-only settings. Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv removes them from every child.
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR"];
 
 /**
  * Factory's internal names that do reach children, on purpose: the hand-off and the task card's (FACTORY_IN, FACTORY_OUT,
@@ -254,7 +254,7 @@ export function promptCacheTtl(harness, env = {}) {
 /**
  * A runner's Claude Code run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/claude-runner.mjs: Factory's HOME for Claude Code, its per-start state, the caches) and the hosts its commands
- * may reach (`allowed_domains`). Null for any other harness, in local mode and before the agent uid exists.
+ * may reach (`allowed_domains`, and the Objective's own host labels: local.mjs openedStageHosts). Null for any other harness, in local mode and before the agent uid exists.
  */
 export function claudeRunner({ harness, agent, clone, env = process.env, claudeHome, services = null }) {
   if (harness !== "claude" || !agent || !clone || backend(env).name === "local") return null;
@@ -263,7 +263,7 @@ export function claudeRunner({ harness, agent, clone, env = process.env, claudeH
   if (!layout.editDiffs) throw new Error(`no uid for ${agent.user}: refusing to start Claude Code without its sandbox's full write list`);
   // The services the repository's setup started: their loopback ports through the sandbox's proxy (claude-runner.mjs).
   const offered = services ?? agentServicePorts(agent);
-  return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env })), ...offered.map((p) => `127.0.0.1:${p}`)] };
+  return { clone, ...layout, services: offered, domains: [...runnerDomains(input("allowed_domains", { env }), openedStageHosts()), ...offered.map((p) => `127.0.0.1:${p}`)] };
 }
 
 /** The Vercel AI Gateway's host, which a runner's Codex commands may reach when the gateway is Codex's provider. */
@@ -272,24 +272,24 @@ export const GATEWAY_HOST = new URL(GATEWAY_CODEX_URL).hostname;
 /**
  * A runner's Codex run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/codex-runner.mjs: Factory's HOME for Codex, its fresh CODEX_HOME, the caches) and the hosts its commands may reach
- * (`allowed_domains`, and the gateway's host when it is the provider). `present` is filled before each start: the
+ * (`allowed_domains`, the Objective's own host labels, and the gateway's host when it is the provider). `present` is filled before each start: the
  * checkout's read-only paths that exist. Null for any other harness, in local mode and before the agent uid exists.
  */
 export function codexRunner({ harness, agent, clone, env = process.env, codexHome }) {
   if (harness !== "codex" || !agent || !clone || backend(env).name === "local") return null;
   const gateway = env[CODEX_GATEWAY_ENV] ? [GATEWAY_HOST] : [];
-  return { clone, ...codexRunnerLayout(agent, codexHome), domains: [...new Set([...runnerDomains(input("allowed_domains", { env })), ...gateway])], present: null };
+  return { clone, ...codexRunnerLayout(agent, codexHome), domains: [...new Set([...runnerDomains(input("allowed_domains", { env }), openedStageHosts()), ...gateway])], present: null };
 }
 
 /**
  * A runner's Copilot run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/copilot-runner.mjs: Factory's HOME for Copilot with its bwrap and release, its fresh COPILOT_HOME, the caches,
- * the agent's GitHub login) and the hosts its commands may reach (`allowed_domains`). Null for any other harness, in
+ * the agent's GitHub login) and the hosts its commands may reach (`allowed_domains`, and the Objective's own host labels). Null for any other harness, in
  * local mode and before the agent uid exists.
  */
 export function copilotRunner({ harness, agent, clone, env = process.env, copilotHome }) {
   if (harness !== "copilot" || !agent || !clone || backend(env).name === "local") return null;
-  return { clone, ...copilotRunnerLayout(agent, copilotHome), domains: runnerDomains(input("allowed_domains", { env })) };
+  return { clone, ...copilotRunnerLayout(agent, copilotHome), domains: runnerDomains(input("allowed_domains", { env }), openedStageHosts()) };
 }
 
 /**

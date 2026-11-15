@@ -52,7 +52,7 @@ function fakeGitHub(g) {
   // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `mainAt`: main's commit time.
   // `threads`: the PR's review threads (GraphQL's shape); `protection`: branch protection requires resolved conversations;
   // `rules`: the active rules GitHub lists for main; `labelled`: labels added; `resolved`: threads Factory resolved.
-  const state = { race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [] };
+  const state = { race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
   // GitHub's own rule: an unresolved conversation refuses the merge when protection or a ruleset requires them resolved.
   const conversationsHeld = () => state.threads.some((t) => !t.isResolved) && (state.protection || state.rules.some((r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution));
   let id = 1;
@@ -94,6 +94,11 @@ function fakeGitHub(g) {
         attempts.push(pr.number);
         await runRace();
         if (conversationsHeld()) return json(200, { errors: [{ type: "UNPROCESSABLE", message: "Pull request is not mergeable: review conversations must be resolved" }] });
+        // GitHub's merge check still counting a conversation resolved a moment ago.
+        if (state.refuseOnce) {
+          state.refuseOnce = false;
+          return json(200, { errors: [{ type: "UNPROCESSABLE", message: "Pull request is not mergeable: review conversations must be resolved" }] });
+        }
         if (queued.has(pr.number)) return json(200, { errors: [{ type: "UNPROCESSABLE", message: "Pull request is already in the queue" }] });
         if (pr.merged) return json(200, { errors: [{ type: "UNPROCESSABLE", message: "Pull request is already merged" }] });
         // GitHub's answer for a conflicting PR: a GraphQL error with HTTP 200, so no status on the thrown error.
@@ -135,7 +140,7 @@ function fakeGitHub(g) {
     if (method === "GET" && /\/check-runs/.test(u)) return json(200, { total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }] });
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && (m = /\/repos\/o\/r\/commits\/([0-9a-f]+)$/.exec(u))) return json(200, { sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
-    if (method === "GET" && /\/timeline/.test(u)) return json(200, []);
+    if (method === "GET" && /\/timeline/.test(u)) return json(200, state.timeline);
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
   const open = (number, issue, sha) => {
@@ -586,7 +591,7 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
     assert.deepEqual(gh.attempts, []);
     const why = mergeBlockReason("threads", report);
-    assert.match(why, /^PR #12 has 1 unresolved review conversation\(s\), and a ruleset on main requires every conversation resolved before a merge: dana on src\/store\.ts:41\./);
+    assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then re-apply `factory:objective` to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     assert.deepEqual(gh.state.labelled, [], "a person's thread is not Factory's to answer");
 
@@ -595,7 +600,7 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
     gh.state.protection = true;
     const prot = {};
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: false, checkNames: ["ci"], report: prot }, { token: "t" }), "threads");
-    assert.match(mergeBlockReason("threads", prot), /and branch protection on main requires every conversation resolved/);
+    assert.match(mergeBlockReason("threads", prot), /^PR #12 cannot merge: branch protection on main requires every review conversation resolved/);
 
     // No rule requires it: the open thread holds nothing.
     gh.state.protection = false;
@@ -632,8 +637,79 @@ test("#331: local --wait takes code scanning's comment to the review stage, and 
     gh.state.threads = [structuredClone(personThread)];
     assert.equal(await loop.followMerge(2, 12, { timeoutMs: 5_000, pollMs: 1 }), false);
     const notice = (gh.comments[2] || []).find((c) => c.body.includes(marker(2, "blocked").replace(/ -->$/, "")));
-    assert.match(notice?.body ?? "", /Blocked \(merge\): PR #12 has 1 unresolved review conversation\(s\), and a ruleset on main requires every conversation resolved before a merge: dana on src\/store\.ts:41/);
+    assert.match(notice?.body ?? "", /Blocked \(merge\): PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src\/store\.ts:41/);
     assert.match(notice.body, /"cause":"work"/);
     assert.deepEqual(gh.attempts, [], "nothing is enqueued");
+  });
+});
+
+test("#331: code scanning's review rounds at the merge are bounded per re-entry, counted in Factory's record; past the bound it Blocks naming each open alert", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    gh.state.rules = [RULESET];
+    const alert = (id, line) => ({ ...structuredClone(codeql.thread), id, line, originalLine: line });
+    const pass = (report = {}) => mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" });
+    // Each round's fix brings a new alert: two rounds, then a Block, not a third review.
+    gh.state.threads = [alert("A1", 239)];
+    assert.equal(await pass(), "code-scanning");
+    gh.state.threads = [alert("A2", 250)];
+    assert.equal(await pass(), "code-scanning");
+    gh.state.threads = [alert("A3", 260), alert("A4", 12)];
+    const report = {};
+    assert.equal(await pass(report), "threads");
+    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 unanswered alert(s) on PR #12 after 2 review rounds answered its earlier ones: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `factory:objective` to resume");
+    assert.equal(mergeBlockCause("threads", report), "work");
+    assert.equal(gh.state.labelled.length, 2, "two rounds, two review labels");
+    assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "code-scanning"))).length, 1, "one record on the issue");
+    assert.deepEqual(gh.attempts, []);
+    // A re-entry (the Objective label applied again) starts the count over.
+    gh.state.timeline = [{ event: "labeled", label: { name: "factory:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
+    assert.equal(await pass(), "code-scanning");
+  });
+});
+
+test("#331: a person's reply in code scanning's thread is no answer: the thread stays open and goes to the answer pass", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const thread = structuredClone(codeql.thread);
+    thread.comments.nodes.push(reply("Looking into it.", { __typename: "User", login: "dana" }, "MEMBER"));
+    gh.state.threads = [thread];
+    assert.equal(await merge(2, 12), "code-scanning");
+    assert.deepEqual(gh.state.resolved, [], "never resolved on a person's word");
+  });
+});
+
+test("#331: threads resolved just now that GitHub's merge check does not count yet: one more try after a moment, not a refusal", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const thread = structuredClone(codeql.thread);
+    thread.comments.nodes.push(reply("<!-- factory:2:reply:4580153891 -->\nFixed in abc1234."));
+    gh.state.threads = [thread];
+    gh.state.rules = [RULESET];
+    gh.state.refuseOnce = true;
+    assert.equal(await merge(2, 12), "queued");
+    assert.deepEqual(gh.attempts, [12, 12]);
+    assert.deepEqual(gh.state.resolved, [codeql.thread.id]);
+  });
+});
+
+test("#331: a named reviewer's comment posted after the answer pass Blocks under the rule, saying so; no review runs for it", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    const greptile = { __typename: "Bot", login: "greptile-apps" };
+    gh.state.threads = [{ id: "PRRT_late", isResolved: false, path: "src/a.ts", line: 3, originalLine: 3, comments: { nodes: [reply("P2: missing check", greptile)] } }];
+    gh.state.rules = [RULESET];
+    const report = {};
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report, thirdParty: ["greptile-apps[bot]"] }, { token: "t" }), "threads");
+    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: greptile-apps[bot] on src/a.ts:3 (posted after the answer pass). Answer or resolve each on the PR, then re-apply `factory:objective` to resume");
+    assert.deepEqual(gh.state.labelled, []);
   });
 });

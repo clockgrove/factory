@@ -22,7 +22,7 @@ import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runH
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, parseArgs, postedError, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
@@ -85,7 +85,7 @@ import {
   redLines,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
-import { answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
@@ -303,6 +303,19 @@ export async function validatedOn({ repo, issue, prNumber, sha, token }) {
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
 export function workerRun(inputs) {
   return { harness: inputs.harness, model: inputs.model, effort: inputs.effort };
+}
+
+/**
+ * What the comments an answer pass is given add to its fix-pass scope (outbox.mjs fence): each comment's file and text,
+ * but of code scanning's alert only its file, and never a protected or toolchain one: an alert there is fixed by no
+ * answer pass, and the scope's refusal Blocks it.
+ */
+export function answerScope(comments, protectedList) {
+  return comments.flatMap((c) => {
+    if (c.from !== CODE_SCANNING) return [`${c.path || ""}\n${c.body || ""}`];
+    const path = String(c.path || "");
+    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path) ? [path] : [];
+  });
 }
 
 /** The worker's prompt for the one pass that answers the review. */
@@ -1240,7 +1253,7 @@ async function main() {
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
-    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...toAnswer.map((c) => `${c.path || ""}\n${c.body || ""}`), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     // The checkout's HEAD before the pass: a queue fix counts once the pass itself committed and that went up
     // (recordQueueFix), never for a merge commit Factory makes at the push.
     const checkoutHead = async () => {

@@ -12,7 +12,7 @@
 import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
+import { CODE_SCANNING, REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
 /** How long Factory waits for a named reviewer's review of the head, from its wait record (Greptile takes 10 to 15 minutes). */
 export const THIRD_PARTY_WAIT_MS = 20 * 60_000;
@@ -42,12 +42,9 @@ export function thirdPartyReviewers(names = [], own = []) {
   return { logins, refused };
 }
 
-/**
- * GitHub's code scanning App: its alerts on a PR's lines (CodeQL's, say) are review comments by this login. A `[bot]`
- * login is an App's, which no person can hold. Factory answers its comments as it answers a named reviewer's, on every
- * repository and with no setting, and never waits for it: its comments come from a check run, not a review of the head.
- */
-export const CODE_SCANNING = "github-advanced-security[bot]";
+// Code scanning (logic.mjs CODE_SCANNING): Factory answers its comments as it answers a named reviewer's, on every
+// repository and with no setting, and never waits for it: its comments come from a check run, not a review of the head.
+export { CODE_SCANNING };
 
 /**
  * The reviewers outside Factory whose line comments the answer pass handles and whose answered threads Factory resolves:

@@ -54,9 +54,10 @@ import {
   setStateLabel,
   upsertComment,
   transientError,
+  RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, refusalCause, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
@@ -665,7 +666,7 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * answers it in a PR comment under its reply marker (handoff.mjs postReplies). Factory's own reviews and reply markers
  * are those by Factory or someone who can push (trustedAuthor). `thirdParty` (third-party-review.mjs logins): a named
  * reviewer's root comments are listed too, shaped and sanitised for the answer pass with `from` set (thirdPartyComment);
- * one counts until Factory or someone who can push replies in its thread.
+ * one counts until it is answered (logic.mjs answersComment: on code scanning's, only Factory's own answer counts).
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
@@ -673,7 +674,8 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // A named reviewer's comment is never Factory's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && trustedAuthor(c)).map((c) => c.in_reply_to_id));
+  const byId = new Map(comments.map((c) => [c.id, c]));
+  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && answersComment(byId.get(c.in_reply_to_id)?.user?.login, c)).map((c) => c.in_reply_to_id));
   const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty) && !answeredByUs.has(c.id)).map((c) => thirdPartyComment(c, namedReviewer(c, thirdParty))) : [];
   const open = [...roots.filter((c) => !replies.has(c.id)), ...theirs];
   // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
@@ -2577,19 +2579,56 @@ export function mergeBlockReason(how, report = {}) {
   return null;
 }
 
+/** How long a merge refused just after Factory resolved threads waits before its one more try (mergeReadyOne). */
+const RESOLVED_SETTLE_MS = 5_000;
 /** The most unresolved conversations a Block names one by one. */
 const THREADS_NAMED = 5;
+/** The most review rounds the merge pass starts for code scanning's comments per re-entry (conversationsGate). */
+export const CODE_SCANNING_ROUNDS = 2;
+
+const SCAN_RECORD = (issue) => `<!-- factory:${issue}:code-scanning-record `;
+
+/**
+ * The review rounds the merge pass started for code scanning's comments on `prNumber`, from Factory's own record on the
+ * issue (one comment, marker(issue, "code-scanning"); a record by Factory or someone who can push, since two routes can
+ * write it): the times of each, oldest first. Throws when the comments cannot be read.
+ */
+export async function codeScanningRounds(repo, issue, prNumber, opts) {
+  const rounds = [];
+  for (const c of await listComments(repo, issue, opts)) {
+    if (!trustedAuthor(c) || !(c.body || "").startsWith(marker(issue, "code-scanning"))) continue;
+    const line = (c.body || "").split("\n").find((l) => l.startsWith(SCAN_RECORD(issue)) && l.endsWith(" -->"));
+    try {
+      const v = JSON.parse(line.slice(SCAN_RECORD(issue).length, -4));
+      if (Number(v?.pr) === Number(prNumber) && Array.isArray(v.rounds)) rounds.push(...v.rounds.filter((t) => Number.isFinite(Date.parse(t))));
+    } catch {
+      // not a record
+    }
+  }
+  return [...new Set(rounds)].sort((a, b) => Date.parse(a) - Date.parse(b));
+}
+
+/** Write the record of code scanning's review rounds on `prNumber` (codeScanningRounds). */
+const writeScanRounds = (repo, issue, prNumber, rounds, opts) =>
+  upsertComment(repo, issue, marker(issue, "code-scanning"), `${SCAN_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds })} -->\nFactory: code scanning commented on PR #${Number(prNumber)} after its answer pass; the review ran again to answer it (${rounds.length} time(s) since its last re-entry, at most ${CODE_SCANNING_ROUNDS}).`, opts);
+
+const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`;
+const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
+const RESUME = "re-apply `factory:objective` to resume";
 
 /**
  * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Factory
  * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
- * resolved now. Code scanning's unanswered comment is the answer pass's: the review label goes back on and this returns
- * "code-scanning". Any other unresolved thread, when the base's rules require every conversation resolved (branch
- * protection, or an active ruleset's pull_request rule), returns "threads" with `report.reason` naming each one: its
- * author, file and line. Otherwise null: the merge goes on. Unreadable threads or rules are null too, and GitHub's own
- * rule decides the merge.
+ * resolved now (`resolvedNow` counts them). Code scanning's unanswered comment is the answer pass's: the review label
+ * goes back on and this returns "code-scanning", at most CODE_SCANNING_ROUNDS times per re-entry (the Objective label
+ * applied again, a restart or a Block, from the issue's timeline), counted in Factory's record on the issue; past that it
+ * Blocks ("threads") naming each open alert. Any other unresolved thread, when the base's rules require every
+ * conversation resolved (branch protection, or an active ruleset's pull_request rule), returns "threads" with
+ * `report.reason` naming each one: its author, file and line. Otherwise null: the merge goes on. Unreadable threads or
+ * rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable round count is "pending".
  */
-async function conversationsGate(repo, { issue, prNumber, base, thirdParty = [] }, report, opts) {
+async function conversationsGate(repo, ctx, report, opts) {
+  const { issue, prNumber, base, thirdParty = [], objectiveLabel } = ctx;
   let read;
   try {
     read = await reviewThreads(repo, prNumber, issue, opts, { thirdParty: answeredReviewers(thirdParty) });
@@ -2605,14 +2644,37 @@ async function conversationsGate(repo, { issue, prNumber, base, thirdParty = [] 
         () => true,
         (e) => (log(`#${issue}: an answered review thread on PR #${prNumber} could not be resolved (${errCode(e)})`), false),
       );
-      if (done) continue;
+      if (done) {
+        ctx.resolvedNow = (ctx.resolvedNow || 0) + 1;
+        continue;
+      }
     }
     open.push(t);
   }
-  if (open.some((t) => t.author === CODE_SCANNING && !t.answered)) {
+  const scans = open.filter((t) => t.author === CODE_SCANNING && !t.answered);
+  if (scans.length) {
+    let rounds;
+    let since;
+    try {
+      [rounds, since] = await Promise.all([codeScanningRounds(repo, issue, prNumber, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked", "factory:restart"], opts)]);
+    } catch (e) {
+      log(`#${issue}: the code scanning rounds on PR #${prNumber} are unreadable (${errCode(e)}); next tick`);
+      return "pending";
+    }
+    const counted = rounds.filter((t) => !since || Date.parse(t) > Date.parse(since));
+    if (counted.length >= CODE_SCANNING_ROUNDS) {
+      report.reason = `code scanning still has ${scans.length} unanswered alert(s) on PR #${prNumber} after ${counted.length} review rounds answered its earlier ones: ${listed(scans.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`;
+      return "threads";
+    }
+    try {
+      await writeScanRounds(repo, issue, prNumber, [...counted, new Date().toISOString()], opts);
+    } catch (e) {
+      log(`#${issue}: the code scanning round on PR #${prNumber} could not be recorded (${errCode(e)}); next tick`);
+      return "pending";
+    }
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
-    log(`#${issue}: code scanning commented on PR #${prNumber} after its answer pass; the review runs again to answer it`);
+    log(`#${issue}: code scanning commented on PR #${prNumber} after its answer pass; the review runs again to answer it (round ${counted.length + 1} of ${CODE_SCANNING_ROUNDS})`);
     return "code-scanning";
   }
   if (!open.length) return null;
@@ -2624,9 +2686,8 @@ async function conversationsGate(repo, { issue, prNumber, base, thirdParty = [] 
     return null;
   }
   if (!rule) return null;
-  const named = open.slice(0, THREADS_NAMED).map((t) => `${t.author ?? "a deleted account"} on ${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`);
-  const more = open.length > THREADS_NAMED ? `, and ${open.length - THREADS_NAMED} more` : "";
-  report.reason = `PR #${prNumber} has ${open.length} unresolved review conversation(s), and ${rule} on ${base} requires every conversation resolved before a merge: ${named.join("; ")}${more}. Factory answers and resolves only its own reviewer's, the named third-party reviewers' and code scanning's; answer or resolve these on the PR`;
+  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.by === "named" && !t.answered ? " (posted after the answer pass)" : t.answered ? " (answered; Factory could not resolve it)" : ""}`;
+  report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME}`;
   return "threads";
 }
 
@@ -2836,7 +2897,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   }
   // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
   // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
-  const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty };
+  const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty, objectiveLabel };
   const held = await conversationsGate(repo, conversations, report, opts);
   if (held) return held;
   // The squash commit says what Factory says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
@@ -2858,14 +2919,16 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
     if (now?.state === "open" && now.mergeable_state === "dirty") return "conflict";
     // A conversation opened since the read above: named as one, never a bare refusal.
-    if (now?.state === "open") {
-      const late = await conversationsGate(repo, conversations, report, opts);
-      if (late) return late;
-    }
+    let late = null;
+    if (now?.state === "open") late = await conversationsGate(repo, conversations, report, opts);
+    if (late) return late;
     // That read failing for now leaves the refusal unexplained: its own transient error is thrown, so the review job
     // leaves the PR to the dispatcher's next tick instead of Blocking a PR another pass may have queued.
     if (transientError(unread)) throw unread;
-    throw e;
+    // Threads this pass resolved may not count yet at GitHub's merge check: once more after a moment, else the refusal.
+    if (now?.state !== "open" || !conversations.resolvedNow) throw e;
+    await RETRY.sleep(RESOLVED_SETTLE_MS);
+    how = await mergeVerified(repo, prNumber, sha, { queue, title: `${pr.title} (#${prNumber})`, message: prFooter(issue, isSplitPart(parts, prNumber)) }, opts);
   }
   if (how === "queued") {
     // The queue's commit is made in a moment: the caller has it watched for a check run to start.

@@ -51,7 +51,7 @@ import {
   transientError,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { outageOf, outageReason, stopWaiting } from "./network.mjs";
@@ -69,7 +69,7 @@ import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, transcriptTotal } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, redDetail } from "./reds.mjs";
@@ -1347,7 +1347,7 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null }) {
   mkdirSync(usageDir, { recursive: true });
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
@@ -1372,6 +1372,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // A stage this machine's network ended (outageExit): the host it could not reach, the code and since when (ISO). A
     // local serve reads it to resume the Objective once the host answers, or to Block it past OUTAGE.blockMs.
     ...(outage ? { outage } : {}),
+    // A stage a harness's usage limit ended (usageLimitExit): the harness, the reset and when it was met (ISO). A local
+    // serve reads it to start no stage on that harness until the reset, and to resume the Objective after it.
+    ...(usageLimit ? { usageLimit } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
@@ -1591,6 +1594,30 @@ export async function outageExit(e, { local, records, finish, block }) {
   log(`blocked: ${blocked}`);
   await block(blocked).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   await finish("blocked", blocked, outage);
+}
+
+/**
+ * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place),
+ * which is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
+ * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
+ * (`usageLimit`: harness, reset, since) and nothing written to GitHub: serve keeps the claim, starts no stage on that
+ * harness until the reset and resumes the Objective after it (local.mjs). On any other route nothing resumes a stage, so
+ * it Blocks with the External cause `provider-quota`, naming the reset, through `block(reason, cause)`.
+ */
+export async function usageLimitExit(e, { local, records, finish, block }) {
+  const ran = stoppedRecords(stagePasses(), openPasses());
+  if (ran.length) records.splice(0, records.length, ...ran);
+  const usageLimit = { harness: e.refusal.harness, reset: new Date(e.resetAt).toISOString(), since: new Date(e.since).toISOString() };
+  if (local) {
+    const reason = `${e.refusal.harness} reached its subscription's usage limit (${refusalFields(e.refusal)}), which resets at ${usageLimit.reset}`;
+    log(`paused: ${reason}; the claim stays, and serve resumes the stage after the reset`);
+    await finish("paused", reason, null, usageLimit);
+    return;
+  }
+  const reason = usageLimitReason(e.refusal);
+  log(`blocked: ${reason}`);
+  await block(reason, "provider-quota").catch((x) => log(`the usage limit's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
+  await finish("blocked", reason, null, usageLimit);
 }
 
 /**

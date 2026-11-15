@@ -843,6 +843,14 @@ export class Local {
       await this.block(issue, name, runs.reason, { fix: runs.fix });
       return { code: null, exit: "blocked", usd: null, usageDir };
     }
+    // That harness's usage limit is spent (a stage here met it, limitPaused): no stage starts on it until the reset. The
+    // Objective pauses as that stage did, and pausedHere resumes it after the reset.
+    const until = runs.harness && (script === "worker.mjs" || script === "review.mjs") ? this.limitUntil(runs.harness) : null;
+    if (until !== null) {
+      rmSync(usageDir, { recursive: true, force: true });
+      this.saidLimit(runs.harness, until);
+      return { code: null, exit: "paused", usd: null, usageDir: null, stage: name, usageLimit: { harness: runs.harness, reset: new Date(until).toISOString(), since: new Date((this.clock ?? Date.now)()).toISOString() } };
+    }
     // The stage's own temp directory, short (srt's sockets live there; a socket path has a 108-byte limit) and the
     // only temp space any sandbox may write: with /tmp itself writable, sandboxed code could swap this directory for
     // a symlink into the home directory before the next sandbox opens it. Removed when the stage ends or fails to
@@ -913,7 +921,7 @@ export class Local {
           // no record: the child failed before writing one
         }
         dropStage();
-        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}) });
+        done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
       });
     });
   }
@@ -1121,6 +1129,7 @@ export class Local {
    * stays. The memory is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
    */
   outagePaused(issue, result) {
+    if (result?.usageLimit) return this.limitPaused(issue, result);
     const o = result?.outage || {};
     const at = Date.parse(o.since);
     const own = Number.isFinite(at) ? at : (this.clock ?? Date.now)();
@@ -1130,6 +1139,37 @@ export class Local {
     (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer" });
     this.lapsed?.delete(issue);
     log(`#${issue}: the ${result?.stage || "work"} stage paused: this machine could not reach ${o.host || "the network"} (${o.code || "no answer"}) since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`);
+  }
+
+  /**
+   * A stage that ended `paused` on its harness's usage limit (session.mjs usageLimitExit): the reset it names
+   * (`result.usageLimit`: harness, reset, since) is kept in this loop's memory, for the Objective (pausedHere resumes it
+   * after the reset, with no bound: the reset is known) and for the harness (no stage starts on it until then, stage).
+   * No lapse is counted; the claim stays. A pause with no readable reset is resumed at once and meets the limit again.
+   */
+  limitPaused(issue, result) {
+    const l = result.usageLimit;
+    const now = (this.clock ?? Date.now)();
+    const reset = Date.parse(l.reset);
+    const since = Date.parse(l.since);
+    (this.offline ??= new Map()).set(issue, { since: Number.isFinite(since) ? since : now, stage: result?.stage || "work", origin: null, host: l.harness, code: "usage limit", harness: l.harness, reset: Number.isFinite(reset) ? reset : now });
+    if (Number.isFinite(reset) && l.harness && reset > (this.limits?.get(l.harness) ?? 0)) (this.limits ??= new Map()).set(l.harness, reset);
+    this.lapsed?.delete(issue);
+    log(`#${issue}: the ${result?.stage || "work"} stage paused: ${l.harness}'s usage limit is spent until ${l.reset}; the claim stays and this loop resumes it after the reset`);
+  }
+
+  /** The reset (ms) of `harness`'s usage limit when a stage here met it and the reset is still ahead, else null. */
+  limitUntil(harness) {
+    const at = this.limits?.get(harness);
+    return at !== undefined && at > (this.clock ?? Date.now)() ? at : null;
+  }
+
+  /** The log line that no stage starts on `harness` until its usage limit's reset (`until`, ms): once per reset. */
+  saidLimit(harness, until) {
+    const key = `${harness}@${until}`;
+    if ((this.limitSaid ??= new Set()).has(key)) return;
+    this.limitSaid.add(key);
+    log(`${harness}'s usage limit is spent until ${new Date(until).toISOString()}; no stage starts on ${harness} until then`);
   }
 
   /**
@@ -1158,6 +1198,11 @@ export class Local {
       // answers would otherwise leave it Running with no notice).
       const off = c.holder === this.holder ? this.offline?.get(issue.number) : null;
       if (off) {
+        // Paused on a usage limit: resumed once its reset has passed, with no probe.
+        if (off.harness && Number.isFinite(off.reset)) {
+          if ((this.clock ?? Date.now)() >= off.reset) out.push(issue.number);
+          continue;
+        }
         if (!off.origin || (this.clock ?? Date.now)() - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null) out.push(issue.number);
         continue;
       }
@@ -1207,7 +1252,7 @@ export class Local {
   async resume(issue) {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
-    if (off && now - off.since >= OUTAGE.blockMs) {
+    if (off && !off.harness && now - off.since >= OUTAGE.blockMs) {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = !off.origin || (await probeHost(off.origin)) === null;
       const reason = `this machine could not reach ${off.host} (${off.code}) from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? "The network is back: re-apply the label to run it again." : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
@@ -1642,13 +1687,17 @@ export class Local {
         running.set(n, track(n, this.resume(n)).catch((e) => log(`#${n} resume failed: ${e.message.slice(0, 200)}`)).finally(() => running.delete(n)));
       }
       const pending = (await this.pendingReviews()).filter((r) => !running.has(r.issue));
-      const reviews = pending.slice(0, Math.max(0, limit - running.size));
+      // The loop's harness's usage limit spent (limitPaused): no review and no new work starts until its reset, said
+      // once. An Objective whose harness label names another harness is held at its stage (stage).
+      const limited = this.limitUntil(this.harness);
+      if (limited !== null) this.saidLimit(this.harness, limited);
+      const reviews = limited !== null ? [] : pending.slice(0, Math.max(0, limit - running.size));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
       const localHeld = { ...this.startHolds(), ...Object.fromEntries(pending.map((r) => [r.issue, "its review runs on this box"])), ...Object.fromEntries([...running.keys()].map((n) => [n, "its stage runs on this box"])) };
       const given = new Map(stopped);
       const localStopped = Object.fromEntries([...given].map(([n, s]) => [n, s.why]));
-      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {
+      const result = await dispatch(inputs, { token: this.token, notice: this.notice, localSlots: limited !== null ? 0 : Math.max(0, limit - running.size - reviews.length), localHeld, localStopped }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;

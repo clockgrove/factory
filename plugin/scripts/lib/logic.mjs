@@ -3,7 +3,7 @@
 
 import { parseToml } from "./toml.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { refusalFields } from "./usage.mjs";
+import { refusalFields, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 // ---------------------------------------------------------------- validation commands
@@ -645,7 +645,7 @@ export function clip(text, max = REASON_MAX) {
 export const BLOCK_CAUSES = Object.freeze({
   "max-usd": Object.freeze({ external: true, what: "Factory's max_usd cap reached" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
-  "provider-quota": Object.freeze({ external: true, what: "a provider's quota, plan limit or billing refusal: the model provider, GitHub's Git LFS storage, or the sandbox vendor's plan" }),
+  "provider-quota": Object.freeze({ external: true, what: "a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit included), GitHub's Git LFS storage, or the sandbox vendor's plan" }),
   outage: Object.freeze({ external: true, what: "a provider or GitHub outage Factory waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
   setup: Object.freeze({ external: false, what: "a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access" }),
   work: Object.freeze({ external: false, what: "the work: the worker's own Block, validation red, review findings, a protected path, the Objective's size, an edit to the Objective after its plan" }),
@@ -672,7 +672,7 @@ export function blockCauseOf(body) {
 }
 
 /** Provider error types and codes (usage.mjs REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
-const PROVIDER_QUOTA_KINDS = new Set(["insufficient_quota", "billing_error", "quota"]);
+const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota"]);
 const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
 
 /**
@@ -693,7 +693,21 @@ export function refusalCause(r) {
  */
 export function refusalReason(r) {
   const fields = refusalFields(r);
+  if (usageLimited(r)) return usageLimitReason(r);
   return `${r.harness} was refused by its provider${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; not retried: the fix is on the credential's account or in the harness settings, not in the code`;
+}
+
+/**
+ * The Blocked (or paused) reason for a subscription's usage limit (usage.mjs usageLimited): the harness, the fields, the
+ * reset when the harness reported it (`resetAt`, ms), and why no other model ran: every model of the subscription draws
+ * on the same limit. Never the provider's prose: the reset is the structured one.
+ */
+export function usageLimitReason(r, { waited = false } = {}) {
+  const fields = refusalFields(r);
+  const reset = Number.isFinite(r.resetAt) ? new Date(r.resetAt).toISOString() : null;
+  const why = `${r.harness} reached its subscription's usage limit${fields ? ` (${fields})` : ""}${reset ? `, which resets at ${reset}` : ", with no reset time reported"}`;
+  if (waited) return `${why}; the stage waited for the reset until its time ran out. Re-apply the label to run it again.`;
+  return `${why}; not run again on another model, since every model of the subscription draws on the same limit. Re-apply the label ${reset ? "after the reset" : "once the limit has reset"}.`;
 }
 
 /** A Question from the worker's exit record: its first question, else the generic line. */

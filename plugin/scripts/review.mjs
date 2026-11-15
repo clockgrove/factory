@@ -18,10 +18,10 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, closingIssues, getIssue, hasMergeQueue, getPr, listComments, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, setDraft, transientError } from "./lib/github.mjs";
 import { eventAction, eventSender, log, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { unpricedCodex } from "./lib/usage.mjs";
+import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
@@ -32,7 +32,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
-import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
+import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, splitPartOf } from "./lib/handoff.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -54,6 +54,7 @@ import {
   mirrorDiff,
   earlyOutageEnd,
   outageExit,
+  usageLimitExit,
   restoreTranscript,
   saveTranscript,
   saveAgentTranscript,
@@ -299,12 +300,12 @@ async function main() {
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // The stage's end is written once: by this finish, or by the stop's (stopNow), whichever claims it first.
-  const finish = async (exit, reason, outage = null) => {
+  const finish = async (exit, reason, outage = null, usageLimit = null) => {
     watch?.stop();
     if (!claimExit()) return parked();
-    return finishNow(exit, reason, outage);
+    return finishNow(exit, reason, outage, usageLimit);
   };
-  const finishNow = async (exit, reason, outage = null) => {
+  const finishNow = async (exit, reason, outage = null, usageLimit = null) => {
     keeper.stop();
     // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
     const known = await stageSpendSoFar().catch(() => null);
@@ -318,7 +319,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { ran: ranWith(inputs, chosenLabels), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -350,6 +351,20 @@ async function main() {
       await dropLabel();
       await applyExit(repo, { issue, pr, exit: "blocked", reason: refused.reason, key: refused.key, cause: "setup", notify: inputs.notify, stage: "review" }, token).catch((x) => log(`exit after refusal failed: ${x.message.slice(0, 120)}`));
       await finish("blocked", refused.reason);
+      return;
+    }
+    // The harness's usage limit, past what the stage waits for in place: paused locally until its reset (its review
+    // label stays, for serve's resume), a `provider-quota` Block elsewhere (session.mjs usageLimitExit).
+    if (e?.code === USAGE_LIMIT) {
+      await usageLimitExit(e, {
+        local,
+        records,
+        finish,
+        block: async (reason, cause) => {
+          await dropLabel();
+          await applyExit(repo, { issue, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "review" }, token);
+        },
+      });
       return;
     }
     // This machine's network, not the stage: paused locally (its review label stays, for serve's resume), an `outage`
@@ -714,8 +729,10 @@ async function main() {
   if (!alreadyReviewed) mark(reviewRec, reviewRec);
   // A pass that missed (handoff.mjs reviewMissed: the call failed, as a crash, a non-zero exit, a cap or an idle kill
   // does; its answer held no JSON; or it judged none of the issue's acceptance entries) reruns once in a fresh session,
-  // on every harness: on the fallback reviewer where the harness has one (Claude's Opus 5.5 at xhigh, since Fable's quota
-  // can run out mid-day and the harness reports no error code for quota), else on the same model (reviewRetry).
+  // on every harness: on the fallback reviewer where the harness has one (Claude's Opus 5.5 at xhigh), else on the same
+  // model (reviewRetry). A provider's refusal is not run again: a subscription's usage limit (usage.mjs usageLimited)
+  // would meet the fallback too, since every model of the subscription draws on it; runHarness waits it out in place, or
+  // ends the stage on it (session.mjs usageLimitExit), or returns it as a refusal when no reset is reported.
   const entries = acceptanceEntries(issueData.body);
   const reviewOf = (rec) => parseReview(rec.finalText || "");
   let retryRec = null;
@@ -724,8 +741,8 @@ async function main() {
   const missed = !alreadyReviewed && reviewMissed({ ok: reviewRec.ok, review: reviewOf(reviewRec), entries });
   const retryTimeout = reviewCallTimeout(remainingMs(deadlineAt));
   if (missed && retryTimeout === null) log(`reviewer ended in ${reviewCallEnd(reviewRec, reviewOf(reviewRec))} with the stage's time cap reached: it is not run again`);
-  else if (missed && reviewRec.refusal) log(`reviewer was refused by the provider (${reviewRec.error}): it is not run again`);
-  else if (missed) {
+  else if (missed && reviewRec.refusal) log(usageLimited(reviewRec.refusal) ? `reviewer reached its subscription's usage limit (${refusalFields(reviewRec.refusal)}): no other model of the same subscription runs it` : `reviewer was refused by the provider (${reviewRec.error}): it is not run again`);
+  else if (reviewRerun({ missed, refusal: reviewRec.refusal, retryTimeout })) {
     const again = reviewRetry({ model: inputs.reviewerModel, effort: inputs.reviewerEffort, fallback: inputs.reviewerFallback });
     log(`reviewer on ${inputs.reviewerModel || inputs.harness} ended in ${reviewCallEnd(reviewRec, reviewOf(reviewRec))}${reviewRec.ok && reviewOf(reviewRec).parsed ? " that judged no acceptance entry" : ""}${reviewRec.error ? ` (${reviewRec.error})` : ""}; running it once more on ${again.model || inputs.harness}${again.effort ? ` at ${again.effort}` : ""}`);
     records.push(reviewRec);

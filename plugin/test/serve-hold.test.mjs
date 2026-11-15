@@ -715,3 +715,49 @@ test("pausedHere: an Objective paused on a provider that never answers again is 
     gh.restore();
   }
 });
+
+test("withClaim: a stage that paused on its harness's usage limit keeps its claim with no lapse; resumed after the reset, never Blocked by the outage bound (#254)", async () => {
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    const since = Date.parse("2026-11-14T21:27:00Z");
+    const reset = Date.parse("2026-11-14T23:00:00Z");
+    let t = since;
+    loop.clock = () => t;
+    const paused = async () => ({ exit: "paused", stage: "review", code: 0, usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(since).toISOString() } });
+    assert.equal((await loop.withClaim(7, paused)).exit, "paused");
+    assert.equal(gh.comments.length, 1, "the claim stays");
+    assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
+    assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
+    assert.equal(loop.limitUntil("claude"), reset, "no stage starts on claude until the reset");
+    assert.equal(loop.limitUntil("codex"), null);
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "not resumed before the reset");
+    t = reset;
+    assert.equal(loop.limitUntil("claude"), null);
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed once the reset has passed");
+    // A weekly limit's reset is past the outage bound: still resumed after it, not Blocked as an outage.
+    t = since + OUTAGE.blockMs + 60_000;
+    loop.offline.get(7).reset = t;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("serve: while the loop's harness's usage limit is spent, no new work or review starts, said once (#254)", async () => {
+  const reviewed = [];
+  const run = await serveAgainst({
+    view: (read, labels) => labels,
+    firstStage: () => Promise.resolve({ exit: "delivered" }),
+    stopAfter: 3,
+    stubs: {
+      harness: "claude",
+      limits: new Map([["claude", Date.now() + 60 * 60_000]]),
+      pendingReviews: async () => [{ issue: 8, pr: 18 }],
+      review: async (n, pr) => (reviewed.push(pr), { exit: "delivered" }),
+    },
+  });
+  assert.deepEqual(run.claims, [], "nothing new started");
+  assert.deepEqual(reviewed, [], "no review started");
+  assert.equal(run.lines.filter((l) => /claude's usage limit is spent until .*; no stage starts on claude until then/.test(l)).length, 1);
+});

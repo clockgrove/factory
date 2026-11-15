@@ -42,6 +42,19 @@ export function thirdPartyReviewers(names = [], own = []) {
   return { logins, refused };
 }
 
+/**
+ * GitHub's code scanning App: its alerts on a PR's lines (CodeQL's, say) are review comments by this login. A `[bot]`
+ * login is an App's, which no person can hold. Factory answers its comments as it answers a named reviewer's, on every
+ * repository and with no setting, and never waits for it: its comments come from a check run, not a review of the head.
+ */
+export const CODE_SCANNING = "github-advanced-security[bot]";
+
+/**
+ * The reviewers outside Factory whose line comments the answer pass handles and whose answered threads Factory resolves:
+ * the named ones (`names`, thirdPartyReviewers) and code scanning.
+ */
+export const answeredReviewers = (names = []) => [...new Set([...thirdPartyReviewers(names).logins, CODE_SCANNING])];
+
 /** The named reviewer who wrote a review or comment (its `user.login`, matched exactly), or null. */
 export const namedReviewer = (item, logins = []) => (logins.length ? (logins.find((l) => l === key(item?.user?.login)) ?? null) : null);
 

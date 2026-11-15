@@ -681,40 +681,66 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
 }
 
 /**
- * Resolve the review threads Factory itself opened (the root comment belongs to the review
- * carrying marker(issue, "review")) once they are answered: a reply exists, or the root is
- * Factory's placeholder. Identified by Factory's own marker and a trusted author (trustedAuthor). A thread a named
- * third-party reviewer opened (`thirdParty`, third-party-review.mjs logins, matched on its review's author) is resolved
- * once Factory or someone who can push replied in it. GraphQL names a Bot without the "[bot]" suffix REST adds.
- * Returns the number resolved.
+ * The PR's review threads as Factory sorts them, each `{id, resolved, author, path, line, by, answered}`: `author` the root comment's, named as REST names it (an App's `<slug>[bot]`; GraphQL
+ * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Factory's
+ * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
+ * "named" for one a reviewer Factory answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
+ * root's review's author), else null. `answered`: ours once a reply exists or the root is Factory's placeholder; named once
+ * Factory or someone who can push replied in it.
  */
-export async function resolveFactoryThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+export async function reviewThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
   const data = await graphql(
-    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 50) { nodes { body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
+    `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100) { nodes { id isResolved path line originalLine comments(first: 50) { nodes { body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
     { owner: repo.owner, name: repo.name, n: Number(number) },
     opts,
   );
-  const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
   const mark = marker(issue, "review");
   // An author as REST shows it (GraphQL names a Bot without "[bot]"), for trustedAuthor.
   const asRest = (author, association) => ({ user: { type: author?.__typename, login: author?.__typename === "Bot" ? `${author.login}[bot]` : author?.login }, author_association: association });
   const named = new Set(thirdParty.map((l) => String(l).toLowerCase()));
-  let resolved = 0;
-  for (const t of threads) {
-    if (t.isResolved) continue;
+  return (data?.repository?.pullRequest?.reviewThreads?.nodes || []).map((t) => {
     const comments = t.comments?.nodes || [];
     const root = comments[0];
     const review = root?.pullRequestReview;
     const by = asRest(review?.author, review?.authorAssociation);
     const ours = !!root && String(review?.body || "").includes(mark) && trustedAuthor(by);
     const theirs = !!root && !ours && named.has(String(by.user.login || "").toLowerCase());
-    if (!ours && !theirs) continue;
-    const answered = ours ? comments.length > 1 || isPlaceholder(root.body) : comments.slice(1).some((c) => trustedAuthor(asRest(c.author, c.authorAssociation)));
-    if (!answered) continue;
-    await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id: t.id }, opts);
+    const answered = ours ? comments.length > 1 || isPlaceholder(root.body) : theirs ? comments.slice(1).some((c) => trustedAuthor(asRest(c.author, c.authorAssociation))) : false;
+    return { id: t.id, resolved: !!t.isResolved, author: root?.author ? asRest(root.author).user.login : null, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
+  });
+}
+
+/** Resolve one review thread (pull requests write, which Factory's token has). */
+export async function resolveThread(id, opts) {
+  await graphql(`mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }`, { id }, opts);
+}
+
+/**
+ * Resolve the answered review threads Factory handles (reviewThreads: its own reviewer's, and those of the reviewers in
+ * `thirdParty`), so a rule that requires resolved conversations can merge; they stay visible on the PR. Returns the
+ * number resolved.
+ */
+export async function resolveFactoryThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
+  let resolved = 0;
+  for (const t of await reviewThreads(repo, number, issue, opts, { thirdParty })) {
+    if (t.resolved || !t.by || !t.answered) continue;
+    await resolveThread(t.id, opts);
     resolved += 1;
   }
   return resolved;
+}
+
+/**
+ * What on `branch` requires every review conversation resolved before a merge: "branch protection" (its
+ * requiresConversationResolution, read through refUpdateRule, which needs no admin), "a ruleset" (an active ruleset's
+ * pull_request rule with `required_review_thread_resolution`: GitHub's rules for a branch list only the active ones
+ * that apply to it, to anyone who can read the repository), or null for neither.
+ */
+export async function resolutionRule(repo, branch, opts) {
+  const d = await graphql(`query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { refUpdateRule { requiresConversationResolution } } } }`, { owner: repo.owner, name: repo.name, ref: `refs/heads/${branch}` }, opts);
+  if (d?.repository?.ref?.refUpdateRule?.requiresConversationResolution === true) return "branch protection";
+  const rules = (await rest(`repos/${repo.full}/rules/branches/${encodeURIComponent(branch)}?per_page=100`, { ...opts, paginate: true })) || [];
+  return rules.some((r) => r?.type === "pull_request" && r.parameters?.required_review_thread_resolution === true) ? "a ruleset" : null;
 }
 
 /** The issue numbers GitHub parsed as closed by this PR (its closing references), as GitHub will act on them. */

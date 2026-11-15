@@ -29,6 +29,9 @@ import {
   onDefaultBranch,
   removeLabel,
   requiredCheckSpecs,
+  resolutionRule,
+  resolveThread,
+  reviewThreads,
   requiredChecks,
   findPr,
   findProject,
@@ -59,7 +62,7 @@ import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, outageOf, outageReason, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
-import { namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
+import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
@@ -2551,16 +2554,71 @@ export async function queueConflictWait(repo, { issue, prNumber, base, removal }
 
 /**
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
- * or the merge queue dropping the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
+ * an unresolved review conversation the base's rules require resolved (conversationsGate), or the merge queue dropping
+ * the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
  */
-/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check is the work's; a drop is `report.cause`, else Factory's. */
-export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" ? "work" : report.cause ?? "factory");
+/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check or an unresolved conversation is the work's; a drop is `report.cause`, else Factory's. */
+export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" || how === "threads" ? "work" : report.cause ?? "factory");
 
 export function mergeBlockReason(how, report = {}) {
   if (how === "red") return "a required check is red on the reviewed head";
   if (how === "edited") return EDITED_REASON;
+  if (how === "threads") return report.reason || "a review conversation is unresolved and the default branch's rules require every conversation resolved before a merge";
   if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Factory re-enqueued it";
   return null;
+}
+
+/** The most unresolved conversations a Block names one by one. */
+const THREADS_NAMED = 5;
+
+/**
+ * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Factory
+ * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
+ * resolved now. Code scanning's unanswered comment is the answer pass's: the review label goes back on and this returns
+ * "code-scanning". Any other unresolved thread, when the base's rules require every conversation resolved (branch
+ * protection, or an active ruleset's pull_request rule), returns "threads" with `report.reason` naming each one: its
+ * author, file and line. Otherwise null: the merge goes on. Unreadable threads or rules are null too, and GitHub's own
+ * rule decides the merge.
+ */
+async function conversationsGate(repo, { issue, prNumber, base, thirdParty = [] }, report, opts) {
+  let read;
+  try {
+    read = await reviewThreads(repo, prNumber, issue, opts, { thirdParty: answeredReviewers(thirdParty) });
+  } catch (e) {
+    log(`#${issue}: PR #${prNumber}'s review threads are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
+    return null;
+  }
+  const open = [];
+  for (const t of read) {
+    if (t.resolved) continue;
+    if (t.by && t.answered) {
+      const done = await resolveThread(t.id, opts).then(
+        () => true,
+        (e) => (log(`#${issue}: an answered review thread on PR #${prNumber} could not be resolved (${errCode(e)})`), false),
+      );
+      if (done) continue;
+    }
+    open.push(t);
+  }
+  if (open.some((t) => t.author === CODE_SCANNING && !t.answered)) {
+    await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
+    await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
+    log(`#${issue}: code scanning commented on PR #${prNumber} after its answer pass; the review runs again to answer it`);
+    return "code-scanning";
+  }
+  if (!open.length) return null;
+  let rule;
+  try {
+    rule = await resolutionRule(repo, base, opts);
+  } catch (e) {
+    log(`#${issue}: the rules on ${base} are unreadable (${errCode(e)}); the merge goes on and GitHub's rules decide`);
+    return null;
+  }
+  if (!rule) return null;
+  const named = open.slice(0, THREADS_NAMED).map((t) => `${t.author ?? "a deleted account"} on ${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`);
+  const more = open.length > THREADS_NAMED ? `, and ${open.length - THREADS_NAMED} more` : "";
+  report.reason = `PR #${prNumber} has ${open.length} unresolved review conversation(s), and ${rule} on ${base} requires every conversation resolved before a merge: ${named.join("; ")}${more}. Factory answers and resolves only its own reviewer's, the named third-party reviewers' and code scanning's; answer or resolve these on the PR`;
+  return "threads";
 }
 
 /**
@@ -2568,6 +2626,9 @@ export function mergeBlockReason(how, report = {}) {
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
  * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
+ * "code-scanning" (code scanning commented after the answer pass: the review runs again to answer it), "threads" (an
+ * unresolved review conversation the base's rules require resolved, read before the merge or after GitHub refused it:
+ * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
  * of; the caller Blocks), "conflict" (the PR conflicts with the
@@ -2588,7 +2649,7 @@ export function mergeBlockReason(how, report = {}) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [] }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -2764,6 +2825,11 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
     if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + 1})`);
   }
+  // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
+  // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
+  const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty };
+  const held = await conversationsGate(repo, conversations, report, opts);
+  if (held) return held;
   // The squash commit says what Factory says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
   const parts = await partsRecord(repo, issue, opts).catch(() => null);
   let how;
@@ -2782,6 +2848,11 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return "queued";
     }
     if (now?.state === "open" && now.mergeable_state === "dirty") return "conflict";
+    // A conversation opened since the read above: named as one, never a bare refusal.
+    if (now?.state === "open") {
+      const late = await conversationsGate(repo, conversations, report, opts);
+      if (late) return late;
+    }
     // That read failing for now leaves the refusal unexplained: its own transient error is thrown, so the review job
     // leaves the PR to the dispatcher's next tick instead of Blocking a PR another pass may have queued.
     if (transientError(unread)) throw unread;

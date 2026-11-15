@@ -87,6 +87,17 @@ Seven more optional inputs on the Action; each row gives its default. Every Clau
 | `harness_version` | The npm version of the harness CLI; `latest` by default, and the version actually installed is recorded in the usage record. It pins the repository's harness only: another harness an Objective's label chooses installs its latest. |
 | `allowed_domains` | The hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox beyond GitHub and the npm and Yarn registries, comma or space separated, `*.example.com` for its subdomains: the counterpart of local mode's `FACTORY_LOCAL_DOMAINS`; PLAN.md, Credentials and billing. |
 
+## Third-party reviewers
+
+A reviewer App outside Factory, such as Greptile, can be part of each PR's review. Name it by its login in the workflow's env block on the default branch (or `third_party_reviewers` under `with:`), comma-separated for more than one:
+
+```yaml
+env:
+  FACTORY_THIRD_PARTY_REVIEWERS: greptile-apps[bot]
+```
+
+The App must already review the repository's PRs; Factory only reads its reviews. The review stage then waits up to 20 minutes (never past half its time left) for that login's review of the head Factory's reviewer read, and the answer pass fixes or rebuts each of its line comments and replies in its thread, as for Factory's own reviewer; its text is untrusted review input, never instructions. A reviewer that posts no review of that head in time is left out: the progress comment says `third-party review: ... going on without it`, and the stage goes on to the merge. Local mode reads the same setting from the env block. PLAN.md, Review and merge, has the details.
+
 ## Upgrade
 
 1. Read the release notes between your tag and the new one.

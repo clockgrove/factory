@@ -1,0 +1,66 @@
+{
+  "source": "clockgrove/factory#271: GET pulls/271/comments and pulls/271/reviews, trimmed to the fields Factory reads",
+  "comments": [
+    {
+      "id": 4577418570,
+      "pull_request_review_id": 5909551658,
+      "path": "plugin/scripts/lib/local.mjs",
+      "commit_id": "8b93fae710ac38dc0a1d045041652f84d9ef1304",
+      "original_commit_id": "8b93fae710ac38dc0a1d045041652f84d9ef1304",
+      "line": null,
+      "original_line": 1550,
+      "side": "RIGHT",
+      "subject_type": "line",
+      "author_association": "NONE",
+      "body": "<a href=\"#\"><img alt=\"P1\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/p1.svg?v=9\" align=\"top\"></a> <a href=\"#\"><img alt=\"security\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/Security.svg?v=2\" align=\"top\"></a> **Writes enter another login**\n\n`homePlaces` drops every denied path below `ownDir`, including another harness's login folder. If `CLAUDE_CONFIG_DIR=~/.claude-two` and `CODEX_HOME=~/.claude-two/codex`, a dangling `cache/model-catalog` link to `codex/auth.json` passes both checks. `ensureStateDir` then creates a directory where Codex needs its login file, preventing Codex from saving its login.\n\nKeep nested credential stores and other logins denied; exclude only the stage's own home entry when needed.\n\n**How this was verified:** `credentialPaths` includes the nested Codex home, but this filter removes it before the dangling-link walk checks and creates `auth.json`.\n\n<details><summary>Prompt To Fix With AI</summary>\n\n`````markdown\nThis is a comment left during a code review.\nPath: plugin/scripts/lib/local.mjs\nLine: 1550\n\nComment:\n**Writes enter another login**\n\n`homePlaces` drops every denied path below `ownDir`, including another harness's login folder. If `CLAUDE_CONFIG_DIR=~/.claude-two` and `CODEX_HOME=~/.claude-two/codex`, a dangling `cache/model-catalog` link to `codex/auth.json` passes both checks. `ensureStateDir` then creates a directory where Codex needs its login file, preventing Codex from saving its login.\n\nKeep nested credential stores and other logins denied; exclude only the stage's own home entry when needed.\n\n**How this was verified:** `credentialPaths` includes the nested Codex home, but this filter removes it before the dangling-link walk checks and creates `auth.json`.\n\n---\n\nFor each issue above, determine whether it is valid and should be fixed. If so, fix it directly.\n`````\n</details>\n\n<a href=\"https://app.greptile.com/ide/claude-code?prompt=This%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20plugin%2Fscripts%2Flib%2Flocal.mjs%0ALine%3A%201550%0A%0AComment%3A%0A**Writes%20enter%20another%20login**%0A%0A%60homePlaces%60%20drops%20every%20denied%20path%20below%20%60ownDir%60%2C%20including%20another%20harness's%20login%20folder.%20If%20%60CLAUDE_CONFIG_DIR%3D~%2F.claude-two%60%20and%20%60CODEX_HOME%3D~%2F.claude-two%2Fcodex%60%2C%20a%20dangling%20%60cache%2Fmodel-catalog%60%20link%20to%20%60codex%2Fauth.json%60%20passes%20both%20checks.%20%60ensureStateDir%60%20then%20creates%20a%20directory%20where%20Codex%20needs%20its%20login%20file%2C%20preventing%20Codex%20from%20saving%20its%20login.%0A%0AKeep%20nested%20credential%20stores%20and%20other%20logins%20denied%3B%20exclude%20only%20the%20stage's%20own%20home%20entry%20when%20needed.%0A%0A**How%20this%20was%20verified%3A**%20%60credentialPaths%60%20includes%20the%20nested%20Codex%20home%2C%20but%20this%20filter%20removes%20it%20before%20the%20dangling-link%20walk%20checks%20and%20creates%20%60auth.json%60.%0A%0A---%0A%0AFor%20each%20issue%20above%2C%20determine%20whether%20it%20is%20valid%20and%20should%20be%20fixed.%20If%20so%2C%20fix%20it%20directly.&repo=clockgrove%2Ffactory&pr=271&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaudeDark.svg?v=7\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=7\"><img alt=\"Fix in Claude Code\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInClaude.svg?v=7\"></picture></a> <a href=\"https://app.greptile.com/api/ide/codex?prompt=IMPORTANT%3A%20Work%20in%20the%20repository%20%22clockgrove%2Ffactory%22%20on%20the%20existing%20branch%20%22fix%2F261-dangling-home-link%22.%20Checkout%20that%20branch%20%E2%80%94%20do%20NOT%20create%20a%20new%20branch%20or%20open%20a%20new%20PR.%20Push%20your%20changes%20to%20%22fix%2F261-dangling-home-link%22.%0A%0AThis%20is%20a%20comment%20left%20during%20a%20code%20review.%0APath%3A%20plugin%2Fscripts%2Flib%2Flocal.mjs%0ALine%3A%201550%0A%0AComment%3A%0A**Writes%20enter%20another%20login**%0A%0A%60homePlaces%60%20drops%20every%20denied%20path%20below%20%60ownDir%60%2C%20including%20another%20harness's%20login%20folder.%20If%20%60CLAUDE_CONFIG_DIR%3D~%2F.claude-two%60%20and%20%60CODEX_HOME%3D~%2F.claude-two%2Fcodex%60%2C%20a%20dangling%20%60cache%2Fmodel-catalog%60%20link%20to%20%60codex%2Fauth.json%60%20passes%20both%20checks.%20%60ensureStateDir%60%20then%20creates%20a%20directory%20where%20Codex%20needs%20its%20login%20file%2C%20preventing%20Codex%20from%20saving%20its%20login.%0A%0AKeep%20nested%20credential%20stores%20and%20other%20logins%20denied%3B%20exclude%20only%20the%20stage's%20own%20home%20entry%20when%20needed.%0A%0A**How%20this%20was%20verified%3A**%20%60credentialPaths%60%20includes%20the%20nested%20Codex%20home%2C%20but%20this%20filter%20removes%20it%20before%20the%20dangling-link%20walk%20checks%20and%20creates%20%60auth.json%60.%0A%0A---%0A%0AFor%20each%20issue%20above%2C%20determine%20whether%20it%20is%20valid%20and%20should%20be%20fixed.%20If%20so%2C%20fix%20it%20directly.&expires=1795331062&sig=3998deee5598b5138501065f0b4c38d193b5157e2d5ee9bfe37215474fad0c12&repo=clockgrove%2Ffactory&pr=271&platform=github\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodexDark.svg?v=7\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=7\"><img alt=\"Fix in Codex\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/FixInCodex.svg?v=7\"></picture></a>",
+      "user": {
+        "login": "greptile-apps[bot]",
+        "type": "Bot"
+      }
+    },
+    {
+      "id": 4577440172,
+      "pull_request_review_id": 5909574456,
+      "in_reply_to_id": 4577418570,
+      "path": "plugin/scripts/lib/local.mjs",
+      "commit_id": "8b93fae710ac38dc0a1d045041652f84d9ef1304",
+      "original_commit_id": "8b93fae710ac38dc0a1d045041652f84d9ef1304",
+      "line": null,
+      "original_line": 1550,
+      "side": "RIGHT",
+      "subject_type": "line",
+      "author_association": "MEMBER",
+      "body": "Fixed in 3dba8a3d. homePlaces now removes only the stage's own login's entries (what bears it, or a Codex or Copilot home whole) from the refused list. Every other login's files stay refused, including one nested in the stage's own folder (CODEX_HOME=~/.claude-two/codex), and the stage's own login files are always refused. Test: home-links.test.mjs, \"another login nested in the stage's own folder stays refused\".",
+      "user": {
+        "login": "kirkmarple-clockgrove",
+        "type": "User"
+      }
+    }
+  ],
+  "reviews": [
+    {
+      "id": 5909551658,
+      "state": "COMMENTED",
+      "commit_id": "8b93fae710ac38dc0a1d045041652f84d9ef1304",
+      "author_association": "NONE",
+      "body": "",
+      "submitted_at": "2026-11-15T07:04:26Z",
+      "user": {
+        "login": "greptile-apps[bot]",
+        "type": "Bot"
+      }
+    },
+    {
+      "id": 5909615309,
+      "state": "APPROVED",
+      "commit_id": "94b6c2b25037696099898d61d22a9be659f80e57",
+      "author_association": "NONE",
+      "body": "<!-- greptile-auto-approve {\"codeReviewId\":\"41919435\",\"correlationId\":\"7cd76e76-b05b-490f-8b3a-5f1606c2f767\",\"headSha\":\"94b6c2b25037696099898d61d22a9be659f80e57\"} -->",
+      "submitted_at": "2026-11-15T07:19:49Z",
+      "user": {
+        "login": "greptile-apps[bot]",
+        "type": "Bot"
+      }
+    }
+  ]
+}

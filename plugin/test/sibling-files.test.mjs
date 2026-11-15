@@ -2,10 +2,10 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
-import { marker, rebaseCost, rebaseCostOf, rebaseLine, rebaseTally, vendorBody } from "../scripts/lib/logic.mjs";
+import { marker, rebaseCost, rebaseCostOf, rebaseLine, rebaseTally, spendOf, vendorBody } from "../scripts/lib/logic.mjs";
 import { forgetFiles, heavyOverlap, plannedFiles, siblingOrder } from "../scripts/lib/overlap.mjs";
 import { progressReporter, rebaseExitLine, rebaseNotice } from "../scripts/lib/session.mjs";
-import { markdownTable, rebaseCell, rebasesOf } from "../../bench/lib/objective.mjs";
+import { markdownTable, rebaseCell, rebasesOf, spendRecords } from "../../bench/lib/objective.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -450,4 +450,26 @@ test("#277: a rebase's partial cost keeps its bound marks from the end's figure 
   const rebases = rebasesOf(collected);
   assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 1.55, unmetered: 0, conflicts: 1, usdLowerBound: true });
   assert.match(rebaseCell(rebases), /^0, at least \$1\.55/);
+});
+
+test("#277: a sandbox rebase's vendor cost keeps its marks: the session's ceiling makes the rebases an upper bound, an unpriced sandbox a lower bound, in the tally, the cell and the row's cost", () => {
+  const at = (m) => new Date(Date.UTC(2026, 10, 14, 10, m)).toISOString();
+  const own = (b, m) => ({ id: m, user: { login: SELF, type: "Bot" }, body: b, created_at: at(m) });
+  const stage = (run, m) => own(`${marker(7, "progress", `work:${run}`)}\nFactory work: started.\n<!-- factory:spend {"usd":0.3} -->\n<!-- factory:rebase-cost {"usd":0.3,"conflict":false} -->`, m);
+  // stageVendorCost's ceiling (its usage not read or not settled), booked as the launcher books it.
+  const ceiling = own(`${marker(7, "vendor", "work:51")}\n${vendorBody({ line: "sandbox", vendorUsd: 0.08, upperBound: true })}`, 2);
+  const unpriced = own(`${marker(7, "vendor", "work:52")}\n${vendorBody({ line: "sandbox", vendorUsd: null })}`, 4);
+  assert.equal(spendOf(unpriced.body), 0, "an unpriced sandbox adds nothing to the daily sum");
+  const mine = (c) => c.user.login === SELF;
+  assert.deepEqual(rebaseTally([stage(51, 1), ceiling], 7, mine), { count: 1, usd: 0.38, unmetered: 0, conflicts: 0, usdUpperBound: true });
+  assert.deepEqual(rebaseTally([stage(52, 3), unpriced], 7, mine), { count: 1, usd: 0.3, unmetered: 0, conflicts: 0, usdLowerBound: true });
+  assert.equal(rebaseLine({ usd: 0.1, conflict: false, passes: 1 }, rebaseTally([stage(51, 1), ceiling], 7, mine)), "rebase 2 of this Objective (clean, 1 fix pass(es)): $0.10; all its rebases: at most $0.48 (an estimate)");
+
+  const comments = [stage(51, 1), ceiling, stage(52, 3), unpriced];
+  const collected = { repository: REPO, issue: { number: 7, title: "x", created_at: at(0), labels: [], state: "open" }, issueTimeline: [{ event: "labeled", label: { name: "factory:running" }, actor: { login: SELF, type: "Bot" }, created_at: at(0) }], issueComments: comments, pulls: [], pullDetails: {} };
+  const rebases = rebasesOf(collected);
+  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 0.68, unmetered: 0, conflicts: 0, usdLowerBound: true, usdUpperBound: true });
+  assert.match(rebaseCell(rebases), /^0, about \$0\.68/);
+  // The row's cost reads the same vendor comments: the ceiling stays an upper bound, the unpriced one unpriced.
+  assert.deepEqual(spendRecords(collected).map((r) => r.vendor), [{ usd: 0.08, upperBound: true }, { usd: null }]);
 });

@@ -2245,7 +2245,7 @@ export function rebaseCostOf(body) {
  * written by `mine` (Factory's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`
  * and, when any summed figure carries one, its bound mark (`usdLowerBound`, `usdUpperBound`). `usd` is the metered
  * stages' sum with each one's sandbox dollars, read from the vendor comment keyed as its progress comment (vendorBody)
- * when `comments` holds it.
+ * when `comments` holds it: a sandbox at the session's ceiling makes the sum an upper bound, one unpriced a lower bound.
  */
 export function rebaseTally(comments, issue, mine = trustedAuthor) {
   const out = { count: 0, usd: 0, unmetered: 0, conflicts: 0 };
@@ -2253,8 +2253,8 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
   const vendor = new Map();
   for (const c of comments || []) {
     const key = mine(c) ? keyOf(c.body, "vendor") : null;
-    const usd = key ? spendParts(c.body)?.vendorUsd : null;
-    if (Number.isFinite(usd)) vendor.set(key, usd);
+    const parts = key ? spendParts(c.body) : null;
+    if (parts) vendor.set(key, parts);
   }
   const head = `<!-- factory:${issue}:progress:work`;
   for (const c of comments || []) {
@@ -2268,7 +2268,10 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
       if (r.usdLowerBound) out.usdLowerBound = true;
       if (r.usdUpperBound) out.usdUpperBound = true;
     }
-    const sum = (r.usd ?? 0) + (vendor.get(keyOf(c.body, "progress")) ?? 0);
+    const sandbox = vendor.get(keyOf(c.body, "progress"));
+    if (sandbox && sandbox.vendorUsd === null) out.usdLowerBound = true;
+    if (sandbox?.vendorUpperBound) out.usdUpperBound = true;
+    const sum = (r.usd ?? 0) + (sandbox?.vendorUsd ?? 0);
     out.usd = Math.round((out.usd + sum) * 1e4) / 1e4;
   }
   return out;
@@ -2312,7 +2315,8 @@ export function spendOf(body) {
 }
 /**
  * The spend line's parts: `usd` (the total the daily sum counts), and for a sandbox stage `modelUsd` (the harness's)
- * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end). Null when the body has no spend line.
+ * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null unpriced), with `vendorUpperBound`
+ * when that is the session's ceiling (vendorBody). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2320,7 +2324,7 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd) };
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...(r?.vendorUpperBound === true && n(r?.vendorUsd) !== null ? { vendorUpperBound: true } : {}) };
   } catch {
     return null;
   }
@@ -2353,12 +2357,14 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
  * The vendor comment's body (`<!-- factory:<n>:vendor:<stage>:<key> -->`, one per stage, written by its one booker):
  * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
  * model dollars. `modelUsd`: the harness's dollars from the usage record, for a stage that left no progress comment.
+ * `upperBound` (stageVendorCost's: the session's ceiling, its usage not read or not settled) is kept as
+ * `vendorUpperBound`; a usage with no figure at all is `vendorUsd: null`, unpriced, counted as $0 in the daily sum.
  */
-export function vendorBody({ line, vendorUsd, modelUsd = null }) {
+export function vendorBody({ line, vendorUsd, modelUsd = null, upperBound = false }) {
   const round = (n) => Math.round(n * 1e6) / 1e6;
-  const vendor = round(Number.isFinite(vendorUsd) ? vendorUsd : 0);
+  const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
-  return `Factory's sandbox cost for this stage:\n${line}\n${spendMarker(round(vendor + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor })}`;
+  return `Factory's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(vendor !== null && upperBound ? { vendorUpperBound: true } : {}) })}`;
 }
 
 // ----------------------------------------------------------------- launch

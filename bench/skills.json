@@ -1,6 +1,5 @@
 {
-  "version": 1,
-  "digest": "08720550cd69",
+  "version": 2,
   "skills": {
     "factory-deliver-pr": {
       "sha256": "6d9995faec6830393d586cf5fa6f926d91b148ab7e8be5b5a54f495e1fbc4a3f",
@@ -132,6 +131,5 @@
       "lines": 30,
       "words": 361
     }
-  },
-  "recordedAt": "2026-11-15T08:28:59.765Z"
+  }
 }

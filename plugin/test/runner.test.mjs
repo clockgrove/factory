@@ -183,3 +183,42 @@ test("--runs-on takes a label list typed as YAML or JSON and renders it as a lis
   assert.equal(odd.detail.split('"[x"').length, 2, odd.detail);
   assert.doesNotMatch(odd.detail, /run on \[x/, odd.detail);
 });
+
+// #418: setup's note names the workflow doctor will compare against, read as doctor reads it: the branch's required
+// checks (not FACTORY_CI_CHECKS), and a workflow told apart from --ci-workflow's by path, not by a joined name.
+test("doctorRunnerNote: from the branch's required checks, never FACTORY_CI_CHECKS, and by path", async () => {
+  const { doctorRunnerNote } = await import("../scripts/setup.mjs");
+  const files = {
+    ".github/workflows/quality.yml": QUALITY.replace("ubuntu-24.04 # ubuntu-latest moved to 26.04", "ubuntu-latest").replace("quality:", "lint:"),
+    ".github/workflows/ci.yml": "name: CI\non: [pull_request, merge_group]\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: npm test\n",
+  };
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
+  let required = ["build"];
+  globalThis.fetch = async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/repos/o/r") return json(200, { default_branch: "main", owner: { type: "Organization" } });
+    if (path === "/repos/o/r/actions/workflows") return json(200, { workflows: [{ path: ".github/workflows/quality.yml", name: "Quality", state: "active" }, { path: ".github/workflows/ci.yml", name: "CI", state: "active" }] });
+    if (path === "/repos/o/r/rulesets") return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
+    if (path === "/repos/o/r/rulesets/1") return json(200, { conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: required.map((context) => ({ context })) } }] });
+    const file = path.replace("/repos/o/r/contents/", "");
+    if (files[file] !== undefined) return new Response(files[file], { status: 200 });
+    return json(404, { message: "Not Found" });
+  };
+  try {
+    const repo = { full: "o/r", owner: "o", name: "r" };
+    const ci = { found: true, name: "Quality", path: ".github/workflows/quality.yml", jobs: workflowJobs(files[".github/workflows/quality.yml"]) };
+    const note = (ciChecks) => doctorRunnerNote({ repo, opts: { token: "t" }, ci, runsOn: "ubuntu-latest", hints: { commands: [], checks: ciChecks }, ciChecks });
+    // FACTORY_CI_CHECKS names Quality's lint; the branch requires CI's build, which doctor reads.
+    assert.equal(await note(["lint"]), "; doctor compares against CI (the workflows on pull_request that make the required checks), which runs on ubuntu-24.04, so it will warn");
+    // The branch requires Quality's lint: doctor reads Quality, the --ci-workflow one by its path, so no note.
+    required = ["lint"];
+    assert.equal(await note(["lint"]), "");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+});

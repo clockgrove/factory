@@ -279,23 +279,23 @@ test("a hop wake covers only up to when it ticks, not the deadline it is named f
   assert.equal(nextWake([turn], { now: T, armed: [{ kind: "daily-cap", at: iso(T + cap + min) }] })?.kind, "daily-cap");
 });
 
-test("closedIssueTicks: a closed issue runs the dispatcher only when it was an Objective or blocks one", async () => {
+test("closedIssueTicks: a closed issue runs the dispatcher only when it was an Objective or blocks one by GitHub's count", async () => {
   const { closedIssueTicks } = await import("../scripts/dispatch.mjs");
-  let reads = 0;
-  const objectives = (list) => async () => {
-    reads += 1;
-    return list;
-  };
   const closed = (issue) => ({ action: "closed", issue });
-  const opts = (list = []) => ({ objectiveLabel: "factory:objective", objectives: objectives(list) });
-  assert.equal(await closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts()), true);
-  assert.equal(await closedIssueTicks("schedule", {}, opts()), true);
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts()), true);
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts()), true);
-  assert.equal(reads, 0);
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts([{ number: 9, body: "Blocked by #3" }])), true, "a body line");
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts([{ number: 9, body: "Blocked by #4" }])), false, "blocks nothing: no run");
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [] }), opts()), true, "no count in the payload rules nothing out");
+  const opts = { objectiveLabel: "factory:objective" };
+  assert.equal(await closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts), true);
+  assert.equal(await closedIssueTicks("schedule", {}, opts), true);
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts), true);
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts), true);
+  // GitHub's count of 0 is exact: the dispatcher reads those dependencies, not body lines, so nothing waited on it (#417).
+  let reads = 0;
+  const objectives = async () => {
+    reads += 1;
+    return [{ number: 9, body: "Blocked by #3" }];
+  };
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), { ...opts, objectives }), false, "blocks nothing by GitHub's count: no run");
+  assert.equal(reads, 0, "no listing read");
+  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [] }), opts), true, "no count in the payload rules nothing out");
 });
 
 const SINCE = "2026-11-10T11:00:00.000Z";

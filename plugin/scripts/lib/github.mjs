@@ -1382,13 +1382,21 @@ export const projectTitle = (repo) => `Factory: ${repo.name}`;
 export async function findProject(repo, opts) {
   const id = String(opts?.project ?? process.env.FACTORY_PROJECT ?? "").trim();
   if (id) {
-    const byId = await graphql(`query($id: ID!, $owner: String!, $name: String!) { node(id: $id) { ... on ProjectV2 { ${PROJECT_FIELDS} repositories(first: 100) { nodes { id } } } } repository(owner: $owner, name: $name) { id } }`, { id, owner: repo.owner, name: repo.name }, opts);
-    const rid = byId?.repository?.id;
-    if (!byId?.node?.id || !rid) return null;
-    // Only a board linked to this repository: a workflow copied from another repository names that one's board.
-    const { repositories, ...board } = byId.node;
-    if (!(repositories?.nodes || []).some((r) => r?.id === rid)) return null;
-    return { ...board, repositoryId: rid };
+    // Only a board linked to this repository: a workflow copied from another repository names that one's board. Its
+    // linked repositories are read page by page (100 a page) until this one shows or none are left.
+    let after = null;
+    let board = null;
+    let rid = null;
+    for (;;) {
+      const byId = await graphql(`query($id: ID!, $owner: String!, $name: String!, $after: String) { node(id: $id) { ... on ProjectV2 { ${PROJECT_FIELDS} repositories(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id } } } } repository(owner: $owner, name: $name) { id } }`, { id, owner: repo.owner, name: repo.name, after }, opts);
+      rid ??= byId?.repository?.id ?? null;
+      if (!byId?.node?.id || !rid) return null;
+      const { repositories, ...fields } = byId.node;
+      board ??= fields;
+      if ((repositories?.nodes || []).some((r) => r?.id === rid)) return { ...board, repositoryId: rid };
+      if (!repositories?.pageInfo?.hasNextPage || !repositories.pageInfo.endCursor) return null;
+      after = repositories.pageInfo.endCursor;
+    }
   }
   const data = await graphql(
     `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id projectsV2(first: 20) { nodes { ${PROJECT_FIELDS} } } } }`,

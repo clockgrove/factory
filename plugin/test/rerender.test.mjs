@@ -278,6 +278,12 @@ test("findProject finds the board by the node id the settings record, never by a
   globalThis.fetch = async (url, init = {}) => {
     const { query, variables } = JSON.parse(init.body);
     queries.push(query.includes("node(id:") ? "node" : "linked");
+    // `PVT_big` and `PVT_wide` are linked to 150 repositories each, two pages: this one on the second page of `PVT_big`, on neither of `PVT_wide`'s.
+    const many = { PVT_big: "R_1", PVT_wide: "R_3" };
+    if (many[variables.id]) {
+      const page = variables.after === "c1" ? { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...Array.from({ length: 49 }, (_, i) => ({ id: `R_x${100 + i}` })), { id: many[variables.id] }] } : { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: Array.from({ length: 100 }, (_, i) => ({ id: `R_x${i}` })) };
+      return new Response(JSON.stringify({ data: { node: { ...board(variables.id, "Board"), repositories: page }, repository: { id: "R_1" } } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
     const node = variables.id === elsewhere.id ? elsewhere : linked.find((b) => b.id === variables.id);
     const data = query.includes("node(id:") ? { node: node ? { repositories: { nodes: [{ id: "R_1" }] }, ...node } : null, repository: { id: "R_1" } } : { repository: { id: "R_1", projectsV2: { nodes: linked } } };
     return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
@@ -291,6 +297,12 @@ test("findProject finds the board by the node id the settings record, never by a
     assert.equal(await findProject(repo, { token: "t", project: "PVT_gone" }), null, "a recorded id that names no board is no board");
     assert.equal(await findProject(repo, { token: "t", project: "PVT_theirs" }), null, "nor one naming another repository's board");
     assert.ok(!("repositories" in (await findProject(repo, { token: "t", project: "PVT_ours" }))));
+    // A board linked to many repositories: every page is read until this one shows, and none past the last.
+    queries.length = 0;
+    const big = await findProject(repo, { token: "t", project: "PVT_big" });
+    assert.deepEqual([big?.id, big?.repositoryId, "repositories" in (big || {})], ["PVT_big", "R_1", false], "linked on its second page");
+    assert.deepEqual(queries, ["node", "node"]);
+    assert.equal(await findProject(repo, { token: "t", project: "PVT_wide" }), null, "not linked on any page");
     delete process.env.FACTORY_PROJECT;
     // No id recorded: only the exact title setup gives a board; a board titled "Factory" or one with a Queued column is not it.
     queries.length = 0;

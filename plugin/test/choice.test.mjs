@@ -448,3 +448,14 @@ test("the launcher takes the repository's defaults once, before any start applie
   assert.match(src, /Object\.assign\(inputs, run\.defaults, chosen\.inputs\)/);
   assert.match(src, /const base = \{ vendor: inputs\.sandbox, stage, harness: inputs\.harness,/, "the stage's harness on its record");
 });
+
+// #418: a sub-agent's refusal names the label that chose its model (logic.mjs AGENT_MODELS): the labels are the choice's own.
+test("AGENT_MODELS names each pinned agent's model by the label and variable that choose it", async () => {
+  const { AGENT_MODELS } = await import("../scripts/lib/logic.mjs");
+  const { agentModel } = await import("../scripts/lib/checkout.mjs");
+  assert.equal(AGENT_MODELS.implementer.label, CHOICE_PREFIXES.subagent_model);
+  assert.equal(AGENT_MODELS.reviewer.label, CHOICE_PREFIXES.reviewer_model);
+  assert.equal(AGENT_MODELS["foundation-reviewer"].label, CHOICE_PREFIXES.reviewer_model);
+  const models = { subagent: "s-1", reviewer: "r-1" };
+  assert.deepEqual(["implementer", "reviewer", "foundation-reviewer", "planner", "constructor"].map((r) => agentModel(r, models)), ["s-1", "r-1", "r-1", null, null]);
+});

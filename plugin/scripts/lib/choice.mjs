@@ -87,8 +87,10 @@ export function hostsOf(names = []) {
 
 /**
  * Why `harness` cannot run `model` within Factory's caps, {reason, fix}, or null when it can: decided before any spend.
- * Claude Code takes any id and reports its dollars itself: whether its login serves the model is the API's answer, a
- * refusal before any token is billed, which the stage Blocks on (usage.mjs providerRefusal). Codex runs a model Factory
+ * Claude Code takes any id and reports its dollars itself: whether its login serves the model is the API's answer. For the
+ * worker and reviewer model that is a refusal before any token is billed, which the stage Blocks on (usage.mjs
+ * providerRefusal); for a sub-agent's, the sub-agent's refusal, at which the stage stops the run and Blocks naming the
+ * label (usage.mjs subAgentRefusal). Codex runs a model Factory
  * prices (codex-prices.json): with no price row max_usd could not stop its runs; a provider prefix (`openai/`) is the
  * AI Gateway's form only. Copilot takes its own catalog's names,
  * which vary by account and which Factory cannot read before a run: only the form is checked here (no provider prefix or spaces).

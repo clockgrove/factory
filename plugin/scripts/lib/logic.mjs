@@ -900,12 +900,31 @@ export function blockCauseOf(body) {
 }
 
 /**
+ * The model each Factory agent file is pinned to (checkout.mjs agentModel): the stage's `subagent` or `reviewer` model,
+ * with the label and the variable that choose it (choice.mjs CHOICE_PREFIXES, docs/USAGE.md).
+ */
+export const AGENT_MODELS = Object.freeze({
+  implementer: Object.freeze({ model: "subagent", what: "sub-agent", label: "factory:subagent-model:", variable: "FACTORY_SUBAGENT_MODEL" }),
+  reviewer: Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
+  "foundation-reviewer": Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
+});
+
+/** refusalReason for a sub-agent's model refused (usage.mjs subAgentRefusal): the agent, and what chose its model. */
+function subAgentRefusalReason(r, fields) {
+  const pin = Object.hasOwn(AGENT_MODELS, r.subAgent) ? AGENT_MODELS[r.subAgent] : null;
+  const who = r.subAgent ? `its \`${r.subAgent}\` sub-agent` : "a sub-agent";
+  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then re-apply \`factory:objective\`` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
+  return `${r.harness} was refused by its provider for ${who}${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; the run was stopped, since the main session would go on without that work. The fix is ${fix}`;
+}
+
+/**
  * The Blocked reason for a provider's refusal (usage.mjs providerRefusal): the harness, the status, type and code, and the
  * provider's own message shortened (clip). Retrying cannot pass it, so the fix is the credential's account or the settings.
  */
 export function refusalReason(r) {
   const fields = refusalFields(r);
   if (usageLimited(r)) return usageLimitReason(r);
+  if (typeof r.subAgent === "string") return subAgentRefusalReason(r, fields);
   return `${r.harness} was refused by its provider${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; not retried: the fix is on the credential's account or in the harness settings, not in the code`;
 }
 

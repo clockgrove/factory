@@ -9,7 +9,7 @@ import { agentUser, exec } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
-import { validationGroups } from "./logic.mjs";
+import { AGENT_MODELS, validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
@@ -31,7 +31,7 @@ const AGENT_SOURCE = { claude: "agents/claude", codex: "agents/codex", copilot: 
  * file's own: the implementer on the sub-agent model; the reviewer and the foundation pass's agent (review.mjs
  * FOUNDATION_AGENT) on the reviewer model, so both passes of a review run on the one the labels or workflow choose.
  */
-export const agentModel = (role, models = {}) => (role === "implementer" ? models.subagent : role === "reviewer" || role === "foundation-reviewer" ? models.reviewer : null) || null;
+export const agentModel = (role, models = {}) => (Object.hasOwn(AGENT_MODELS, role) ? models[AGENT_MODELS[role].model] : null) || null;
 
 /**
  * Copy the plugin's skills to .agents/skills and .claude/skills, mirror the

@@ -516,11 +516,11 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
  */
 export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   const kind = deciderKind({ inputs, env, home });
-  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, a reply resolves its finding unjudged, a send-back's conflict pass is checked by matching commits, a writer's comment resumes a Question unjudged, a red after a fix pass the exact checks cannot judge Blocks, and any edit to an Objective's text after its plan makes it stale";
+  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, a reply resolves its finding unjudged, a send-back's conflict pass is checked by matching commits, a writer's comment resumes a Question unjudged, a red after a fix pass the exact checks cannot judge Blocks, any edit to an Objective's text after its plan makes it stale, a fix pass's lockfile change outside its scope is refused unjudged, and a writer's comment no pass has read holds a reviewed PR's merge until the review stage applies it";
   if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
-  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check): no AI Gateway key (${kind.code})`;
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check): no AI Gateway key (${kind.code})`;
   if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
   return PASS("decision calls", text);
 }

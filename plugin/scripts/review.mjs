@@ -106,6 +106,7 @@ import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, 
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
+import { openCommentCheck } from "./lib/comment-check.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -1901,7 +1902,7 @@ async function main() {
         await recordMergeable(repo, pr.number, issue, outbox.expected() || pr.head.sha, token);
         recorded = true;
         const report = {};
-        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, thirdParty, editCheck }, token);
+        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, commentCheck: () => openCommentCheck({ inputs, stage: decisionStage }), thirdParty, editCheck }, token);
         log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase

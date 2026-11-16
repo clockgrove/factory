@@ -1047,3 +1047,47 @@ test("#448 review job: a timeline that cannot be read leaves the ready mark's re
   gh.fetch = async (url, init) => (/\/issues\/7\/timeline/.test(String(url)) ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }) : realFetch(url, init));
   assert.equal(await readyCheck(gh, 7), null);
 });
+
+test("#449 a writer's restart since a non-writer's label is the newest start: the pick runs it, as personStart reads", async () => {
+  const { restartMarker } = await import("../scripts/lib/stop.mjs");
+  const gh = fakeGitHub([{ number: 7 }]);
+  gh.unlabel(7, OBJ, PERSON);
+  gh.label(7, OBJ, TRIAGER);
+  assert.ok(!(await tick(gh)).ready.includes(7), "the triager's label runs nothing");
+  // Then the dispatcher restarts it for a writer: its record, Factory's, on the issue's timeline.
+  const at = new Date(Date.now() + 1000).toISOString();
+  gh.timeline(7).push({ event: "commented", user: BOT, actor: BOT, created_at: at, body: `${restartMarker(7, at)}\n<!-- factory:restart ${JSON.stringify({ at, by: PERSON.login })} -->\nRestarted.` });
+  assert.ok((await tick(gh)).ready.includes(7), "the restart is the newer start");
+});
+
+test("#449 the newest start decides, in the pick and in requeuedIn alike: a writer's go, then a triager's remove and re-apply, is refused", async () => {
+  const { requeuedIn } = await import("../scripts/lib/stop.mjs");
+  const at = (m) => new Date(Date.parse("2026-11-15T10:00:00Z") + m * MIN).toISOString();
+  const ev = (event, name, m, actor) => ({ event, label: { name }, actor, created_at: at(m) });
+  const trusted = async (actor) => actor?.login === PERSON.login;
+  const events = [ev("labeled", OBJ, 0, PERSON), ev("labeled", "factory:question", 1, BOT), ev("labeled", OBJ, 2, PERSON), ev("unlabeled", OBJ, 3, TRIAGER), ev("labeled", OBJ, 4, TRIAGER)];
+  const go = await requeuedIn(events, OBJ, trusted);
+  assert.deepEqual([go.requeued, go.refused.map((r) => r.actor.login)], [false, ["triager"]], "the triager's re-apply is the go that decides");
+  assert.equal((await requeuedIn(events.slice(0, 3), OBJ, trusted)).requeued, true, "the writer's alone requeues");
+
+  // Through the dispatcher: a Question the writer re-applied, then the triager took off and on again.
+  const q = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await questionToReapply(q, 7);
+  q.label(7, OBJ, PERSON);
+  q.unlabel(7, OBJ, TRIAGER);
+  q.label(7, OBJ, TRIAGER);
+  const r = await tick(q);
+  assert.ok(!r.ready.includes(7) && q.labels(7).includes("factory:question"), "stays a Question");
+  assert.equal(refusals(q, 7).length, 1);
+  // And a Queued one the writer labelled, then the triager took off and on again: held at its pick, the same way.
+  const p = fakeGitHub([{ number: 8 }]);
+  p.unlabel(8, OBJ, TRIAGER);
+  p.label(8, OBJ, TRIAGER);
+  assert.ok(!(await tick(p)).ready.includes(8));
+  assert.equal(refusals(p, 8).length, 1);
+});
+
+test("dispatch.mjs reads GitHub's spent REST quota once a tick, for both the start check and the hold on new stages", async () => {
+  const src = readFileSync(new URL("../scripts/dispatch.mjs", import.meta.url), "utf8");
+  assert.equal(src.split("spentUntil(quotaKey(").length - 1, 1);
+});

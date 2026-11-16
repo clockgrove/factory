@@ -19,7 +19,7 @@ import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, che
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -1404,6 +1404,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
     const start = startsOf(events, inputs.objectiveLabel)[0];
     if (!start) return null;
+    // A restart since (Factory's record of a person's restart, logic.mjs restartedAt) is the newer start, as personStart reads.
+    const restart = restartedAt(commentsOf(events));
+    if (restart && Date.parse(restart) >= Date.parse(start.created_at)) return null;
     const ok = await goTrust(events, n, mayGo)(start.actor ?? null, start);
     if (ok === true) return null;
     if (ok === "unread") {
@@ -1426,8 +1429,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       spentToday,
     });
   let picked = pick();
-  // GitHub's REST quota spent: nothing starts this tick (below), so no start is read.
-  if (!spentUntil(quotaKey(`${githubOrigin()}/repos`, token))) for (let unchecked = picked.ready.filter((n) => !startChecked.has(n)); unchecked.length; unchecked = picked.ready.filter((n) => !startChecked.has(n))) {
+  // GitHub's REST quota spent, read once for this tick: nothing starts (below), so no start is read.
+  const spent = spentUntil(quotaKey(`${githubOrigin()}/repos`, token));
+  if (!spent) for (let unchecked = picked.ready.filter((n) => !startChecked.has(n)); unchecked.length; unchecked = picked.ready.filter((n) => !startChecked.has(n))) {
     let refused = false;
     for (const n of unchecked) {
       startChecked.add(n);
@@ -1470,7 +1474,6 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // GitHub's REST quota for this token spent (a read above met it and went on without its answer): nothing new starts
   // until its reset, since the new stages' first reads would meet it too. Said once. Its GraphQL quota alone holds nothing.
-  const spent = spentUntil(quotaKey(`${githubOrigin()}/repos`, token));
   if (spent && picked.ready.length) {
     const why = rateLimitLine(spent);
     log(why);

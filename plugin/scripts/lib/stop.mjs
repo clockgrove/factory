@@ -76,10 +76,10 @@ const REQUEUED_FROM = ["factory:blocked", "factory:question", "factory:in-review
  * Block, Question or In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage
  * (the dispatcher's recovery). serve's pendingReviews and the review job's start read the same rule, so a ready mark
  * beside such a go starts no review. A go counts only when `trusted` (labelTrust) holds for its actor; anyone else's
- * changes nothing. Newest go first, so the usual case is one check. Returns `{requeued, at, unread, refused}` (`at`: the
- * go that counted): `unread`
- * when the check of a go's actor could not be made for now (nothing is decided on it), and `refused`, when neither, the
- * goes since that did not count (`{at, actor, draft}`, `draft` for a draft's start), newest first.
+ * changes nothing. Only the newest go decides, as for a pick (dispatch.mjs): taking the label off is a stop, so an
+ * earlier go by a writer does not outlive anyone's later remove and re-apply. Returns `{requeued, at, unread, refused}`
+ * (`at`: the go that counted): `unread` when the check of its actor could not be made for now (nothing is decided on
+ * it), and `refused`, when neither, the go that did not count (`[{at, actor, draft}]`, `draft` for a draft's start).
  */
 export async function requeuedIn(events, label, trusted) {
   let since = null;
@@ -87,14 +87,12 @@ export async function requeuedIn(events, label, trusted) {
   const out = { requeued: false, unread: false, refused: [] };
   if (!since) return out;
   const go = (e) => (e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
-  const goes = (events || []).filter((e) => go(e) && e.created_at > since).reverse();
-  for (const e of goes) {
-    const ok = await trusted(e.actor ?? null, e);
-    if (ok === true) return { ...out, requeued: true, at: e.created_at, refused: [] };
-    if (ok === "unread") return { ...out, unread: true, refused: [] };
-    out.refused.push({ at: e.created_at, actor: e.actor ?? null, draft: e.event === "unlabeled" });
-  }
-  return out;
+  const e = (events || []).filter((x) => go(x) && x.created_at > since).at(-1);
+  if (!e) return out;
+  const ok = await trusted(e.actor ?? null, e);
+  if (ok === true) return { ...out, requeued: true, at: e.created_at };
+  if (ok === "unread") return { ...out, unread: true };
+  return { ...out, refused: [{ at: e.created_at, actor: e.actor ?? null, draft: e.event === "unlabeled" }] };
 }
 
 /** Whether the issue is a draft (DRAFT_LABEL on it). */

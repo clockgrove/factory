@@ -70,7 +70,7 @@ import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
-import { credentialEnv as gitCredentialEnv, mergeTree } from "./outbox.mjs";
+import { credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
@@ -1587,12 +1587,11 @@ async function replayOnto(mgit, { base, covered, head }) {
   };
   const [from, onto, headTree] = [await one(["merge-base", base, covered]), await one(["merge-base", base, head]), await one(["rev-parse", "--verify", `${head}^{tree}`])];
   if (!from || !onto || !headTree) return { why: "the reviewed head shares no history with the default branch" };
-  const replay = await mgit(["merge-tree", "--write-tree", "--no-messages", `--merge-base=${from}`, onto, covered]);
-  // Exit 1 is git's conflict; any other failure is git's own (a git before 2.40 has no --merge-base).
-  if (replay.code === 1) return { why: `the reviewed head ${covered.slice(0, 7)} does not replay cleanly onto ${onto.slice(0, 7)}` };
-  const tree = replay.code === 0 ? String(replay.stdout).split("\n")[0].trim() : "";
-  if (!tree) return { why: `git merge-tree failed (exit ${replay.code}) replaying ${covered.slice(0, 7)}` };
-  return { tree, headTree };
+  const r = await replay(mgit, { from, onto, theirs: covered });
+  // A conflict is git's exit 1; any other failure is git's own (a git before 2.40 has no --merge-base).
+  if (!r.tree) return { why: `git merge-tree failed (exit ${r.code}) replaying ${covered.slice(0, 7)}` };
+  if (!r.clean) return { why: `the reviewed head ${covered.slice(0, 7)} does not replay cleanly onto ${onto.slice(0, 7)}` };
+  return { tree: r.tree, headTree };
 }
 
 /**

@@ -46,6 +46,8 @@ export async function secretScan(git, range, held = heldSecrets(), maxBytes = SE
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+/** The most of one diff the rebase check's decision model is given (box.rebaseLeft): a larger one is not judged. */
+export const JUDGE_MAX_BYTES = 32 * 1024;
 
 /**
  * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
@@ -435,13 +437,17 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
    * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
-   * a head that does not contain `onto` (the conflict pass gave up); or one of the branch's own commits missing from it.
-   * A rebase keeps each commit's author, author time and subject while its patch changes to resolve the conflict, so a
-   * commit is found by those, and only a commit that changes something counts as one. One missing (a `rebase --skip`)
-   * is lost unless its patch is already in the head (it reverse-applies there), as git rebase drops a commit whose
-   * change the base already has. Read on git's exit codes and fields, never its messages.
+   * a head that does not contain `onto` (the conflict pass gave up); or a change of the branch's own commits missing
+   * from it, decided on content, never on commit ids, authors or subjects (a rebase or squash rewrites those):
+   * - exact first: the branch's change (its merge base with `onto` to `from`) replayed onto `onto` (replay) is the
+   *   head's tree, or, per commit, each path the commit changes is as that replay has it in the head (not a path git
+   *   could not merge), or the commit's own change merges into the head as a no-op (its change is already there);
+   * - else the conflict reshaped the commit, and `judge` (kept.mjs openKeptCheck) is asked whether its change is kept,
+   *   given the commit's diff, the branch's and the default branch's changes and the head's change on those paths.
+   * A commit that changes nothing keeps no work and is skipped. No judge, no answer, a diff over JUDGE_MAX_BYTES or a
+   * "lost" answer names the commit as dropped, with the paths and why. Read on git's exit codes and fields only.
    */
-  box.rebaseLeft = async ({ from, onto }) => {
+  box.rebaseLeft = async ({ from, onto, judge = null }) => {
     const busy = await box.inProgress();
     if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
     if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
@@ -452,50 +458,58 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return `the checkout's head could not be read: ${e.message}`;
     }
     if ((await git(["merge-base", "--is-ancestor", onto, head])).code !== 0) return "the branch it left is not rebased onto it";
-    const old = (await git(["merge-base", from, onto])).stdout.trim();
-    const commits = async (range) => {
-      const r = await git(["log", "--no-merges", "-z", "--format=%H%x01%ae%x01%at%x01%s", range]);
-      if (r.code !== 0) throw new Error(`git log exited ${r.code}`);
-      return r.stdout.split("\0").filter(Boolean).map((l) => {
-        const [id, ...key] = l.replace(/^\n/, "").split("\x01");
-        return { id, key: key.join("\x01") };
-      });
-    };
-    // Whether commit `id` changes nothing (`git diff-tree --quiet` against its parent exits 0).
-    const empty = async (id) => (await git(["diff-tree", "--quiet", id])).code === 0;
-    // Whether the head already has commit `id`'s patch: it reverse-applies to the head's tree, in a scratch index.
-    const inHead = async (id) => {
-      const patch = await git(["diff", "--binary", "--no-ext-diff", "--no-textconv", `${id}^`, id]);
-      if (patch.code !== 0) throw new Error(`git diff exited ${patch.code}`);
-      const env = { ...gitEnv(), GIT_INDEX_FILE: join(scratch, `onto-${process.pid}-${Date.now()}.index`) };
-      try {
-        if ((await git(["read-tree", head], { env })).code !== 0) throw new Error("git read-tree failed");
-        return (await git(["apply", "--cached", "--check", "-R", "-"], { env, input: patch.stdout })).code === 0;
-      } finally {
-        rmSync(env.GIT_INDEX_FILE, { force: true });
-      }
-    };
+    const lost = [];
     try {
-      if (!SHA.test(old)) throw new Error("no merge base");
-      // A commit that changes nothing keeps no work, whatever its author, time and subject: it is no counterpart.
-      const kept = new Map();
-      for (const c of await commits(`${onto}..${head}`)) if (!(await empty(c.id))) kept.set(c.key, (kept.get(c.key) || 0) + 1);
-      const lost = [];
-      for (const c of (await commits(`${old}..${from}`)).reverse()) {
-        if (await empty(c.id)) continue;
-        if (kept.get(c.key)) {
-          kept.set(c.key, kept.get(c.key) - 1);
+      const old = (await git(["merge-base", from, onto])).stdout.trim();
+      const headTree = (await git(["rev-parse", "--verify", `${head}^{tree}`])).stdout.trim();
+      if (!SHA.test(old) || !SHA.test(headTree)) throw new Error("no merge base");
+      const replayed = async (args) => {
+        const r = await replay(git, args);
+        if (!r.tree) throw new Error(`git merge-tree exited ${r.code}`);
+        return r;
+      };
+      const whole = await replayed({ from: old, onto, theirs: from });
+      if (whole.clean && whole.tree === headTree) return "";
+      const zlist = async (args) => {
+        const r = await git(args);
+        if (r.code !== 0) throw new Error(`git ${args[0]} exited ${r.code}`);
+        return r.stdout.split("\0").filter(Boolean);
+      };
+      // The paths where the head is not the default branch plus the branch's change as git replays it.
+      const unsettled = new Set([...whole.conflicts, ...(await zlist(["diff", "--name-only", "--no-renames", "-z", whole.tree, head]))]);
+      const ids = (await git(["rev-list", "--no-merges", "--reverse", `${old}..${from}`])).stdout.split("\n").filter((l) => SHA.test(l));
+      const diff = async (a, b, paths) => {
+        const r = await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", a, b, "--", ...paths.map((p) => `:(literal)${p}`)], { maxBytes: JUDGE_MAX_BYTES });
+        if (r.code !== 0 && !r.truncated) throw new Error(`git diff exited ${r.code}`);
+        return r.truncated ? null : r.stdout;
+      };
+      for (const id of ids) {
+        const paths = await zlist(["diff-tree", "--no-commit-id", "-r", "--name-only", "--no-renames", "-z", id]);
+        // A commit that changes nothing keeps no work.
+        if (!paths.length) continue;
+        const open = paths.filter((p) => unsettled.has(p));
+        if (!open.length) continue;
+        // Its own change already in the head: merging it in changes nothing.
+        const own = await replayed({ from: `${id}^`, onto: head, theirs: id });
+        if (own.clean && own.tree === headTree) continue;
+        const name = `${id.slice(0, 7)} in ${open.slice(0, 5).join(", ")}${open.length > 5 ? ` and ${open.length - 5} more` : ""}`;
+        if (!judge) {
+          lost.push(`${name} (its change is not in the head as written, and no decision model is set up to judge it)`);
           continue;
         }
-        // Dropped by git as already upstream only when its patch is already in the head.
-        if (await inHead(c.id)) continue;
-        lost.push(c.id);
+        const diffs = { commit: await diff(`${id}^`, id, open), branch: await diff(old, from, open), base: await diff(old, onto, open), head: await diff(onto, head, open) };
+        if (Object.values(diffs).some((d) => d === null)) {
+          lost.push(`${name} (its diffs are over ${JUDGE_MAX_BYTES / 1024} KiB, too large for the decision model to judge)`);
+          continue;
+        }
+        const subject = (await git(["log", "-1", "--format=%s", id])).stdout.trim();
+        const said = await judge({ id, subject, paths: open, ...diffs });
+        if (!said.kept) lost.push(`${name} (${said.why})`);
       }
-      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")})`;
     } catch {
       return "Factory could not compare the rebased branch with the branch before it";
     }
-    return "";
+    return lost.length ? `the branch it left drops ${lost.length} of the Objective's commit(s): ${lost.join("; ")}` : "";
   };
 
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */
@@ -1102,6 +1116,20 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     rmSync(scratch, { recursive: true, force: true });
   };
   return box;
+}
+
+/**
+ * `theirs`' change since `from` replayed onto `onto` (git merge-tree --merge-base, git 2.40 or later), with `git` a
+ * mirror's git: {tree, clean, conflicts} (`conflicts` the paths git could not merge, whose entries in `tree` are git's
+ * conflict form, not a resolution), or {code} with git's exit code when it could not run (exit 1 is a conflict).
+ */
+export async function replay(git, { from, onto, theirs }) {
+  const r = await git(["merge-tree", "--write-tree", "--no-messages", "-z", `--merge-base=${from}`, onto, theirs]);
+  const [tree, ...entries] = String(r.stdout ?? "").split("\0");
+  if ((r.code !== 0 && r.code !== 1) || !SHA.test(tree)) return { code: r.code };
+  // Each conflicted entry is `<mode> <object> <stage>\t<path>`.
+  const conflicts = [...new Set(entries.map((e) => /^\d+ [0-9a-f]+ \d\t(.+)$/s.exec(e)?.[1]).filter(Boolean))];
+  return { tree, clean: r.code === 0, conflicts };
 }
 
 /**

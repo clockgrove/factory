@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
 import { openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
+import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
@@ -1188,7 +1189,7 @@ test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's downlo
  * and b.txt the other way and added the same c.txt, so git drops that commit as already upstream. The worker's
  * conflict pass then ends in `pass` in the checkout; rebaseLeft says whether that is the branch rebased onto main.
  */
-async function conflictPass(pass) {
+async function conflictPass(pass, judge = null) {
   const r = repos();
   r.put(r.work, "app.txt", "ours\n");
   r.run(r.work, "commit", "-q", "-m", "c1");
@@ -1214,19 +1215,48 @@ async function conflictPass(pass) {
   };
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
   await pass({ resolve, go, r });
-  return { box, r, from, onto, left: await box.rebaseLeft({ from, onto }) };
+  return { box, r, from, onto, left: await box.rebaseLeft({ from, onto, judge }) };
 }
 
-test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, aborted, stopped on the first or second commit, or a commit skipped (#243)", async () => {
-  // Resolved: both conflicts resolved and the rebase finished; c3 dropped by git as already upstream is no loss.
-  const ok = await conflictPass(async ({ resolve, go }) => {
+/**
+ * A fake decision client behind the real judge (kept.mjs openKeptCheck): it answers each commit's question from
+ * `verdicts` (a 7-character commit id to "kept", "lost" or "error"; any other commit gets `fallback`) and records what
+ * it was asked.
+ */
+function fakeJudge(verdicts = {}, fallback = "kept") {
+  const asked = [];
+  const decider = {
+    name: "fake",
+    model: "fake/model",
+    async decide(input, question) {
+      const id = /^Commit ([0-9a-f]{7})/.exec(input)[1];
+      asked.push({ id, input, question });
+      const v = verdicts[id] ?? fallback;
+      return v === "error" ? { verdict: null, confidence: null, error: "unavailable" } : { verdict: v, confidence: 0.9 };
+    },
+  };
+  return { asked, judge: openKeptCheck({ inputs: { triageModel: "fake/model" }, decider }).judge };
+}
+
+test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, aborted, stopped on the first or second commit, or a commit skipped (#243, #362)", async () => {
+  // Resolved: both conflicts resolved and the rebase finished; c3 dropped by git as already upstream is no loss. The
+  // resolutions reshaped c1 and c2, so the decision model is asked about those two only, and says kept.
+  const resolve2 = async ({ resolve, go }) => {
     resolve("app.txt", "ours and theirs\n");
     assert.throws(() => go("rebase", "--continue"), "c2 conflicts next");
     resolve("b.txt", "ours-b and theirs-b\n");
     go("rebase", "--continue");
-  });
+  };
+  const kept = fakeJudge();
+  const ok = await conflictPass(resolve2, kept.judge);
   assert.equal(ok.left, "", ok.left);
+  const short = (rev) => ok.r.run(ok.r.work, "rev-parse", "--short=7", rev);
+  assert.deepEqual(kept.asked.map((a) => a.id), [short(`${ok.from}~2`), short(`${ok.from}~1`)], "asked about the reshaped commits only, oldest first");
   assert.equal(await ok.box.push(), true, ok.box.error);
+
+  // The same resolution with no decision model: the reshaped commits cannot be judged, so they are named, never passed.
+  const unjudged = await conflictPass(resolve2);
+  assert.match(unjudged.left, /^the branch it left drops 2 of the Objective's commit\(s\): [0-9a-f]{7} in app\.txt \(.*no decision model.*\); [0-9a-f]{7} in b\.txt \(/);
 
   // Aborted: the branch is as it was, not on main.
   const aborted = await conflictPass(async ({ go }) => go("rebase", "--abort"));
@@ -1243,24 +1273,28 @@ test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, 
   });
   assert.equal(second.left, "the conflict pass left a rebase in progress");
 
-  // Skipped: c1 dropped with `rebase --skip`, c2 resolved, the rebase finished. Contains main, yet c1 is lost.
-  const skipped = await conflictPass(async ({ resolve, go }) => {
+  // Skipped: c1 dropped with `rebase --skip`, c2 resolved, the rebase finished. Contains main, yet c1 is lost: the
+  // decision model, asked about both, says so for c1.
+  const verdicts = {};
+  const lost = fakeJudge(verdicts);
+  const skipped = await conflictPass(async ({ resolve, go, r }) => {
+    verdicts[r.run(r.work, "rev-parse", "--short=7", "refs/heads/factory/1~2")] = "lost";
     assert.throws(() => go("rebase", "--skip"));
     resolve("b.txt", "ours-b and theirs-b\n");
     go("rebase", "--continue");
-  });
-  assert.match(skipped.left, /^the branch it left drops 1 of the Objective's commit\(s\) \([0-9a-f]{7}\)$/);
+  }, lost.judge);
   const c1 = skipped.r.run(skipped.r.work, "rev-parse", "--short=7", `${skipped.from}~2`);
-  assert.ok(skipped.left.includes(c1), "it names the dropped commit");
+  assert.equal(skipped.left, `the branch it left drops 1 of the Objective's commit(s): ${c1} in app.txt (the decision model (fake/model) judged its change lost at 0.90)`);
 });
 
 test("outbox: rebaseLeft checks the base the rebase was onto, not one the default branch moved to since (a catch-up merge) (#243)", async () => {
+  const { judge } = fakeJudge();
   const done = await conflictPass(async ({ resolve, go }) => {
     resolve("app.txt", "ours and theirs\n");
     assert.throws(() => go("rebase", "--continue"));
     resolve("b.txt", "ours-b and theirs-b\n");
     go("rebase", "--continue");
-  });
+  }, judge);
   // main moves again (a workflow change a push would merge in): the outbox's base moves with it.
   done.r.put(done.r.other, ".github/workflows/ci.yml", "on: push\n");
   done.r.run(done.r.other, "commit", "-q", "-m", "workflow");
@@ -1268,12 +1302,13 @@ test("outbox: rebaseLeft checks the base the rebase was onto, not one the defaul
   await done.box.refresh();
   assert.notEqual(done.box.base, done.onto);
   assert.ok((await done.box.behind()) > 0, "counted against the moved base, the branch reads behind");
-  assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto }), "", "yet it is rebased onto the base it was sent for");
+  assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto, judge }), "", "yet it is rebased onto the base it was sent for");
 });
 
-test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch is in the head, and an empty commit as no counterpart (#243)", async () => {
+test("outbox: rebaseLeft counts a dropped commit as upstream only when its change is in the head, and an empty commit as no counterpart (#243, #362)", async () => {
   // c1 changes app.txt, c2 changes doc.txt (which main changed too: the conflict), c3 undoes c1. The pass resolves c2
-  // and then drops the undo: whole-file, app.txt is main's again in c3, yet the head still carries c1's change.
+  // and then drops the undo: whole-file, app.txt is main's again in c3, yet the head still carries c1's change. The
+  // decision model says c2 is kept, and anything else lost.
   const r = repos();
   r.put(r.work, "doc.txt", "d1\n");
   r.run(r.work, "commit", "-q", "-m", "doc");
@@ -1291,6 +1326,7 @@ test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r);
   const from = box.expected();
+  const { asked, judge } = fakeJudge({ [r.run(r.work, "rev-parse", "--short=7", `${from}~1`)]: "kept" }, "lost");
   assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null);
   const onto = box.base;
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
@@ -1301,15 +1337,135 @@ test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch
   go("rebase", "--continue");
   go("reset", "-q", "--hard", "HEAD~1");
   assert.equal(readFileSync(join(r.work, "app.txt"), "utf8"), "ours\n", "the head carries c1's change without its undo");
-  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+  const c3 = from.slice(0, 7);
+  const dropsC3 = new RegExp(`^the branch it left drops 1 of the Objective's commit\\(s\\): ${c3} in app\\.txt \\(`);
+  assert.match(await box.rebaseLeft({ from, onto, judge }), dropsC3);
+  assert.ok(!asked.some((a) => a.id === r.run(r.work, "rev-parse", "--short=7", `${from}~2`)), "c1's change is in the head as written: not asked");
 
   // A forged empty commit with c3's author, time and subject (`commit --allow-empty -C`) is no counterpart for it.
   go("commit", "-q", "--allow-empty", "-C", from);
-  assert.match(await box.rebaseLeft({ from, onto }), /^the branch it left drops 1 of the Objective's commit\(s\)/);
+  assert.match(await box.rebaseLeft({ from, onto, judge }), dropsC3);
   // The undo kept: the branch is whole.
   go("reset", "-q", "--hard", "HEAD~1");
   go("cherry-pick", from);
-  assert.equal(await box.rebaseLeft({ from, onto }), "");
+  assert.equal(await box.rebaseLeft({ from, onto, judge }), "");
+});
+
+/**
+ * #362: a branch of two commits whose rebase onto main conflicts. c1 changes line 6 of app.txt (main changed line 3:
+ * no conflict, but the context of c1's patch moved) and conf.txt (which main changes too with `confOnMain`: a conflict);
+ * c2 deletes old.txt, which main edited and listed in registry.txt (a conflict). Returns what `pass` left, read by
+ * rebaseLeft with `judge`.
+ */
+async function rebasedBranch(pass, judge = null, { confOnMain = true } = {}) {
+  const r = repos();
+  const lines = (at, text) => Array.from({ length: 10 }, (_, i) => (i + 1 === at ? text : `l${i + 1}`)).join("\n") + "\n";
+  r.put(r.work, "app.txt", lines(0));
+  r.put(r.work, "conf.txt", "a=1\n");
+  r.put(r.work, "old.txt", "old\n");
+  r.run(r.work, "commit", "-q", "-m", "base files");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  r.run(r.other, "pull", "-q", "origin", "main");
+  r.put(r.work, "app.txt", lines(6, "L6 objective"));
+  r.put(r.work, "conf.txt", "a=objective\n");
+  r.run(r.work, "commit", "-q", "-m", "c1");
+  r.run(r.work, "rm", "-q", "old.txt");
+  r.run(r.work, "commit", "-q", "-m", "c2 removes old.txt");
+  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.put(r.other, "app.txt", lines(3, "L3 main"));
+  r.put(r.other, "old.txt", "old, edited\n");
+  r.put(r.other, "registry.txt", "old.txt\n");
+  if (confOnMain) r.put(r.other, "conf.txt", "a=main\n");
+  r.run(r.other, "commit", "-q", "-m", "sibling");
+  r.run(r.other, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r);
+  const from = box.expected();
+  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  const onto = box.base;
+  const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
+  go("fetch", "-q", "origin", "main");
+  await pass({ go, r, from });
+  return { box, r, from, onto, left: await box.rebaseLeft({ from, onto, judge }) };
+}
+
+test("outbox: a squashed rebase that keeps the Objective's work, with a commit joining it to main's, is delivered on content alone (#362)", async () => {
+  const { asked, judge } = fakeJudge({}, "lost");
+  const done = await rebasedBranch(async ({ go, r }) => {
+    // c2 conflicts with main's edit of old.txt: the Objective deletes it.
+    assert.throws(() => go("rebase", "-q", "origin/main"));
+    go("rm", "-q", "old.txt");
+    go("rebase", "--continue");
+    // Squashed under the worker's own name and time, then a commit taking old.txt out of main's registry.
+    go("reset", "-q", "--soft", "origin/main");
+    go("commit", "-q", "-m", "The Objective's work");
+    writeFileSync(join(r.work, "registry.txt"), "");
+    go("commit", "-q", "-am", "Join main's registry");
+  }, judge, { confOnMain: false });
+  assert.equal(done.left, "", done.left);
+  assert.deepEqual(asked, [], "every change is in the head as written: no decision model call");
+  assert.equal(await done.box.push(), true, done.box.error);
+  assert.equal(done.r.run(done.r.origin, "rev-parse", "factory/1"), done.r.run(done.r.work, "rev-parse", "HEAD"));
+});
+
+test("outbox: a resolution that keeps a commit but takes main's side of its conflict drops its change, named by the decision model or with none (#362)", async () => {
+  const takeMain = async ({ go }) => {
+    // Rebased with each commit's author, time and subject kept; c1's conflict on conf.txt resolved as main has it.
+    assert.throws(() => go("rebase", "-q", "origin/main"));
+    go("checkout", "-q", "--ours", "conf.txt");
+    go("add", "conf.txt");
+    assert.throws(() => go("rebase", "--continue"));
+    go("rm", "-q", "old.txt");
+    go("rebase", "--continue");
+  };
+  const { asked, judge } = fakeJudge({}, "lost");
+  const lost = await rebasedBranch(takeMain, judge);
+  const c1 = lost.r.run(lost.r.work, "rev-parse", "--short=7", `${lost.from}~1`);
+  assert.equal(lost.left, `the branch it left drops 1 of the Objective's commit(s): ${c1} in conf.txt (the decision model (fake/model) judged its change lost at 0.90)`);
+  assert.deepEqual(asked.map((a) => a.id), [c1], "only c1's conf.txt change is not in the head as written");
+  const { input, question } = asked[0];
+  assert.equal(question, KEPT_QUESTION);
+  assert.match(input, /^Commit [0-9a-f]{12}: c1\nFiles: conf\.txt\n/);
+  assert.match(input, /The commit's change \(its parent to it\):\ndiff --git a\/conf\.txt b\/conf\.txt[\s\S]*\+a=objective/);
+  assert.match(input, /The default branch's change since the branch split from it, on these files:\ndiff --git a\/conf\.txt b\/conf\.txt[\s\S]*\+a=main/);
+  assert.match(input, /The rebased branch's change against the default branch's head, on these files:\n\(no change\)$/, "the head has main's conf.txt");
+  assert.doesNotMatch(input, /app\.txt/, "only the paths not in the head as written go to the model");
+  // The worker's guard Blocks with it, and nothing goes out.
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  const why = await sendBackGuard({ outbox: lost.box, onto: { from: lost.from, base: lost.onto, files: ["conf.txt", "old.txt"] }, defaultBranch: "main", judge });
+  assert.ok(why.endsWith(`: ${lost.left}; nothing of it was pushed`), why);
+  assert.equal(await lost.box.push(), false);
+  assert.equal(lost.r.run(lost.r.origin, "rev-parse", "factory/1"), lost.from, "the branch on GitHub is as it was");
+
+  // No decision model: the change is named all the same.
+  const unjudged = await rebasedBranch(takeMain);
+  assert.match(unjudged.left, new RegExp(`^the branch it left drops 1 of the Objective's commit\\(s\\): [0-9a-f]{7} in conf\\.txt \\(its change is not in the head as written, and no decision model is set up to judge it\\)$`));
+});
+
+test("outbox: a commit the conflict reshaped goes to the decision model: kept is delivered, lost or no answer is named (#362)", async () => {
+  const reshape = async ({ go, r }) => {
+    assert.throws(() => go("rebase", "-q", "origin/main"));
+    writeFileSync(join(r.work, "conf.txt"), "a=main-and-objective\n");
+    go("add", "conf.txt");
+    assert.throws(() => go("rebase", "--continue"));
+    go("rm", "-q", "old.txt");
+    go("rebase", "--continue");
+    go("reset", "-q", "--soft", "origin/main");
+    go("commit", "-q", "-m", "squashed");
+  };
+  const kept = fakeJudge();
+  const ok = await rebasedBranch(reshape, kept.judge);
+  assert.equal(ok.left, "", ok.left);
+  assert.equal(kept.asked.length, 1);
+  assert.match(kept.asked[0].input, /rebased branch's change against the default branch's head, on these files:\ndiff --git a\/conf\.txt b\/conf\.txt[\s\S]*\+a=main-and-objective/);
+
+  const silent = fakeJudge({}, "error");
+  const unanswered = await rebasedBranch(reshape, silent.judge);
+  assert.match(unanswered.left, /^the branch it left drops 1 of the Objective's commit\(s\): [0-9a-f]{7} in conf\.txt \(the decision model gave no answer \(unavailable\)\)$/);
+
+  // A decider that throws is no answer either; with no key there is no judge at all.
+  const thrown = openKeptCheck({ inputs: {}, decider: { decide: async () => { throw new Error("boom"); } } });
+  assert.deepEqual(await thrown.judge({ id: "a".repeat(40), paths: ["x"], commit: "", branch: "", base: "", head: "" }), { kept: false, why: "the decision model gave no answer (vendor)" });
+  assert.equal(openKeptCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } }), null);
 });
 
 test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothing; the cap stays the Block's reason (#243)", async () => {
@@ -1325,5 +1481,5 @@ test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothi
   assert.equal(decideExit({ harness: { ok: false, timedOut: true }, pr, commits: 0, unresolved, pushRejected: box.error !== unresolved ? box.error : "" }).reason, "time cap reached");
   // The worker calls the guard for every send-back conflict, caps or not.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
-  assert.match(src, /\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch \}\);\n {2}let pushed = await outbox\.push\(\);/);
+  assert.match(src, /\n {2}const keptCheck = rebaseOnto \? openKeptCheck\(\{ inputs \}\) : null;\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck\?\.judge \?\? null \}\);\n {2}let pushed = await outbox\.push\(\);/);
 });

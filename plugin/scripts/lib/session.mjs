@@ -83,7 +83,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -1082,6 +1082,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   let checksFixed = false;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
+  // A running required check's hung reading (hangsOn, as the merge queue's): its bound for a check with no history, the
+  // merge queue rule's check_response_timeout_minutes or else the stage's wall clock (read once), and its step history.
+  let hungMs = null;
+  const hangCache = {};
   // The head the last fix pass was asked to fix: the same head after it is no new observation (validate).
   let redHead = null;
   // Workflow files read at a head while classifying a wait (triage.mjs checkSources): once per stage.
@@ -1139,13 +1143,22 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed") || !all.some((w) => ENDED_EARLY.includes(w.conclusion))) return false;
       return (await classify({ runs })).kind === "ended";
     };
-    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    // A required check whose step is past its usual duration in recent green runs has hung (logic.mjs jobStall): the
+    // wait ends unfinished, as at the stage's wall clock. One still within it is waited for. Actions are not read on the
+    // local route (its App has no Actions permission): there every check is judged by the time bound.
+    const hung = async (runs) => {
+      hungMs ??= await queueCheckTimeout(checks.repo, { token: checks.token }).then((m) => (m ? m * 60_000 : Infinity), () => Infinity);
+      return hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache }, { token: checks.token });
+    };
+    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, hung, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? Infinity, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
     // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
     // on every route, up to CHECKS_WAIT_MS or the stage's wall clock less CHECKS_WAIT_GUARD_MS, the reads backing off;
     // still not started, or anything else unfinished, it comes back as `stuck` and the stage Blocks with the reason.
     const unfinished = (x) => !x.green && x.timedOut && !x.failedRuns?.length;
+    // A running check that ended the wait by making no progress: the Block names its step and times.
+    const noProgress = (x, s) => (x.hung?.length && s.kind === "running" ? { ...s, reason: `no progress: ${hungChecks(x.hung)}; ${s.reason}` } : s);
     const history = async () => {
       // Older commits that ran the checks: the PR's last green head, then the default branch's newest.
       const green = lastGreenHead(await rest(`repos/${checks.repo.full}/issues/${checks.prNumber}/comments?per_page=100`, { token: checks.token, paginate: true }).catch(() => []), checks.issue);
@@ -1166,20 +1179,20 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
     const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;
-      let stuck = await classify(x);
+      let stuck = noProgress(x, await classify(x));
       if (!stuck.waits) return { stuck };
       const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
       if (capMs <= 0) return { stuck };
       if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`);
-      x = await wait(ignoreIds, capMs, { appearMs: Infinity, maxPollMs: checks.maxPollMs ?? 5 * 60_000 });
+      x = await wait(ignoreIds, capMs, { appearMs: Infinity, maxPollMs: checks.maxPollMs ?? 5 * 60_000, hung: null });
       if (x.conflict || !unfinished(x)) return x;
       stuck = await classify(x);
-      // Started during that wait and still running: it gets the checks' normal timeout, as a check that started at once does.
+      // Started during that wait and still running: it is waited for as a check that started at once is.
       if (stuck.kind === "running") {
         if (onPhase) await onPhase(`required checks on ${sha.slice(0, 7)} started late; waiting for them as usual`);
         x = await wait(ignoreIds);
         if (x.conflict || !unfinished(x)) return x;
-        stuck = await classify(x);
+        stuck = noProgress(x, await classify(x));
       }
       return { stuck };
     };
@@ -2385,25 +2398,41 @@ export async function queueBoundMs(repo, opts) {
  * be judged has its normal duration read from the workflow's recent green runs (github.mjs stepDurations), once per
  * `cache` (one merge pass, or one watch). Actions are read with `actionsToken` (the job token's `actions: read`); with
  * none (the local route, whose App has no Actions permission), or an unread job or history, a check is judged by the
- * time bound `hungMs` only.
+ * time bound `hungMs` only. `checks` are the commit's checks when the caller has read them (awaitChecks' `hung`).
+ * A job is read only once its check could be hung (past min(STEP_STALL_FLOOR_MS, `hungMs`)), and read again only when
+ * its last reading in `cache` is that old, judges it stalled now, or is past `hungMs`: until then no step it moved on to
+ * could be stalled, so that reading stands.
  */
-export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {} }, opts) {
-  const checks = await queueCommitChecks(repo, sha, opts);
+export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null }, opts) {
+  const checks = given ?? (await queueCommitChecks(repo, sha, opts));
   const aopts = { ...opts, token: actionsToken || opts.token };
   const jobs = new Map();
   const baselines = new Map();
   cache.baselines ??= new Map();
-  for (const t of queueTargets(names, checks).targets) {
-    // No Actions token (the local route: its App has no Actions permission): every check is judged by the time fallback.
-    if (t.app !== ACTIONS_APP_ID || !actionsToken) continue;
-    const job = await rest(`repos/${repo.full}/actions/jobs/${t.id}`, aopts).catch(() => null);
-    if (!job) continue;
-    jobs.set(t.id, job);
-    if (!needsBaseline(job, { fallbackMs: hungMs, now })) continue;
+  cache.read ??= new Map();
+  const soonest = Math.min(STEP_STALL_FLOOR_MS, hungMs);
+  const within = (t, ms) => now - Date.parse(t) <= ms;
+  // The step's baseline, read once per cache and only once the step could be stalled by it.
+  const baseline = async (job) => {
+    if (!needsBaseline(job, { fallbackMs: hungMs, now })) return null;
     const key = stepKey(job, jobPosition(job).step);
     if (!cache.baselines.has(key)) cache.baselines.set(key, stepDurations(repo, { runId: job.run_id, jobName: job.name, stepName: jobPosition(job).step }, aopts, cache).then(stepBaselineMs, () => null));
     const b = await cache.baselines.get(key);
     if (b !== null) baselines.set(key, b);
+    return b;
+  };
+  for (const t of queueTargets(names, checks).targets) {
+    // No Actions token (the local route: its App has no Actions permission): every check is judged by the time fallback.
+    if (t.app !== ACTIONS_APP_ID || !actionsToken || within(t.started_at, soonest)) continue;
+    const kept = cache.read.get(t.id);
+    let job = kept && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at }) ? kept.job : null;
+    if (!job) {
+      job = await rest(`repos/${repo.full}/actions/jobs/${t.id}`, aopts).catch(() => null);
+      if (!job) continue;
+      cache.read.set(t.id, { job, at: new Date(now).toISOString() });
+      await baseline(job);
+    }
+    jobs.set(t.id, job);
   }
   return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs });
 }

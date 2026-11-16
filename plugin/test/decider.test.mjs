@@ -20,6 +20,7 @@ import { holdSecrets, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
 import { answerDecider } from "../scripts/review.mjs";
 import { FINDING_QUESTION, openFindingCheck } from "../scripts/lib/finding-check.mjs";
+import { openKeptCheck } from "../scripts/lib/kept.mjs";
 
 const fixture = (name) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf8");
 const LIMIT_RUN = fixture("claude-2.1.323-usage-limit.jsonl");
@@ -513,4 +514,15 @@ test("#379: the answer gate and the finding check ask the stage's harness withou
   assert.ok(calls()[0].prompt.includes('"enum":["fixed","rebutted","unresolved"]'));
   assert.equal(FINDING_QUESTION.choices.length, 3);
   assert.equal(kept.length, 1);
+});
+
+test("#379: the rebase check judges through the stage's harness without a key, and is off only with no decider", async () => {
+  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"kept","confidence":0.92}'));
+  const { stage } = stageOf(bin, "claude");
+  const check = openKeptCheck({ inputs: {}, env: {}, stage });
+  assert.ok(check);
+  assert.deepEqual(await check.judge({ path: "src/a.ts", conflicted: true, branch: "+a", base: "+b", head: "+a\n+b" }), { kept: true, why: "" });
+  assert.equal(calls().length, 1);
+  assert.equal(openKeptCheck({ inputs: {}, env: {} }), null, "no stage, no key");
+  assert.equal(openKeptCheck({ inputs: { decisionRoute: "off" }, env: {}, stage }), null);
 });

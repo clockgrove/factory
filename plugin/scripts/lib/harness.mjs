@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, answeredError, busyCode, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, answeredError, busyCode, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, subAgentRefusal, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -1331,13 +1331,32 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   relay?.beginPass(maxUsd, live.usd);
   // What the harness has in flight, from its own stream: the hung check names it.
   const activity = harnessActivity();
+  // A Claude sub-agent's model refused (usage.mjs subAgentRefusal) stops the run there: the main session would go on
+  // without that work, on its own model, and spend on it.
+  const subStop = harness === "claude" ? new AbortController() : null;
+  let subRefused = null;
   const lines = (l) => {
     live.line(l);
     activity.feed(l);
     onLine?.(l);
+    if (subStop && !subRefused && l.includes('"is_api_error_message"')) {
+      let event = null;
+      try {
+        event = JSON.parse(l);
+      } catch {
+        return;
+      }
+      subRefused = subAgentRefusal([event]);
+      if (subRefused) {
+        log(`${label}: the provider refused the ${subRefused.subAgent || "sub-agent"}'s model (${refusalFields(subRefused)}); stopping the run`);
+        subStop.abort();
+      }
+    }
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal: subStop ? AbortSignal.any([signal, subStop.signal]) : signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  // Stopped on a sub-agent's refusal: the refusal is the run's end, not a stop by Factory.
+  if (subRefused && r.stopped && !signal.aborted) r.stopped = false;
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the

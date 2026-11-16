@@ -84,6 +84,11 @@ const SERVICES_OUT_NOTE = "\n\nA service the repository's setup started on this 
 
 const ACTIONS = {
   name: "actions",
+  /**
+   * The hosts this stage's sandboxed commands may reach (local.mjs runnerDomains): the built-in list, the workflow's
+   * `allowed_domains` input and the Objective's approved host labels, never anything the checkout says.
+   */
+  hosts: (env = process.env) => runnerDomains(input("allowed_domains", { env }), openedStageHosts()),
   trigger: {
     /** The Action takes every Objective not routed to a local loop. */
     routes: (issue) => !hasLocalLabel(issue),
@@ -145,6 +150,8 @@ const ACTIONS = {
 
 const LOCAL = {
   name: "local",
+  /** The hosts this stage's sandboxes allow, as serve resolved them for it (FACTORY_LOCAL_SANDBOX `domains`). */
+  hosts: (env = process.env) => sandboxDomains(env),
   trigger: {
     /** A local loop takes the Objectives labelled factory:local, or every one with FACTORY_LOCAL_ALL=1. */
     routes: (issue, env = process.env) => env.FACTORY_LOCAL_ALL === "1" || hasLocalLabel(issue),

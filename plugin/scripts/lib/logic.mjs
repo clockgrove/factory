@@ -173,7 +173,8 @@ export function protectedTouched(files, protectedList) {
 // ------------------------------------------------------------ fix-pass scope
 
 // Toolchain, lockfile and CI configuration: what a fix pass (after a red, or answering the review) may change only when
-// its scope reaches it (fixScopeRefused). `.github/` is not here: it is a protected path, refused for every pass.
+// its scope reaches it (fixScopeRefused), or when the fence check judges the change part of fixing the red (outbox.mjs
+// box.outside, fence-check.mjs). `.github/` is not here: it is a protected path, refused for every pass.
 const LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "deno.lock", "Cargo.lock", "go.sum", "go.work.sum", "poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "pixi.lock", "conda-lock.yml", "Gemfile.lock", "composer.lock", "mix.lock", "pubspec.lock", "Package.resolved", "Podfile.lock", "flake.lock", "gradle.lockfile", "packages.lock.json"]);
 // Each lockfile and the manifests it is regenerated from: a lockfile beside one of its own manifests in scope is in
 // scope (a Cargo.lock beside a package.json is not). packages.lock.json (NuGet) pairs with a project file of any name,
@@ -199,15 +200,18 @@ const TOOLCHAIN_DIRS = [".devcontainer/", ".circleci/", ".buildkite/", ".woodpec
 const fileName = (p) => p.split("/").at(-1);
 const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "");
 
-/** Whether a path is toolchain, lockfile or CI configuration (a pin, a lockfile, a CI file, a container, a `*toolchain*` file other than prose, a file under a `toolchain/` directory). */
-export function toolchainFile(path) {
+/**
+ * Whether a path is toolchain, lockfile or CI configuration (a pin, a lockfile, a CI file, a container), by the exact
+ * lists, or a path the repository's `toolchain_paths` setting covers (`paths`, each matched as a protected path is:
+ * protectedCovers).
+ */
+export function toolchainFile(path, paths = []) {
   const p = String(path).replace(/^\.\//, "");
   const name = fileName(p);
   if (LOCKFILES.has(name) || TOOLCHAIN_FILES.has(name)) return true;
-  if (/toolchain/i.test(name) && !/\.(md|mdx|markdown|txt|rst|adoc)$/i.test(name)) return true;
   if (/^(Dockerfile|Containerfile)(\..+)?$|\.(Dockerfile|Containerfile)$/.test(name)) return true;
-  if (p.split("/").slice(0, -1).some((d) => /^toolchains?$/i.test(d))) return true;
-  return TOOLCHAIN_DIRS.some((d) => p.startsWith(d) || p.includes(`/${d}`));
+  if (TOOLCHAIN_DIRS.some((d) => p.startsWith(d) || p.includes(`/${d}`))) return true;
+  return paths.some((rule) => protectedCovers(rule, p));
 }
 
 // Dependency lists an install command reads (`pip install -r requirements.txt`): a fix pass adding a dependency changes
@@ -641,10 +645,10 @@ export const settingsFile = (path) => fileName(String(path)) === SETTINGS_FILE;
  * changed without its manifest or a member manifest in scope is refused. `extra` (the files the repository's `setup`
  * and `install` commands name, setupPaths) counts as toolchain too, and with `unknown` (what those commands may run that
  * Factory cannot name, commandRefs `unresolved`) every file does: any one may be what they run. A pnpm-workspace.yaml in
- * `membership` (its change touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may
- * change as before.
+ * `membership` (its change touches only the `packages` list, membershipOnly) is not. `paths`: the repository's
+ * `toolchain_paths` setting (toolchainFile). Everything else a fix pass may change as before.
  */
-export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], named: commandNamed = extra, unknown = [], workspaces = [], membership = [] } = {}) {
+export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], named: commandNamed = extra, unknown = [], workspaces = [], membership = [], paths = [] } = {}) {
   const clean = (p) => String(p).replace(/^\.\//, "");
   const before = new Set(prior.map(clean));
   const setupPaths = new Set([...extra].map(clean));
@@ -657,15 +661,32 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], n
   // setup command names the file itself.
   const namedBySetup = new Set([...commandNamed].map(clean));
   const membersOnly = (p) => settingsFile(p) && members.has(p) && !namedBySetup.has(p);
-  return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
+  return [...now].filter((p) => (toolchainFile(p, paths) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
+}
+
+/**
+ * Whether the fence check (fence-check.mjs) may be asked about `entry`, one of fixScopeRefused's (or a package.json
+ * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go. Only a lockfile: never a
+ * version pin (any program setup, install or a check runs may read one), a script entry, a protected path, what either
+ * command names or runs (`extra`, each with what is under and above it: guardCovers), what the setup guard covers
+ * (`guarded`, setupGuard `files`), nor anything while either command may run a file Factory cannot name (`unknown`).
+ * A lockfile setup's install reads is no exception: its manifest beside it in scope already lets it go
+ * (fixScopeRefused). Everything else stays refused as the fence found it.
+ */
+export function fenceDecidable(entry, { extra = [], unknown = [], protectedList = [], guarded = [] } = {}) {
+  const p = String(entry).replace(/^\.\//, "");
+  if (unknown.length || / scripts\./.test(p) || !LOCKFILES.has(fileName(p))) return false;
+  if (protectedTouched([p], protectedList).length) return false;
+  return ![...extra, ...guarded].some((g) => guardCovers(String(g).replace(/^\.\//, ""), p));
 }
 
 /**
  * The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. `unknown`: what
- * the setup or install command may run that Factory cannot name (fixScopeRefused), said once, with its fix.
+ * the setup or install command may run that Factory cannot name (fixScopeRefused), said once, with its fix. `judged`:
+ * what the fence check said of the files it was asked about (`<path>: <why>`, outbox.mjs box.fenceVerdict).
  */
-export const fixScopeReason = (files, unknown = []) =>
-  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Factory cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
+export const fixScopeReason = (files, unknown = [], judged = []) =>
+  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names${judged.length ? `; the fence check: ${judged.slice(0, 3).join("; ")}${judged.length > 3 ? `; and ${judged.length - 3} more` : ""}` : ""}; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Factory cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
 
 /**
  * The Blocked reason for a push GitHub refused because it would create or update a workflow file, which a token
@@ -722,7 +743,10 @@ export function priorityOf(issue) {
   return best;
 }
 
-/** Issue numbers named by `Blocked by #N` (or `blocked-by: #N, #M`) lines in a body. */
+/**
+ * Issue numbers named by `Blocked by #N` (or `blocked-by: #N, #M`) lines in a body: the fallback where GitHub's issue
+ * dependencies are unavailable (github.mjs blockedByRelations answers null). Where they answer, they are the only source.
+ */
 export function parseBlockedBy(body) {
   const out = new Set();
   for (const line of String(body || "").split(/\r?\n/)) {
@@ -904,12 +928,31 @@ export function blockCauseOf(body) {
 }
 
 /**
+ * The model each Factory agent file is pinned to (checkout.mjs agentModel): the stage's `subagent` or `reviewer` model,
+ * with the label and the variable that choose it (choice.mjs CHOICE_PREFIXES, docs/USAGE.md).
+ */
+export const AGENT_MODELS = Object.freeze({
+  implementer: Object.freeze({ model: "subagent", what: "sub-agent", label: "factory:subagent-model:", variable: "FACTORY_SUBAGENT_MODEL" }),
+  reviewer: Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
+  "foundation-reviewer": Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
+});
+
+/** refusalReason for a sub-agent's model refused (usage.mjs subAgentRefusal): the agent, and what chose its model. */
+function subAgentRefusalReason(r, fields) {
+  const pin = Object.hasOwn(AGENT_MODELS, r.subAgent) ? AGENT_MODELS[r.subAgent] : null;
+  const who = r.subAgent ? `its \`${r.subAgent}\` sub-agent` : "a sub-agent";
+  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then re-apply \`factory:objective\`` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
+  return `${r.harness} was refused by its provider for ${who}${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; the run was stopped, since the main session would go on without that work. The fix is ${fix}`;
+}
+
+/**
  * The Blocked reason for a provider's refusal (usage.mjs providerRefusal): the harness, the status, type and code, and the
  * provider's own message shortened (clip). Retrying cannot pass it, so the fix is the credential's account or the settings.
  */
 export function refusalReason(r) {
   const fields = refusalFields(r);
   if (usageLimited(r)) return usageLimitReason(r);
+  if (typeof r.subAgent === "string") return subAgentRefusalReason(r, fields);
   return `${r.harness} was refused by its provider${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; not retried: the fix is on the credential's account or in the harness settings, not in the code`;
 }
 
@@ -979,7 +1022,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  pr:         {exists, draft, body} | null
  *  commits:    number of commits on the branch beyond the base
  *  validation: {passes: number, green: boolean, lastOutput?: string, baseFailure?: string, notStarted?: string, stuck?: string (a wait with
- *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
+ *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason), scopeCause?: its cause when not the work's,
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
  *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
  *              pass was given after a fix pass changed nothing on it, when the red after it is the last), stalled?: string
@@ -994,6 +1037,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              "mark ready" answers it)
  *  reviewUnaddressed: number (review pass: findings still open, session.mjs unaddressedReviewComments)
  *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
+ *  pushCause:  that Block's cause when not the work's (outbox.mjs errorCause: the fence check could not judge a file)
  *  unresolved: string, why what a send-back's conflict pass left is not the branch rebased onto its base (worker.mjs,
  *              outbox.mjs rebaseLeft): Blocked with it after the hard stops, as the work's
  *  lfsRefused: boolean, the refusal was Git LFS's (quota, storage, cap, pointers)
@@ -1012,13 +1056,13 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  * likewise `missingSecrets`, the variables its shell lacked (worker-secrets.mjs missingSecretsFix).
  * A worker's reason and question are shortened on a word boundary (clip).
  */
-export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", unresolved = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "", handoverRefused = "", handoverOnly = false }) {
+export function decideExit({ harness, pr, commits = 0, validation, protectedHits = [], record = null, recordBasis = "", question, reviewUnaddressed = 0, pushRejected = "", pushCause = null, unresolved = "", lfsRefused = false, lfsQuota = false, lfsPlain = [], planNeeds = "", sessionCap = "", handoverRefused = "", handoverOnly = false }) {
   // Git LFS first: the branch on GitHub lacks the work (a refused upload) or carries a binary LFS should hold.
   // GitHub's Git LFS quota or storage (the outbox's `lfs-quota` refusal) is a plan limit a person raises; any other LFS refusal is setup.
   if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: lfsQuota ? "provider-quota" : "setup" };
   if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}`, cause: "work" };
   // Factory refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
-  if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}`, cause: "work" };
+  if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}`, cause: Object.hasOwn(BLOCK_CAUSES, pushCause ?? "") ? pushCause : "work" };
   // A provider's refusal (usage.mjs providerRefusal) is never retried: it Blocks at once, naming the refusal.
   if (harness?.refusal) return { exit: "blocked", reason: refusalReason(harness.refusal), cause: refusalCause(harness.refusal) };
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "factory" };
@@ -1061,7 +1105,8 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // A fix pass that committed nothing left the same red (session.mjs unchangedBlock): said as such, never a second red.
     if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
-    if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
+    // Its cause is `factory` or `outage` when the fence check gave no answer on every file still refused (scopeCause).
+    if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: Object.hasOwn(BLOCK_CAUSES, validation.scopeCause ?? "") ? validation.scopeCause : "work" };
     // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
     const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
     const red = validation.stalled
@@ -1746,18 +1791,17 @@ export const entryKey = (id) =>
     .replace(/[:.]+$/, "")
     .toUpperCase();
 
-const ACCEPTANCE_HEADING = /\b(?:acceptance|must be true|done when|definition of done|criteria)\b/i;
-
 /**
- * The acceptance entries an issue states, so the reviewer judges each one: the top-level list items under a heading
- * (Markdown `#`, or a line that is only bold text) naming acceptance ("Acceptance", "What must be true", "Done when",
- * "Definition of done", "criteria"). Each is {id, text}: the id is the item's own label ("- **B:** ..." is B) or else its
- * 1-based position; nested items and continuation lines join their entry's text. [] when the issue has no such section;
- * the reviewer then names the entries from the issue text itself.
+ * The acceptance entries an issue states, so the reviewer judges each one: the top-level list items in the section the
+ * factory-file skill writes, a Markdown heading whose text is exactly `Acceptance` (any level, any case), down to the
+ * next heading of its level or above; items under its sub-headings are entries too. Each is {id, text}: the id is the
+ * item's own label ("- **B:** ..." is B) or else its 1-based position; nested items and continuation lines join their
+ * entry's text. [] when the issue has no such section: the reviewer then names the entries from the issue text itself.
  */
 export function acceptanceEntries(body) {
   const entries = [];
-  let inSection = false;
+  // The section's heading level while inside it, else 0.
+  let level = 0;
   let current = null;
   let fence = false;
   for (const raw of String(body || "").replace(/\r\n?/g, "\n").split("\n")) {
@@ -1766,13 +1810,14 @@ export function acceptanceEntries(body) {
       continue;
     }
     if (fence) continue;
-    const heading = /^\s{0,3}#{1,6}\s+(.*)$/.exec(raw) || /^\s{0,3}\*\*([^*]+)\*\*:?\s*$/.exec(raw);
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(raw);
     if (heading) {
-      inSection = ACCEPTANCE_HEADING.test(heading[1]);
       current = null;
+      if (level && heading[1].length > level) continue;
+      level = heading[2].toLowerCase() === "acceptance" ? heading[1].length : 0;
       continue;
     }
-    if (!inSection) continue;
+    if (!level) continue;
     const item = /^\s{0,1}(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(raw);
     if (item) {
       const label = /^\*\*([A-Za-z0-9]{1,3})[:.)]?\*\*:?\s*|^([A-Z]|\d{1,2})[:.)]\s+/.exec(item[1]);

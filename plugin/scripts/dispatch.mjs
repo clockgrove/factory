@@ -149,7 +149,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
    * marker's time. Returns `{record, flight}`: `flight` null when none is in flight, else when to look again: the started
    * job's own limit, or Infinity while it waits for a runner or its group (its end ticks the dispatcher; the cron is the
    * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry, up to the
-   * unread-claim bound (CLAIM_PAUSE_MS from the marker; GitHub ends a job that waits that long for a runner). Past it, a
+   * unread-claim bound (CLAIM_PAUSE_MS from the marker). Past it, a
    * read that still fails (not rate limited) returns `unread` too, `{run, read, code}`, the read named: the caller Blocks
    * the Objective with cause `factory`, its notice naming that read.
    */

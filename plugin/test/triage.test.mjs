@@ -133,6 +133,13 @@ test("changedPathIn: only a repository file the failure points at, equal to a ch
   assert.equal(changedPathIn(failureSignature("py", fixture("pytest-math.txt")), changedNames([{ filename: "tests/test_math.py", patch: "-x" }])), "tests/test_math.py");
   assert.equal(changedPathIn(failureSignature("py", fixture("python-traceback.txt")), changedNames([{ filename: "app/models.py", patch: "-x" }])), "app/models.py");
   assert.deepEqual(changeMentions(go, changedNames([{ filename: "invoice/invoice_test.go", patch: "-x" }])), { files: [], tests: [] });
+  // A whole token equal to a changed path is exact too: Git LFS names the object's path with no line number.
+  const yard = changedNames([{ filename: "assets/yard.png" }]);
+  assert.equal(changedPathIn(failureSignature("quality", lfsMissingLog), yard), "assets/yard.png", "the LFS line names the changed object");
+  assert.equal(changedPathIn(failureSignature("quality", "##[group]Run ./setup.sh\nfatal: './assets/yard.png' is missing\n##[error]x"), yard), "assets/yard.png");
+  const longer = failureSignature("quality", lfsMissingLog.replaceAll("assets/yard.png", "media/assets/yard.png"));
+  assert.equal(changedPathIn(longer, yard), null, "a longer path containing the changed one is another file");
+  assert.deepEqual(changeMentions(longer, yard).files, ["assets/yard.png"], "a mention for the model");
 });
 
 test("triage records: written in the progress comment, read back only from Factory's own progress comments", () => {
@@ -856,8 +863,8 @@ test("triage: a checkout or set-up failure is rerun once on its head without the
     assert.equal(decider.asked.length, 1);
     assert.match(decider.asked[0], /^Failed step: Run npm test$/m);
   });
-  // Not GitHub's side, so asked like any red: a checkout that failed on an object the PR added (a 404 naming a changed
-  // file), the same 404 naming nothing changed, and a 502 checkout under continue-on-error with a later step cancelled.
+  // Not GitHub's side: a checkout that failed on an object the PR added (a 404 naming a changed file), never asked; the
+  // same 404 naming nothing changed, and a 502 checkout under continue-on-error with a later step cancelled, asked.
   const red = (id) => [{ ...red41[0], id }];
   for (const [id, job, text, prFiles] of [[43, checkoutFailed, lfsMissingLog, ["assets/yard.png"]], [44, checkoutFailed, lfsMissingLog, []], [45, checkoutThenCancelled, lfsLog, []]]) {
     const ask = asking({ verdict: "change_caused", confidence: 0.97 });
@@ -865,9 +872,8 @@ test("triage: a checkout or set-up failure is rerun once on its head without the
       const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: ask });
       assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: red(id), required: ["quality"] })).rerun, false, `job ${id}`);
       assert.equal(seen.reruns, 0);
-      // Each is asked; the object the PR added is named in the question, for the model to weigh (#369).
-      assert.equal(ask.asked.length, 1, `job ${id}`);
-      if (prFiles.length) assert.match(ask.asked[0], /by name: another file may share it\):\nassets\/yard\.png\n/);
+      // The changed object's whole path is the exact rule (changedPathIn): not asked. The others are.
+      assert.equal(ask.asked.length, prFiles.length ? 0 : 1, `job ${id}`);
     });
   }
 });
@@ -1338,14 +1344,13 @@ test("validation loop: a checkout that fails on GitHub's side is rerun without t
   // A checkout red, then a test red after the rerun: not the same way, so the work's.
   assert.equal((await run({ key: false, after: testFailed, logAfter: failingLog })).result.unchanged.cause, "work");
 
-  // The PR added an LFS pointer without its object: the checkout's 404 names a file the PR changes. Not GitHub's side,
-  // so the model is asked, told of the file, and reads it as the change's: never rerun, and after a fix pass that
-  // commits nothing, Blocked as the work's.
-  const missing = await run({ logBefore: lfsMissingLog, prFiles: ["assets/yard.png"], answer: { verdict: "change_caused", confidence: 0.9 } });
-  assert.equal(missing.asked, 1);
+  // The PR added an LFS pointer without its object: the checkout's 404 names, whole, a file the PR changes. Asked of
+  // nobody, never rerun for free, and after a fix pass that commits nothing, Blocked as the work's.
+  const missing = await run({ logBefore: lfsMissingLog, prFiles: ["assets/yard.png"] });
+  assert.equal(missing.asked, 0);
   assert.equal(missing.result.reruns, 0);
   assert.equal(missing.result.unchanged.cause, "work");
-  assert.match(missing.result.unchanged.reason, /not rerun \(triage read it as caused by the change: quality 0\.90\)/);
+  assert.match(missing.result.unchanged.reason, /not rerun \(the failure of quality points at assets\/yard\.png, which the PR changes\)/);
 
   // continue-on-error: the checkout failed on a 502 but a later step was cancelled: asked of the model like any red.
   const later = await run({ before: checkoutThenCancelled, answer: { verdict: "change_caused", confidence: 0.9 } });

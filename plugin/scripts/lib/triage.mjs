@@ -278,12 +278,20 @@ export function changedNames(files) {
   return { paths, bases, tests };
 }
 
+// What delimits a whole path in a log line: whitespace, quotes, colons and brackets.
+const PATH_DELIM = /[\s'"`:()<>[\]{}]+/;
+
 /**
- * The one exact sign the change caused a failure: a repository file its failure lines or their stack frames point at
- * (repoRefs, as the signature reads them) that is a path the PR changes. Returns that path, or null.
+ * The one exact sign the change caused a failure: a path the PR changes, in full, among the repository files its
+ * failure lines or their stack frames point at (repoRefs, as the signature reads them) or among their whole tokens
+ * (PATH_DELIM; the runner's checkout prefix dropped, foldPaths), such as Git LFS's `Error downloading object: <path>`.
+ * A changed path inside a longer one is no match. Returns that path, or null.
  */
 export function changedPathIn(sig, names) {
-  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) for (const p of repoRefs(l)) if (names.paths.has(p)) return p;
+  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) {
+    for (const p of repoRefs(l)) if (names.paths.has(p)) return p;
+    for (const t of foldPaths(l).split(PATH_DELIM)) if (names.paths.has(t.replace(/^\.\//, ""))) return t.replace(/^\.\//, "");
+  }
   return null;
 }
 

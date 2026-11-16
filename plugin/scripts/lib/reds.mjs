@@ -1,9 +1,10 @@
 // What a fix pass gets about a red the required checks found, and whether the red is the change's at all: each failing
 // CI job's whole log (a file, not a tail), the diff since the PR's last green head, and, per job, whether the default
-// branch fails the same job with the same failure signature, steadily (a base failure, not this change's).
+// branch fails the same job with the same failure, steadily (a base failure, not this change's). "The same failure" is
+// equal failure signatures, else, where the signatures cannot tell, a decision call (triage.mjs openTriage `same`).
 import { checkRuns, getRepo, jobLog, logWindow, rest } from "./github.mjs";
 import { filesDiff, trustedAuthor } from "./logic.mjs";
-import { MAX_JOBS, failureSignature, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
+import { MAX_JOBS, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
 
 /** The largest log or diff handed to the harness as one file; past it the head is cut and the tail kept. */
 export const RED_FILE_CAP = 8 * 1024 * 1024;
@@ -30,16 +31,51 @@ export function lastGreenHead(comments, issue) {
   return best?.sha ?? null;
 }
 
+/** "The same failure" by signature alone: what baseMatch decides with no same-failure check (triage.mjs openTriage `same`). */
+export const sameBySignature = async (a, b) => {
+  const yes = sameFailure(a?.sig, b?.sig);
+  return { same: yes, different: !yes, exact: true, said: yes ? `the same signature, ${a.sig.id}` : "not the same signature" };
+};
+
 /**
  * Whether the default branch fails a job the same way, steadily: its newest completed run of the job (attempts
- * included, newest first) is red with this failure signature, and at least BASE_MATCHES of its newest BASE_RUNS are.
- * One red run on the base (a flake, an outage) is not enough. `runs` are [{run, sig}] newest first; a run whose log was
- * not read has no `sig`.
+ * included, newest first) is red with the same failure, and at least BASE_MATCHES of its newest BASE_RUNS are. One red
+ * run on the base (a flake, an outage) is not enough. `job` is this failure and `runs` the base's, [{run, side}] newest
+ * first, each side as `same` takes it (triage.mjs openTriage `same`: equal signatures, else the decision model where
+ * they cannot tell; sameBySignature by default), or [{run, sig}]. A run that passed is not asked about, nor any run
+ * once the answer is settled. Resolves {base, said, exact, undecided}: `said` how the base's newest run was judged and
+ * `exact` whether without the decision model; `undecided` the first judgement with no answer that could have made it a
+ * base failure (its `cause`, `said`, `limited`), else null.
  */
-export function steadyOnBase(sig, runs) {
+export async function baseMatch(job, runs, same = sameBySignature) {
   const newest = (runs || []).slice(0, BASE_RUNS);
-  const same = (x) => !!x && !PASSED.includes(x.run.conclusion) && sameFailure(sig, x.sig);
-  return !!newest.length && same(newest[0]) && newest.filter(same).length >= BASE_MATCHES;
+  let matches = 0;
+  let open = 0;
+  let undecided = null;
+  let said = "";
+  let exact = true;
+  let newestSame = false;
+  for (const [i, x] of newest.entries()) {
+    if (PASSED.includes(x.run.conclusion)) {
+      if (i === 0) break;
+      continue;
+    }
+    // Settled: already steady, or too few runs left to get there.
+    if ((newestSame && matches >= BASE_MATCHES) || matches + open + newest.length - i < BASE_MATCHES) break;
+    const j = await same(job, x.side ?? { name: job.name, sig: x.sig ?? null });
+    if (i === 0) {
+      said = j.said;
+      exact = j.exact !== false;
+      newestSame = !!j.same;
+    }
+    if (j.same) matches += 1;
+    else if (j.undecided) {
+      open += 1;
+      undecided ??= j;
+    } else if (i === 0) break;
+  }
+  const base = newestSame && matches >= BASE_MATCHES;
+  return { base, said, exact, undecided: !base && undecided && matches + open >= BASE_MATCHES ? undecided : null };
 }
 
 /**
@@ -69,14 +105,17 @@ export function evidenceText({ branch, job, evidence, lines }) {
 }
 
 /**
- * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, evidence}], truncated,
- * branch, green, diff, diffError}. `base` is {sha} when the job fails exactly the same way, steadily, on the default
- * branch (steadyOnBase), else null; `evidence` is what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the two-dot diff from it to `sha`, made by `diffOf(from, to)`
- * (Factory's own mirror) or, when the red head descends from it, GitHub's compare; `diffError` says why there is none.
+ * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence}],
+ * truncated, branch, green, diff, diffError}. `base` is {sha, said} when the job fails the same way, steadily, on the
+ * default branch (baseMatch, with `same`: triage.mjs openTriage `same`, else the signature alone), else null;
+ * `baseUndecided` ({cause, said, limited?}) when a judgement that could have made it so got no answer; `evidence` is
+ * what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the
+ * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Factory's own mirror) or, when the red head descends from
+ * it, GitHub's compare; `diffError` says why there is none.
  * With `sinceGreen` false (a merge queue commit, no head of the PR) neither is read: `green` and `diff` are null.
- * `token` reads the repository and the PR; `actionsToken` the job logs.
+ * `token` reads the repository and the PR; `actionsToken` the job logs and jobs.
  */
-export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5, sinceGreen = true }) {
+export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5, sinceGreen = true, same = null }) {
   const opts = { token };
   const actions = { token: actionsToken };
   const { jobs: picked, truncated } = jobsToDetail(failedRuns, required);
@@ -94,18 +133,33 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     }
     return out.slice(0, BASE_RUNS);
   };
+  // A job's failed step (its Actions job's first failed step), read once and only when a same-failure judgement needs it.
+  const steps = new Map();
+  const stepOf = (id) => {
+    if (!steps.has(id)) steps.set(id, rest(`repos/${repo.full}/actions/jobs/${id}`, actions).then((j) => failedStep(j)?.name || "", () => ""));
+    return steps.get(id);
+  };
+  const short = (s) => String(s).slice(0, 7);
   const jobs = [];
   for (const r of picked) {
     const log = await jobLog(repo, r.id, actions).catch(() => "");
     const sig = failureSignature(r.name, log);
-    // The base's newest runs of the job; each red one's log is read once (not kept: no later step reads it again).
+    // The base's newest runs of the job; each red one's log is read once, and only its failure window kept.
     const runs = await baseRunsOf(r.name);
-    for (const x of runs) if (!PASSED.includes(x.run.conclusion)) x.sig = failureSignature(r.name, await jobLog(repo, x.run.id, actions, { cache: false }).catch(() => ""));
-    // Handed back only on an exact, steady match; no signature (an unreadable log, or only wrappers) never matches.
-    const base = sig.id && steadyOnBase(sig, runs) ? { sha: runs[0].sha } : null;
-    // A required check that only gathers the others (isAggregate) and printed no failure line of its own.
+    for (const x of runs) {
+      if (PASSED.includes(x.run.conclusion)) continue;
+      const text = await jobLog(repo, x.run.id, actions, { cache: false }).catch(() => "");
+      x.sig = failureSignature(r.name, text);
+      x.side = { id: x.run.id, name: r.name, sig: x.sig, step: () => stepOf(x.run.id), window: failureWindow(text), label: `job ${x.run.id}, on ${branch}@${short(x.sha)}` };
+    }
+    // A required check that only gathers the others (isAggregate) and printed no failure line of its own: never asked.
     const aggregate = isAggregate(r, failedRuns, required) && !sig.lines.length;
-    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000), sig, base, aggregate, evidence: baseEvidence(runs) });
+    // Handed back only on a steady match of the same failure (`same`: the signature, else the decision model).
+    const match = aggregate ? { base: false, said: "", undecided: null } : await baseMatch({ id: r.id, name: r.name, sig, step: () => stepOf(r.id), window: failureWindow(log), label: `job ${r.id}, on the head ${short(sha)}` }, runs, same ?? sameBySignature);
+    const base = match.base ? { sha: runs[0].sha, said: match.said, exact: match.exact } : null;
+    const u = match.undecided;
+    const baseUndecided = u ? { cause: u.cause || "factory", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
+    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
   // needs and which may fail without failing the run (triage.mjs workflowJobs), so the Block's lead (leadJobs) quotes a
@@ -225,9 +279,30 @@ async function diffSince({ repo, green, sha, opts, diffOf }) {
  */
 export const allOnBase = (detail) => !!detail?.jobs?.length && !detail.truncated && detail.jobs.every((j) => j.base || j.aggregate) && detail.jobs.some((j) => j.base && !j.aggregate);
 
-/** The one-line reason for a red that is all base failures (the base matches named; an aggregate beside them). */
+/**
+ * The one-line reason for a red that is all base failures (the base matches named, each by its signature, or by the
+ * same-failure check's verdict, confidence and floor where the decision model judged it; an aggregate beside them).
+ */
 export const baseFailureReason = (detail) => {
   const based = detail.jobs.filter((j) => j.base);
   const gathered = detail.jobs.filter((j) => !j.base && j.aggregate);
-  return `base failure: ${based.map((j) => j.name).join(", ")} ${based.length > 1 ? "fail" : "fails"} the same way on ${detail.branch}@${String(based[0].base.sha).slice(0, 7)} (${based.map((j) => j.sig.id).join(", ")})${gathered.length ? `, and ${gathered.map((j) => j.name).join(", ")} only ${gathered.length > 1 ? "gather" : "gathers"} ${based.length > 1 ? "them" : "it"}` : ""}; not this change`;
+  const how = (j) => (j.base.exact === false ? `${j.name}: ${j.base.said}` : j.sig.id);
+  return `base failure: ${based.map((j) => j.name).join(", ")} ${based.length > 1 ? "fail" : "fails"} the same way on ${detail.branch}@${String(based[0].base.sha).slice(0, 7)} (${based.map(how).join(", ")})${gathered.length ? `, and ${gathered.map((j) => j.name).join(", ")} only ${gathered.length > 1 ? "gather" : "gathers"} ${based.length > 1 ? "them" : "it"}` : ""}; not this change`;
 };
+
+/**
+ * A red that would be all base failures (allOnBase) but for jobs whose same-failure judgement got no answer
+ * (`baseUndecided`): {cause, why, limited?}, the Block's cause (`outage` when every such judgement met its vendor's
+ * outage, else `factory`), why, and the stage harness's usage limit that stopped one. Null otherwise, and when a job is
+ * the change's (judged not the same failure) or one was left out.
+ */
+export function undecidedOnBase(detail) {
+  const jobs = detail?.jobs || [];
+  if (!jobs.length || detail.truncated) return null;
+  const open = jobs.filter((j) => !j.base && !j.aggregate);
+  if (!open.length || !open.every((j) => j.baseUndecided)) return null;
+  const limited = open.find((j) => j.baseUndecided.limited)?.baseUndecided.limited ?? null;
+  const cause = !limited && open.every((j) => j.baseUndecided.cause === "outage") ? "outage" : "factory";
+  const names = open.map((j) => j.name).join(", ");
+  return { cause, why: `whether ${detail.branch} fails ${names} the same way could not be judged: the same-failure check got ${open.map((j) => j.baseUndecided.said).join("; ")}`, ...(limited ? { limited } : {}) };
+}

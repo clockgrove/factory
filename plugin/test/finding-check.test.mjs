@@ -183,7 +183,7 @@ test("#368: without a decider key a reply answers its finding as before, said on
   // No key: no ai_gateway_api_key input on Actions; locally, no key file in the (fake) home.
   const home = mkdtempSync(join(tmpdir(), "fc-home-"));
   const check = openFindingCheck({ inputs: {}, env: {}, home });
-  assert.deepEqual(check, { model: "perplexity/pplx-decider-v1.2", off: "no-key" });
+  assert.deepEqual(check, { model: "perplexity/pplx-decider-v1.2", off: "no-key", floor: { min: 0.7, set: false, text: "default floor 0.7" } });
   assert.equal(openFindingCheck({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true" }, home }).off, "no-key");
   await withGitHub(gh, async () => {
     const toAnswer = await list();

@@ -5,7 +5,7 @@
 // the same jobs failing with the same failure lines (folded, each as many times), or a red the stage has seen before
 // (by signature), is none; the jobs that failed now passing, with a different set or fewer failing, is progress. Anything else asks the decision model,
 // through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's key, model setting and
-// confidence floor: only `closer` at MIN_CONFIDENCE or more is progress, so a model that keeps answering `closer` is
+// confidence floor: only `closer` at the floor (confidenceFloor) or more is progress, so a model that keeps answering `closer` is
 // bounded by max_usd and the wall clock alone. No decider is no progress; a decider that gives no answer leaves the
 // judgement unmade, which ends the loop as Factory's (or the outage's), never as the work's. This runs in Factory's own
 // process, never in a harness. The failure lines and the diff go in delimited, as data.
@@ -13,7 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, foldLine, sameFailure } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor, foldLine, sameFailure } from "./triage.mjs";
 
 /** The one question asked when the exact checks cannot tell. */
 export const PROGRESS_QUESTION = {
@@ -140,12 +140,12 @@ export function progressInput({ before, after, diff }, tag = randomBytes(8).toSt
  * Gateway's `triage_model` with a key, else the stage's own harness (`stage`). With neither, `off` is why (the key's code
  * or `route-off`). `seen`: the stage's reds, one list for every validation loop the check is passed to (validationLoop
  * adds each red it reads). judge({before, after, seen, diff}) resolves {progress, why} and never throws: the exact
- * checks (redProgress) first, then the question; with the check off, `not_closer`, or `closer` under MIN_CONFIDENCE, no
+ * checks (redProgress) first, then the question; with the check off, `not_closer`, or `closer` under the floor (`min`), no
  * progress. No answer is `undecided`, with the Block's `cause` (`outage` for the vendor's outage, else `factory`); the
  * stage harness's usage limit that stopped the question is `limited` too: the caller ends the stage on it
  * (harness.mjs UsageLimitReached).
  */
-export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = MIN_CONFIDENCE } = {}) {
+export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = confidenceFloor(inputs).min } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
   const judge = async ({ before, after, seen = [], diff = null }) => {

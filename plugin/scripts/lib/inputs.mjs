@@ -85,6 +85,7 @@ export const DEFAULTS = {
   worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
   worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
   triage_model: "", // empty: triage.mjs TRIAGE_MODEL
+  triage_min_confidence: "", // empty: triage.mjs MIN_CONFIDENCE, measured on TRIAGE_MODEL; goes with triage_model (settingLayers, resolveInputs)
   drift_model: "", // empty: drift.mjs DRIFT_MODEL (the drift advisory, on with ai_gateway_api_key)
   github_token: "",
   app_token: "",
@@ -185,7 +186,7 @@ export const MODEL_SETTINGS = ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTO
  * The settings this machine's own environment sets over the repository's in local mode (local.mjs baseEnv): the harness,
  * models and session settings, set to a non-empty value, and local mode's own settings (FACTORY_LOCAL_*), set at all.
  */
-export const MACHINE_SETTINGS = ["FACTORY_HARNESS", ...MODEL_SETTINGS, "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_DECISION_ROUTE", "FACTORY_WORKER_SECRETS"];
+export const MACHINE_SETTINGS = ["FACTORY_HARNESS", ...MODEL_SETTINGS, "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_TRIAGE_MIN_CONFIDENCE", "FACTORY_DRIFT_MODEL", "FACTORY_DECISION_ROUTE", "FACTORY_WORKER_SECRETS"];
 const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("FACTORY_LOCAL_"));
 
 /**
@@ -245,6 +246,7 @@ const VALUE_RULES = (() => {
     FACTORY_THIRD_PARTY_WAIT_MINUTES: [(v) => number(v) && Number(v) > 0 && Number(v) <= THIRD_PARTY_WAIT_MAX_MINUTES, `a number above 0, at most ${THIRD_PARTY_WAIT_MAX_MINUTES} (24 hours)`],
     FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, `a list of hours, each a number above 0, at most ${GUESS_MAX_HOURS}`],
     FACTORY_COPILOT_CREDIT_USD: above0,
+    FACTORY_TRIAGE_MIN_CONFIDENCE: [(v) => confidenceValue(v) !== null, "a number from 0 to 1"],
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
     FACTORY_SIBLING_HOLD: oneOf("on", "off"),
@@ -262,6 +264,14 @@ export function guessHoursMs(value) {
   return guessHoursValid(hours) ? hours.map((h) => h * 3600_000) : null;
 }
 
+/** A `triage_min_confidence` value as a number from 0 to 1, or null when it is none (empty, not a number, out of range). */
+export function confidenceValue(value) {
+  const v = String(value ?? "").trim();
+  if (!number(v)) return null;
+  const n = Number(v);
+  return n >= 0 && n <= 1 ? n : null;
+}
+
 /** Why a variable's value for setting `name` is not taken (VALUE_RULES), or null. */
 export const valueProblem = (name, value) => (VALUE_RULES[name] && !VALUE_RULES[name][0](value) ? `not ${VALUE_RULES[name][1]}` : null);
 
@@ -273,13 +283,17 @@ export function machineSettings(env = process.env) {
   return own;
 }
 
+/** The triage model's confidence floor (`triage_min_confidence`), which goes with `triage_model`. */
+const TRIAGE_FLOOR_OF = "FACTORY_TRIAGE_MIN_CONFIDENCE";
+
 /**
  * A repository's Factory settings in layers, each over the one below (#284): Factory's defaults (DEFAULTS), the
  * committed workflow's env block (`workflow`, workflowSettings's kept), the repository's variables (`variables`, all of
  * them: variableSettings takes the settings), and this machine's own (`machine`: in local mode machineSettings's).
  * A layer that sets another harness than the layers below drops their models and effort for that harness's defaults,
- * unless it sets them itself, as the workflow's models belong to its harness. Returns {values, from, excluded, unknown,
- * invalid} (variableSettings's):
+ * unless it sets them itself, as the workflow's models belong to its harness; one that sets another `triage_model`
+ * drops their `triage_min_confidence` the same way, as a floor belongs to the model it was set for. Returns {values,
+ * from, excluded, unknown, invalid} (variableSettings's):
  * `values` holds the settings some layer sets (the workflow's own empty ones included, which read as the default),
  * `from` the layer each came from (`workflow`, `variable` or `machine`).
  */
@@ -287,14 +301,16 @@ export function settingLayers({ workflow = {}, variables = {}, machine = {} } = 
   const values = {};
   const from = {};
   const harnessOf = harnessName;
+  const drop = (k) => {
+    delete values[k];
+    delete from[k];
+  };
   const take = (layer, set) => {
     if (set.FACTORY_HARNESS && harnessOf(set.FACTORY_HARNESS) !== harnessOf(values.FACTORY_HARNESS)) {
-      for (const k of MODEL_SETTINGS) {
-        if (k in set) continue;
-        delete values[k];
-        delete from[k];
-      }
+      for (const k of MODEL_SETTINGS) if (!(k in set)) drop(k);
     }
+    // The confidence floor is the triage model's own: a layer that names another model drops the floor below it.
+    if ("FACTORY_TRIAGE_MODEL" in set && !(TRIAGE_FLOOR_OF in set) && String(set.FACTORY_TRIAGE_MODEL).trim() !== String(values.FACTORY_TRIAGE_MODEL ?? "").trim()) drop(TRIAGE_FLOOR_OF);
     for (const [k, v] of Object.entries(set)) {
       values[k] = v;
       from[k] = layer;
@@ -561,6 +577,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     workerSecrets: get("worker_secrets"),
     workerSecretValues: get("worker_secret_values"),
     triageModel: get("triage_model").trim(),
+    triageMinConfidence: triageFloorSetting({ args, env }),
     driftModel: get("drift_model").trim(),
     githubToken: get("github_token") || env.GITHUB_TOKEN || "",
     appToken: get("app_token") || env.FACTORY_APP_TOKEN || "",
@@ -577,6 +594,31 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     sweepMaxDestroys: Math.max(0, Math.floor(num(get("sweep_max_destroys"), 5))),
     nodeVersion: get("node_version").trim(),
   };
+}
+
+/** Where input `name` comes from by the precedence above: 0 a flag, 1 the Action's `with:`, 2 the settings, 3 the default. */
+const inputTier = (name, { args, env }) => {
+  const set = (v) => v !== undefined && v !== "";
+  return set(args[name]) ? 0 : set(env[`FACTORY_INPUT_${upper(name)}`]) ? 1 : set(env[`FACTORY_${upper(name)}`]) ? 2 : 3;
+};
+
+/**
+ * `triage_min_confidence` as a number from 0 to 1, or null for triage.mjs's default floor. A floor belongs to the model
+ * it was set for: one set where a model is named below it (a setting under a flag or `with:` naming `triage_model`) is
+ * not that model's, so it is not taken. A value that is no number from 0 to 1 is refused with a line and reads as null.
+ */
+export function triageFloorSetting({ args = {}, env = process.env } = {}) {
+  const tier = inputTier("triage_min_confidence", { args, env });
+  if (tier === 3) return null;
+  const model = inputTier("triage_model", { args, env });
+  if (model < tier) {
+    log(`triage_min_confidence is set below the triage_model it would go with (a flag or the Action's input names the model): the default floor applies`);
+    return null;
+  }
+  const raw = input("triage_min_confidence", { args, env });
+  const n = confidenceValue(raw);
+  if (n === null) log(`triage_min_confidence ${JSON.stringify(String(raw).slice(0, 40))} is not a number from 0 to 1; the default floor applies`);
+  return n;
 }
 
 /** `prompt_cache_ttl` as one of its four values; anything else is refused with a warning and reads as `off`. */

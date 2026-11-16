@@ -16,7 +16,7 @@ import { refusingOrigin, unhandedPort } from "./ports.mjs";
 import { keyBreakdown, maskFile, writeUsage } from "../scripts/lib/session.mjs";
 import { maxUsdReached, usdText } from "../scripts/lib/logic.mjs";
 import { harnessOuterSettings } from "../scripts/lib/local.mjs";
-import { secretForms } from "../scripts/lib/inputs.mjs";
+import { resolveInputs, secretForms } from "../scripts/lib/inputs.mjs";
 import { costOf as benchCostOf } from "../../bench/lib/cost.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 
@@ -2003,6 +2003,43 @@ test("a pass's end waits for the lookups a bounded time: an estimate still stand
     assert.deepEqual([r.totals().usd, r.totals().estimated, lookups], [0.25, 1, tried]);
   } finally {
     records.open();
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#423: the repository's relay_unknown_shut and floors reach the stage's relay: two failures that may have been billed shut it, booked at the repository's floors", async () => {
+  const inputs = { ...resolveInputs({ env: { FACTORY_RELAY_UNKNOWN_SHUT: "2", FACTORY_RELAY_UNKNOWN_FLOOR_USD: "0.1", FACTORY_RELAY_SLOW_FLOOR_USD: "0.5" } }), harness: "claude", maxUsd: 100 };
+  const dir = mkdtempSync(join(tmpdir(), "relay-own-"));
+  const root = join(dir, "root");
+  mkdirSync(root, { mode: 0o1700 });
+  chmodSync(root, 0o1700);
+  // The stage's opening of its relay, up to the relay itself: what it hands openRelay.
+  let given = null;
+  const w = await openWorkerRelay({ inputs, shell: { [RELAYED_NAME]: KEY }, usageDir: join(dir, "u"), env: {}, socketRoot: root, socketRootUid: process.getuid(), open: async (o) => ((given = o), Promise.reject(new Error("opened elsewhere"))) });
+  assert.match(w.blocked, /opened elsewhere/);
+  assert.deepEqual([given.unknownStageShut, given.unknownFloorUsd, given.slowFloorUsd], [2, 0.1, 0.5]);
+  // The relay those settings open: a failure past the fast bound and a slow one, each booked at its floor; the second shuts it.
+  let upstreamNow = 0;
+  const gw = await fakeGateway({
+    [LANG]: async (body) => {
+      upstreamNow += JSON.parse(body || "{}").mode === "slow" ? 2000 : 500;
+      return { status: 500, body: { error: { type: "internal_server_error", message: "x" } } };
+    },
+  });
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [1], fastErrorMs: 100, slowFailureMs: 1000, upstreamClock: () => upstreamNow, callLog: join(dir, "usage", CALL_LOG), unknownStageShut: given.unknownStageShut, unknownFloorUsd: given.unknownFloorUsd, slowFloorUsd: given.slowFloorUsd });
+  const go = (mode) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify({ mode }) });
+  try {
+    r.beginPass(100);
+    assert.equal((await go("mid")).status, 500);
+    assert.equal(r.totals().failClosed, false, "one is under the repository's two");
+    assert.equal((await go("slow")).status, 500);
+    assert.equal((await go("mid")).status, 403, "shut at the second");
+    const p = await r.endPass();
+    assert.deepEqual([p.usd, p.shut?.calls, p.shut?.stage], [0.6, 2, true]);
+    assert.deepEqual(logLines(join(dir, "usage", CALL_LOG)).filter((l) => l.status === 500).map((l) => l.usd), [0.1, 0.5]);
+  } finally {
     await r.close();
     await gw.close();
     rmSync(dir, { recursive: true, force: true });

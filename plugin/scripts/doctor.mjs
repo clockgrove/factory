@@ -18,7 +18,7 @@ import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -132,6 +132,31 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
 export function defaultsCheck(inputs) {
   const m = (v) => v || `${inputs.harness}'s own default`;
   return PASS("defaults", `harness ${inputs.harness}, worker ${m(inputs.model)}, sub-agents ${m(inputs.subagentModel)}, reviewer ${m(inputs.reviewerModel)}: the repository's defaults; an Objective overrides any of them for itself with a ${Object.values(CHOICE_PREFIXES).map((p) => `${p}<${p === CHOICE_PREFIXES.harness ? "name" : "id"}>`).join(", ")} label (docs/USAGE.md); one on another harness needs that harness's credential too, and Blocks naming it when it is missing`);
+}
+
+/**
+ * The limits a person owns in force (#423, inputs.mjs OWNER_LIMITS), from the settings as a stage reads them (`inputs`,
+ * resolveInputs): one PASS; in local mode with the local stage's settings (`stage`, local.mjs baseEnv's) the two local
+ * ones as well, and a WARN when the outage bound (FACTORY_LOCAL_OUTAGE_HOURS) is not under the claim pause
+ * (claim_pause_hours), so the dispatcher's Block would come first and name a quiet claim rather than the outage.
+ */
+export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
+  const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
+  const min = (ms) => `${Number((ms / 60_000).toFixed(2))} min`;
+  const { stall, relay } = inputs;
+  const lines = [
+    `a usage limit waited out in place ${inputs.usageLimitWaits} time(s) per pass, and on Actions and the cloud sandbox a reset over ${min(inputs.usageLimitMoveMs)} away moves to a free account`,
+    `a quiet local claim Blocked after ${h(inputs.claimPauseMs)}`,
+    `a sibling waited for ${h(inputs.siblingWaitMs)} at most`,
+    `${inputs.maxParts} part(s) per Objective at most`,
+    `a queue check's step hung past ${stall.factor} x its normal duration and at least ${min(stall.floorMs)} over it, a queue commit with no CI begun stalled after ${min(stall.queueMs)}`,
+    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost, each booked at least $${relay.unknownFloorUsd} ($${relay.slowFloorUsd} past 30 s upstream)`,
+  ];
+  const own = local ? localLimits(stage) : null;
+  if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);
+  const rows = [PASS("owner limits", `${lines.join("; ")} (the settings in docs/INSTALL.md and docs/LOCAL.md)`)];
+  if (own && own.outageMs >= inputs.claimPauseMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}) is not under claim_pause_hours (${h(inputs.claimPauseMs)}), so a long outage meets the dispatcher's Block for a quiet claim first, which does not name the outage`, "lower FACTORY_LOCAL_OUTAGE_HOURS under claim_pause_hours, or raise claim_pause_hours"));
+  return rows;
 }
 
 /**
@@ -2098,7 +2123,7 @@ async function main() {
   // The variables are listed as serve lists them: with local mode's token in local mode.
   const varsToken = (local && localToken(repo.full)) || token;
   const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers)];
+  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

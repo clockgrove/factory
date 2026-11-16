@@ -69,14 +69,18 @@ export function setupFilesNote(guard, max = 25, width = 80) {
   return lines.join(" ");
 }
 
-/** The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote). */
-export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null }) {
+/**
+ * The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote).
+ * `maxParts`: the repository's max_parts (6 by default, handoff.mjs MAX_PARTS).
+ */
+export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null, maxParts = 6 }) {
   const hours = Math.round((Number(timeoutMinutes) / 60) * 10) / 10;
   const checks = (ciChecks || []).filter(Boolean);
   return {
     issue: String(issue),
     usd: String(maxUsd),
     hours: String(hours),
+    max_parts: String(maxParts),
     validation: (validation || []).length ? validation.map(commandText).join("; ") : "none",
     validation_note: checks.length
       ? `Factory's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head Factory pushes, run by CI in parallel; before you stop, run the tests your change touches, not the whole suite.`
@@ -1882,7 +1886,10 @@ export function conflictsAt(pr, sha) {
 
 /** Times one reviewed PR is put in the merge queue: the first enqueue and one more after the queue drops it. */
 export const QUEUE_TRIES = 2;
-/** How long a merge queue commit may wait with no CI begun on it (gateStarted) before Factory reads it as stalled (#295). */
+/**
+ * How long a merge queue commit may wait with no CI begun on it (gateStarted) before Factory reads it as stalled (#295):
+ * the default of the repository's queue_stall_minutes (STALL_DEFAULTS `queueMs`).
+ */
 export const QUEUE_STALL_MS = 10 * 60_000;
 /** The code Factory gives a stalled queue entry it took out itself: GitHub started no check on the queue's commit. */
 export const STALL_CODE = "checks_never_started";
@@ -1909,12 +1916,21 @@ export const QUEUE_HUNG_MS = queueHungMs(null);
 
 /**
  * The margin over a step's normal duration: a step is stalled only past max(3 x its baseline, its baseline + this), so
- * never under this, whatever its history (a warm-cache baseline is too tight for an install or a build).
+ * never under this, whatever its history (a warm-cache baseline is too tight for an install or a build). The default of
+ * the repository's step_stall_floor_minutes (STALL_DEFAULTS `floorMs`).
  */
 export const STEP_STALL_FLOOR_MS = 15 * 60_000;
 
-/** How long a step with normal duration `baselineMs` may run before it is stalled: max(3 x it, it + 15 min). */
-export const stepStallMs = (baselineMs) => Math.max(3 * baselineMs, baselineMs + STEP_STALL_FLOOR_MS);
+/**
+ * When a check counts as hung, limits a person owns (#423): `factor` and `floorMs`, a step is stalled past
+ * max(factor x its normal duration, it + floorMs) (step_stall_factor, step_stall_floor_minutes); `queueMs`, a merge queue
+ * commit with no CI begun on it is stalled past this (queue_stall_minutes). Every function here and in session.mjs that
+ * judges a hang takes a `stall` of this shape (inputs.mjs resolveInputs `stall`), these by default.
+ */
+export const STALL_DEFAULTS = Object.freeze({ factor: 3, floorMs: STEP_STALL_FLOOR_MS, queueMs: QUEUE_STALL_MS });
+
+/** How long a step with normal duration `baselineMs` may run before it is stalled: max(factor x it, it + floorMs). */
+export const stepStallMs = (baselineMs, stall = STALL_DEFAULTS) => Math.max(stall.factor * baselineMs, baselineMs + stall.floorMs);
 /** How many recent green runs of the workflow give a step's normal duration. */
 export const STEP_BASELINE_RUNS = 15;
 
@@ -1943,24 +1959,24 @@ export function jobPosition(job) {
 
 /**
  * Whether a running Actions job needs its step's baseline read: only once the step could be stalled by it (past
- * STEP_STALL_FLOOR_MS, the least stepStallMs gives) or the job is past the fallback bound, so a healthy queue reads no
+ * `stall.floorMs`, the least stepStallMs gives) or the job is past the fallback bound, so a healthy queue reads no
  * history. A step with no start time needs none: the fallback judges it.
  */
-export function needsBaseline(job, { fallbackMs = QUEUE_HUNG_MS, now = Date.now() }) {
+export function needsBaseline(job, { fallbackMs = QUEUE_HUNG_MS, now = Date.now(), stall = STALL_DEFAULTS }) {
   const pos = jobPosition(job);
   if (!pos?.step || !Number.isFinite(pos.since)) return false;
-  return now - pos.since > STEP_STALL_FLOOR_MS || now - Date.parse(job.started_at) > fallbackMs;
+  return now - pos.since > stall.floorMs || now - Date.parse(job.started_at) > fallbackMs;
 }
 
 /**
- * Whether a running Actions job is stalled (#2683): its current step has run past stepStallMs(`baselineMs`), that is
- * max(3 x the step's normal duration, it + 15 min), the normal duration from the workflow's recent green runs. With no
+ * Whether a running Actions job is stalled (#2683): its current step has run past stepStallMs(`baselineMs`, `stall`), that
+ * is max(3 x the step's normal duration, it + 15 min) by default, the normal duration from the workflow's recent green runs. With no
  * baseline (a new step, no history) the job is stalled once `fallbackMs` (queueHungMs) has passed since the job's own
  * start; between steps, once it has passed since the last step's progress. A step or job whose start GitHub does not
  * give is judged by the fallback from the check run's start (`checkStartedAt`), then the job's: never left unjudged.
  * Returns `{name, step, elapsedMs, baselineMs}` or null; a job not running yet is never stalled.
  */
-export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, now = Date.now(), checkStartedAt = null }) {
+export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, now = Date.now(), checkStartedAt = null, stall = STALL_DEFAULTS }) {
   const pos = jobPosition(job);
   if (!pos) return null;
   const name = String(job.name ?? "");
@@ -1970,7 +1986,7 @@ export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, n
     return now - from > fallbackMs ? { name, step: pos.step, elapsedMs: now - from, baselineMs: null } : null;
   }
   const elapsed = now - pos.since;
-  if (pos.step && Number.isFinite(baselineMs) && baselineMs >= 0) return elapsed > stepStallMs(baselineMs) ? { name, step: pos.step, elapsedMs: elapsed, baselineMs } : null;
+  if (pos.step && Number.isFinite(baselineMs) && baselineMs >= 0) return elapsed > stepStallMs(baselineMs, stall) ? { name, step: pos.step, elapsedMs: elapsed, baselineMs } : null;
   const from = pos.step ? [job.started_at, checkStartedAt].map((t) => Date.parse(t)).find(Number.isFinite) : pos.since;
   const total = now - (Number.isFinite(from) ? from : pos.since);
   return total > fallbackMs ? { name, step: pos.step, elapsedMs: pos.step ? elapsed : total, baselineMs: null } : null;
@@ -2007,15 +2023,15 @@ export function queueTargets(names, checks) {
  * waiting there, is hung once `hungMs` has passed since CI first started on the commit (`headAt` when nothing has).
  * Returns `[{name, step, elapsedMs, baselineMs}]`. Decided on statuses, names and times only.
  */
-export function queueHangs({ names, checks, jobs = new Map(), baselines = new Map(), headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS }) {
+export function queueHangs({ names, checks, jobs = new Map(), baselines = new Map(), headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, stall = STALL_DEFAULTS }) {
   const { latest, missing, targets } = queueTargets(names, checks);
   const out = [];
   for (const t of targets) {
     const job = jobs.get(t.id);
     if (job) {
       const pos = jobPosition(job);
-      const stall = jobStall(job, { baselineMs: pos?.step ? (baselines.get(stepKey(job, pos.step)) ?? null) : null, fallbackMs: hungMs, now, checkStartedAt: t.started_at });
-      if (stall) out.push({ ...stall, name: String(t.name) });
+      const hang = jobStall(job, { baselineMs: pos?.step ? (baselines.get(stepKey(job, pos.step)) ?? null) : null, fallbackMs: hungMs, now, checkStartedAt: t.started_at, stall });
+      if (hang) out.push({ ...hang, name: String(t.name) });
       continue;
     }
     const since = Date.parse(t.started_at);
@@ -2129,26 +2145,26 @@ export const QUEUE_FRESH_MS = 2 * 60_000;
 
 /**
  * Whether a PR's merge queue entry is stalled: its merge_group commit exists (`entry.head`, made at `entry.headAt`) and
- * the entry waits on checks, and either CI did not begin on that commit (`started`: gateStarted) within QUEUE_STALL_MS,
- * or it began and a required check hung there (`hung`: queueHangs' entries, read once the commit is STEP_STALL_FLOOR_MS
+ * the entry waits on checks, and either CI did not begin on that commit (`started`: gateStarted) within `stall.queueMs`,
+ * or it began and a required check hung there (`hung`: queueHangs' entries, read once the commit is `stall.floorMs`
  * old, before which no step can be stalled). Returns `{stalled: true}` (no CI began), `{stalled: true, hung}`, `{waitMs}`
  * (read again then: no check yet, a started one too young to judge, or an entry enqueued under QUEUE_FRESH_MS ago with no
  * commit yet) or `{}` (nothing to decide now: the entry is past checks, waits its turn behind others, or nothing hung).
  * The queue watch keeps any PR still in the queue whatever this says; only the merge pass acts on `stalled`.
  */
-export function queueStall(entry, { started, now = Date.now(), hung = null }) {
+export function queueStall(entry, { started, now = Date.now(), hung = null, stall = STALL_DEFAULTS }) {
   if (entry && !entry.head && (!entry.state || entry.state === "QUEUED")) {
     const queuedAt = Date.parse(entry.enqueuedAt);
-    return Number.isFinite(queuedAt) && now - queuedAt < QUEUE_FRESH_MS ? { waitMs: QUEUE_STALL_MS } : {};
+    return Number.isFinite(queuedAt) && now - queuedAt < QUEUE_FRESH_MS ? { waitMs: stall.queueMs } : {};
   }
   if (!entry?.head || entry.state !== "AWAITING_CHECKS") return {};
   const at = Date.parse(entry.headAt ?? entry.enqueuedAt);
   if (!Number.isFinite(at)) return {};
   if (!started) {
-    const left = at + QUEUE_STALL_MS - now;
+    const left = at + stall.queueMs - now;
     return left <= 0 ? { stalled: true } : { waitMs: left };
   }
-  const left = at + STEP_STALL_FLOOR_MS - now;
+  const left = at + stall.floorMs - now;
   if (left > 0) return { waitMs: left };
   const named = new Map();
   for (const h of Array.isArray(hung) ? hung : []) {

@@ -33,7 +33,7 @@ const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { holdSecrets, input, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -41,7 +41,7 @@ import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
-import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
+import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
@@ -117,7 +117,7 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
 
 /**
  * How often a loop writes again the claim of an Objective it holds paused (Local.beatPaused): well inside the dispatcher's
- * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
+ * bound for a claim gone quiet (claim_pause_hours, at least two hours), at one write an hour (the API quota is shared).
  */
 export const PAUSED_BEAT_MS = 60 * 60_000;
 
@@ -2873,7 +2873,7 @@ export class Local {
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
-        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
+        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
         const why = mergeBlockReason(how, report);
         if (why) {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
@@ -2897,10 +2897,10 @@ export class Local {
       if (pr?.merged_at) {
         const project = await findProject(this.repo, this.opts).catch(() => null);
         // A split part: the issue stays open and the next part starts from the default branch (handoff.mjs nextPart).
-        const next = await nextPart(this.repo, issue, this.opts).catch(() => null);
+        const next = await nextPart(this.repo, issue, this.opts, { maxParts: inputs.maxParts }).catch(() => null);
         await setStateLabel(this.repo, issue, next === "cap" ? "blocked" : null, this.opts).catch(() => {});
         if (project) await moveCard(project, this.repo, issue, next === "next" ? "Queued" : next === "cap" ? "Blocked" : "Done", this.opts).catch(() => {});
-        log(`#${issue}: PR #${prNumber} merged; ${next === "next" ? "the next part is queued" : next === "cap" ? `split into ${MAX_PARTS} PRs with work left: Blocked` : "card Done"}`);
+        log(`#${issue}: PR #${prNumber} merged; ${next === "next" ? "the next part is queued" : next === "cap" ? `split into ${inputs.maxParts} PRs with work left: Blocked` : "card Done"}`);
         return next === "next" ? "next" : true;
       }
       if (pr?.state === "closed") {
@@ -3320,6 +3320,9 @@ export class Local {
       }
       // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
       await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
+      // How long an Objective stays paused on one outage before it Blocks (FACTORY_LOCAL_OUTAGE_HOURS), as now set.
+      const base = this.baseEnv();
+      if (base.FACTORY_LOCAL_OUTAGE_HOURS) OUTAGE.blockMs = localLimits(base).outageMs;
       // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
       const switching = await this.followPin(running.size, { once }).catch((e) => {
         log(`pin: ${e.message.slice(0, 160)}`);

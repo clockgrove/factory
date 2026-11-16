@@ -60,7 +60,7 @@ const UNCLAIMED_MS = 5 * 60_000;
 /** A long-lived loop's memory of what its sweep last said of an issue it left alone (said once while it stays so). */
 const UNCLAIMED_SAID = new Map();
 
-/** What a person does about a factory:local Objective no loop came back to for a day. */
+/** What a person does about a factory:local Objective no loop came back to for the claim pause (claim_pause_hours). */
 const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
 
 /**
@@ -112,6 +112,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // (stageHolds), so it neither restarts nor Blocks a stage the sandbox still runs. The repository's spend is read as
   // the sandbox setting says either way (todaysSpend), since that is where the Action's stages record it.
   const sandbox = !!inputs.sandbox && backend().trigger.sandboxRoute === true;
+  // How long a local loop's Objective may stay paused while the loop is away before it Blocks (claim_pause_hours).
+  const claimPause = inputs.claimPauseMs ?? CLAIM_PAUSE_MS;
+  const pauseText = claimPause === 24 * 3600_000 ? "a day" : `${Number((claimPause / 3600_000).toFixed(2))} h`;
+  // The longest a hand-off or a rebase waits for a sibling ahead of it (sibling_hold, sibling_wait_hours).
+  const siblingWait = inputs.siblingWaitMs ?? WAIT_MAX_MS;
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
   // Conditional reads (rest's `cache`): a local loop keeps the Map across its ticks, so an unchanged page costs no quota.
@@ -219,7 +224,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const comments = await listComments(repo, n, opts).catch(() => null);
         if (!comments || stageHolds(sandboxRecord(comments, n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
       }
-      const hold = await backend().trigger.localHold(repo, n, opts).catch(() => ({ state: "unread" }));
+      const hold = await backend().trigger.localHold(repo, n, opts, Date.now(), claimPause).catch(() => ({ state: "unread" }));
       return hold?.state === "alive" || hold?.state === "unread";
     };
     // Who may restart: a writer the repository lists, a pinned maintainer, else one whose permission reads write or more.
@@ -425,7 +430,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one
   // that a human re-labelled) says nothing now.
   const localWait = async (issue, entered) => {
-    const hold = await backend().trigger.localHold(repo, issue.number, opts);
+    const hold = await backend().trigger.localHold(repo, issue.number, opts, Date.now(), claimPause);
     if (hold) claimed.add(issue.number);
     return hold && hold.state !== "unread" && entered && Date.parse(hold.heartbeat) < Date.parse(entered) ? null : hold;
   };
@@ -433,7 +438,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // next stint starts clean.
   const blockLocalWait = async (n, hold, noClaim, cause) => {
     const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-    const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day; ${SERVE_FIX}` : noClaim;
+    const reason = hold ? `the local loop holding it (${hold.holder}) has been away over ${pauseText}; ${SERVE_FIX}` : noClaim;
     // A Block that cannot be written (the reads behind an unread claim failing too) is tried again next tick.
     const written = await applyExit(repo, { issue: n, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "dispatch" }, opts).then(
       () => true,
@@ -441,8 +446,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     );
     if (written && hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
   };
-  // An unread claim has a deadline too: past a day from `since` (when the Objective began waiting), and with the newest
-  // marked comment read (its author unchecked) also over a day old, no loop can be holding it. Only a read that keeps
+  // An unread claim has a deadline too: past the claim pause (claim_pause_hours) from `since` (when the Objective began waiting), and with the newest
+  // marked comment read (its author unchecked) also older than that, no loop can be holding it. Only a read that keeps
   // failing gets here, and its Block names that read (cause `factory`), never a machine.
   // A live local stage keeps writing as Factory (its claim's heartbeat, its progress comment), so a Block also needs the
   // issue to show none of that for the day: no comment created or updated by Factory's login, or carrying a Factory
@@ -450,15 +455,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // and no label event by Factory's login. Taken from the issue's timeline; a timeline or a login Factory cannot read is
   // no evidence, so it waits.
   const unreadLapsed = async (n, hold, since) => {
-    if (!since || Date.now() - Date.parse(since) <= CLAIM_PAUSE_MS) return false;
-    if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= CLAIM_PAUSE_MS) return false;
+    if (!since || Date.now() - Date.parse(since) <= claimPause) return false;
+    if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= claimPause) return false;
     return factoryQuiet(n);
   };
   const factoryQuiet = async (n) => {
     if (!selfLogin()) return false;
     const events = await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
     if (!Array.isArray(events)) return false;
-    const after = Date.now() - CLAIM_PAUSE_MS;
+    const after = Date.now() - claimPause;
     const recent = (...ts) => ts.some((t) => Date.parse(t) > after);
     return !events.some((e) =>
       e.event === "commented"
@@ -466,7 +471,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         : (e.event === "labeled" || e.event === "unlabeled") && isSelf({ user: e.actor }) && recent(e.created_at),
     );
   };
-  const unreadReason = (hold, what) => `${what} for over a day and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
+  const unreadReason = (hold, what) => `${what} for over ${pauseText} and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
   // In review with its review owed (an open PR, not a draft, labelled factory:review, or unlabelled with a third-party
   // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
   // as a Running one does, counted from the later of its entering In review and the PR's last factory:review label (a
@@ -481,15 +486,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       return false;
     }
     if (!entered.at) return false;
-    if (Date.now() - Date.parse(entered.at) < CLAIM_PAUSE_MS) {
-      due(n, "local-pause", Date.parse(entered.at) + CLAIM_PAUSE_MS);
+    if (Date.now() - Date.parse(entered.at) < claimPause) {
+      due(n, "local-pause", Date.parse(entered.at) + claimPause);
       return false;
     }
     const hold = await localWait(issue, entered.at);
     if (hold?.state === "alive") return false;
     if (hold?.state === "paused") {
       paused.push(n);
-      due(n, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
+      due(n, "local-pause", Date.parse(hold.heartbeat) + claimPause);
       return false;
     }
     if (hold?.state === "unread" && !(await unreadLapsed(n, hold, entered.at))) {
@@ -519,15 +524,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (waited && owed.at && Date.parse(owed.at) >= waited.updatedAt) return false;
     const from = waited ? new Date(waited.updatedAt).toISOString() : owed.at;
     const since = from && Date.parse(from) > Date.parse(entered.at) ? from : entered.at;
-    if (Date.now() - Date.parse(since) < CLAIM_PAUSE_MS || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
-      due(n, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+    if (Date.now() - Date.parse(since) < claimPause || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
+      due(n, "local-pause", Date.parse(since) + claimPause);
       return false;
     }
     vanished.push(n);
     statuses[n] = "Blocked";
     if (dryRun) return true;
     if (hold?.state === "unread") await blockLocalWait(n, null, unreadReason(hold, "In review"), "factory");
-    else await blockLocalWait(n, hold, `in review with no local loop running its review for over a day (no claim); ${SERVE_FIX}`, "setup");
+    else await blockLocalWait(n, hold, `in review with no local loop running its review for over ${pauseText} (no claim); ${SERVE_FIX}`, "setup");
     return true;
   };
   // A stage lost to a network failure on the Action's runners or the cloud sandbox (lib/relaunch.mjs): one that ended on
@@ -674,7 +679,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
         }
         // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
-        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day. A read that
+        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for the claim pause. A read that
         // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
         const read = (await timeline()) ? { at: lastRunningAt(events) } : null;
         const hold = read && (await localWait(issue, read.at));
@@ -697,7 +702,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (hold?.state === "alive") continue;
         if (hold?.state === "paused") {
           paused.push(issue.number);
-          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
+          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + claimPause);
           continue;
         }
         const local = hasLocalLabel(issue);
@@ -739,8 +744,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // No claim: a runner job gets 15 minutes to show up. Any other factory:local Objective waits for a loop on its
         // machine, so it gets the day a claim gets.
-        if (!hold && since && Date.now() - Date.parse(since) < (local ? CLAIM_PAUSE_MS : 15 * 60_000)) {
-          if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+        if (!hold && since && Date.now() - Date.parse(since) < (local ? claimPause : 15 * 60_000)) {
+          if (local) due(issue.number, "local-pause", Date.parse(since) + claimPause);
           continue;
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
@@ -780,7 +785,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
         const lostEnd = notLostBlock(notLost, note);
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over ${pauseText} (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
       }
     }
   }
@@ -873,7 +878,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (!open) {
           // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
           if (dryRun) continue;
-          const next = await nextPart(repo, issue.number, opts).catch((e) => {
+          const next = await nextPart(repo, issue.number, opts, { maxParts: inputs.maxParts }).catch((e) => {
             log(`  #${issue.number}: next part: ${String(e.message).slice(0, 120)}`);
             return null;
           });
@@ -886,7 +891,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             log(`  #${issue.number}: a split part merged; the next part is queued`);
           } else if (next === "cap") {
             statuses[issue.number] = "Blocked";
-            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
+            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${inputs.maxParts ?? MAX_PARTS} PRs and work still remains (max_parts); finish it by hand, narrow the issue or raise max_parts, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
           }
           continue;
         }
@@ -955,7 +960,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (!reviewing && reviewWait && !reviewWait.released && pr) {
           let how;
           try {
-            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { dryRun, log });
+            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { dryRun, log });
           } catch (e) {
             log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
             retry(`#${issue.number}'s review wait`);
@@ -965,12 +970,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (["released", "rebase", "stale", "draft"].includes(how)) holdReleased.add(issue.number);
           if (how.waiting) {
             reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
-            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            due(issue.number, "sibling-wait", reviewWait.since + siblingWait + WAKE_SLACK_MS);
             continue;
           }
           if (how === "deferred") {
             holdDeferred.add(issue.number);
-            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            due(issue.number, "sibling-wait", reviewWait.since + siblingWait + WAKE_SLACK_MS);
             retry(`#${issue.number}'s trial merges`);
             continue;
           }
@@ -981,7 +986,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           if (how === "released") {
             reviewResumed.push(issue.number);
-            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= siblingWait ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
             continue;
           }
           if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
@@ -1084,7 +1089,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           // green, with no unread maintainer decision. Nothing is armed between ticks.
           const report = {};
           if (queue) hungMs ??= await queueBoundMs(repo, opts);
-          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, opts).catch((e) => {
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, opts).catch((e) => {
             log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
             return null;
           });
@@ -1107,7 +1112,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
     }
     // The conflicting In-review PRs (#366): each goes back in the release order unless a sibling ahead of it, which
-    // merges first, conflicts with it too; that one waits (at most WAIT_MAX_MS, with a note and a wake), since its
+    // merges first, conflicts with it too; that one waits (at most sibling_wait_hours, with a note and a wake), since its
     // rebase now would be undone by that merge. With one conflicting PR and no sibling ahead, nothing is merged on trial.
     const cannotMerge = new Set(["red", "queue-red", "held", "threads", "edited", "dropped", "stopped"]);
     // A usage-limit hold slows a sibling only while it still needs a stage: Running, its review label on, or a merge-pass
@@ -1115,21 +1120,21 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const backToReview = new Set(["re-review", "unread", "code-scanning", "queue-red", "text-edit"]);
     const needsStage = async (s) => stateOf(s, statuses[s.number] ?? null) === "Running" || backToReview.has(mergeHow[s.number]) || ((await (prOfTick ??= prFinder(repo, opts, prsSeen))(s.number))?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
     const mergesLate = async (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || ((!!localHold?.(s) || (await routeHeld(s))) && (await needsStage(s)));
-    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { log }) : [];
+    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { log }) : [];
     for (const { issue, pr, open, recent, already, rebaseWait, wait, since } of sendOrder) {
       if (wait) {
         rebaseHeld.push(issue.number);
         log(`  #${issue.number}: PR #${open.number} conflicts; ${rebaseWaitReason(wait)}`);
-        due(issue.number, "sibling-wait", since + WAIT_MAX_MS + WAKE_SLACK_MS);
+        due(issue.number, "sibling-wait", since + siblingWait + WAKE_SLACK_MS);
         if (!dryRun)
-          await sayRebaseWait(repo, { issue, prNumber: open.number, wait, record: rebaseWait }, opts, { log }).catch((e) => {
+          await sayRebaseWait(repo, { issue, prNumber: open.number, wait, record: rebaseWait }, opts, { log, waitMaxMs: siblingWait }).catch((e) => {
             log(`  #${issue.number}: its rebase wait could not be recorded (${String(e.message).slice(0, 120)}); the next tick tries again`);
             retry(`#${issue.number}'s rebase wait`);
           });
         continue;
       }
       sentBack.push(issue.number);
-      if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= WAIT_MAX_MS ? "gaveUp" : "sent" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
+      if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= siblingWait ? "gaveUp" : "sent" }, opts, { log, waitMaxMs: siblingWait }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
       if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
     }
   } finally {
@@ -1140,7 +1145,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   for (const h of reviewHeld) {
     if (!h.wait.cause && personHeld.has(h.wait.on)) h.wait.cause = "a person took it out of the merge queue";
     log(`  #${h.issue.number}: PR #${h.pr}: ${waitReason(h.wait)}`);
-    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log });
+    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log, waitMaxMs: siblingWait });
   }
   watch.mark("review");
   // max_concurrent caps the repository as a whole (LOCAL.md): the Running count is every route's Objectives (a local
@@ -1393,14 +1398,14 @@ export const watchOutput = (list) => (list?.length ? JSON.stringify([...new Set(
  * WATCH_POLL_MS for as long as each stays there. Returns `{tick: true, pr, left: true}` as soon as one leaves the queue,
  * merged or dropped (the dispatcher's merge pass then re-enqueues a drop once, or Blocks, #2683), and
  * `{tick: true, pr, stalled: true}` as soon as one's entry is stalled: no CI began on its queue commit in
- * QUEUE_STALL_MS, or a required check made no progress (session.mjs hangsOn, logic.mjs queueHangs; the
+ * `stall.queueMs` (queue_stall_minutes), or a required check made no progress (session.mjs hangsOn, logic.mjs queueHangs; the
  * merge pass takes it out and puts it back once, or Blocks). The tick is the job's own workflow_dispatch, which GitHub
  * never holds for approval, unlike the `dequeued` event's run when the queue's bot counts as an outside contributor;
  * that run stays a faster path where it runs. A failed read keeps the PR watched. Past `maxMs` with a PR
  * still in the queue it ticks anyway (`pr: null`): the merge pass reads every PR again and has it watched again.
  * Returns `{tick: false}` only with nothing to watch.
  */
-export async function watchQueue(repo, prs, opts, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), pollMs = WATCH_POLL_MS, maxMs = WATCH_MAX_MS, actionsToken = null } = {}) {
+export async function watchQueue(repo, prs, opts, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), pollMs = WATCH_POLL_MS, maxMs = WATCH_MAX_MS, actionsToken = null, stall = undefined } = {}) {
   const watched = new Set(prs.map(Number).filter((n) => Number.isInteger(n) && n > 0));
   if (!watched.size) return { tick: false };
   // The required checks and their integration: code scanning's runs on the queue's commit are not the gate starting.
@@ -1414,7 +1419,7 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
   for (;;) {
     let wait = pollMs;
     for (const pr of watched) {
-      const st = await queueEntryState(repo, pr, opts, now(), gate, { hungMs, actionsToken, cache }).catch((e) => {
+      const st = await queueEntryState(repo, pr, opts, now(), gate, { hungMs, actionsToken, cache, stall }).catch((e) => {
         log(`queue watch: PR #${pr}: unreadable (${Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : "error"}); read again`);
         return { unread: true };
       });
@@ -1574,7 +1579,7 @@ async function main() {
     } catch {
       prs = [];
     }
-    const r = await watchQueue(repoOf(inputs.repo), Array.isArray(prs) ? prs : [], { token }, { actionsToken: inputs.githubToken || null });
+    const r = await watchQueue(repoOf(inputs.repo), Array.isArray(prs) ? prs : [], { token }, { actionsToken: inputs.githubToken || null, stall: inputs.stall });
     setOutput("tick", r.tick ? "true" : "false");
     return;
   }

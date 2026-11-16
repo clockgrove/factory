@@ -320,6 +320,24 @@ test("hung queue check: progress decides, not the job's age; no history falls ba
   });
 });
 
+test("#423 hung queue check: the repository's step_stall_factor and step_stall_floor_minutes decide: a warm 6-minute build at 20 minutes is progress by default, hung at 2 x and 5 minutes", async () => {
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const stall = resolveInputs({ env: { FACTORY_STEP_STALL_FACTOR: "2", FACTORY_STEP_STALL_FLOOR_MINUTES: "5" } }).stall;
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN, "Run npm run build": 6 * MIN }));
+    fake.building("7".repeat(40), Date.now() - 22 * MIN, { step: "Run npm run build", before: 2 * MIN });
+    assert.equal(await merge({}), "in-queue");
+    assert.deepEqual(await watchQueue(repo, [PR], { token: "t" }, { sleep: async () => {}, maxMs: 0, actionsToken: "job" }), { tick: true, pr: null }, "the watch keeps it");
+    assert.equal(fake.s.dequeued, 0, "under max(3 x 6, 6 + 15)");
+    // The watch and the merge pass at the repository's settings: past max(2 x 6, 6 + 5), hung.
+    assert.deepEqual(await watchQueue(repo, [PR], { token: "t" }, { sleep: async () => {}, maxMs: 0, actionsToken: "job", stall }), { tick: true, pr: PR, stalled: true });
+    assert.equal(await merge({}, { stall }), "queued");
+    assert.equal(fake.s.dequeued, 1);
+    assert.match(requeues(fake.s)[0].body, new RegExp(`\\(${HUNG_CODE}; no progress: \`Quality\` / \`Run npm run build\` running 20 min, normally ~6 min\\)`));
+  });
+});
+
 test("hung queue check: a running step GitHub gives no start time is judged by the fallback from the check run's start, never skipped (#2683 F2-a)", async () => {
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -151,11 +151,13 @@ async function main() {
   const eventsFile = join(usageDir, "events.jsonl");
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
-  // in place for its host to answer, up to fifteen minutes on the local route (then the stage ends paused, for serve to
+  // in place for its host to answer, up to FACTORY_LOCAL_WAIT_MINUTES (fifteen by default) on the local route (then the stage ends paused, for serve to
   // resume) and up to the work's deadline elsewhere, where the dispatcher relaunches a stage the network ended. GitHub's
   // primary rate limit spent is the same wait, to its reset: one past that bound ends the stage at once (paused locally,
   // Blocked elsewhere).
   const local = backend().name === "local";
+  // The repository's usage-limit waits and, locally, the in-place bound (FACTORY_LOCAL_WAIT_MINUTES).
+  stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
@@ -731,6 +733,7 @@ async function main() {
     issueBody: issueData.body,
     decisions,
     maxUsd: inputs.maxUsd,
+    maxParts: inputs.maxParts,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
     ciChecks: inputs.ciChecks,
@@ -963,7 +966,7 @@ async function main() {
     validation = await validationLoop({
       onPhase: progress,
       progress,
-      checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null,
+      checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null,
       outbox,
       checkout,
       commands: inputs.validation,
@@ -1116,7 +1119,7 @@ async function main() {
       // A head no review has seen (the one Factory pushed) waits, unlabelled, while a sibling it conflicts with is ahead
       // of it (overlap.mjs reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by
       // then. The rebase that follows such a wait goes to review: it is next.
-      const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed }, token, { log });
+      const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed, waitMaxMs: inputs.siblingWaitMs }, token, { log });
       if (held) decision.reason = `PR #${pr.number} is ready; ${waitReason(held)}`;
       else await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }

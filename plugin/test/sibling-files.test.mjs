@@ -379,7 +379,7 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
 
   // The worker hands off through reviewHold with its rebase state, and labels only what it does not hold.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
-  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, head: outbox\?\.expected\(\) \|\| pr\.head\?\.sha, autoMerge: inputs\.autoMerge, hold: inputs\.siblingHold, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
+  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, head: outbox\?\.expected\(\) \|\| pr\.head\?\.sha, autoMerge: inputs\.autoMerge, hold: inputs\.siblingHold, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed, waitMaxMs: inputs\.siblingWaitMs \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
 });
 
 /**
@@ -994,7 +994,25 @@ test("#340: a hand-off waits 6 h at most from its first wait, then its review go
   assert.deepEqual([again.reviewHeld, again.reviewResumed], [[7], []]);
 });
 
-test("#340: a sibling on the other route counts by its own record: the Action's tick releases its hand-off ahead of a local Objective that waited later, and holds it behind one that waited first; the note names a third-party wait that holds a sibling", async () => {
+test("#423: sibling_wait_hours is the bound: a hand-off waiting three hours still waits at the default six, and its review goes on at two, the note saying so", async () => {
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const three = Date.now() - 3 * 3600_000;
+  const waiting = () => world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, three)], 13: [holdRecord(8, 7, three)] }, prs: { ...PR7(), 8: PR8() } });
+  forgetFiles();
+  const w = waiting();
+  const r = await tick(w);
+  assert.deepEqual([r.reviewHeld, r.reviewResumed], [[8], []]);
+  const wake = r.deadlines.find((d) => d.issue === 8 && d.kind === "sibling-wait");
+  assert.ok(Math.abs(Date.parse(wake.at) - (three + 6 * 3600_000)) < 5 * 60_000, "the wake at the default bound");
+  forgetFiles();
+  const v = waiting();
+  const t = await tick(v, { siblingWaitMs: resolveInputs({ env: { FACTORY_SIBLING_WAIT_HOURS: "2" } }).siblingWaitMs });
+  assert.deepEqual(t.reviewResumed, [8]);
+  assert.deepEqual(prLabels(v, 8), ["factory:review"]);
+  assert.match(overlap(v, 8)[0].body, /stopped waiting for #7 after 2 h, the longest Factory holds a review for a sibling/);
+});
+
+test("#340: a sibling on the other route counts by its own record: the Action's tick releases its hand-off ahead of a local Objective that waited later, and holds it behind one that waited first; a sibling whose own review waits for a third-party reviewer is not ahead (#423)", async () => {
   const since = Date.now() - 3600_000;
   const prs = () => {
     const p = { ...PR7(), 8: PR8() };
@@ -1012,13 +1030,14 @@ test("#340: a sibling on the other route counts by its own record: the Action's 
   const t = await tick(v);
   assert.deepEqual(t.reviewHeld, [8], "#7 waited first: it goes first, on its own route");
 
-  // #7 In review, its review waiting for a third-party reviewer (its record on its PR): the note says so.
+  // #7 In review, its review waiting for a third-party reviewer (its record on its PR): it will not merge soon, so it is
+  // not ahead, as a send-back already reads it, and #8's review goes on.
   forgetFiles();
   const thirdParty = { id: 940, user: { login: SELF, type: "Bot" }, body: `${marker(7, "third-party").replace(/ -->$/, "")} {"sha":"${"a".repeat(40)}","logins":["greptile-apps[bot]"],"at":"${new Date().toISOString()}"} -->\nFactory: waiting.`, created_at: new Date().toISOString() };
   const p = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [thirdParty], 13: [holdRecord(8, 7, since)] }, prs: prs() });
   const q = await tick(p);
-  assert.deepEqual(q.reviewHeld, [8]);
-  assert.match(overlap(p, 8)[0].body, /its review waits for #7 to merge \(its review waits for a third-party reviewer\)/);
+  assert.deepEqual([q.reviewHeld, q.reviewResumed], [[], [8]]);
+  assert.deepEqual(prLabels(p, 8), ["factory:review"]);
 });
 
 test("#340: `factory run` on an Objective whose hand-off waits reviews it now: the label goes on, the record is released", async () => {

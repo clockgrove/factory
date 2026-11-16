@@ -19,17 +19,19 @@ An implementer that fails twice on the same item is a planning fault: re-read th
 
 ## Run disjoint items at the same time
 
-Items whose owned files do not overlap, and that do not depend on each other's output, run concurrently: start their implementers together and wait for all of them. Items that share a file, or that need an earlier item's export, run after it. Keep the number running at once to what the session's sub-agent limit allows; the agent definition or the harness sets that, not you.
+Items whose owned files do not overlap, and that do not depend on each other's output, run concurrently: start their implementers together and wait for all of them. Items that share a file, or that need an earlier item's export, run after it. Run no more at once than the session's sub-agent limit allows.
 
 ## Integrate once
 
-After every item has landed, integrate once in the worker session: resolve overlaps, reconcile names, remove scaffolding the implementers left (temporary unit tests, debug output, TODOs that the plan already answers), and run the repository's formatter. Then run the validation commands once over the whole tree; this is the first time the full suite runs. Do not validate per item beyond the focused command; the full run is the integration's job.
+After every item has landed, integrate once in the worker session: resolve overlaps, reconcile names, remove scaffolding the implementers left (temporary unit tests, debug output, TODOs that the plan already answers), and run the repository's formatter. Then run the validation commands once over the whole tree, the first full run: per item, only its focused command.
 
-Commit as you go on `factory/<issue>`. Each commit message names the checklist item. Never push: Factory pushes the branch once you stop.
+Commit as you go on `factory/<issue>`, each message naming its checklist item. Never push: Factory pushes the branch once you stop.
 
 ## Too large for one session
 
-If the checklist cannot finish within the hour and dollar budget on the task card, or the integrated diff would exceed what a reviewer can read in one pass, split it: finish the first self-contained group of items, deliver it as this part's PR through factory-prove-acceptance and factory-deliver-pr, mark in plan.md which items remain for a later part, and list them in your exit record as `"part": {"remaining": [...]}`. Factory links that PR to the issue without closing it; once it merges, Factory starts the next part from the default branch, with the plan in `$FACTORY_IN/plan.md` and the merged parts in `$FACTORY_IN/parts.md`. Each PR stands alone: validation green, acceptance entries it proves named in its body, nothing the next part needs left broken. The last part leaves `part` out, and its PR closes the issue. Factory caps an Objective at six parts. Decide this early, from the plan, not after the budget runs out.
+If the checklist cannot finish within the hour and dollar budget on the task card, or the integrated diff would exceed what a reviewer can read in one pass, split it: finish the first self-contained group of items, deliver it as this part's PR through factory-prove-acceptance and factory-deliver-pr, mark in plan.md which items remain, and list them in your exit record as `"part": {"remaining": [...]}`. Once that PR merges, Factory starts the next part from the default branch, with the plan in `$FACTORY_IN/plan.md` and the merged parts in `$FACTORY_IN/parts.md`. Each PR stands alone: validation green, the acceptance entries it proves named in its body, nothing the next part needs left broken. The last part leaves `part` out; its PR closes the issue. Decide this early, from the plan.
+
+The task card caps the parts; each has its own budget, so the cap bounds the Objective's whole spend. When the plan needs more parts than that, stop before building: a `question` exit (test `decision`) naming the groups, so the owner raises the cap or narrows the issue.
 
 ## Before leaving this step
 

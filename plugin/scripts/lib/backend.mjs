@@ -38,11 +38,12 @@ const claimedLocally = async (repo, issue, opts, { tries = 3, pauseMs = 2000 } =
 
 /**
  * A local loop's hold on a Running Objective: "alive" while its heartbeat is fresh, "paused" while it is stale but
- * younger than CLAIM_PAUSE_MS (the machine sleeps or serve stopped; that machine's serve resumes it), "expired" past
+ * younger than `pauseMs` (the repository's claim_pause_hours, CLAIM_PAUSE_MS by default: the machine sleeps or serve
+ * stopped; that machine's serve resumes it), "expired" past
  * that, "unread" when the claim could not be read or its author checked (no answer: the caller reads again next tick,
  * and it never counts as held), and null with no claim. `holder` names the loop.
  */
-const localHold = async (repo, issue, opts, now = Date.now()) => {
+const localHold = async (repo, issue, opts, now = Date.now(), pauseMs = CLAIM_PAUSE_MS) => {
   let c;
   try {
     c = await localClaim(repo, issue, opts, now);
@@ -50,7 +51,7 @@ const localHold = async (repo, issue, opts, now = Date.now()) => {
     return { state: "unread", reason: String(e?.message || e).slice(0, 160), updatedAt: e?.updatedAt ?? null };
   }
   if (!c) return null;
-  const state = c.fresh ? "alive" : now - Date.parse(c.heartbeat) < CLAIM_PAUSE_MS ? "paused" : "expired";
+  const state = c.fresh ? "alive" : now - Date.parse(c.heartbeat) < pauseMs ? "paused" : "expired";
   return { state, holder: c.holder, heartbeat: c.heartbeat, commentId: c.commentId };
 };
 

@@ -84,7 +84,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -661,9 +661,9 @@ export function fixClosingText({ commands = [], setupGuard = null } = {}) {
   return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null, maxParts = undefined }) {
   const template = readFileSync(templatePath, "utf8");
-  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard }));
+  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard, maxParts }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
   return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
@@ -1210,7 +1210,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const running = queueTargets(checks.names, runs).targets.length > 0;
       if (!running) return { running, hung: [] };
       hungMs ??= await queueCheckTimeout(checks.repo, { token: checks.token, cache: rulesRead }).then((m) => (m ? m * 60_000 : Infinity), () => Infinity);
-      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache }, { token: checks.token });
+      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache, stall: checks.stall ?? STALL_DEFAULTS }, { token: checks.token });
       if (hung.length && !waived.has(sha)) waived.set(sha, headMarks(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).then((m) => m.noProgress));
       return { running, hung: hung.length && !(await waived.get(sha)) ? hung : [] };
     };
@@ -2511,7 +2511,6 @@ export async function recordedMergeable(repo, prNumber, issue, opts) {
   return /^<!-- factory:\d+:mergeable:([0-9a-f]{40,64}) -->/.exec(mine?.body || "")?.[1] ?? null;
 }
 
-const QUEUE_STALL_MIN = QUEUE_STALL_MS / 60_000;
 const errCode = (e) => (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : e?.transport ? "network" : "error");
 
 /** A check's name as Factory quotes it in a notice: one line, no backticks, at most 80 characters. */
@@ -2584,22 +2583,23 @@ export async function queueBoundMs(repo, opts) {
  * `cache` (one merge pass, or one watch). Actions are read with `actionsToken` (the job token's `actions: read`); with
  * none (the local route, whose App has no Actions permission), or an unread job or history, a check is judged by the
  * time bound `hungMs` only. `checks` are the commit's checks when the caller has read them (awaitChecks' `progress`).
- * A job is read only once its check could be hung (past min(STEP_STALL_FLOOR_MS, `hungMs`)), and read again only when
+ * `stall`: when a step counts as hung (logic.mjs STALL_DEFAULTS, the repository's settings). A job is read only once its
+ * check could be hung (past min(`stall.floorMs`, `hungMs`)), and read again only when
  * its last reading in `cache` is that old, judges it stalled now, or is past `hungMs`: until then no step it moved on to
  * could be stalled, so that reading stands.
  */
-export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null }, opts) {
+export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null, stall = STALL_DEFAULTS }, opts) {
   const checks = given ?? (await queueCommitChecks(repo, sha, opts));
   const aopts = { ...opts, token: actionsToken || opts.token };
   const jobs = new Map();
   const baselines = new Map();
   cache.baselines ??= new Map();
   cache.read ??= new Map();
-  const soonest = Math.min(STEP_STALL_FLOOR_MS, hungMs);
+  const soonest = Math.min(stall.floorMs, hungMs);
   const within = (t, ms) => now - Date.parse(t) <= ms;
   // The step's baseline, read once per cache and only once the step could be stalled by it.
   const baseline = async (job) => {
-    if (!needsBaseline(job, { fallbackMs: hungMs, now })) return null;
+    if (!needsBaseline(job, { fallbackMs: hungMs, now, stall })) return null;
     const key = stepKey(job, jobPosition(job).step);
     if (!cache.baselines.has(key)) cache.baselines.set(key, stepDurations(repo, { runId: job.run_id, jobName: job.name, stepName: jobPosition(job).step }, aopts, cache).then(stepBaselineMs, () => null));
     const b = await cache.baselines.get(key);
@@ -2612,7 +2612,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     const kept = cache.read.get(t.id);
     // A job that could not be read is not read again sooner either: the time bound judges it meanwhile.
     if (kept && !kept.job && within(kept.at, soonest - 1)) continue;
-    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at }) ? kept.job : null;
+    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at, stall }) ? kept.job : null;
     if (!job) {
       job = await rest(`repos/${repo.full}/actions/jobs/${t.id}`, aopts).catch(() => null);
       cache.read.set(t.id, { job, at: new Date(now).toISOString() });
@@ -2621,7 +2621,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     }
     jobs.set(t.id, job);
   }
-  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs });
+  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs, stall });
 }
 
 /**
@@ -2630,21 +2630,21 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
  * check that made no progress, or `waitMs` until it could be judged). `gate` is the required checks
  * (github.mjs requiredCheckSpecs): CI from their integration on the commit is the gate starting, code scanning's runs
  * are not (logic.mjs gateStarted). `hungMs` is the pass's or the watch's one fallback bound (queueBoundMs), `cache`
- * its one cache of step history (hangsOn), so both judge a check alike.
+ * its one cache of step history (hangsOn), so both judge a check alike; `stall` the repository's stall limits.
  */
-export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {} } = {}) {
+export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, stall = STALL_DEFAULTS } = {}) {
   const entry = await mergeQueueEntry(repo, prNumber, opts);
   if (!entry) return null;
   const checking = !!entry.head && entry.state === "AWAITING_CHECKS";
   const started = checking ? await checksStarted(repo, entry.head, gate, opts) : true;
   let hung = null;
   const at = Date.parse(entry.headAt ?? entry.enqueuedAt);
-  // No step on the commit can be stalled before the commit is STEP_STALL_FLOOR_MS old: only then are its checks read.
-  if (checking && started && Number.isFinite(at) && now - at >= STEP_STALL_FLOOR_MS) {
+  // No step on the commit can be stalled before the commit is `stall.floorMs` old: only then are its checks read.
+  if (checking && started && Number.isFinite(at) && now - at >= stall.floorMs) {
     const names = (gate || []).map((g) => (typeof g === "string" ? g : g?.name)).filter(Boolean);
-    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache }, opts);
+    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache, stall }, opts);
   }
-  return { ...entry, ...queueStall(entry, { started, now, hung }) };
+  return { ...entry, ...queueStall(entry, { started, now, hung, stall }) };
 }
 
 /**
@@ -3345,7 +3345,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
  * or "stopped" (its Objective is stopped or waits for its restart, read first, from `issueData` when the caller has it: nothing merges; the stop's
  * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
- * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
+ * queue, an entry whose merge_group commit started no check run within `stall.queueMs`, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
  * as a drop. A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
@@ -3353,7 +3353,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3374,7 +3374,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     const gate = await requiredCheckSpecs(repo, opts).catch(() => checkNames || []);
     // The pass's one bound: the caller's (the dispatcher reads it once per tick), else read here once.
     bound ??= await queueBoundMs(repo, opts);
-    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache }).catch((e) => {
+    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache, stall }).catch((e) => {
       log(`#${issue}: PR #${prNumber}'s merge queue entry is unreadable (${errCode(e)}); next tick`);
       return null;
     });
@@ -3394,7 +3394,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // GitHub made the queue's commit and started no check on it (#295), or a required check started there and made no
     // progress (#2683, logic.mjs queueHangs): out and back in once, as a drop (which restarts CI); the second
     // time it Blocks, rather than waiting out the ruleset's check timeout.
-    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(QUEUE_STALL_MIN)} min`;
+    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(stall.queueMs / 60_000)} min`;
     try {
       await dequeuePr(repo, pr.node_id, opts);
     } catch (e) {

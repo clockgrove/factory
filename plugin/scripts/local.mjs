@@ -19,17 +19,17 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { constants as osConstants, homedir, hostname, platform, tmpdir, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, causeCode, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
 
 /** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
 const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
-import { PLUGIN_ROOT } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
@@ -48,7 +48,7 @@ import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 import { scrubbedEnv } from "./lib/harness.mjs";
 import { choiceOf } from "./lib/choice.mjs";
-import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
+import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
@@ -63,6 +63,7 @@ import { runningStint, timelineOf } from "./lib/relaunch.mjs";
 import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, STAGE_AUTO_ENV, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
 import { lastStage } from "./lib/continue.mjs";
 import { accountHolds, holdsDir, windowOf } from "./lib/holds.mjs";
+import { personHolds, releaseRouteHold } from "./lib/route-holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -135,11 +136,52 @@ export const SETTINGS_EVERY_MS = 3 * 60_000;
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
+/** The repository's command words already named as not visible to the harness's commands (stageEnv, #371): once per loop. */
+const TOOLS_SAID = new Set();
 /** After a failed start, this loop holds the Objective this long, doubling per failure up to the cap (Local.unstart). */
 export const START_BACKOFF_MS = 5 * 60_000;
 export const START_BACKOFF_MAX_MS = 60 * 60_000;
 /** The failed starts in a row of one Objective on one loop that Block it, with the error, rather than un-mark it again. */
 export const START_FAILURES_BLOCK = 3;
+/** The free disk space a machine hold on a full disk waits for before new starts resume (Local.machineProbe). */
+export const START_DISK_FLOOR = 2 * 1024 ** 3;
+/** The system codes of a full disk or a spent disk quota. */
+const DISK_CODES = new Set(["ENOSPC", "EDQUOT"]);
+
+/**
+ * A failed start's cause, on structure only. `kind`: the claim's read or write (`claim-read`, `claim`), else the step of
+ * the stage's set-up that failed (`clone`, `prepare`: the clone's preparation in its sandbox, `setup`: any other).
+ * `code`: a system or network code (ENOSPC, ECONNREFUSED), GitHub's HTTP status, a command's exit, or Factory's own
+ * code; null when the error carries none, and such a failure is never put down to the machine.
+ */
+export function startCause(e) {
+  const kind = e?.startFailed === "work" || !e?.startFailed ? e?.startStep ?? "setup" : e.startFailed;
+  const code = causeCode(e) || (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : "") || (e?.exitCode != null ? `exit ${e.exitCode}` : "") || (typeof e?.code === "string" && /^[a-z][a-z0-9-]*$/.test(e.code) ? e.code : "");
+  return { kind, code: code || null };
+}
+
+/**
+ * What tells that a machine's start fault is gone (Local.machineProbe), by its cause: free disk space for a full disk,
+ * the repository read with the local token for a clone (git) or a claim (the API), the sandbox starting for the clone's
+ * preparation; with no probe of its own (`retry`), one start is tried again once the backoff ends.
+ */
+const probesOf = ({ kind, code }) => (DISK_CODES.has(code) ? ["disk"] : kind === "clone" ? ["clone", "disk"] : kind === "prepare" ? ["sandbox", "disk"] : kind === "claim-read" || kind === "claim" ? ["api"] : ["retry"]);
+const PROBE_FIX = {
+  disk: "free disk space on this machine (the error above names the path)",
+  clone: "check this machine's network to github.com, and that the local token still reads the repository",
+  api: "check this machine's network to GitHub's API, GitHub's status, and that the local token still reads the repository",
+  sandbox: "make the sandbox start again (`factory doctor` names what fails)",
+  retry: "fix the error above",
+};
+const PROBE_WAIT = { disk: `${START_DISK_FLOOR / 1024 ** 3} GB free on its disk`, clone: "`git ls-remote` of the repository passing with the local token", api: "GitHub's API reading the repository with the local token", sandbox: "the sandbox starting", retry: "one start tried again after the backoff" };
+const gb = (n) => `${(n / 1024 ** 3).toFixed(1)} GB`;
+/** How often a machine hold's probe runs at most (Local.machineWait): the sandbox's can take up to a minute. */
+export const MACHINE_PROBE_EVERY_MS = 60_000;
+/** sandboxStartProblems on one sandboxed `true`, run without blocking the loop (at most a minute). */
+const sandboxProblemsNow = async () => {
+  const r = await exec("srt", ["--", "true"], { timeoutMs: 60_000 }).catch((error) => ({ code: null, error }));
+  return sandboxStartProblems({ start: () => ({ status: r.code, signal: r.signal, stderr: r.stderr, error: r.error }) });
+};
 export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer sandbox, which does not start on this host";
 /** The Blocked reason when Copilot's outer sandbox stopped starting after serve began: fixed text, no probe output. */
 export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
@@ -170,8 +212,22 @@ export const COMMANDS = {
     check: (f) => (f.since !== undefined && !parseCursor(f.since) ? `--since needs a cursor a line printed or a time with its zone, not ${JSON.stringify(f.since)}` : f.on !== undefined && !parseKinds(f.on) ? `--on takes ${WAIT_KINDS.join(", ")}, not ${JSON.stringify(f.on)}` : null),
     about: `one JSON line per event on the queue (or the issues named): ${WAIT_KINDS.join(", ")}; exits 0 after the first, ${WAIT_TIMEOUT_EXIT} at --timeout (with --follow, keeps going)`,
   },
+  hold: {
+    args: ["list|release"],
+    more: "account",
+    flags: { repo: WHERE.repo },
+    usage: "factory hold list [--repo OWNER/NAME] | factory hold release <account> [--repo OWNER/NAME]",
+    check: (f) => {
+      const [, what, ...others] = f._;
+      if (what !== "list" && what !== "release") return `hold takes list or release, not ${JSON.stringify(what)}`;
+      if (what === "list" && others.length) return `unexpected argument ${JSON.stringify(others[0])}`;
+      if (what === "release" && others.length !== 1) return others.length ? `unexpected argument ${JSON.stringify(others[1])}` : "missing <account>";
+      return null;
+    },
+    about: "the usage-limit holds of this machine's accounts (with --repo, of GitHub Actions and the cloud sandbox), or release one account's: every serve may start on it again at its next tick",
+  },
 };
-const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
+const usageOf = (cmd) => COMMANDS[cmd].usage ?? `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
 /** The usage text: one command's, or every command's. */
 export const usage = (cmd = null) => (cmd ? `usage: ${usageOf(cmd)}\n  ${COMMANDS[cmd].about}\n` : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}`);
 
@@ -971,7 +1027,7 @@ export class Local {
       const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, ...SKIP_SMUDGE_ENV }, stdio: ["ignore", "inherit", "inherit"] });
       child.on("close", done);
     });
-    if (code !== 0) throw new Error(`git clone of ${this.repoFull} failed (exit ${code})`);
+    if (code !== 0) throw Object.assign(new Error(`git clone of ${this.repoFull} failed (exit ${code})`), { startStep: "clone", exitCode: code });
     pinGitDir(dir, pin);
     // The Objective's first stage on this machine pays for this clone and a cold install: reported apart (worker.mjs).
     this.firstSetup.set(issue, Date.now() - started);
@@ -1081,11 +1137,18 @@ export class Local {
       }
     }
     const addDirs = [...caches, stageTmp];
-    // Linux: the stage's node (#111) and the repository's package manager (#137) for Claude Code's and Copilot's commands,
-    // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
-    // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
-    // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
-    const tools = localTools({ harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    // Linux: the stage's node (#111), the repository's package manager (#137) and the tools its own commands run (#371) for
+    // Claude Code's and Copilot's commands, read-only: their sandboxes show nothing of the home but what their settings
+    // name. Never in or above what a sandbox may write (this repository's Objectives, the stages' temp directories), the
+    // home or a credential store. Codex's sandbox reads the whole system but the credential stores, so its commands find
+    // them as the developer does. A command word not made visible is named once per loop.
+    const commands = stageCommands(base);
+    const tools = localTools({ harness, clone, commands: { ...commands, install: installCommand(clone, commands.install) }, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    for (const u of tools.unresolved) {
+      if (TOOLS_SAID.has(u.word)) continue;
+      TOOLS_SAID.add(u.word);
+      log(`local: \`${u.word}\` (${u.from}) is not visible to ${harness === "claude" ? "Claude Code's" : "Copilot's"} commands: ${u.why}`);
+    }
     const lead = tools.lead;
     const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness, domains, account);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
@@ -1178,7 +1241,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv } : {}), ...(tools.readable.length ? { readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
@@ -1206,7 +1269,7 @@ export class Local {
     mkdirSync(home, { recursive: true });
     // Its policy, config and MCP servers, as Factory's own: whatever an earlier run left there (a link included) is replaced.
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
-    // The stage's node and package manager (stageEnv) read-only, its global npmrc denied.
+    // The stage's node, package manager and repository tools (stageEnv) read-only, its global npmrc denied.
     const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(tools?.denied || [])] : [];
     const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains, clone, addDirs, readOnly: [usageDir], readable: tools?.readable || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {
@@ -1325,7 +1388,10 @@ export class Local {
       for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
       // That git runs on the model's clone: with no secret in its env (scrubbedEnv), as every other git there.
       const gitEnv = scrubbedEnv(env);
-      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, gitEnv), { env: gitEnv }), { fresh: script !== "worker.mjs", locks: locks.stale });
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, gitEnv), { env: gitEnv }), { fresh: script !== "worker.mjs", locks: locks.stale }).catch((e) => {
+        // A failed start's step (unstart: startCause), which says what probe tells a machine's fault is gone.
+        throw Object.assign(e instanceof Error ? e : new Error(String(e)), { startStep: "prepare" });
+      });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();
@@ -1928,6 +1994,21 @@ export class Local {
   }
 
   /**
+   * Whether the account an Objective paused on (`off`, limitPaused) is no longer held before the reset the pause kept: its
+   * hold and guess are read again from the store each tick (this machine's files, or this loop's memory for a hold kept
+   * there), so a person's release (`factory hold release`, holds.mjs release), the folder cleared by hand, or any other
+   * end of the hold resumes it at the next tick, on that account. Said once, as it resumes.
+   */
+  heldNoMore(issue, off, now) {
+    const stores = [this.holdStore(), this.ownHolds].filter(Boolean);
+    if (stores.some((st) => st.avoidUntil(off.hold, now) !== null)) return false;
+    const at = this.holdStore().releasedAt?.(off.hold, now) ?? null;
+    const how = at !== null && at > off.since ? `was released (factory hold release) at ${new Date(at).toISOString()}` : "is no longer held on this machine";
+    log(`#${issue}: ${limitName(off.harness, off.account)} ${how}; resuming it now, before the reset it paused for`);
+    return true;
+  }
+
+  /**
    * Where `hold`'s record is kept (holdOf): this machine's holds (lib/holds.mjs), else this loop's memory. A loop made
    * without the constructor (a test's) keeps all of them in its memory.
    */
@@ -2081,7 +2162,7 @@ export class Local {
         // Paused on GitHub's 5xx: resumed after its doubling wait (serverWait), not on a probe, which answers while one
         // endpoint fails; taken up at once past OUTAGE.serverResumes resumes, so resume Blocks it.
         const server = serverDown(off.code) && off.server ? off.server.pauses > OUTAGE.serverResumes || now - off.since >= OUTAGE.blockMs || now >= off.server.at + serverWait(off.server.pauses) : null;
-        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
+        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (this.heldNoMore(issue.number, off, now) || (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null)))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
         if (due) out.push(issue.number);
         // Waiting on a usage limit's reset, on its account labels or on GitHub's 5xx: its claim kept alive while this loop is.
         else if (off.harness || server !== null) await this.beatPaused(issue.number, c);
@@ -2262,20 +2343,27 @@ export class Local {
   /**
    * The Objectives whose last start on this loop failed, still in their backoff: issue -> the reason serve's dispatch
    * holds it with (localHeld), so it is not picked, nor marked Running, before its backoff ends. This loop's memory only.
+   * One with no failed start counted (it failed only during a machine hold) is held only while its claim waits to be
+   * read again: the machine hold (machineWait) holds new starts meanwhile.
    */
   startHolds(now = (this.clock ?? Date.now)()) {
     const out = {};
-    for (const [n, f] of this.startFailures ?? []) if (now < f.retryAt) out[n] = `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+    for (const [n, f] of this.startFailures ?? []) {
+      if (now >= f.retryAt || (f.count === 0 && !f.recheck)) continue;
+      out[n] = f.count === 0 ? `its start here failed on a fault of this machine; its claim is read again after ${new Date(f.retryAt).toISOString()}` : `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+    }
     return out;
   }
 
   /**
    * A start that failed before its work stage ran (the claim, the clone, prepareClone, a directory): the real error is
    * logged and the Objective goes back to Queued, its claim dropped, rather than sitting Running for the dispatcher to
-   * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS), so a
-   * machine-level fault (disk full, a broken sandbox) neither Blocks every queued Objective in turn nor relabels them
-   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error as postedError has it
-   * (cause `setup`).
+   * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS).
+   * The same cause (startCause: its kind and code) on two or more Objectives within START_BACKOFF_MS is the machine's (a
+   * full disk, a broken sandbox, GitHub out of reach): this loop holds new starts until a probe of that cause passes, and
+   * no failed start is counted while the hold lasts (machineFault, machineWait). A cause seen on one Objective alone, or
+   * again after its probe passed, is counted: the third failed start of an Objective in a row Blocks it once, with the
+   * error as postedError has it (cause `setup`).
    * When the claim could not be read, or was another loop's, who holds it is unknown: nothing changes now, and after the
    * backoff this loop reads the claim again (recheckStarts). Only an Objective still labelled Running is un-marked or
    * Blocked; otherwise, or on a failed read, the claim stays, goes stale and this loop resumes it (pausedHere).
@@ -2285,10 +2373,13 @@ export class Local {
     log(`#${issue}: could not start (${e.startFailed}): ${String(e?.message || e).slice(0, 300)}`);
     const error = postedError(e).slice(0, 300);
     const failures = (this.startFailures ??= new Map());
-    const count = (failures.get(issue)?.count ?? 0) + 1;
+    const cause = startCause(e);
+    const machine = this.machineFault(issue, cause, e);
+    // While the machine's hold lasts, a failed start charges no Objective: its count stays as it is.
+    const count = (failures.get(issue)?.count ?? 0) + (machine ? 0 : 1);
     const unknown = e.startFailed === "claim-read" || !!e.othersClaim;
     const backoff = (recheck = unknown) => {
-      const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (count - 1), START_BACKOFF_MAX_MS);
+      const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (Math.max(count, 1) - 1), START_BACKOFF_MAX_MS);
       failures.set(issue, { count, retryAt, recheck });
       return new Date(retryAt).toISOString();
     };
@@ -2306,7 +2397,10 @@ export class Local {
       } else if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
       else {
         await this.requeue(issue);
-        log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
+        if (machine) {
+          backoff();
+          log(`#${issue}: back to Queued; it waits with every new start here for this machine's fault to clear`);
+        } else log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
       }
     } catch (x) {
       // GitHub failed here too (the issue read, the requeue or the Block): the Objective may still be Running, so this
@@ -2315,6 +2409,120 @@ export class Local {
     }
     this.lapsed?.delete(issue);
     return out;
+  }
+
+  /**
+   * Whether this failed start's cause is the machine's: a machine hold on that cause is on, or another Objective's start
+   * failed here with the same kind and code within the last START_BACKOFF_MS. Each failed start is recorded here, before
+   * anything is awaited, so two starts that fail at once see each other. The hold starts said once in this log, with the
+   * cause, what to fix and what new starts wait for. A cause with no code is never the machine's, and neither is one
+   * that failed again within an hour of its hold's probe passing: that probe did not explain it, so each Objective is
+   * charged and Blocks on its own count (one hold per cause an hour).
+   */
+  machineFault(issue, cause, e) {
+    if (!cause.code) return false;
+    const now = (this.clock ?? Date.now)();
+    this.startLog = [...(this.startLog ?? []).filter((f) => f.at > now - START_BACKOFF_MS), { issue, kind: cause.kind, code: cause.code, at: now }];
+    const key = `${cause.kind} ${cause.code}`;
+    const holds = (this.machineHolds ??= new Map());
+    const held = holds.get(key);
+    if (held) {
+      held.issues.add(issue);
+      return true;
+    }
+    const lifted = (this.machineLifts ??= new Map()).get(key);
+    if (lifted && now - lifted.at < START_BACKOFF_MAX_MS) {
+      if (!lifted.said) log(`#${issue} failed to start the same way (${cause.kind}, ${cause.code}) after this machine's probe for it passed, so the probe does not explain it: each Objective that fails so is charged for it, and Blocks on its own count`);
+      lifted.said = true;
+      return false;
+    }
+    const others = [...new Set(this.startLog.filter((f) => f.issue !== issue && f.kind === cause.kind && f.code === cause.code).map((f) => f.issue))];
+    if (!others.length) return false;
+    const probes = probesOf(cause);
+    // The disk the start failed on: the path a system error names, else this repository's Objective directories.
+    const path = typeof e?.path === "string" && e.path.startsWith("/") ? e.path : join(this.dev, ".factory");
+    const issues = new Set([...others, issue]);
+    // A clone's fault holds new work only: a resume or a review runs in the clone its work made.
+    const all = cause.kind !== "clone";
+    holds.set(key, { ...cause, key, probes, path, issues, all, since: now, retryAt: now + START_BACKOFF_MS });
+    const list = [...issues].sort((a, b) => a - b).map((n) => `#${n}`).join(", ");
+    log(`holding every new ${all ? "stage" : "work start"} on this machine: ${list} failed to start the same way (${cause.kind}, ${cause.code}), which is this machine's fault, not theirs; no Objective is charged for it while the hold lasts. Fix: ${probes.map((p) => PROBE_FIX[p]).join("; ")}. New starts resume once the probe passes: ${probes.map((p) => PROBE_WAIT[p]).join(" and ")}.`);
+    return true;
+  }
+
+  /**
+   * Each tick: the machine holds' probes (machineProbe), each at most once every MACHINE_PROBE_EVERY_MS. A hold whose
+   * probe passes ends, said once, and the Objectives it held are free to pick again. Returns what the holds still on
+   * hold: `work`, the reason no new work starts (serve's dispatch), and `all`, the reason no resume or review starts
+   * either (any hold but a clone's); each null with none.
+   */
+  async machineWait() {
+    const out = { work: null, all: null };
+    for (const [key, h] of [...(this.machineHolds ?? [])]) {
+      const now = (this.clock ?? Date.now)();
+      if (h.probedAt === undefined || now - h.probedAt >= (this.machineProbeEveryMs ?? MACHINE_PROBE_EVERY_MS)) {
+        h.problem = await this.machineProbe(h);
+        h.probedAt = now;
+      }
+      if (h.problem === null) {
+        this.machineHolds.delete(key);
+        (this.machineLifts ??= new Map()).set(key, { at: now, said: false });
+        log(`this machine's start fault (${h.kind}, ${h.code}) is gone (${h.probes.map((p) => PROBE_WAIT[p]).join(" and ")}): new starts resume`);
+        continue;
+      }
+      const why = `this machine's starts fail (${h.kind}, ${h.code}): ${h.problem}`;
+      out.work ??= why;
+      if (h.all) out.all ??= why;
+    }
+    return out;
+  }
+
+  /**
+   * Null when every probe of a machine hold's cause passes, else what still fails: the disk's free space against
+   * START_DISK_FLOOR (statfs on the failed path, or its nearest folder that exists); `git ls-remote` of the repository
+   * with the local token; GitHub's API reading the repository with the local token (a 2xx); srt's sandbox starting
+   * (lib/local.mjs sandboxStartProblems on one sandboxed `true`); or, with no probe of its own, the backoff since the
+   * hold began. `machineProbes`: a test's own statfs, lsRemote or sandbox.
+   */
+  async machineProbe(h) {
+    const p = { statfs: statfsSync, lsRemote: () => this.lsRemote(), sandbox: () => sandboxProblemsNow(), ...this.machineProbes };
+    for (const what of h.probes) {
+      if (what === "disk") {
+        let free = null;
+        for (let dir = h.path; free === null; dir = dirname(dir)) {
+          try {
+            const s = p.statfs(dir);
+            free = Number(s.bavail) * Number(s.bsize);
+          } catch {
+            if (dir === dirname(dir)) break;
+          }
+        }
+        if (free !== null && free < START_DISK_FLOOR) return `${gb(free)} free on its disk, under the ${PROBE_WAIT.disk} it waits for`;
+      } else if (what === "clone") {
+        const code = await p.lsRemote();
+        if (code !== 0) return `git ls-remote of ${this.repoFull} with the local token failed (exit ${code})`;
+      } else if (what === "api") {
+        const api = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
+        try {
+          const r = await fetch(`${api}/repos/${this.repoFull}`, { headers: { authorization: `Bearer ${this.token ?? this.opts?.token}`, accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(OUTAGE.probeTimeoutMs) });
+          await r.body?.cancel?.().catch(() => {});
+          if (!r.ok) return `GitHub's API answered HTTP ${r.status} to reading ${this.repoFull} with the local token`;
+        } catch (e) {
+          return `GitHub's API does not answer (${causeCode(e) || "no answer"})`;
+        }
+      } else if (what === "sandbox") {
+        const problems = await p.sandbox();
+        if (problems.length) return problems[0];
+      } else if ((this.clock ?? Date.now)() < h.retryAt) return `one start is tried again after ${new Date(h.retryAt).toISOString()}`;
+    }
+    return null;
+  }
+
+  /** `git ls-remote` of this repository with the local token, as ensureClone clones it: its exit code. */
+  async lsRemote() {
+    const helper = "!f() { echo username=x-access-token; echo \"password=$FACTORY_LOCAL_TOKEN\"; }; f";
+    const r = await exec("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "ls-remote", "-q", `https://github.com/${this.repoFull}.git`, "HEAD"], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 60_000 }).catch(() => ({ code: null }));
+    return r.code;
   }
 
   /** Back to Queued: the Running label off, the card to Queued, this loop's claim dropped. */
@@ -3022,8 +3230,13 @@ export class Local {
       shownCap = capNow;
       const slots = this.takeSlots(box, running);
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
-      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : null;
-      const paused = switching ? [] : await this.pausedHere(running);
+      // A fault of this machine that failed the starts of two Objectives or more (machineFault): no new stage starts here
+      // until its probe passes, so none is charged for it.
+      const machine = switching ? {} : await this.machineWait().catch((e) => (log(`machine probe: ${String(e?.message || e).slice(0, 160)}`), {}));
+      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : machine.work;
+      // Resumes and reviews too, unless the hold is a clone's (they run in the clone their work made).
+      const holdAll = switching || !!machine.all;
+      const paused = holdAll ? [] : await this.pausedHere(running);
       const resumes = paused.slice(0, slots.take(paused.length));
       for (const n of resumes) {
         log(`#${n}: resuming (this machine held it when it went away)`);
@@ -3034,7 +3247,7 @@ export class Local {
       // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
       const free = pending.filter((r) => !this.limitHold(r.labels, r.issue, r.updatedAt ?? null));
       // Each review starts as soon as its slot is taken, as resumes do: never a slot held idle through the dispatch.
-      const reviews = switching ? [] : free.slice(0, slots.take(free.length));
+      const reviews = holdAll ? [] : free.slice(0, slots.take(free.length));
       for (const r of reviews) slots.start(r.issue, "review", () => track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
@@ -3051,7 +3264,7 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3098,7 +3311,7 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (free.length > reviews.length && !switching) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
+      if (free.length > reviews.length && !holdAll) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
       // What holds new starts on this machine, said once: here, unless the dispatcher's reason (localFull) says it already.
       const hold = box.why && result.reason !== box.why ? `; holding new starts: ${box.why}` : "";
       log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}${hold}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
@@ -3111,6 +3324,61 @@ export class Local {
       await new Promise((r) => setTimeout(r, intervalMs));
     }
   }
+}
+
+/** One account's holds as `factory hold` says them (holds.mjs list's entry), at `now`: `state` alone, its state's words. */
+export function holdText(h, now, { state = false } = {}) {
+  const iso = (ms) => new Date(ms).toISOString();
+  const parts = [];
+  if (h.until !== null) parts.push(`${h.until > now ? `held until ${iso(h.until)}${h.window ? ` (${h.window})` : ""}` : `hold ended ${iso(h.until)}`}, back-off count ${h.streak}`);
+  if (h.guess) parts.push(`${h.guess.until > now ? `passed over until about ${iso(h.guess.until)}` : `guess ended ${iso(h.guess.until)}`} (no reset reported), ${h.guess.streak} in a row`);
+  return state ? parts.join("; ") : `${h.account} (${HARNESS_NAMES[h.harness] || h.harness}): ${parts.join("; ")}`;
+}
+
+/**
+ * `factory hold list | release <account> [--repo OWNER/NAME]` (#376): the usage-limit holds this machine's serves share
+ * (lib/holds.mjs, read with the same checks as serve), or with --repo those of GitHub Actions and the cloud sandbox
+ * (lib/route-holds.mjs, read and written with the person's own token: local mode's, else their gh login). `release`
+ * writes one release record for the account named exactly as `list` shows it, which ends its holds and guesses and its
+ * back-off count for every reader at once; it removes no file and changes no other account. A name with nothing held
+ * is refused (exit 1), naming the ones that are. `home`, `now` and `out`/`err` are a test's own.
+ */
+export async function holdCommand(flags, { home = homedir(), now = Date.now(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s) } = {}) {
+  const [, what, account] = flags._;
+  const repo = flags.repo ? repoOf(flags.repo) : null;
+  const where = repo ? `on ${repo.full}'s holds issue (GitHub Actions and the cloud sandbox)` : `on this machine (${holdsDir(home)})`;
+  const opts = repo ? { token: sessionToken(repo.full) } : null;
+  if (what === "list") {
+    const list = repo ? (await personHolds(repo, opts, { now })).store.list(now) : accountHolds({ dir: holdsDir(home), onError: () => {} }).list(now);
+    out(list.length ? `${list.map((h) => holdText(h, now)).join("\n")}\n` : `no account is held or passed over ${where}\n`);
+    return 0;
+  }
+  let released;
+  let known;
+  let refused = null;
+  let issue = null;
+  if (repo) ({ released, known, refused, issue } = await releaseRouteHold(repo, account, opts, { now }));
+  else {
+    let failed = null;
+    const store = accountHolds({ dir: holdsDir(home), onError: (e) => (failed = e) });
+    known = store.list(now).map((h) => h.account);
+    released = store.release({ account, now });
+    // A record that could not be written to the folder is kept in this process alone, which ends with it: nothing released.
+    if (failed) {
+      err(`factory: the release could not be written to ${holdsDir(home)} (${String(failed?.message || failed).slice(0, 160)}); nothing was released\n`);
+      return 1;
+    }
+  }
+  if (!released) {
+    err(`factory: nothing is held or passed over for ${JSON.stringify(account)} ${where}; ${known.length ? `the accounts that are: ${known.join(", ")}` : "no account is"}\n`);
+    return 1;
+  }
+  if (refused) {
+    err(`factory: the release of ${account} was posted on ${repo.full}#${issue}, Factory's holds issue, but it will not count: ${refused}; delete that comment, and release it again with a token of a person who can push\n`);
+    return 1;
+  }
+  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Factory release or later; a job on an earlier release still holds it until its reset" : `every serve on this Factory release or later on this machine may start on it at its next tick, and an Objective paused on it resumes then; a serve on an earlier release still holds it until its reset: restart that serve on this release for it to see the release`}\n`);
+  return 0;
 }
 
 /**
@@ -3640,6 +3908,10 @@ async function main() {
   }
   if (cmd === "wait") {
     process.exitCode = await waitForQueue(flags);
+    return;
+  }
+  if (cmd === "hold") {
+    process.exitCode = await holdCommand(flags);
     return;
   }
   if (cmd === "serve") await (await new Local(flags).init({ serve: true })).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });

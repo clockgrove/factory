@@ -48,15 +48,16 @@ test("host labels: a wildcard over a public suffix, or over a name with one belo
   for (const suffix of ["co.uk", "github.io", "vercel.app", "s3.amazonaws.com", "pages.dev"]) {
     const r = hostsOf([`${HOST_PREFIX}*.${suffix}`]);
     assert.equal(r.ok, false, suffix);
-    assert.match(r.reason, new RegExp(`opens every site under \`${suffix.replace(/\./g, "\\.")}\`, and the Public Suffix List names \`${suffix.replace(/\./g, "\\.")}\` there a public suffix`), suffix);
+    assert.ok(r.reason.includes(`opens every site under \`${suffix}\`, and the Public Suffix List names \`${suffix}\` there a public suffix`), `${suffix}: ${r.reason}`);
     assert.equal(isSandboxHost(`*.${suffix}`), false, "the runner's own filter drops it too");
   }
   // A wildcard over a parent of public suffixes covers anyone's bucket or storage account under them.
-  for (const [parent, under] of [["amazonaws.com", /\.amazonaws\.com$/], ["windows.net", /\.windows\.net$/], ["core.windows.net", /\.core\.windows\.net$/]]) {
+  for (const parent of ["amazonaws.com", "windows.net", "core.windows.net"]) {
     const r = hostsOf([`${HOST_PREFIX}*.${parent}`]);
     assert.equal(r.ok, false, parent);
-    assert.match(r.reason, new RegExp(`opens every site under \`${parent.replace(/\./g, "\\.")}\`, and the Public Suffix List names \`[^\`]+\` there`), parent);
-    assert.match(suffixRuleUnder(parent), under, "the rule it names lies below it");
+    const rule = suffixRuleUnder(parent);
+    assert.ok(typeof rule === "string" && rule.endsWith(`.${parent}`), `the rule it names lies below ${parent}: ${rule}`);
+    assert.ok(r.reason.includes(`opens every site under \`${parent}\`, and the Public Suffix List names \`${rule}\` there`), `${parent}: ${r.reason}`);
     assert.equal(isSandboxHost(`*.${parent}`), false, parent);
   }
   // One organisation's name under such a suffix, or the suffix's own host, is a host like any other; so is a name an

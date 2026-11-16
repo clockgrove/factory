@@ -56,6 +56,16 @@ test("claude: a 401 is a refusal from the result's api_error_status; a 429 or 5x
   }
 });
 
+// #418: Factory no longer judges a Claude model id by its form (choice.mjs modelProblem); the API's 404 for a model the
+// login does not serve is the answer, read as a refusal (no retry, no death) that Blocks naming it.
+test("claude: a 404 for a model the login does not serve is a refusal that Blocks", () => {
+  const text = fixture("claude-2.1.321-401.jsonl").replaceAll('"api_error_status":401', '"api_error_status":404').replace('"error":"authentication_failed"', '"error":"invalid_request"');
+  const rec = failed("claude", text);
+  assert.deepEqual([rec.refusal?.status, rec.refusal?.type], [404, "invalid_request"]);
+  assert.equal(crashed(rec), false);
+  assert.match(decideExit({ harness: rec, pr: null, commits: 0 }).reason, /^claude was refused by its provider \(HTTP 404 invalid_request\)/);
+});
+
 // Copilot 1.0.107's session.error event (copilot-sdk/generated/session-events.d.ts ErrorData).
 test("copilot: session.error with a 4xx status or a quota type is a refusal on a failed run; a passing rate limit is not, the user's global one is", () => {
   const text = fixture("copilot-1.0.107-session-error.jsonl");

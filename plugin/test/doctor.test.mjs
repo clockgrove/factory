@@ -645,3 +645,77 @@ test("doctor never starts a bash, or any program, the repository ships, whatever
   }
   assert.equal(existsSync(marker), false, "nothing the repository ships ran");
 });
+
+/**
+ * githubChecks against a fake GitHub (#418): factory.yml as `flow`, the other workflows as `files` (listed in that
+ * order), and an active ruleset on the default branch with a merge queue and `required` as its required checks.
+ */
+async function rowsWith({ flow, files = {}, required = [] }) {
+  const { githubChecks } = await import("../scripts/doctor.mjs");
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
+  const all = { ".github/workflows/factory.yml": flow, ...files };
+  globalThis.fetch = async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/repos/o/r") return json(200, { default_branch: "main", owner: { type: "Organization" } });
+    if (path === "/repos/o/r/actions/workflows") return json(200, { workflows: Object.entries(all).map(([p, t]) => ({ path: p, name: /^name: (.+)$/m.exec(t)?.[1] ?? p, state: "active" })) });
+    if (path === "/repos/o/r/rulesets") return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
+    if (path === "/repos/o/r/rulesets/1") return json(200, { conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue" }, { type: "required_status_checks", parameters: { required_status_checks: required.map((context) => ({ context })) } }] });
+    const file = decodeURIComponent(path.replace("/repos/o/r/contents/", ""));
+    if (all[file] !== undefined) return new Response(all[file], { status: 200 });
+    if (path === "/graphql") return json(200, { data: {} });
+    return json(404, { message: "Not Found" });
+  };
+  const inputs = { repo: "o/r", objectiveLabel: "factory:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
+  try {
+    const rows = await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env: { GITHUB_WORKSPACE: mkdtempSync(join(tmpdir(), "ws-")) }, job: true });
+    return Object.fromEntries(rows.map((r) => [r.name, r]));
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+}
+
+test("doctor's job token row reads factory.yml's parsed permissions, each job's own replacing the top level's, never its text (#418)", async () => {
+  const token = async (flow) => (await rowsWith({ flow }))["job token"];
+  const job = (perms) => `on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n${perms}    steps:\n      - run: echo\n`;
+  // The shipped template's shapes: the top level reads, one job asks for actions alone (contents none), one for contents read.
+  assert.equal((await token(job("    permissions: { actions: write }\n"))).status, "PASS");
+  assert.equal((await token(job("    permissions: { contents: read, issues: write }\n"))).status, "PASS");
+  // A job that grants itself write-all, with contents: read at the top: the text has read and no `contents: write`.
+  const all = await token(job("    permissions: write-all\n"));
+  assert.equal(all.status, "FAIL");
+  assert.equal(all.detail, "a job's token may write repository contents: work (contents: write, its own)");
+  // read-all says no `contents: read`; a comment that names write grants nothing.
+  assert.equal((await token("on: issues\npermissions: read-all\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n")).status, "PASS");
+  assert.equal((await token(job("    # contents: write is the App's, never this token's\n"))).status, "PASS");
+  // No permissions anywhere: the repository's default token, which the file does not hold to read.
+  const unset = await token("on: issues\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n");
+  assert.equal(unset.status, "FAIL");
+  assert.match(unset.detail, /work \(no permissions here or at the top level, so the repository's default token\)/);
+  assert.equal((await token(job("    permissions: { contents: admin }\n"))).status, "FAIL", "a value GitHub does not take is not read as read");
+});
+
+test("doctor's CI workflow is the one whose jobs make the required checks, not the first GitHub lists (#418)", async () => {
+  const flow = "on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n";
+  // Listed first and on merge_group, but none of its jobs is required; the workflow that makes `test (ubuntu)` is not on merge_group.
+  const files = {
+    ".github/workflows/lint.yml": "name: Lint\non: [pull_request, merge_group]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm run lint\n",
+    ".github/workflows/ci.yml": "name: CI\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    strategy: { matrix: { os: [ubuntu] } }\n    steps:\n      - run: npm test\n",
+  };
+  const missing = (await rowsWith({ flow, files, required: ["test (ubuntu)"] }))["ci workflow"];
+  assert.equal(missing.status, "FAIL");
+  assert.match(missing.detail, /^CI makes required checks but does not run on merge_group/);
+  assert.match(missing.fix, /in \.github\/workflows\/ci\.yml$/);
+  // With merge_group on it too, the row names it and the checks it makes.
+  files[".github/workflows/ci.yml"] = files[".github/workflows/ci.yml"].replace("on: pull_request", "on: [pull_request, merge_group]");
+  const ok = (await rowsWith({ flow, files, required: ["test (ubuntu)", "lint"] }))["ci workflow"];
+  assert.deepEqual([ok.status, ok.detail], ["PASS", "Lint, CI, which makes the required checks (test (ubuntu), lint), runs on merge_group"]);
+  // A required check no workflow's job makes (an App's): doctor says it cannot tell, rather than judge another workflow.
+  const app = (await rowsWith({ flow, files, required: ["Vercel"] }))["ci workflow"];
+  assert.equal(app.status, "WARN");
+  assert.match(app.detail, /^no workflow doctor read has a job that makes the required checks \(Vercel\), so doctor cannot tell what runs them or whether it runs on merge_group$/);
+});

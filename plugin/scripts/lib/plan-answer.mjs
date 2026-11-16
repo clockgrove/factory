@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { redactSecrets } from "./inputs.mjs";
-import { answeredRepos, planNeeds } from "./one-repo.mjs";
+import { NEED_KEY, answeredRepos, planNeeds } from "./one-repo.mjs";
 import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
 
 /** The one question asked about each repository a plan-time Question named. */
@@ -87,7 +87,7 @@ export async function judgedAnswers(asked, decisions, { source, label = "factory
     const since = Date.parse(at);
     const comments = (decisions || []).filter((d) => Date.parse(d?.seen ?? d?.at) > since);
     if (!comments.length) continue;
-    const question = planNeeds(`Needs-Repository: ${repo}`, { source, label }).reason;
+    const question = planNeeds(`${NEED_KEY}: ${repo}`, { source, label }).reason;
     const verdict = question && check ? await check.judge(planAnswerInput({ need: repo, question, comments })) : null;
     if (verdict ?? exact.has(repo.toLowerCase())) out.add(repo.toLowerCase());
   }

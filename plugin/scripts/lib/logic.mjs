@@ -2821,13 +2821,51 @@ export function checksResume(record, { headSha, checksDone, now = Date.now(), gr
 }
 
 /**
- * The answer to a Question the launcher missed: a maintainer decision (objectiveDecisions: people with write access,
- * never Factory) made after the Question was asked, older than `graceMs` (the comment's own launch gets that long).
+ * Whether a PR body still asks a Question: an item of its Assumptions starting with `QUESTION:` (factory-deliver-pr).
+ * A Question asked on the issue (the plan-time Question) is not in the body.
+ */
+export const asksQuestion = (body) => /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUESTION:/.test(body || "");
+
+/**
+ * Where a Question is answered (#344): `issue` when it was asked on the issue (`askOnIssue`: the plan-time Question) or
+ * has no PR, where a maintainer's comment answers it; else `pr`, where the answer is a comment and then the PR marked
+ * ready. applyExit chooses the notice's text by it (session.mjs questionNotice) and writes it into the notice's marker
+ * (questionMarker), and the dispatcher resumes on a comment only a Question of form `issue` (questionFormOf), so the
+ * notice and the resume never disagree.
+ */
+export const questionForm = ({ pr = null, askOnIssue = false } = {}) => (askOnIssue || !pr ? "issue" : "pr");
+/** The Question notice's marker: one comment per run (`runId`), the form (questionForm) its last field. */
+export const questionMarker = (issue, { stage, runId, form }) => marker(issue, "question", `${stage}:${runId}:${form}`);
+const QUESTION_NOTICE = /^<!-- factory:(\d+):question:\S*:(issue|pr) -->/;
+/**
+ * The form (questionForm) of the Question asked at `since` (the issue's last factory:question label), read from
+ * Factory's notice on the issue posted or edited since; null when there is none (a Question its PR asks often has no
+ * notice on the issue: its review request is the notice). Factory's: by its own login, by someone who can push, or by an
+ * App (local mode posts its notices as the Factory App: app-token.mjs noticeMinter). The latest one counts.
+ */
+export function questionFormOf(comments, { issue, since }) {
+  const at = Date.parse(since);
+  if (!Number.isFinite(at)) return null;
+  let best = null;
+  for (const c of comments || []) {
+    const m = QUESTION_NOTICE.exec(c?.body || "");
+    if (!m || Number(m[1]) !== Number(issue) || !(isSelf(c) || pushAuthor(c) || c.user?.type === "Bot")) continue;
+    const t = Math.max(Date.parse(c.created_at) || 0, Date.parse(c.updated_at) || 0);
+    if (t >= at && (!best || t > best.t)) best = { t, form: m[2] };
+  }
+  return best?.form ?? null;
+}
+
+/**
+ * The answer to a Question: a maintainer decision (objectiveDecisions: people with write access, never Factory's own
+ * marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the comment's own
+ * launch gets that long; on any other route nothing launches on a comment, so the grace is 0).
  */
 export function missedAnswer(decisions, { questionSince, now = Date.now(), graceMs }) {
   const since = Date.parse(questionSince);
   if (!Number.isFinite(since)) return null;
-  return (decisions || []).find((d) => Date.parse(d.created_at ?? d.at) > since && now - Date.parse(d.created_at ?? d.at) > graceMs) ?? null;
+  // No grace: any answer since the Question, whatever this machine's clock says of GitHub's time.
+  return (decisions || []).find((d) => Date.parse(d.created_at ?? d.at) > since && (graceMs <= 0 || now - Date.parse(d.created_at ?? d.at) > graceMs)) ?? null;
 }
 
 /**

@@ -83,7 +83,7 @@ import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -587,8 +587,9 @@ export const commitAuthor = (identity) =>
  * comments, by people with write access or more to the repository (checked per author: an author association of
  * COLLABORATOR or MEMBER can be read-only), oldest first, minus Factory's own review threads. A failed read keeps
  * nothing from that list or author; with `strict` it throws instead, for a caller that must not merge on a partial read.
+ * `quiet` (a dispatcher tick's read, every tick) logs its count line only when a read failed.
  */
-export async function objectiveDecisions(repo, { issue, prNumber = null }, opts, { strict = false } = {}) {
+export async function objectiveDecisions(repo, { issue, prNumber = null }, opts, { strict = false, quiet = false } = {}) {
   const failed = [];
   const read = (what, p) =>
     p.catch((e) => {
@@ -616,7 +617,7 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
   }
   const kept = candidates.filter((d) => can.get(d.author));
   // Structured enough to tell "nobody answered" from "an answer was dropped" when a Question does not resume.
-  log(`decisions: ${all.length} comment(s) read, ${candidates.length} by people, ${[...can.values()].filter(Boolean).length} of ${can.size} author(s) with write access, ${kept.length} kept${failed.length ? `; read failed for ${failed.join(", ")}` : ""}`);
+  if (!quiet || failed.length) log(`decisions: ${all.length} comment(s) read, ${candidates.length} by people, ${[...can.values()].filter(Boolean).length} of ${can.size} author(s) with write access, ${kept.length} kept${failed.length ? `; read failed for ${failed.join(", ")}` : ""}`);
   return kept;
 }
 
@@ -1691,8 +1692,10 @@ export async function noticePost({ notice, token, what, post }) {
  */
 export function questionNotice({ at = "", stage = "work", reason, pr = null, askOnIssue = false }) {
   const why = String(reason || "").replace(/^question:\s*/i, "");
+  // The form (logic.mjs questionForm) decides the instruction, as it decides what resumes the Objective.
+  if (questionForm({ pr, askOnIssue }) === "pr") return `${at}Question (${stage}): ${why} — PR #${pr.number} is a draft until it is answered. Answer in a comment on the issue or the PR, then mark the PR ready.`;
   if (askOnIssue) return `${at}Question (${stage}): ${why.replace(/[.\s]+$/, "")}.${pr ? ` PR #${pr.number} stays a draft: answer here on the issue, not by marking it ready, which would start its review and merge it without the rest of the work.` : ""}`;
-  return `${at}Question (${stage}): ${why}${pr ? ` — PR #${pr.number} is a draft until it is answered.` : ""} Answer in a comment on the issue${pr ? " or the PR, then mark the PR ready" : ""}.`;
+  return `${at}Question (${stage}): ${why} Answer in a comment on the issue.`;
 }
 
 /**
@@ -1768,14 +1771,17 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     }
     await setStateLabel(repo, issue, "question", { token });
     await moveCard(project, repo, issue, "In review", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
-    // A question asked on the issue (`askOnIssue`) is answered there, never on the PR: no review request for it.
-    if (pr && notify && !askOnIssue) await requestReviewers(repo, pr.number, [notify], { token }).catch((e) => log(`review request: ${e.message.slice(0, 120)}`));
-    // The Question goes on the issue when no PR carries it (a plan-time Question: no work, no PR) or the caller asks
-    // (`askOnIssue`: a question the PR body does not hold), and when GitHub refuses a review request to the PR's own
-    // author, who is the operator in local mode: then the App's comment says it.
-    if (!pr || askOnIssue || (notice && notify && pr.user?.login?.toLowerCase() === notify.toLowerCase())) {
+    // Where it is answered (logic.mjs questionForm): its notice's text, its marker, and whether a maintainer's comment
+    // alone resumes it (dispatch.mjs) all come from this one decision.
+    const form = questionForm({ pr, askOnIssue });
+    // A question asked on the issue is answered there, never on the PR: no review request for it.
+    if (pr && notify && form === "pr") await requestReviewers(repo, pr.number, [notify], { token }).catch((e) => log(`review request: ${e.message.slice(0, 120)}`));
+    // The Question goes on the issue when it is asked there (no PR carries it, or `askOnIssue`: a question the PR body
+    // does not hold), and when GitHub refuses a review request to the PR's own author, who is the operator in local
+    // mode: then the App's comment says it.
+    if (form === "issue" || (notice && notify && pr.user?.login?.toLowerCase() === notify.toLowerCase())) {
       const body = questionNotice({ at, stage, reason, pr, askOnIssue });
-      await postNotice("Question notice", (o) => upsertComment(repo, issue, marker(issue, "question", `${stage}:${runId}`), body, o)).catch((e) => log(`Question notice: ${e.message.slice(0, 120)}`));
+      await postNotice("Question notice", (o) => upsertComment(repo, issue, questionMarker(issue, { stage, runId, form }), body, o)).catch((e) => log(`Question notice: ${e.message.slice(0, 120)}`));
     }
     return { exit, reason };
   }

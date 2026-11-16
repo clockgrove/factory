@@ -17,6 +17,7 @@ import { availableParallelism, homedir, loadavg, totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeNew } from "./fsafe.mjs";
 import { SPENT_GUESS_MS } from "./holds.mjs";
+import { GUESS_MAX_HOURS, guessHoursValid } from "./inputs.mjs";
 import { processRecord, sameProcess, startTime } from "./proc.mjs";
 
 const GB = 2 ** 30;
@@ -65,7 +66,7 @@ const PRESSURE_KEYS = { cpu_psi: "cpuPsi", load: "load", memory_psi: "memPsi", a
 /**
  * The machine's limits a person owns, from machine.json beside `stages`: `pressure` (an object of PRESSURE_KEYS's
  * names, each optional) is when the machine counts as saturated (saturation); `guess_hours` (a list of hours, each
- * above 0) is how long automatic account choice passes over an account whose usage limit reported no reset, by how
+ * above 0 and at most inputs.mjs GUESS_MAX_HOURS) is how long automatic account choice passes over an account whose usage limit reported no reset, by how
  * many in a row (holds.mjs SPENT_GUESS_MS). Returns `{pressure, guessMs, from: {pressure, guess}, file, problems}`:
  * a value that is not given, or cannot be used (named in `problems`), is Factory's default.
  */
@@ -91,7 +92,7 @@ export function machineLimits({ home = homedir() } = {}) {
   let guessMs = SPENT_GUESS_MS;
   const hours = data?.guess_hours;
   if (hours !== undefined) {
-    if (!Array.isArray(hours) || !hours.length || !hours.every((h) => typeof h === "number" && Number.isFinite(h) && h > 0)) problems.push(`${file}: "guess_hours" is not a list of hours, each above 0`);
+    if (!guessHoursValid(hours)) problems.push(`${file}: "guess_hours" is not a list of hours, each above 0 and at most ${GUESS_MAX_HOURS}`);
     else {
       guessMs = hours.map((h) => h * 3600_000);
       from.guess = "setting";

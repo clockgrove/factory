@@ -12,6 +12,7 @@
 // through to the env block rather than overriding it with "".
 import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { HOLD_MAX_MS } from "./holds.mjs";
 
 /**
  * Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's
@@ -211,6 +212,13 @@ export function variableSettings(vars = {}) {
   return { kept, excluded: excluded.sort(), unknown: unknown.sort(), invalid: invalid.sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
+/** The longest third-party wait (third_party_wait_minutes), and the most a wait record's `minutes` is taken as. */
+export const THIRD_PARTY_WAIT_MAX_MINUTES = 24 * 60;
+/** The longest step of the no-reset guess (guess_hours): the longest hold a record keeps (holds.mjs HOLD_MAX_MS). */
+export const GUESS_MAX_HOURS = HOLD_MAX_MS / 3600_000;
+/** Whether `hours` (numbers) is a usable guess: at least one step, each above 0 and at most GUESS_MAX_HOURS. */
+export const guessHoursValid = (hours) => Array.isArray(hours) && hours.length > 0 && hours.every((h) => typeof h === "number" && Number.isFinite(h) && h > 0 && h <= GUESS_MAX_HOURS);
+
 const number = (v) => v.trim() !== "" && Number.isFinite(Number(v));
 /**
  * What a variable's value must be for Factory to take it as given (#284), where the env block's parsing would fall back
@@ -234,8 +242,8 @@ const VALUE_RULES = (() => {
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
-    FACTORY_THIRD_PARTY_WAIT_MINUTES: above0,
-    FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, "a list of hours, each a number above 0"],
+    FACTORY_THIRD_PARTY_WAIT_MINUTES: [(v) => number(v) && Number(v) > 0 && Number(v) <= THIRD_PARTY_WAIT_MAX_MINUTES, `a number above 0, at most ${THIRD_PARTY_WAIT_MAX_MINUTES} (24 hours)`],
+    FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, `a list of hours, each a number above 0, at most ${GUESS_MAX_HOURS}`],
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
@@ -246,13 +254,12 @@ const VALUE_RULES = (() => {
   };
 })();
 /**
- * A `guess_hours` value as milliseconds: a list of hours, comma or space separated, each a number above 0 (the same
- * rule as machine.json's `guess_hours`, machine.mjs machineLimits); null when it is not one.
+ * A `guess_hours` value as milliseconds: a list of hours, comma or space separated, each a number above 0 and at most
+ * GUESS_MAX_HOURS (the same rule as machine.json's `guess_hours`, machine.mjs machineLimits); null when it is not one.
  */
 export function guessHoursMs(value) {
-  const parts = String(value ?? "").split(/[\s,]+/).filter(Boolean);
-  const hours = parts.map(Number);
-  return hours.length && hours.every((h) => Number.isFinite(h) && h > 0) ? hours.map((h) => h * 3600_000) : null;
+  const hours = String(value ?? "").split(/[\s,]+/).filter(Boolean).map(Number);
+  return guessHoursValid(hours) ? hours.map((h) => h * 3600_000) : null;
 }
 
 /** Why a variable's value for setting `name` is not taken (VALUE_RULES), or null. */
@@ -534,7 +541,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     protectedAdditions: list(get("protected_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
-    thirdPartyWaitMs: above0(get("third_party_wait_minutes"), 20) * 60_000,
+    thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,
     harnessVersion: get("harness_version"),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),

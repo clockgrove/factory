@@ -11,7 +11,7 @@
 // finds Factory's own review already posted, so no reviewer pass runs again, and goes on to the answer pass.
 import { addLabels, listComments, objectiveLabeledAt, removeLabel, rest, setStateLabel } from "./github.mjs";
 import { sanitize } from "./handoff.mjs";
-import { log } from "./inputs.mjs";
+import { THIRD_PARTY_WAIT_MAX_MINUTES, log } from "./inputs.mjs";
 import { CODE_SCANNING, REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
 /**
@@ -101,8 +101,9 @@ export function waitBody(issue, { sha, logins, at, waitMs = THIRD_PARTY_WAIT_MS 
 /**
  * The PR's wait record, the newest by Factory itself or by someone who can push (trustedAuthor: a local loop writes as
  * its developer, so the Action's dispatcher and another developer's loop read its record too): {id, sha, logins, since,
- * updatedAt, own, waitMs}, or null. `waitMs` is the bound the stage that wrote it had (third_party_wait_minutes), so
- * every route ends the wait alike. `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock;
+ * updatedAt, own, waitMs}, or null. `waitMs` is the bound the stage that wrote it had (third_party_wait_minutes), at
+ * most THIRD_PARTY_WAIT_MAX_MINUTES whatever the record says: it only tells the dispatcher, serve and run when to wake
+ * the review (waitState); the stage that resumes judges the wait by its own setting (thirdPartyStep). `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock;
  * `updatedAt` its last write; `own` whether this process wrote it (only its own is rewritten).
  */
 export function waitOf(comments, issue) {
@@ -121,7 +122,7 @@ export function waitOf(comments, issue) {
     if (!data || !/^[0-9a-f]{40,64}$/.test(data.sha || "") || !Array.isArray(data.logins) || !Number.isFinite(since)) continue;
     const logins = thirdPartyReviewers(data.logins.slice(0, LOGINS_MAX)).logins;
     if (!logins.length) continue;
-    const waitMs = typeof data.minutes === "number" && data.minutes > 0 && Number.isFinite(data.minutes) ? data.minutes * 60_000 : THIRD_PARTY_WAIT_MS;
+    const waitMs = typeof data.minutes === "number" && data.minutes > 0 && Number.isFinite(data.minutes) ? Math.min(data.minutes, THIRD_PARTY_WAIT_MAX_MINUTES) * 60_000 : THIRD_PARTY_WAIT_MS;
     return { id: c.id, sha: data.sha, logins, since, updatedAt: Date.parse(c.updated_at || c.created_at), own: isSelf(c), waitMs };
   }
   return null;

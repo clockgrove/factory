@@ -399,7 +399,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     },
     spent({ harness, account, now, window = null, steps = SPENT_GUESS_MS }) {
       const n = (of(account, now)?.guess?.streak ?? 0) + 1;
-      const until = now + steps[Math.min(n, steps.length) - 1];
+      const until = now + Math.min(steps[Math.min(n, steps.length) - 1], HOLD_MAX_MS);
       const w = windowOf(window);
       put({ harness, account, until, streak: n, at: now, guess: true, ...(w ? { window: w } : {}) });
       return until;

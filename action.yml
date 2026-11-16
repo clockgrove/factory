@@ -63,7 +63,7 @@ inputs:
     description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.
     required: false
   guess_hours:
-    description: How many hours automatic account choice passes over an account whose usage limit or quota reported no reset, by how many in a row (the last for every one after); `1, 4, 24` when empty. A list of hours, comma or space separated, each a number above 0. In local mode, machine.json's `guess_hours` wins on that machine.
+    description: How many hours automatic account choice passes over an account whose usage limit or quota reported no reset, by how many in a row (the last for every one after); `1, 4, 24` when empty. A list of hours, comma or space separated, each a number above 0 and at most 192 (8 days, the longest hold kept). In local mode, machine.json's `guess_hours` wins on that machine.
     required: false
   rebase_limit:
     description: How many times in 24 hours a PR goes back to its worker to rebase after other PRs merged (each a worker run) before its Objective Blocks; 5 when empty. A whole number above 0. Scheduling only.
@@ -111,7 +111,7 @@ inputs:
     description: 'Reviewers outside Factory whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to `third_party_wait_minutes` for each one''s review of the head Factory''s reviewer read, going on as soon as every one has posted it, then its answer pass handles their line comments as it handles Factory''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
     required: false
   third_party_wait_minutes:
-    description: How long, in minutes, the review stage waits for each of `third_party_reviewers` to review the head, from the wait's record on the PR; 20 when empty. The wait ends as soon as every one has posted its review of that head. Set in the workflow file only, since it gates a merge.
+    description: How long, in minutes, the review stage waits for each of `third_party_reviewers` to review the head, from the wait's record on the PR; 20 when empty, and at most 1440 (24 hours): a larger value is ignored for the default. The wait ends as soon as every one has posted its review of that head. Set in the workflow file only, since it gates a merge.
     required: false
   harness_version:
     description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (FACTORY_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.

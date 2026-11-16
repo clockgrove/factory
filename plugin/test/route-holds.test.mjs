@@ -506,6 +506,7 @@ test("#402: on Actions and in the cloud sandbox the no-reset guess follows the r
   assert.deepEqual(await guessFor("2, 5", 3), [2, 5, 5]);
   assert.deepEqual(await guessFor(null, 2), [1, 4], "Factory's default");
   assert.deepEqual(await guessFor("soon", 1), [1], "not a list of hours: the default");
+  assert.deepEqual(await guessFor("1e10", 1), [1], "a step past the longest hold kept (8 days): the default, never a time no date can hold");
   setSelf(null);
 });
 

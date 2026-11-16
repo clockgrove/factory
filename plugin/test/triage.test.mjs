@@ -469,10 +469,13 @@ test("#402: validation loop: a triage rerun may wait for its workflow run as lon
   const sha = "a".repeat(40);
   const repo = { owner: "acme", name: "app", full: "acme/app" };
   const checkRun = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: locked.job.started_at, completed_at: locked.job.completed_at };
-  const untilOf = async (checks, deadlineAt) => {
+  const untilOf = async (checks, deadlineAt, readMs = 0) => {
     const asked = [];
-    await withGitHub({ runs: [checkRun], jobs: { 1: ranAndFailed } }, () =>
-      validationLoop({
+    await withGitHub({ runs: [checkRun], jobs: { 1: ranAndFailed } }, () => {
+      // `readMs`: the checks' read takes this long, time the checks' one wait has spent before the triage.
+      const fetch = globalThis.fetch;
+      globalThis.fetch = async (url, init) => (/check-runs/.test(String(url)) && readMs ? await new Promise((r) => setTimeout(r, readMs)) : null, fetch(url, init));
+      return validationLoop({
         checkout: "/nonexistent",
         commands: [],
         harness: "codex",
@@ -485,8 +488,8 @@ test("#402: validation loop: a triage rerun may wait for its workflow run as lon
         checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", ...checks },
         outbox: { push: async () => true, expected: () => sha },
         triage: { red: async (r) => (asked.push({ until: r.until, at: Date.now() }), { rerun: false }) },
-      }),
-    );
+      }).finally(() => (globalThis.fetch = fetch));
+    });
     assert.equal(asked.length, 1);
     return asked[0];
   };
@@ -497,6 +500,10 @@ test("#402: validation loop: a triage rerun may wait for its workflow run as lon
   // The checks' own wait binds first.
   const checks = await untilOf({ guardMs: 0, timeoutMs: 10_000 }, Date.now() + 50_000);
   assert.ok(checks.until - checks.at <= 10_000 && checks.until - checks.at > 5_000, `${checks.until - checks.at}`);
+  // Time the checks' wait already spent comes off: the whole wait stays within its one wait.
+  const from = Date.now();
+  const spent = await untilOf({ guardMs: 0, timeoutMs: 3_000 }, Date.now() + 50_000, 1_500);
+  assert.ok(spent.until <= from + 3_000 && spent.until - spent.at <= 1_600, `${spent.until - from} ${spent.until - spent.at}`);
 });
 
 test("notStartedJobs: a required aggregate red from a gathered job that ran is the change's, never pinned on one that never started", async () => {

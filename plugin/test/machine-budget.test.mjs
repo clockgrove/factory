@@ -425,6 +425,9 @@ test("#402: the machine's limits are machine.json's beside stages: when it count
   assert.equal(bad.problems.length, 3);
   assert.match(bad.problems.join("\n"), /"pressure\.cpu_psi" is not a number above 0[\s\S]*"pressure" has no limit "swap"[\s\S]*"guess_hours" is not a list of hours/);
   assert.match(machineLimits({ home: withFile("{") }).problems[0], /is not JSON$/);
+  const huge = machineLimits({ home: withFile({ guess_hours: [1, 1e10] }) });
+  assert.deepEqual([huge.guessMs, huge.problems], [none.guessMs, [`${join(huge.file)}: "guess_hours" is not a list of hours, each above 0 and at most 192`]], "a step past the longest hold kept is named, never cut silently");
+  assert.deepEqual(machineLimits({ home: withFile({ guess_hours: [192] }) }).guessMs, [192 * 3600_000]);
 });
 
 test("#402: a loop holds new starts by the machine's own pressure limits, and doctor prints the limits in force", () => {
@@ -448,6 +451,8 @@ test("#402: a loop holds new starts by the machine's own pressure limits, and do
   const repoRows = by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: dflt, proc: busy }));
   assert.match(repoRows["machine limits"].detail, /for 3 h, 9 h by how many in a row; .* the guess from the repository's FACTORY_GUESS_HOURS$/);
   assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: relaxed, proc: busy }))["machine limits"].detail, /for 2 h, 8 h by how many in a row/, "machine.json's wins on this machine");
+  // The source is what a stage reads (serve's baseEnv): a value in this shell alone is no repository's.
+  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, settings: {}, local: true, home: dflt, proc: busy }))["machine limits"].detail, /for 1 h, 4 h, 24 h by how many in a row; .* the guess from Factory's default$/);
   assert.equal(dfltRows["machine load"].status, "WARN");
   const wrong = home();
   mkdirSync(join(wrong, ".cache", "factory"), { recursive: true });

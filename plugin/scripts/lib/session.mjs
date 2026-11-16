@@ -1145,8 +1145,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     // How long a triage rerun may wait for its workflow run to complete (GitHub reruns only a completed run's failed
-    // jobs): as long as the checks' own wait would, within the stage's wall clock less CHECKS_WAIT_GUARD_MS.
-    const runUntil = () => Date.now() + Math.min(checks.timeoutMs ?? 60 * 60_000, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
+    // jobs): what is left of the checks' own wait, counted from its start, within the stage's wall clock less
+    // CHECKS_WAIT_GUARD_MS.
+    const runUntil = () => Math.min(waitedFrom + (checks.timeoutMs ?? 60 * 60_000), Date.now() + remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
     // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
     // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
     // on every route, up to CHECKS_WAIT_MS or the stage's wall clock less CHECKS_WAIT_GUARD_MS, the reads backing off;

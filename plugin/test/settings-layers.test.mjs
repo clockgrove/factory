@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { WORKFLOW_ONLY_SETTINGS, VARIABLE_SETTINGS, WORKFLOW_SETTINGS, layerLines, resolveInputs, machineSettings, settingLayers, variableSettings } from "../scripts/lib/inputs.mjs";
+import { WORKFLOW_ONLY_SETTINGS, VARIABLE_SETTINGS, WORKFLOW_SETTINGS, layerLines, resolveInputs, valueProblem, machineSettings, settingLayers, variableSettings } from "../scripts/lib/inputs.mjs";
 import { HOT_SETTINGS, Local } from "../scripts/local.mjs";
 import { SPENT_GUESS_MS } from "../scripts/lib/holds.mjs";
 import { doctorSettings, settingsRows } from "../scripts/doctor.mjs";
@@ -75,7 +75,14 @@ test("#402: rebase_limit is a cap a repository variable may set (a whole number 
   assert.ok(layerLines(layers).includes('FACTORY_REBASE_LIMIT: "3" (repository variable)'), "doctor and serve print the value in force and its layer");
   // guess_hours: a list of hours, each above 0, on every route; a variable may set it.
   assert.deepEqual(variableSettings({ FACTORY_GUESS_HOURS: "2, 6 48" }).kept, { FACTORY_GUESS_HOURS: "2, 6 48" });
-  for (const bad of ["0, 4", "1, soon"]) assert.deepEqual(variableSettings({ FACTORY_GUESS_HOURS: bad }).invalid.map((x) => x.why), ["not a list of hours, each a number above 0"], bad);
+  for (const bad of ["0, 4", "1, soon", "1, 193", "1e10"]) assert.deepEqual(variableSettings({ FACTORY_GUESS_HOURS: bad }).invalid.map((x) => x.why), ["not a list of hours, each a number above 0, at most 192"], bad);
+  assert.deepEqual(variableSettings({ FACTORY_GUESS_HOURS: "1, 192" }).kept, { FACTORY_GUESS_HOURS: "1, 192" }, "the longest hold a record keeps, 8 days, is the longest step");
+  assert.deepEqual(resolveInputs({ env: { FACTORY_GUESS_HOURS: "1e10" } }).guessMs, SPENT_GUESS_MS, "past it: the default");
+  // third_party_wait_minutes: at most 24 hours; past it, the default.
+  assert.equal(valueProblem("FACTORY_THIRD_PARTY_WAIT_MINUTES", "1441"), "not a number above 0, at most 1440 (24 hours)");
+  assert.equal(valueProblem("FACTORY_THIRD_PARTY_WAIT_MINUTES", "1440"), null);
+  assert.equal(resolveInputs({ env: { FACTORY_THIRD_PARTY_WAIT_MINUTES: "1e12" } }).thirdPartyWaitMs, 20 * 60_000);
+  assert.equal(resolveInputs({ env: { FACTORY_THIRD_PARTY_WAIT_MINUTES: "1440" } }).thirdPartyWaitMs, 1440 * 60_000);
   assert.deepEqual(resolveInputs({ env: { FACTORY_GUESS_HOURS: "2, 6 48" } }).guessMs, [2, 6, 48].map((h) => h * 3600_000));
   assert.deepEqual(resolveInputs({ env: {} }).guessMs, SPENT_GUESS_MS, "Factory's default is holds.mjs's");
   assert.deepEqual(resolveInputs({ env: { FACTORY_GUESS_HOURS: "-1" } }).guessMs, SPENT_GUESS_MS);

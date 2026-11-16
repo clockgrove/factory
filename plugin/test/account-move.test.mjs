@@ -893,6 +893,7 @@ test("#266: a usage limit with no reset reported Blocks as before, and automatic
   const holds = accountHolds({ dir: join(dir, "..", "holds") });
   assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t }), t + 60 * MIN);
   assert.equal(holds.until("seat", t), null, "no hold");
+  assert.equal(accountHolds({ dir: join(dir, "..", "holds-cap") }).spent({ harness: "copilot", account: "seat", now: t, steps: [1e15] }), t + 8 * 24 * 60 * MIN, "#402: a step is never longer than the longest hold kept");
   assert.equal(holds.held("copilot", t), false);
   assert.equal(holds.held("copilot", t, true), true);
   assert.equal(accountHolds({ dir: join(dir, "..", "holds") }).avoidUntil("seat", t), t + 60 * MIN, "every serve reads it");

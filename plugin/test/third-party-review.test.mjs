@@ -559,6 +559,30 @@ test("#303: the dispatcher leaves a waiting PR as it is, then puts its review la
   assert.ok(!t.writes.some((x) => x.startsWith("POST /issues/12/labels")));
 });
 
+test("#402: a wait record's minutes only times the wake, at most 24 hours; an out-of-range record never stops the dispatcher's tick, and the resuming stage judges by its own setting", async () => {
+  // A writer edits the record to a bound no Date can hold: it is taken as 24 hours, and the tick goes on.
+  const w = waitWorld();
+  const rec = w.state.comments[12][0];
+  rec.body = rec.body.replace(/"minutes":20/, '"minutes":1e12');
+  setSelf(W_SELF);
+  assert.equal(waitOf([rec], 7).waitMs, 24 * 60 * MIN);
+  setSelf(null);
+  let t = await waitTick(w);
+  assert.deepEqual(t.writes, [], "still waiting");
+  assert.equal(Date.parse(t.r.deadlines.find((d) => d.kind === "third-party").at), Date.parse(rec.created_at) + 24 * 60 * MIN + 60_000);
+  // A record whose time no wake can be set for throws in the issue's pass: said, read again next tick, and the tick ends.
+  const far = waitWorld();
+  far.state.comments[12][0].created_at = "+275760-09-13T00:00:00.000Z";
+  t = await waitTick(far);
+  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"), "read again next tick");
+  // The record's minutes never decide for the stage: a record edited to one minute still waits the stage's own 20.
+  const clock = { t: T0 };
+  const gh = github({ reviews: [], clock: () => clock.t });
+  await step(gh, clock, { waitMs: MIN });
+  clock.t = T0 + 5 * MIN;
+  assert.deepEqual((await step(gh, clock)).wait, { missing: [GREPTILE], until: T0 + THIRD_PARTY_WAIT_MS });
+});
+
 test("#303: past the bound the dispatcher puts the label back with no reviews read; a record whose stage already took it up is left to the usual passes", async () => {
   const w = waitWorld({ recordAgo: THIRD_PARTY_WAIT_MS + MIN });
   let t = await waitTick(w);

@@ -51,7 +51,8 @@ on:
       - {{ci_workflow}}
     types: [completed]
 # Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below:
-#   FACTORY_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets
+#   FACTORY_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets; re-render after any change,
+#     since setup writes each declared account's secrets into the jobs by name
 #   FACTORY_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
 env:
   FACTORY_HARNESS: {{harness}} # claude | codex | copilot
@@ -190,7 +191,7 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
@@ -203,14 +204,14 @@ jobs:
           account: ${{ steps.account.outputs.account }} # empty with no accounts declared: the secrets below are today's
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
-          anthropic_api_key: ${{ secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)] }} # Claude; empty with federation
-          codex_api_key: ${{ secrets[format('CODEX_API_KEY{0}', steps.account.outputs.suffix_codex)] }} # Codex; reaches the harness step only
-          codex_gateway_key: ${{ secrets[format('FACTORY_CODEX_GATEWAY_KEY{0}', steps.account.outputs.suffix_codex)] }} # Codex through the Vercel AI Gateway; wins over CODEX_API_KEY when set
-          copilot_github_token: ${{ secrets[format('COPILOT_GITHUB_TOKEN{0}', steps.account.outputs.suffix_copilot)] }} # Copilot; a token with only the Copilot Requests permission (required)
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # Claude; empty with federation
+          codex_api_key: ${{ secrets.CODEX_API_KEY }} # Codex; reaches the harness step only
+          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }} # Codex through the Vercel AI Gateway; wins over CODEX_API_KEY when set
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }} # Copilot; a token with only the Copilot Requests permission (required)
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }} # optional: red-check triage reruns flaky CI jobs instead of a fix pass, and the drift advisory flags a drifting worker on its progress comment; empty turns both off
           worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # optional, with FACTORY_WORKER_SECRETS in the env block: SOURCE=value lines for the worker's shell only; a dedicated key with a gateway-side budget (docs/PLAN.md, Worker secrets)
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
-          claude_code_oauth_token: ${{ secrets[format('CLAUDE_CODE_OAUTH_TOKEN{0}', steps.account.outputs.suffix_claude)] }} # credential: plan only; your own repository only
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
       - uses: actions/upload-artifact@v7
         if: always()
         with: { name: "factory-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
@@ -231,7 +232,7 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: actions/checkout@v7
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
@@ -244,14 +245,14 @@ jobs:
           account: ${{ steps.account.outputs.account }}
           app_id: ${{ secrets.FACTORY_APP_ID }}
           app_private_key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
-          anthropic_api_key: ${{ secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)] }}
-          codex_api_key: ${{ secrets[format('CODEX_API_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          codex_gateway_key: ${{ secrets[format('FACTORY_CODEX_GATEWAY_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          copilot_github_token: ${{ secrets[format('COPILOT_GITHUB_TOKEN{0}', steps.account.outputs.suffix_copilot)] }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
           worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the fix and answer passes only, never the reviewer
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
-          claude_code_oauth_token: ${{ secrets[format('CLAUDE_CODE_OAUTH_TOKEN{0}', steps.account.outputs.suffix_claude)] }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       - uses: actions/upload-artifact@v7
         if: always() && steps.f.outputs.issue_number != ''
         with: { name: "factory-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly
@@ -275,7 +276,7 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
@@ -289,11 +290,11 @@ jobs:
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
-          anthropic_api_key: ${{ secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)] }} # the harness's credential goes into the stage's environment only
-          codex_api_key: ${{ secrets[format('CODEX_API_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          codex_gateway_key: ${{ secrets[format('FACTORY_CODEX_GATEWAY_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          copilot_github_token: ${{ secrets[format('COPILOT_GITHUB_TOKEN{0}', steps.account.outputs.suffix_copilot)] }}
-          claude_code_oauth_token: ${{ secrets[format('CLAUDE_CODE_OAUTH_TOKEN{0}', steps.account.outputs.suffix_claude)] }} # credential: plan only; your own repository only
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
           worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7
@@ -341,7 +342,7 @@ jobs:
       - uses: {{action}}
         id: account # several accounts (FACTORY_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.FACTORY_ACCOUNTS != ''
-        with: { mode: account, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
+        with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ needs.launch-gate.outputs.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.FACTORY_APP_ID }}", app_private_key: "${{ secrets.FACTORY_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
       - uses: {{action}}
         id: f
         with:
@@ -353,11 +354,11 @@ jobs:
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
-          anthropic_api_key: ${{ secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)] }} # the harness's credential goes into the stage's environment only
-          codex_api_key: ${{ secrets[format('CODEX_API_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          codex_gateway_key: ${{ secrets[format('FACTORY_CODEX_GATEWAY_KEY{0}', steps.account.outputs.suffix_codex)] }}
-          copilot_github_token: ${{ secrets[format('COPILOT_GITHUB_TOKEN{0}', steps.account.outputs.suffix_copilot)] }}
-          claude_code_oauth_token: ${{ secrets[format('CLAUDE_CODE_OAUTH_TOKEN{0}', steps.account.outputs.suffix_claude)] }} # credential: plan only; your own repository only
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # the harness's credential goes into the stage's environment only
+          codex_api_key: ${{ secrets.CODEX_API_KEY }}
+          codex_gateway_key: ${{ secrets.FACTORY_CODEX_GATEWAY_KEY }}
+          copilot_github_token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
           worker_secret_values: ${{ secrets.FACTORY_WORKER_SECRET_VALUES }} # with FACTORY_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
       - uses: actions/upload-artifact@v7

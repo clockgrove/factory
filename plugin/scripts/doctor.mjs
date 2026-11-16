@@ -680,7 +680,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);
   out.push(label ? PASS("label", inputs.objectiveLabel) : FAIL("label", `${inputs.objectiveLabel} missing`, "setup --apply labels"));
-  const project = await findProject(repo, { token }).catch(() => null);
+  const project = await findProject(repo, { token, project: inputs.project }).catch(() => null);
   // A local loop's token is scoped to the one repository and usually cannot see an organisation's projects: the
   // board is then out of view, card moves are skipped, and the labels carry the state, as the dispatcher already does.
   // A local token is scoped to one repository: an organisation's board may be out of its sight with or without an error

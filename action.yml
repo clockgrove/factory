@@ -125,6 +125,9 @@ inputs:
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
     required: false
+  project:
+    description: 'The node id of the repository''s Factory Project board, which setup records as it creates the board. Empty, Factory looks for the board linked to the repository titled exactly `Factory: <repository>`.'
+    required: false
   app_id:
     description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
     required: true

@@ -15,11 +15,11 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -127,10 +127,101 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (Number.isFinite(ms)) deadlines.push({ issue, kind, at: new Date(ms).toISOString() });
   };
   // A read this run could not make: read again soon, once (nextWake arms no retry from a retry's own run).
-  // The stage each relaunch names, for its starting marker; the Objectives whose last start the vendor failed (a
-  // transient error), which hold this route's new picks.
+  // The stage each relaunch names, for its starting marker; the Objectives whose last start the vendor refused
+  // (`{n, at, flight}`, at its streak's first refusal, `flight` its own retry still in flight), which hold this route's new picks unless another Objective's record
+  // shows the vendor serving it since (logic.mjs vendorEvidence); every sandbox record read this tick, by Objective.
   const relaunchStage = {};
   const vendorHeld = [];
+  const boxRecords = new Map();
+  // The dispatcher runs' jobs, and the runs themselves where needed, read once a run this tick: where each starting
+  // marker's launch job stands (launchJobState). Each read settles to `{value}` or `{error}`.
+  const markerReads = new Map();
+  const readOnce = (key, read) => {
+    if (!markerReads.has(key)) markerReads.set(key, read().then((value) => ({ value }), (error) => (log(`  ${key} could not be read (${error?.status || String(error?.message || error).slice(0, 120)})`), { error })));
+    return markerReads.get(key);
+  };
+  let markerBase;
+  /**
+   * The record with each starting marker since `since` settled by its launch job as GitHub lists it: a job that ended
+   * with the marker still there is stored as a `lost` start (under the record lock, with the marker read again there:
+   * a launcher's outcome written meanwhile settles it instead, and this tick goes on from the record read there; a dry
+   * run only reads), one queued or running is in flight. A marker that names no run names no launch job: none is in
+   * flight. A run GitHub no longer holds (a 404 or 410: deleted, expired) runs no launch job either: lost at the
+   * marker's time. Returns `{record, flight}`: `flight` null when none is in flight, else when to look again: the started
+   * job's own limit, or Infinity while it waits for a runner or its group (its end ticks the dispatcher; the cron is the
+   * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry, up to the
+   * unread-claim bound (CLAIM_PAUSE_MS from the marker). Past it, a
+   * read that still fails (not rate limited) returns `unread` too, `{run, read, code}`, the read named: the caller Blocks
+   * the Objective with cause `factory`, its notice naming that read.
+   */
+  const settleMarkers = async (n, record, since) => {
+    let rec = record;
+    let flight = null;
+    let unread = null;
+    const look = (t) => (flight = flight === null ? t : Math.min(flight, t));
+    for (const m of pendingMarkers(record, since)) {
+      if (m.run && m.run === process.env.GITHUB_RUN_ID) {
+        look(Infinity);
+        continue;
+      }
+      let state = { ended: m.at };
+      if (m.run) {
+        let failed = `run ${m.run}'s jobs`;
+        const jobs = await readOnce(failed, () => runJobs(repo, m.run, readToken));
+        state = jobs.error ? null : launchJobState(jobs.value, n);
+        let error = jobs.error;
+        if (state?.unlisted) {
+          failed = `run ${m.run}`;
+          const run = await readOnce(failed, () => actionsRun(repo, m.run, readToken));
+          if (run.error) error = run.error;
+          else state = launchJobState(jobs.value, n, run.value);
+        }
+        if (error && runGone(error)) state = { ended: m.at };
+        else if (error && !error.rateLimited && Date.now() - Date.parse(m.at) > CLAIM_PAUSE_MS) {
+          unread ??= { run: m.run, read: failed, code: Number.isInteger(error.status) && error.status > 0 ? `HTTP ${error.status}` : error.transport ? "network" : "error" };
+          continue;
+        } else if (error) {
+          retry(`#${n}'s launch job`);
+          look(Infinity);
+          continue;
+        }
+      }
+      if (state.running) {
+        look(state.until === null ? Infinity : state.until + 1000);
+        continue;
+      }
+      const lost = { run: m.run, stage: m.stage, at: state.ended ?? new Date().toISOString() };
+      if (!dryRun) {
+        markerBase ??= recordWrites?.base ?? (await lockBase(repo, opts).catch(() => null));
+        const w = markerBase ? await writeSandboxRecord(repo, n, opts, (cur) => lostLaunch(cur, lost), { base: markerBase, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
+        if (!w?.ok && !w?.refused) {
+          log(`  #${n}: its lost launch (run ${m.run || "none"}) was not stored; next tick`);
+          retry(`#${n}'s lost launch`);
+          look(Infinity);
+          continue;
+        }
+        // Refused: the marker was gone under the lock (its launcher's outcome landed after this tick's read): the record
+        // read there is GitHub's, not this tick's copy with a lost start the record does not hold.
+        if (w.refused) {
+          rec = w.record ? { ...rec, ...w.record } : rec;
+          continue;
+        }
+      }
+      rec = lostLaunch(rec, lost) ?? rec;
+    }
+    return { record: rec, flight, unread };
+  };
+  // The Block for a launch whose dispatcher run stayed unreadable past the bound (settleMarkers `unread`): Factory
+  // cannot tell whether it started, so the Objective stops with one notice naming the read, never a silent wait.
+  const blockUnreadLaunch = async (issue, { run, read, code }, stage) => {
+    const n = issue.number;
+    vanished.push(n);
+    statuses[n] = "Blocked";
+    const from = stage === "review" ? "factory:in-review" : "factory:running";
+    issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "factory:blocked" }];
+    log(`  #${n}: its ${stage} launch (dispatcher run ${run}) unread for over a day (${read}: ${code}); Blocked`);
+    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Factory cannot tell whether it started; re-apply the label once GitHub answers that read`, "factory");
+  };
   // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
   // its own, not a wait for the cron, since that launch will not come.
   const graceDue = (n, kind, ms) => due(n, n === failedLaunch ? "start-retry" : kind, ms);
@@ -642,6 +733,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (sandbox && backend().trigger.routes(issue)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
           boxRecord = record;
+          boxRecords.set(issue.number, record);
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;
@@ -659,11 +751,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (since && !launchedSince(record, "work", since)) {
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
             // launcher); one that never ran gets the grace for its own launch first.
-            const again = startRetryAt(record, since);
-            const flight = inFlightUntil(record, since);
-            if (transientHold(record, since)) vendorHeld.push(issue.number);
+            const settled = await settleMarkers(issue.number, record, since);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "work");
+              continue;
+            }
+            const again = startRetryAt(settled.record, since);
+            const flight = settled.flight;
+            boxRecords.set(issue.number, settled.record);
+            if (transientHold(settled.record, since)) vendorHeld.push({ n: issue.number, at: refusalStreakAt(settled.record, since), flight: flight !== null });
             relaunchStage[issue.number] = "work";
-            // A launch named less than START_LOST_MS ago is still in flight (its job may wait for a runner, or threw
+            // A launch whose job GitHub still lists queued or running is in flight (it may wait for a runner, or threw
             // before it could record anything): it is not named again before its marker turns into an outcome.
             if (flight !== null) due(issue.number, "start-retry", flight);
             else if (again !== null) {
@@ -992,13 +1090,20 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (sandbox && reviewing && !pr.draft) {
           const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
           if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
           if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
-            const again = startRetryAt(record, labelledAt);
-            const flight = inFlightUntil(record, labelledAt);
-            if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
+            const settled = await settleMarkers(issue.number, record, labelledAt);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "review");
+              continue;
+            }
+            const again = startRetryAt(settled.record, labelledAt);
+            const flight = settled.flight;
+            boxRecords.set(issue.number, settled.record);
+            if (transientHold(settled.record, labelledAt)) vendorHeld.push({ n: issue.number, at: refusalStreakAt(settled.record, labelledAt), flight: flight !== null });
             if (flight !== null) due(issue.number, "start-retry", flight);
             else if (again !== null) {
               if (Date.now() >= again) relaunch.push(issue.number);
@@ -1011,6 +1116,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
         if (sandbox && !relaunch.includes(issue.number)) {
           const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
           if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) {
@@ -1220,13 +1326,25 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const slots = Math.max(0, inputs.maxConcurrent - running);
     picked.ready = [...sentBack, ...picked.ready.filter((n) => !sentBack.includes(n))].slice(0, slots);
   }
-  // The sandbox vendor failing starts (a transient error, its retry pending): nothing new starts on this route until a
-  // retry gets through, so the queue is not drained into the outage. The retries themselves still go.
-  if (sandbox && vendorHeld.length && !inputs.issue && picked.ready.length) {
-    const why = `the ${inputs.sandbox} sandbox is failing starts (#${vendorHeld.join(", #")} waits to retry); new Objectives wait`;
-    picked.skipped = [...picked.skipped, ...picked.ready.map((n) => ({ number: n, reason: why }))];
-    picked.ready = [];
-    picked.reason = why;
+  // The sandbox vendor refusing starts (its retry pending): the queue is not drained into an outage. The retries
+  // themselves still go. Whether it refuses everyone is read from the other Objectives' sandbox records since each
+  // refusal streak began (logic.mjs vendorEvidence): one that started since says the vendor serves others, and that
+  // refusal holds nothing. Otherwise at most one start goes into the suspected outage at a time: while one is in flight
+  // (another Objective's launch since, a held one's own retry in flight or named this tick), every new pick waits for its
+  // answer; with none in flight (another was refused too, or none tried), one new pick goes as the next try, and the
+  // rest wait. So two Objectives each refused for reasons of their own never hold the route for good: each try that
+  // starts frees it.
+  const evidence = (h) => vendorEvidence(h.at, [...boxRecords].filter(([n]) => n !== h.n).map(([, r]) => r));
+  const vendorDown = vendorHeld.filter((h) => evidence(h) !== "up");
+  if (sandbox && vendorDown.length && !inputs.issue && picked.ready.length) {
+    const trying = vendorDown.some((h) => h.flight || relaunch.includes(h.n) || evidence(h) === "trying");
+    const held = trying ? picked.ready : picked.ready.slice(1);
+    const why = `the ${inputs.sandbox} sandbox is refusing starts (#${vendorDown.map((h) => h.n).join(", #")} waits to retry); ${trying ? "a start into it is in flight, and new Objectives wait for its answer" : `#${picked.ready[0]} starts as the one try into it, and the other new ones wait`}`;
+    if (held.length) {
+      picked.skipped = [...picked.skipped, ...held.map((n) => ({ number: n, reason: why }))];
+      picked.ready = picked.ready.filter((n) => !held.includes(n));
+      picked.reason = why;
+    } else log(why);
   }
   // GitHub's REST quota for this token spent (a read above met it and went on without its answer): nothing new starts
   // until its reset, since the new stages' first reads would meet it too. Said once. Its GraphQL quota alone holds nothing.
@@ -1349,8 +1467,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // A starting marker for each stage this run names on the sandbox route, written under the record lock: a launch that
   // never runs its course (its job never starts, fails before it writes, or is cut off) leaves it with no outcome, and
-  // past START_LOST_MS it counts as a failed start (logic.mjs startFailures), so the next try waits its pause and three
-  // Block, whatever happened to the job.
+  // once GitHub lists its launch job as ended it is stored as a failed start (settleMarkers), so the next try waits its
+  // pause and three Block, whatever happened to the job.
   const named = [...picked.ready.map((n) => [n, "work"]), ...relaunch.filter((n) => !picked.ready.includes(n)).map((n) => [n, relaunchStage[n] || "work"])];
   if (sandbox && !dryRun && named.length) {
     // `recordWrites`: the record writes' {api, base} (tests); else GitHub's, with the lock's base read once.
@@ -1359,9 +1477,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const markedAt = new Date().toISOString();
       const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: markedAt, run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
       if (!w?.ok) log(`  #${n}: no starting marker (${w?.refused ? "a launcher's live claim holds the record" : "not written"}); the wake below and the launch grace catch a lost launch`);
-      // This run owns the launch it named: a launcher that exits without a tick, or never runs, is looked at again when
-      // its marker turns into an outcome, by a wake of this run's, not the cron.
-      due(n, "start-retry", Date.parse(markedAt) + START_LOST_MS + 1000);
+      // This run owns the launch it named: a launcher that exits without a tick is looked at again, by a wake of this
+      // run's, not the cron, at the earliest its job could have ended (its own limit from now); then its job's state says.
+      due(n, "start-retry", Date.parse(markedAt) + LAUNCH_JOB_MS + 1000);
     }
   }
   watch.mark("mark");

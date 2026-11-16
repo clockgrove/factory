@@ -5,6 +5,7 @@
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
@@ -1229,8 +1230,94 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
-export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+// The Public Suffix List, through the tldts library (vendored: plugin/vendor/tldts, pinned in tools/deps), its ICANN and
+// private sections both: `github.io` and `vercel.app` are suffixes anyone can register a site under, as `co.uk` is.
+const requireVendor = createRequire(import.meta.url);
+const { getPublicSuffix } = requireVendor("../../vendor/tldts/dist/index.cjs.min.js");
+/** Whether `name` is itself a public suffix (the Public Suffix List, both sections): anyone can have a site under it. */
+export const publicSuffix = (name) => getPublicSuffix(name, { allowPrivateDomains: true }) === name;
+/**
+ * The list's rules as tldts publishes them (dist/cjs/src/data/trie.js: a trie of labels, right to left; a node's flags
+ * say a rule of either section ends there), read once; null when the file does not have that shape, so the check that
+ * reads it fails closed. tldts's API answers for one name only, never what lies below one.
+ */
+let pslTrie;
+const suffixTrie = () => {
+  if (pslTrie !== undefined) return pslTrie;
+  try {
+    const t = requireVendor("../../vendor/tldts/dist/cjs/src/data/trie.js");
+    const ok = t.nodeFlags instanceof Uint8Array && t.edgeStart?.length === t.nodeFlags.length + 1 && t.edgeLength?.length === t.edgeChild?.length && typeof t.labelText === "string" && Number.isInteger(t.rulesRoot);
+    const offset = ok ? new Uint32Array(t.edgeLength.length) : null;
+    for (let node = 0, at = 0; ok && node < t.nodeFlags.length; node += 1) {
+      for (let e = t.edgeStart[node]; e < t.edgeStart[node + 1]; e += 1) {
+        offset[e] = at;
+        at += t.edgeLength[e];
+      }
+    }
+    pslTrie = ok ? { ...t, label: (e) => t.labelText.slice(offset[e], offset[e] + t.edgeLength[e]) } : null;
+  } catch {
+    pslTrie = null;
+  }
+  return pslTrie;
+};
+/**
+ * A Public Suffix List rule (both sections) at `name` or below it: the first one found, as the list writes it (`*.` for
+ * a wildcard rule), or null with none. A `*.name` wildcard covers every site under `name`, so a rule anywhere below it
+ * (`s3.amazonaws.com` under `amazonaws.com`) is a public suffix it would open. Returns `name` itself when the list
+ * cannot be read: no wildcard passes unchecked.
+ */
+export function suffixRuleUnder(name) {
+  const t = suffixTrie();
+  if (!t) return name;
+  const edges = (node) => Array.from({ length: t.edgeStart[node + 1] - t.edgeStart[node] }, (_, i) => t.edgeStart[node] + i);
+  const child = (node, label) => {
+    const e = edges(node).find((x) => t.label(x) === label);
+    return e === undefined ? -1 : t.edgeChild[e];
+  };
+  const labels = name.split(".").reverse();
+  // An exception rule for `name` itself (`!city.kawasaki.jp`): the wildcard rule over it does not make it a suffix.
+  let ex = Number.isInteger(t.exceptionsRoot) ? t.exceptionsRoot : -1;
+  for (const label of labels) ex = ex < 0 ? -1 : child(ex, label);
+  const excepted = ex >= 0 && (t.nodeFlags[ex] & 3) !== 0;
+  // The nodes `name`'s labels reach, right to left, each label by its own edge or a wildcard rule's `*`.
+  let reached = [{ node: t.rulesRoot, path: [], star: false }];
+  for (const label of labels) {
+    reached = reached.flatMap(({ node, path }) => edges(node).filter((e) => t.label(e) === label || t.label(e) === "*").map((e) => ({ node: t.edgeChild[e], path: [t.label(e), ...path], star: t.label(e) === "*" })));
+    if (!reached.length) return null;
+  }
+  // Any rule that ends there or deeper (the trie shares its nodes: each is looked at once).
+  const seen = new Set();
+  const below = (node, path, self = true) => {
+    if (self && t.nodeFlags[node] & 3) return path.join(".");
+    if (seen.has(node)) return null;
+    seen.add(node);
+    for (const e of edges(node)) {
+      const hit = below(t.edgeChild[e], [t.label(e), ...path]);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  for (const { node, path, star } of reached) {
+    const hit = below(node, path, !(star && excepted));
+    if (hit) return hit;
+  }
+  return null;
+}
+/**
+ * Why a `*.name` wildcard may not be opened, or null when it may: a Public Suffix List rule at `name` or below it
+ * (suffixRuleUnder: `*.github.io`, `*.amazonaws.com`, where `s3.amazonaws.com` is a suffix anyone can have a bucket
+ * under), as `{rule}`. A wildcard over a top-level name alone (`*.com`, `*.internal`) is no host entry at all (hostEntry).
+ */
+export function wildcardRefusal(name) {
+  const rule = suffixRuleUnder(name);
+  return rule ? { rule } : null;
+}
+/**
+ * Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry) that an
+ * Objective's label may open: a wildcard only over a name with no public suffix at or below it (wildcardRefusal),
+ * never one that would open sites anyone can register.
+ */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host) && !(host.startsWith("*.") && wildcardRefusal(host.slice(2)));
 export function runnerDomains(value = "", hosts = []) {
   return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }

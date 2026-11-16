@@ -2899,8 +2899,46 @@ export const MAX_FAILED_STARTS = 3;
  * retried with a growing pause and never Block; a vendor's outage holds new picks instead (transientHold).
  */
 export const TRANSIENT_START = Object.freeze(["rate_limited", "unavailable", "timeout"]);
-/** A launch job's limit (5 minutes) plus its wait for a runner: a starting marker this old with no outcome was lost. */
-export const START_LOST_MS = 10 * 60_000;
+/** The launch job's own limit: workflow-template.yml's `launch` job's timeout-minutes (a test checks they agree). */
+export const LAUNCH_JOB_MS = 5 * 60_000;
+/** The name of a dispatcher run's launch job for Objective `n`: workflow-template.yml's `launch` matrix job. */
+export const launchJobName = (n) => `launch (${n})`;
+/**
+ * What became of the launch a dispatcher run named for Objective `n`, from that run's jobs as GitHub lists them and,
+ * when none of them is the launch job for `n`, the run itself (`run`, actions/runs/{run}): `{ended: iso}` once its
+ * launch job for `n` has completed (the latest attempt), at that completion, or once the run has completed with no launch
+ * job for `n` (the matrix never had it), at the run's end; else `{running: true, until}`, the job queued, waiting for a
+ * runner or its concurrency group, or running, `until` the moment its own limit ends it when it has started
+ * (LAUNCH_JOB_MS), null when it has not. GitHub lists a matrix job only once it expands the matrix, after the `dispatch`
+ * job it needs completes: until the run has completed, no launch job listed is one still to come. With no launch job
+ * listed and `run` not read, it says `unlisted: true` too: the run's own status decides.
+ */
+export function launchJobState(jobs, n, run = null) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const job = list.filter((j) => j?.name === launchJobName(n)).sort((a, b) => (b.run_attempt ?? 0) - (a.run_attempt ?? 0) || (b.id ?? 0) - (a.id ?? 0))[0];
+  if (job) return job.status === "completed" ? { ended: job.completed_at ?? null } : { running: true, until: Number.isFinite(Date.parse(job.started_at)) ? Date.parse(job.started_at) + LAUNCH_JOB_MS : null };
+  if (run?.status === "completed") return { ended: run.updated_at ?? null };
+  return run ? { running: true, until: null } : { running: true, until: null, unlisted: true };
+}
+/** A read of a dispatcher run (or its jobs) that failed because GitHub holds no such run any more (deleted, expired). */
+export const runGone = (e) => !!e && !e.rateLimited && (e.status === 404 || e.status === 410);
+/** The dispatcher's starting markers (`ok: null`) at or after `since` with no outcome yet, oldest first. */
+export function pendingMarkers(record, since) {
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
+  return (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+}
+/**
+ * The record with the starting marker of dispatcher run `run` for `stage` stored as a lost start at `at` (its launch
+ * job ended with no outcome written, launchJobState), or null when the record holds no such marker any more (its
+ * launcher's claim or failure settled it).
+ */
+export function lostLaunch(record, { run, stage, at }) {
+  const launches = Array.isArray(record?.launches) ? record.launches : [];
+  const i = launches.findIndex((l) => l?.ok === null && l.run === run && l.stage === stage);
+  if (i < 0) return null;
+  const l = launches[i];
+  return { ...record, launches: launches.map((x, k) => (k === i ? { stage: l.stage, event: l.event, ok: false, run: l.run, at, code: "lost" } : x)) };
+}
 /**
  * `since` (the Running label, the review request) is GitHub's time, in whole seconds; a launch entry's `at` is the
  * writing runner's clock. A runner behind GitHub's by a few seconds writes its marker or failure "before" the stint it
@@ -2915,28 +2953,18 @@ export const START_RETRY_MAX_MS = 30 * 60_000;
 export const startBackoffMs = (n) => (n >= 5 ? START_RETRY_MAX_MS : Math.min(START_RETRY_MAX_MS, START_RETRY_MS * 2 ** Math.max(0, n - 1)));
 
 /**
- * The record with every launch attempt that ended unseen stored as a failed start: the one place a failure is read from
- * an absence. Every claim-comment write applies it first (launch.mjs writeSandboxRecord), and every reader counts
- * through it (startFailures), so a later write never erases an attempt and the count only grows:
- * - a starting marker (`ok: null`, the dispatcher's as it names a stage) older than START_LOST_MS is replaced by
- *   `{ok: false, code: "lost"}` at its expiry: its launch never ran its course;
- * - a claim (`running`, a launcher's nonce) whose lease ran out with no start since it was made gets
- *   `{ok: false, code: "timeout"}` at the lease's end, and the record says `failed`: its launcher was cut off.
+ * The record with a launcher's claim that ended unseen stored as a failed start. Every claim-comment write applies it
+ * first (launch.mjs writeSandboxRecord), and every reader counts through it (startFailures), so a later write never
+ * erases an attempt and the count only grows: a claim (`running`, a launcher's nonce) whose lease ran out with no start
+ * since it was made gets `{ok: false, code: "timeout"}` at the lease's end, and the record says `failed`: its launcher
+ * was cut off. A starting marker (`ok: null`, the dispatcher's as it names a stage) is stored as a `lost` start by the
+ * dispatcher once GitHub lists its launch job as ended (launchJobState, lostLaunch), never by its age.
  * Returns the same object when nothing was due.
  */
 export function settleStale(record, now = Date.now()) {
   if (!record) return record;
-  const launches = Array.isArray(record.launches) ? record.launches : [];
-  let changed = false;
-  const kept = [];
-  for (const l of launches) {
-    const at = Date.parse(l?.at);
-    if (l?.ok === null && Number.isFinite(at) && now - at > START_LOST_MS) {
-      kept.push({ stage: l.stage, event: l.event, ok: false, run: l.run, at: new Date(at + START_LOST_MS).toISOString(), code: "lost" });
-      changed = true;
-    } else kept.push(l);
-  }
-  let rec = changed ? { ...record, launches: kept } : record;
+  const kept = Array.isArray(record.launches) ? record.launches : [];
+  let rec = record;
   // "No start since the claim": by the launcher's claim time (`claimedAt`), never the merged record's `at`, which the
   // started stage's own beats override; for a claim written before `claimedAt` was, by its launch run (the start's
   // entry carries the claim's run).
@@ -2994,11 +3022,6 @@ export function startRetryAt(record, since, now = Date.now()) {
 }
 /** The vendor's own refusals: these alone hold a route's new picks (a cut-off launch says nothing about the vendor). */
 export const VENDOR_DOWN = Object.freeze(["rate_limited", "unavailable"]);
-/**
- * Vendor refusals in a row after which one Objective's failure looks like its own, not the vendor's: its retries go on
- * every 30 minutes, but it no longer holds the route (4 refusals: about 30 minutes of backoff).
- */
-export const VENDOR_HOLD_MAX = 4;
 /** How many of the latest failed starts since `since` in a row were the vendor refusing (VENDOR_DOWN). */
 export const refusalsInRow = (record, since, now = Date.now()) => {
   const fails = startFailures(record, since, now);
@@ -3006,22 +3029,29 @@ export const refusalsInRow = (record, since, now = Date.now()) => {
   for (let i = fails.length - 1; i >= 0 && VENDOR_DOWN.includes(fails[i].code); i -= 1) n += 1;
   return n;
 };
-/** Whether this stage's latest starts were refused by the vendor, at most VENDOR_HOLD_MAX in a row: the route's new picks wait. */
-export const transientHold = (record, since, now = Date.now()) => {
+/** Whether this stage's latest starts since `since` were refused by the vendor: whether it holds its route's new picks is vendorEvidence's. */
+export const transientHold = (record, since, now = Date.now()) => refusalsInRow(record, since, now) >= 1;
+/** When the first of this stage's latest vendor refusals in a row since `since` was (ms), or null when its latest failed start is none. */
+export function refusalStreakAt(record, since, now = Date.now()) {
   const n = refusalsInRow(record, since, now);
-  return n >= 1 && n <= VENDOR_HOLD_MAX;
-};
-/**
- * A launch the dispatcher named less than START_LOST_MS ago with no outcome yet: still in flight (its job may wait for
- * a runner, or threw before it could record anything). Returns when its marker turns into a `lost` failure, the
- * earliest moment it may be named again, or null when none is in flight since `since`.
- */
-export function inFlightUntil(record, since, now = Date.now()) {
-  const t = Date.parse(since) - CLOCK_SKEW_MS;
-  const young = (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t && now - Date.parse(l.at) <= START_LOST_MS);
-  return young.length ? Math.max(...young.map((l) => Date.parse(l.at))) + START_LOST_MS + 1000 : null;
+  return n ? startFailures(record, since, now).at(-n).at : null;
 }
-
+/**
+ * What other Objectives' sandbox records (`others`, as sandboxRecord reads them) say of the vendor since `at` (ms, the
+ * first refusal of an Objective's streak, refusalStreakAt), from their launches: `up` when any started at or after `at`
+ * (the vendor serves others: the refusal is that Objective's own), else `trying` when a launch named since has no outcome
+ * yet (a try whose answer is coming), `refused` when any was refused by the vendor since, and `none` when no other
+ * Objective tried since. Runner clocks differ by a few seconds (CLOCK_SKEW_MS): the allowance widens only the evidence
+ * that holds picks (`trying`, `refused`), never `up`, so a start just before the outage never releases it.
+ */
+export function vendorEvidence(at, others = [], now = Date.now()) {
+  const launches = (others || []).flatMap((r) => (r ? settleStale(r, now).launches || [] : []));
+  if (launches.some((l) => l?.ok === true && Date.parse(l.at) >= at)) return "up";
+  const since = launches.filter((l) => Date.parse(l?.at) >= at - CLOCK_SKEW_MS);
+  if (since.some((l) => l.ok === null)) return "trying";
+  if (since.some((l) => l.ok === false && VENDOR_DOWN.includes(l.code))) return "refused";
+  return "none";
+}
 /**
  * The stage an Objective is due for, from its state alone: work for a Running Objective with no work start since it
  * became Running, review for a non-draft PR whose review was asked for (reviewRequestOf `since`) with no review start
@@ -3163,6 +3193,8 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
   return (decisions || []).find((d) => Date.parse(d.created_at ?? d.at) > since && (graceMs <= 0 || now - Date.parse(d.created_at ?? d.at) > graceMs)) ?? null;
 }
 
+/** How long the sweep leaves a sandbox whose stage ended moments ago to its launcher's end, which answers it first. */
+export const END_GRACE_MS = 10 * 60_000;
 /**
  * What the sweep does with one of Factory's Objective sandboxes (tags `factory=objective`, this repository's id;
  * the caller lists only those). `issue` is the Objective (null when GitHub has none by that number), `state` its
@@ -3173,7 +3205,7 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * sandbox's grace; a stopped one's idle days, `idle: true`), the sweep's own next run (sweep.mjs sweepWaits).
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
-export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = START_LOST_MS }) {
+export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = END_GRACE_MS }) {
   if (holds) return { keep: "a stage holds it" };
   const mine = record?.id === sandbox.id;
   // A stage that said it ended moments ago: the launcher's end answers it (collects its usage, stops the sandbox, books

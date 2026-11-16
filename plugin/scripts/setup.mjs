@@ -24,10 +24,10 @@
 //               one (`--name=` clears one), and prints what it kept and changed.
 import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, repoOf, requiredChecks, rest } from "./lib/github.mjs";
+import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
 import { DEFAULTS, FACTORY_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
@@ -95,23 +95,30 @@ async function applyLabels(repo, opts) {
   return made.length ? `created ${made.join(", ")}` : "all labels present";
 }
 
-export async function applyProjectStep(repo, opts) {
+/**
+ * setup's board step: `{note, id}`, `id` the board's node id (made now, or found with every column), which setup writes
+ * into the workflow as FACTORY_PROJECT; null on a repository a user owns, which gets no board. The board is the one
+ * `project` names (the id the workflow records) when it is linked to this repository, else the one titled
+ * "Factory: <repo>" (findProject), else a new one.
+ */
+export async function applyProjectStep(repo, opts, { project = "" } = {}) {
   // A personal account's board is out of every GitHub App's reach (Projects is an organization permission, #199).
-  if ((await getRepo(repo, opts)).owner?.type === "User") return "skipped: a repository a user owns gets no board Factory can move; labels carry each Objective's state";
-  const existing = await findProject(repo, opts);
+  if ((await getRepo(repo, opts)).owner?.type === "User") return { note: "skipped: a repository a user owns gets no board Factory can move; labels carry each Objective's state", id: null };
+  const recorded = String(project || "").trim();
+  const existing = (recorded && (await findProject(repo, { ...opts, project: recorded }))) || (await findProject(repo, { ...opts, project: "" }));
   if (existing) {
     const names = (existing.field?.options || []).map((o) => o.name);
     const missing = COLUMNS.filter((c) => !names.includes(c));
-    if (!missing.length) return `project "${existing.title}" already has ${COLUMNS.join(", ")}`;
+    if (!missing.length) return { note: `project "${existing.title}" already has ${COLUMNS.join(", ")}`, id: existing.id };
     // Add the missing options, keeping the existing ones (and their ids) in place.
     const colors = { Queued: "GRAY", Running: "BLUE", "In review": "YELLOW", Blocked: "RED", Done: "GREEN" };
     const all = [...existing.field.options.map((o) => ({ name: o.name, color: o.color || "GRAY", description: o.description || "" })), ...missing.map((name) => ({ name, color: colors[name], description: "" }))];
     const literal = all.map((o) => `{name: ${JSON.stringify(o.name)}, color: ${o.color}, description: ${JSON.stringify(o.description)}}`).join(", ");
     await graphql(`mutation($f: ID!) { updateProjectV2Field(input: {fieldId: $f, singleSelectOptions: [${literal}]}) { projectV2Field { ... on ProjectV2SingleSelectField { id } } } }`, { f: existing.field.id }, opts);
-    return `added ${missing.join(", ")} to project "${existing.title}"`;
+    return { note: `added ${missing.join(", ")} to project "${existing.title}"`, id: existing.id };
   }
   const p = await createProject(repo, opts);
-  return `created project "Factory" (#${p.number}) with ${COLUMNS.join(", ")} and linked it to ${repo.full}`;
+  return { note: `created project "${projectTitle(repo)}" (#${p.number}) with ${COLUMNS.join(", ")} and linked it to ${repo.full}`, id: p.id };
 }
 
 /**
@@ -210,8 +217,8 @@ export function templateEnvInputs(template) {
   return map;
 }
 
-/** Every env key the template writes on either route (runner jobs or launch jobs). */
-const templateEnvKeys = (template) => new Set(Object.keys(parseYaml(renderWorkflow(template, { sandbox: "vercel", action: "clockgrove/factory@v0.0.0" })).env || {}));
+/** Every env key the template writes on either route (runner jobs or launch jobs), a board's id included. */
+const templateEnvKeys = (template) => new Set(Object.keys(parseYaml(renderWorkflow(template, { sandbox: "vercel", project: "PVT_x", action: "clockgrove/factory@v0.0.0" })).env || {}));
 
 /** The numeric ids in a launch gate's `fromJSON('[...]')` lists (the maintainer ids; the association list holds none). */
 export function gateIds(expr) {
@@ -368,6 +375,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     protected_paths: protectedList.join(", "),
     ci_checks: inputs.ciChecks.join(", "),
     node_version: args.node_version || "22",
+    project: String(args.project || "").trim(),
     action: workflowAction({ explicit, before, latest }),
     sandbox,
     sandbox_vcpus: String(args.sandbox_vcpus || "").trim() || "2",
@@ -565,6 +573,29 @@ async function applyWorkflow({ inputs, args, explicit, before, template, checkou
 }
 
 /** The newest Factory release tag, so a new install never pins a stale one; this plugin's own version offline. */
+/**
+ * setup's project step as main runs it: the board (applyProjectStep, by the id the workflow records first), its id put in
+ * `args.project` for the workflow step to write as FACTORY_PROJECT (a --project flag wins). Only the workflow step
+ * writes the file: run without it, a board id the file does not record yet is named in the note with how to record it.
+ * Returns the step's note.
+ */
+export async function projectStep({ repo, opts, args, explicit, steps, outPath, checkout }) {
+  const recorded = String(args.project || "").trim() || recordedProject(outPath);
+  const p = await applyProjectStep(repo, opts, { project: recorded });
+  if (p.id && explicit.project === undefined) args.project = p.id;
+  if (!p.id || steps.includes("workflow") || p.id === recordedProject(outPath)) return p.note;
+  return `${p.note}; the workflow does not record its id yet: run setup with --apply project,workflow, or set FACTORY_PROJECT: ${p.id} in the env block of ${relative(checkout, outPath)}`;
+}
+
+/** The board id the workflow file at `path` records (FACTORY_PROJECT), or "" with none, no file or one that does not parse. */
+export function recordedProject(path) {
+  try {
+    return existsSync(path) ? String(workflowSettings(readFileSync(path, "utf8")).env?.FACTORY_PROJECT || "").trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 async function latestRelease() {
   const tag = await rest("repos/clockgrove/factory/releases/latest", {}).then((r) => r?.tag_name, () => null);
   return /^v\d+\.\d+\.\d+$/.test(tag || "") ? tag : `v${FACTORY_VERSION}`;
@@ -639,7 +670,7 @@ async function main() {
   for (const s of steps) {
     let note;
     if (s === "labels") note = await applyLabels(repo, opts);
-    else if (s === "project") note = await applyProjectStep(repo, opts);
+    else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });
     else if (s === "workflow") note = await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts });
     else throw new Error(`unknown step ${s}`);

@@ -2,7 +2,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyExit, mergeBlockCause, mergeBlockReason, mergeReadyOne, rebaseBlock, rebaseMarkers, rebaseNotice, recordMergeable } from "../scripts/lib/session.mjs";
@@ -38,7 +38,16 @@ function gitRepo() {
   git("add", "store.mjs");
   git("commit", "-q", "-m", "base");
   const conflicts = (head) => spawnSync("git", ["-C", dir, "merge-tree", "--write-tree", "main", head]).status === 1;
-  return { dir, git, commit, conflicts, main: () => git("rev-parse", "main") };
+  // o/r on the test's git server (temp.mjs GITHUB_SERVER_URL), where Factory's trial merges fetch from: `publish()`
+  // pushes every branch there as it is now.
+  const origin = join(process.env.GITHUB_SERVER_URL, "o", "r.git");
+  const publish = () => {
+    rmSync(origin, { recursive: true, force: true });
+    mkdirSync(origin, { recursive: true });
+    execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", origin]);
+    git("push", "-q", origin, "refs/heads/*:refs/heads/*");
+  };
+  return { dir, git, commit, conflicts, publish, main: () => git("rev-parse", "main") };
 }
 
 /** GitHub as the merge pass reads it, over the git repository: PRs, comments, reviews, green CI and the merge queue. */
@@ -50,10 +59,11 @@ function fakeGitHub(g) {
   const attempts = [];
   // The PRs a test put in the merge queue, and `race`: another merge pass that runs just before a merge call lands (#2669).
   const queued = new Set();
-  // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `mainAt`: main's commit time.
+  // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `entries`: the queue's
+  // entries as `{pr, head}` (mergeQueueHeads); `mainAt`: main's commit time.
   // `threads`: the PR's review threads (GraphQL's shape); `protection`: branch protection requires resolved conversations;
   // `rules`: the active rules GitHub lists for main; `labelled`: labels added; `resolved`: threads Factory resolved.
-  const state = { race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
+  const state = { race: null, removals: [], entries: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
   // GitHub's own rule: an unresolved conversation refuses the merge when protection or a ruleset requires them resolved.
   const conversationsHeld = () => state.threads.some((t) => !t.isResolved) && (state.protection || state.rules.some((r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution));
   let id = 1;
@@ -82,6 +92,7 @@ function fakeGitHub(g) {
       const q = body.query;
       if (q.includes("isInMergeQueue")) return json(200, { data: { repository: { pullRequest: { isInMergeQueue: queued.has(body.variables.n) } } } });
       if (q.includes("timelineItems")) return json(200, { data: { repository: { pullRequest: { timelineItems: { nodes: state.removals.map((r) => ({ createdAt: r.at, reason: r.reason, actor: { login: "github-merge-queue", __typename: "Bot" } })) } } } } });
+      if (q.includes("entries(first")) return json(200, { data: { repository: { ref: { target: { oid: g.main() } }, mergeQueue: { entries: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: state.entries.map((e, i) => ({ position: i + 1, pullRequest: { number: e.pr }, headCommit: { oid: e.head } })) } } } } });
       if (q.includes("mergeQueue(branch")) return json(200, { data: { repository: { ref: { target: { oid: g.main(), committedDate: state.mainAt } }, mergeQueue: { entries: { totalCount: state.waiting ?? queued.size } } } } });
       if (q.includes("resolveReviewThread")) {
         state.threads.find((t) => t.id === body.variables.id).isResolved = true;
@@ -220,46 +231,45 @@ test("#2647: two sibling PRs on one file: the second conflicts at its merge, goe
   });
 });
 
-test("#243: a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move (main's head as Factory recorded it, or an empty queue, or 2 h), then goes back in; such removals count toward no drop Block", async () => {
-  const { QUEUE_CONFLICT_WAIT_MS, queueConflictRecord } = await import("../scripts/lib/session.mjs");
+test("#243: a PR the merge queue took out for a conflict waits while a PR in the queue conflicts with it by a trial merge, then goes back in; such removals count toward no drop Block", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const base = g.main();
+    // Two siblings write the same line of store.mjs: each merges into main cleanly, but not both.
+    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    // A third changes another file only.
+    g.git("checkout", "-q", "-B", "factory/3", base);
+    writeFileSync(join(g.dir, "other.mjs"), "export const other = 3;\n");
+    g.git("add", "other.mjs");
+    g.git("commit", "-q", "-m", "three");
+    const three = g.git("rev-parse", "HEAD");
+    g.publish();
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const later = (s) => new Date(Date.now() + s * 1000).toISOString();
     // Dropped twice for a conflict with the sibling ahead of it, which still waits in the queue.
     gh.state.removals = [{ at: later(1), reason: "merge_conflict" }, { at: later(2), reason: "merge_conflict" }];
-    gh.state.waiting = 1;
+    gh.state.entries = [{ pr: 11, head: one }];
     const report = {};
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "queue-wait", "no Block, no enqueue that would bounce off the same entry");
     assert.equal(mergeBlockReason("queue-wait", report), null);
     assert.deepEqual(gh.attempts, []);
-    const main0 = g.main();
-    let rec = queueConflictRecord(gh.comments[2], 2);
-    assert.deepEqual([rec.removal, rec.main], [gh.state.removals[1].at, main0], "main's head when the removal was first seen, recorded on the issue");
-    // Main's commit time says nothing (a queue's commit is dated before it merges): only its head as recorded counts.
+    // Main's head and its commit time say nothing: only the queue's own PRs, merged on trial with this one, decide.
     gh.state.mainAt = later(60);
     assert.equal(await merge(2, 12), "queue-wait");
-    assert.equal(gh.comments[2].filter((c) => c.body.startsWith(marker(2, "queue-conflict"))).length, 1, "one record, kept");
-    // The sibling merged without making this PR conflict: main is another commit, so it goes back in.
-    g.git("checkout", "-q", "main");
-    g.git("commit", "-q", "--allow-empty", "-m", "sibling");
+    // The conflicting sibling left the queue; the one there now touches another file: it goes back in at once, with main
+    // unmoved and no time passed.
+    gh.state.entries = [{ pr: 13, head: three }];
     assert.equal(await merge(2, 12), "queued");
     assert.deepEqual(gh.enqueued, [{ pr: 12, sha: two }]);
-    // Dropped again for a conflict: a new record at main now; the queue empties, so it goes back in.
+    // Dropped again for a conflict with an empty queue now: back in.
+    gh.queued.clear();
     gh.state.removals.push({ at: later(3), reason: "merge_conflict" });
-    assert.equal(await merge(2, 12), "queue-wait");
-    assert.equal(queueConflictRecord(gh.comments[2], 2).main, g.main());
-    gh.state.waiting = 0;
-    assert.equal(await merge(2, 12), "queued");
-    // A busy queue and an unmoved main still put it back once the wait's bound has passed since the record.
-    gh.state.waiting = 1;
-    const c = gh.comments[2].find((x) => x.body.startsWith(marker(2, "queue-conflict")));
-    rec = queueConflictRecord(gh.comments[2], 2);
-    c.body = c.body.replace(rec.seen, new Date(Date.now() - QUEUE_CONFLICT_WAIT_MS - 1000).toISOString());
+    gh.state.entries = [];
     assert.equal(await merge(2, 12), "queued");
     // Two drops for failed checks still Block, as before, once the review stage read the newest as no failure of the
     // PR's own (#312: a red queue run goes to the review stage first).
+    gh.queued.clear();
     gh.state.removals = [{ at: later(4), reason: "failed_checks" }, { at: later(5), reason: "failed_checks" }];
     assert.equal(await merge(2, 12), "queue-red");
     const { writeQueueRed } = await import("../scripts/lib/session.mjs");
@@ -268,18 +278,29 @@ test("#243: a PR the merge queue took out for a conflict with a PR ahead of it w
   });
 });
 
-test("#243: a queue-conflict wait whose issue comments cannot be read writes no new record (its clock is not restarted)", async () => {
-  const { queueConflictWait } = await import("../scripts/lib/session.mjs");
+test("#243: a queue-conflict wait whose queue cannot be read holds this tick; one whose trial merge cannot be computed goes back in once per queue state, never again on the same queue", async () => {
+  const { queueConflictWait, queueConflictRecord } = await import("../scripts/lib/session.mjs");
   await withGitHub(async (g, gh) => {
-    gh.state.waiting = 1;
-    const removal = new Date().toISOString();
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, base: "main", removal }, { token: "t" }), "queue-wait");
-    const before = gh.comments[2].map((c) => c.body);
+    g.publish();
+    const t0 = Date.now();
+    const at = (s) => new Date(t0 + s * 1000).toISOString();
     const real = gh.fetch;
-    globalThis.fetch = async (url, init = {}) => (/\/issues\/2\/comments/.test(String(url)) ? new Response(JSON.stringify({ message: "Server Error" }), { status: 502 }) : real(url, init));
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, base: "main", removal }, { token: "t" }, Date.now() + 60_000), "pending");
+    globalThis.fetch = async (url, init = {}) => (/\/graphql$/.test(String(url)) && String(init.body).includes("entries(first") ? new Response(JSON.stringify({ message: "Server Error" }), { status: 502 }) : real(url, init));
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), "pending");
     globalThis.fetch = real;
-    assert.deepEqual(gh.comments[2].map((c) => c.body), before, "the record as it was");
+    // A queue head no trial can read: back in, and the queue's state then recorded on the issue.
+    gh.state.entries = [{ pr: 11, head: "0".repeat(40) }];
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), null);
+    const rec = queueConflictRecord(gh.comments[2], 2);
+    assert.deepEqual([rec.pr, rec.removal], [12, at(1)]);
+    // The queue (its merge group, which pairwise trials cannot see) takes it out again, and nothing in the queue moved:
+    // it waits rather than bouncing off the same queue at event speed.
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait");
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait", "however often the dispatcher ticks");
+    // The queue changed (another PR joined): one more go.
+    gh.state.entries = [{ pr: 11, head: "0".repeat(40) }, { pr: 14, head: "1".repeat(40) }];
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), null);
+    assert.equal(queueConflictRecord(gh.comments[2], 2).removal, at(2));
   });
 });
 

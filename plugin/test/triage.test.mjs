@@ -452,6 +452,35 @@ test("#420 logWindow: with the job, the failed step is cut by its times: a step'
   assert.equal(logWindow(raw, 4000, null), logWindow(raw, 4000));
 });
 
+test("#420 logWindow: a step's own groups in its first second are kept unless an earlier step ended in that second", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const at = (s, l) => `2026-11-16T08:50:${s}.1234567Z ${l}`;
+  const raw = [
+    at("40", "##[group]Run npm ci"),
+    at("41", "added 10 packages"),
+    at("42", "##[group]Run npm test"),
+    at("42", "npm test"),
+    at("42", "##[endgroup]"),
+    at("42", "##[group]suite A"),
+    at("42", "1) A fails"),
+    at("42", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2"),
+    at("42", "##[endgroup]"),
+    at("42", "##[group]suite B"),
+    at("44", "ok B"),
+    at("44", "##[endgroup]"),
+    at("45", "##[error]Process completed with exit code 1."),
+  ].join("\n");
+  const failed = { name: "Run npm test", number: 4, conclusion: "failure", started_at: "2026-11-16T08:50:42Z", completed_at: "2026-11-16T08:50:45Z" };
+  // The step before ended a second earlier, or ended in this second having started before it: suite A's failure stays.
+  for (const ended of ["2026-11-16T08:50:41Z", "2026-11-16T08:50:42Z"]) {
+    const job = { id: 1, steps: [{ name: "Run npm ci", number: 3, conclusion: "success", started_at: "2026-11-16T08:50:40Z", completed_at: ended }, failed] };
+    const lines = logWindow(raw, 4000, job).split("\n");
+    assert.equal(lines[0], "##[group]Run npm test", ended);
+    for (const l of ["1) A fails", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2", "ok B"]) assert.ok(lines.includes(l), `${ended}: ${l}`);
+    assert.equal(lines.at(-1), "##[error]Process completed with exit code 1.");
+  }
+});
+
 // ------------------------------------------------------------------ a required job GitHub never started (#2676)
 
 // The real one: clockgrove/clockgrove's `quality` job while its Actions were locked for billing (no step, no runner).

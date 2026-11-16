@@ -1011,10 +1011,11 @@ const lineSecond = (l) => {
 /**
  * The lines of `job`'s failed step (failedStep), cut from the raw log by time: every line the runner stamped within the
  * step's started_at and completed_at, which GitHub states to the second, so both seconds are kept whole. At those two
- * edges other steps can share a second: in the first, lines before the last `##[group]` opened in it (the header the
- * runner opens for each step; short steps before it often start and end in that second) are earlier steps'; in the
- * last, lines after the step's last `##[error]` (the runner's own last line of a failed step) are later steps'. Past its
- * first second, a step's own `::group::` output is no boundary. Cleaned
+ * edges other steps can share a second. The first is trimmed only when GitHub's `steps` show an earlier step that ended
+ * in it: the step starts at its own `##[group]` header, the one after the headers of the earlier steps that started in
+ * that second; with no such step, or fewer headers than that, the whole second is kept. In the last second, lines after
+ * the step's last `##[error]` (the runner's own last line of a failed step) are later steps'. A step's own `::group::`
+ * output is no boundary. Cleaned
  * (cleanLog). null with no job, no failed step with both times, or no line stamped in that range: the caller cuts by
  * structure (failingStep).
  */
@@ -1032,8 +1033,18 @@ export function stepByTime(raw, job) {
     if (sec >= from && sec <= to) kept.push({ sec, line: cleanLog(l) });
   }
   if (!kept.length) return null;
+  // The first second is trimmed only when an earlier step ended in it. Each step that ran opens with a `##[group]`
+  // header, so the step's own header is the one after those of the earlier steps that started in that second. Where
+  // that count does not hold (an earlier step's own groups, a header stamped a second late), more is kept, not less.
+  const second = (x) => Math.floor(Date.parse(x) / 1000) * 1000;
+  const earlier = job.steps.filter((x) => x !== step && Number(x?.number) < Number(step.number) && x?.conclusion !== "skipped");
   let head = -1;
-  for (let i = 0; i < kept.length && kept[i].sec === from; i += 1) if (kept[i].line.startsWith("##[group]")) head = i;
+  if (earlier.some((x) => second(x?.completed_at) === from)) {
+    const before = earlier.filter((x) => second(x?.started_at) === from).length;
+    const groups = [];
+    for (let i = 0; i < kept.length && kept[i].sec === from; i += 1) if (kept[i].line.startsWith("##[group]")) groups.push(i);
+    if (groups.length > before) head = groups[before];
+  }
   let lastError = -1;
   for (let i = kept.length - 1; i >= 0; i -= 1) if (kept[i].line.startsWith("##[error]")) {
     lastError = i;

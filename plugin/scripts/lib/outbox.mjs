@@ -58,6 +58,8 @@ const PACKAGE_JSON_MAX = 1024 * 1024;
  */
 export const JUDGE_MAX_BYTES = 32 * 1024;
 export const JUDGE_VIEW_LINES = 60;
+/** The most of a path's hunks and its file (or their views) asked about in one question; more is asked hunk by hunk. */
+export const JUDGE_PATH_MAX_BYTES = 64 * 1024;
 /** The most of one file's diff the fence check is given (box.outside): a larger change is not judged, and stays refused. */
 export const FENCE_DIFF_MAX = 32 * 1024;
 /** The most fenced files the fence check asks about in one reading of the fence; the rest stay refused. */
@@ -581,13 +583,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * Each open path (unsettled) decided: kept when the head has exactly the branch's entry, blob and mode (a path the
    * replay conflicted on: as the branch left it; any other: as replayed). Exactly not kept: the same blob with another
    * mode, a binary or Git LFS file, or a path the head moved or removed where git cannot merge the branch's change into
-   * it. Any other text file goes to `judge` (kept.mjs) one hunk of the branch's change at a time, JUDGE_AT_ONCE hunks
-   * at a time, at most JUDGE_MAX_PATHS paths and JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES,
-   * it is not judged. The branch's change is, for a replay conflict, its side from their base; for a path where merging
-   * the branch's change into the head conflicts, its side of that merge; for any other path, what that merge would still
-   * change there. Each hunk is judged against the head's file (kept.mjs hunkView), and a path is kept when every hunk of
-   * it is. Returns "" or why, naming each path not kept, the branch's commits that changed it, the first hunk not kept
-   * and why; null, with no `judge`, when a path is not exactly the branch's.
+   * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE paths at a time, at most JUDGE_MAX_PATHS paths and
+   * JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES, it is not judged. The branch's change is, for
+   * a replay conflict, its side from their base; for a path where merging the branch's change into the head conflicts,
+   * its side of that merge; for any other path, what that merge would still change there. Its hunks are judged against
+   * the head's file, whole or around each hunk (kept.mjs hunkView): all in one question, then, unless kept, each alone,
+   * and a path is kept when all are. A change with no hunk is decided exactly. Returns "" or why, naming each path not
+   * kept, the branch's commits that changed it, the first hunk not kept and why; null, with no `judge`, when a path is
+   * not exactly the branch's.
    */
   const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge }) => {
     const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
@@ -648,8 +651,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (now && meant && mode(now) !== meant) return `its file mode is ${mode(now)}, the branch's change makes it ${meant}`;
         if (oid(now) && oid(now) === oid(theirs)) return "";
         const ours = st ? st[2] || "" : await entry(onto, p);
-        if (![theirs, now, ours].every(plain)) return "a submodule or symlink that is not the branch's version";
-        if ((await binary(theirs)) || (await binary(now)) || (await binary(ours))) return "a binary or Git LFS file that is not the branch's version";
+        // The base the branch's change is read from (below): a replay conflict's, or a conflict of the merge into the head.
+        const base = st ? st[1] || "" : mergeConflicts.has(p) ? merged.stages.get(p)?.[1] || "" : "";
+        if (![theirs, now, ours, base].every(plain)) return "a submodule or symlink that is not the branch's version";
+        if ((await binary(theirs)) || (await binary(now)) || (await binary(ours)) || (await binary(base))) return "a binary or Git LFS file that is not the branch's version";
         // git cannot merge the branch's change into the head's file: nothing to judge.
         if (!st && !theirs && mergeConflicts.has(p)) return now && (await entry(onto, p)) ? "the branch deletes it, and the head keeps it with edits git cannot merge that deletion into" : "the head renamed or removed it where git cannot merge the branch's change into it";
         return null;
@@ -669,78 +674,83 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const queued = paths.filter((p) => verdicts.get(p) === null);
     queued.slice(JUDGE_MAX_PATHS).forEach((p) => verdicts.set(p, `not judged: the decision model is asked about ${JUDGE_MAX_PATHS} paths at most`));
     const out = `not judged: the check's ${JUDGE_MAX_MS / 60_000} minutes ran out`;
-    // Each judged path's hunks (kept.mjs hunksOf), each asked against the file as the head has it (kept.mjs hunkView),
-    // or why the path is not judged.
-    const items = [];
-    const hunks = new Map();
+    // A judged path's hunks (kept.mjs hunksOf), each with the lines around it (kept.mjs hunkView) when the head's file is
+    // over JUDGE_MAX_BYTES, else the file whole; or why the path is decided without the model.
     const ready = async (p) => {
       const { now, change } = prepare.get(p);
       const branchDiff = await diff(change.before, change.after, p);
       if (branchDiff === null) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
       const list = hunksOf(branchDiff);
-      // No hunk: the branch changes no line of the file under this name (one side of a rename conflict, whose other
-      // names are checked on their own); its file mode was checked exactly above.
-      if (!list.length) return [];
-      let file = "";
+      if (!list.length) {
+        // No hunk with two different blobs: git reads one as binary.
+        if (oid(change.before) !== oid(change.after)) return "a binary file that is not the branch's version";
+        // The branch changes no line here; it only puts the file under this name (one side of a rename), which the head
+        // must still have. With neither side (the other name of a rename conflict, checked on its own): nothing here.
+        if (oid(change.after) && !oid(now)) return "the branch's change puts the file here, and the head has no such file";
+        return "";
+      }
+      let file = null;
       if (oid(now)) {
         const r = await git(["cat-file", "blob", oid(now)], { maxBytes: readMaxBytes });
         if (r.code !== 0 && !r.truncated) throw new Error(`git cat-file exited ${r.code}`);
         if (r.truncated) return `not judged: the file is over ${readMaxBytes} bytes`;
         file = r.stdout;
       }
-      // Where the change's lines are in the head's file, read only when the file is shown in part.
+      const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h }));
+      if (Buffer.byteLength(file ?? "") <= JUDGE_MAX_BYTES) return { file, hunks };
+      // Where the change's lines are in the head's file: from its base side, or (what the merge would still change) the
+      // head's own lines.
       let moves = [];
-      if (!change.merged && Buffer.byteLength(file) > JUDGE_MAX_BYTES) {
+      if (!change.merged) {
         const d = await diff(change.before, now, p, { extra: ["-U0"], max: readMaxBytes });
         if (d === null) return `not judged: the file is over ${readMaxBytes} bytes`;
         moves = hunksOf(d);
       }
-      const asks = [];
-      for (const [i, h] of list.entries()) {
-        const view = hunkView({ file: oid(now) ? file : null, hunk: h, moves, max: JUDGE_MAX_BYTES, context: JUDGE_VIEW_LINES });
-        if (!view) return `not judged: the lines around hunk ${i + 1} of ${list.length} are over ${JUDGE_MAX_BYTES / 1024} KiB`;
-        asks.push({ path: p, hunk: h.text, header: h.header, at: i + 1, of: list.length, merged: !!change.merged, file: oid(now) ? view.file : null, lines: view.lines });
+      for (const h of hunks) {
+        h.view = hunkView({ file, hunk: h.raw, moves, max: JUDGE_MAX_BYTES, context: JUDGE_VIEW_LINES });
+        if (!h.view) return `not judged: the lines around hunk ${h.at} of ${hunks.length} are over ${JUDGE_MAX_BYTES / 1024} KiB`;
       }
-      return asks;
+      return { file: null, hunks };
+    };
+    let over = false;
+    // One path: all its hunks in one question when they fit JUDGE_PATH_MAX_BYTES with the file or their views; unless
+    // that is kept, each hunk alone, in order, up to the first not kept. null when the time ran out first.
+    const judgePath = async (p) => {
+      const got = await ready(p);
+      if (typeof got === "string") return got;
+      const { now, change } = prepare.get(p);
+      const { file, hunks } = got;
+      const of = hunks.length;
+      const item = (hs) => ({ path: p, of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
+      const size = hunks.reduce((n, h) => n + Buffer.byteLength(h.text) + Buffer.byteLength(h.view?.file ?? ""), Buffer.byteLength(file ?? ""));
+      const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
+      if (size <= JUDGE_PATH_MAX_BYTES) {
+        if (over) return null;
+        const all = await judge(item(hunks));
+        if (all.kept) return "";
+        if (of === 1) return named(hunks[0], all.why);
+      }
+      for (const h of hunks) {
+        if (over) return null;
+        const one = await judge(item([h]));
+        if (!one.kept) return named(h, one.why);
+      }
+      return "";
     };
     let timer;
     const deadline = new Promise((done) => (timer = setTimeout(done, JUDGE_MAX_MS)));
-    let over = false;
-    // A path is decided once a hunk of it is not kept, or every hunk of it is: what is left of it is not asked.
-    const failed = new Map();
-    const settle = (p) => {
-      const h = hunks.get(p);
-      const bad = [...(failed.get(p) || [])].sort((a, b) => a.at - b.at)[0];
-      if (bad) verdicts.set(p, `hunk ${bad.at} of ${bad.of} (${bad.header}): ${bad.why}`);
-      else if (h && h.done === h.of) verdicts.set(p, "");
-    };
+    const work = queued.slice(0, JUDGE_MAX_PATHS);
     let next = 0;
     const lane = async () => {
-      while (!over && next < items.length) {
-        const item = items[next++];
-        if (failed.has(item.path)) continue;
-        const said = await judge(item);
-        if (over) return;
-        hunks.get(item.path).done += 1;
-        if (!said.kept) failed.set(item.path, [...(failed.get(item.path) || []), { ...item, why: said.why }]);
-        settle(item.path);
+      while (!over && next < work.length) {
+        const p = work[next++];
+        const why = await judgePath(p);
+        if (!over && why !== null) verdicts.set(p, why);
       }
-    };
-    const run = async () => {
-      for (const p of queued.slice(0, JUDGE_MAX_PATHS)) {
-        if (over) return;
-        const asks = await ready(p);
-        if (typeof asks === "string" || !asks.length) verdicts.set(p, typeof asks === "string" ? asks : "");
-        else {
-          hunks.set(p, { of: asks.length, done: 0 });
-          items.push(...asks);
-        }
-      }
-      await Promise.all(Array.from({ length: JUDGE_AT_ONCE }, lane));
     };
     try {
       await Promise.race([
-        run(),
+        Promise.all(Array.from({ length: JUDGE_AT_ONCE }, lane)),
         deadline.then(() => {
           over = true;
         }),
@@ -815,18 +825,31 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   /**
    * Local mode: keep the head rebaseLeft read last (a finished rebase onto the base) on the branch `<branch>-conflict-pass`
    * of the agent's checkout, the Objective's local clone, which a Blocked Objective keeps and the next stage's putOn
-   * leaves alone, so a conflict pass the check stopped is not lost. Written as the agent, in its sandbox, with no hooks.
-   * {name, sha, branch}, or null elsewhere (an Actions runner keeps nothing), with no such head, or when git failed.
+   * leaves alone, so a conflict pass the check stopped is not lost. With no such head, an earlier one kept there is
+   * deleted: the branch is only ever the last stopped pass's. Written as the agent, in its sandbox, with no hooks.
+   * {name, sha, branch}; {name, failed: true} when git could not write it (the log says why); null elsewhere (an Actions
+   * runner keeps nothing) or with nothing to keep.
    */
   box.setAside = async () => {
-    if (!local || !box.rebaseHead) return null;
+    if (!local) return null;
     const name = `${branch}-conflict-pass`;
+    if (!box.rebaseHead) {
+      await dropAside();
+      return null;
+    }
     const r = await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-f", name, box.rebaseHead]);
     if (r.code !== 0) {
       log(`the conflict pass's head could not be kept on ${name}: ${gitError(r.stderr) || `exit ${r.code}`}`);
-      return null;
+      return { name, failed: true };
     }
     return { name, sha: box.rebaseHead, branch };
+  };
+  // The branch setAside keeps, deleted once (a later push of this stage, or a stop with nothing to keep): best effort.
+  let asideDropped = false;
+  const dropAside = async () => {
+    if (!local || asideDropped) return;
+    asideDropped = true;
+    await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-q", "-D", `${branch}-conflict-pass`]).catch(() => null);
   };
 
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */
@@ -1596,6 +1619,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     if (now !== head) return refuse(`after the push GitHub's ${branch} is ${now.slice(0, 7) || "missing"}, not the checked ${head.slice(0, 7)}`);
     expected = head;
+    // A conflict pass kept aside by an earlier Block (setAside) is superseded by what went out.
+    await dropAside();
     if (caught.merged) catchUps.add(head);
     await git(["update-ref", `refs/remotes/origin/${branch}`, head]);
     // The agent's checkout takes Factory's merge, so its next commits build on it (sync). A push of a commit Factory

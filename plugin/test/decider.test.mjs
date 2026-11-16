@@ -523,7 +523,7 @@ test("#379: the rebase check judges through the stage's harness without a key, a
   const { stage } = stageOf(bin, "claude");
   const check = openKeptCheck({ inputs: {}, env: {}, stage });
   assert.ok(check);
-  assert.deepEqual(await check.judge({ path: "src/a.ts", hunk: "@@ -1 +1,2 @@\n-x\n+a", file: "a\nb\n" }), { kept: true, why: "" });
+  assert.deepEqual(await check.judge({ path: "src/a.ts", hunks: [{ at: 1, text: "@@ -1 +1,2 @@\n-x\n+a" }], file: "a\nb\n" }), { kept: true, why: "" });
   assert.equal(calls().length, 1);
   assert.equal(openKeptCheck({ inputs: {}, env: {} }), null, "no stage, no key");
   assert.equal(openKeptCheck({ inputs: { decisionRoute: "off" }, env: {}, stage }), null);
@@ -539,7 +539,7 @@ test("#379: a stage harness's usage limit in the rebase check ends the stage thr
   // The outbox's rebaseLeft asks the judge about one hunk, as outbox.mjs keptLeft does, and reads its answer as not kept.
   const outbox = {
     rebaseLeft: async ({ judge }) => {
-      verdict = await judge({ path: "src/a.ts", hunk: "@@ -1 +1 @@\n-x\n+a", file: "b\n" });
+      verdict = await judge({ path: "src/a.ts", hunks: [{ at: 1, text: "@@ -1 +1 @@\n-x\n+a" }], file: "b\n" });
       return verdict.kept ? null : `src/a.ts: ${verdict.why}`;
     },
     block: (why) => (blocked = why),

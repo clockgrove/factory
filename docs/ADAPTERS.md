@@ -84,7 +84,7 @@ The `harness` vendor:
   - The drift advisory asks every two minutes while a worker runs.
   - The answer gate asks once per review stage whose answer and fix passes committed.
   - The finding check asks once per reviewer finding the answer pass replied to.
-  - The rebase check asks once per hunk of the branch's change to each file a send-back's conflict pass left other than the branch's version.
+  - The rebase check asks once per file a send-back's conflict pass left other than the branch's version, with all the branch's hunks to it and the file; for a file of several hunks that answer does not keep, once per hunk, each with the file again.
   - The fix-progress check asks once per red after a fix pass whose progress the exact checks cannot tell.
   - The edit check asks once per distinct title and body of an Objective edited after its plan was made (a label change is never asked about), its verdict kept on the plan comment.
   - The plan-answer check asks once per repository a plan-time Question named that has a maintainer comment since the ask, in each work stage that reruns after that Question.

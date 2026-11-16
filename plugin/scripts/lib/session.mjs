@@ -1147,8 +1147,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A required check with no run will get none once every workflow run on the head has completed, so the wait ends
     // then (classify, checksNotStarted): its own producing workflow runs all ended before their jobs ran (kind `ended`),
     // or no workflow on the head produces it (`unreported`: a wrong check name) or its workflow skips this change
-    // (`filtered`). Those two only when nothing else may still report it: the ruleset binds it to Actions, or no check
-    // suite of the app it binds it to (any app but Actions, unbound) is going on the head; no workflow on the head runs
+    // (`filtered`). Those two only when nothing else may still report it: the ruleset binds it to Actions, or binds it to
+    // no app and no other app's check suite is going on the head (a check bound to another app never ends early, nor
+    // one older commits got as a commit status: classify reads it as not started); no workflow on the head runs
     // `on: workflow_run` (its run starts after the others); and no triage rerun is awaited (`ignoreIds`). Otherwise the
     // not-started bound (idleMs) ends the wait. Read only when every workflow run completed; past one page of runs (100)
     // it is not read. Classified again only when the runs or the suites read differently.
@@ -1166,14 +1167,16 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         return apps.length === 1 ? apps[0] : null;
       };
       const free = missing.filter((n) => boundTo(n) !== ACTIONS_APP_ID);
-      // The apps that may still report a missing check not bound to Actions: their suites on the head still going.
-      const going = free.length
+      // A check bound to another app is that app's to report, whenever it does: never an early end.
+      const foreign = free.some((n) => boundTo(n) !== null);
+      // The apps that may still report an unbound missing check: their suites on the head still going.
+      const going = free.length && !foreign
         ? await rest(`repos/${checks.repo.full}/commits/${sha}/check-suites?per_page=100`, { token: checks.token, paginate: true, cache: etags }).then(
             (suites) => (suites || []).filter((x) => x?.status !== "completed").map((x) => x?.app?.id),
             () => null,
           )
         : [];
-      const open = going === null || free.some((n) => going.some((id) => id !== ACTIONS_APP_ID && (boundTo(n) === null || id === boundTo(n))));
+      const open = foreign || going === null || (free.length > 0 && going.some((id) => id !== ACTIONS_APP_ID));
       const key = JSON.stringify([all.map((w) => [w.id, w.conclusion]), runs.map((r) => [r.id, r.status]), open, !!ignoreIds?.size]);
       if (endedLast?.key === key) return endedLast.answer;
       const early = all.some((w) => ENDED_EARLY.includes(w.conclusion));
@@ -1229,13 +1232,19 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (signal?.aborted) return { aborted: true };
     const command = `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}`;
     if (r.conflict) return { green: false, conflict: true, command };
+    // A stuck result, every one of which comes from settle: a "no progress" one is recorded on the PR first
+    // (noProgressMarker), so the re-applied label its Block promises is the waiver it says.
+    const stuckOf = async (stuck) => {
+      if (stuck.noProgress) await postNoProgress(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).catch((e) => log(`no-progress record: ${String(e?.message || e).slice(0, 120)}`));
+      return { stuck };
+    };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
     const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;
       let stuck = noProgress(x, await classify(x));
-      if (!stuck.waits) return { stuck };
+      if (!stuck.waits) return stuckOf(stuck);
       const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
-      if (capMs <= 0) return { stuck };
+      if (capMs <= 0) return stuckOf(stuck);
       if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`);
       x = await wait(ignoreIds, capMs, { appearMs: Infinity, backoffAfterMs: 0, progress: null });
       if (x.conflict || !unfinished(x)) return x;
@@ -1247,11 +1256,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         if (x.conflict || !unfinished(x)) return x;
         stuck = noProgress(x, await classify(x));
       }
-      return { stuck };
+      return stuckOf(stuck);
     };
     r = await settle(r);
     if (r.conflict) return { green: false, conflict: true, command };
-    if (r.stuck?.noProgress) await postNoProgress(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).catch((e) => log(`no-progress record: ${String(e?.message || e).slice(0, 120)}`));
     if (r.stuck) return { green: false, stuck: r.stuck, command, sha };
     // The fix pass committed nothing: the head is the one that was red, and its completed runs are that same red, not a
     // second one. No pass is counted and no fix pass follows: the failed jobs are rerun once for this head (triage.mjs

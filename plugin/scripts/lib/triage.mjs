@@ -753,6 +753,7 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
   }
   const producers = new Map();
   const skips = new Map();
+  const posted = new Set();
   let chained = false;
   const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
   const missing = names.filter((n) => !latestRun(checkRuns, n));
@@ -794,8 +795,20 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
         }
       }
     }
+    // Still none: an older commit's commit status of that name (a service posting statuses, Codecov's say) is its
+    // producer, which posts it on this head when it does (`posted`). Each older commit's statuses are read once.
+    const statusesOf = new Map();
+    for (const n of left.filter((x) => !producers.has(x))) {
+      for (const c of older) {
+        if (!statusesOf.has(c)) statusesOf.set(c, rest(`repos/${repo.full}/commits/${c}/status`, { token }).then((st) => new Set((st?.statuses || []).map((x) => x?.context)), () => new Set()));
+        if ((await statusesOf.get(c)).has(n)) {
+          posted.add(n);
+          break;
+        }
+      }
+    }
   }
-  return { workflowRuns, readError: "", jobs, producers, skips, chained };
+  return { workflowRuns, readError: "", jobs, producers, skips, chained, posted };
 }
 
 /** GitHub Actions' own app: a check run from any other app is that service's, not Actions'. */
@@ -811,10 +824,11 @@ const ACTIONS_APP = "github-actions";
  * service whose app owns the check run. Kinds that do not wait: `running` (a check still running), `approval` (a
  * deployment approval), `filtered` (its workflow's path filter skips this change), `ended` (every workflow run on the
  * head that produces it ended `startup_failure`, or `cancelled` with no check run in its suite), `unreported` (no workflow on the head
- * produces it: a wrong check name) and `unread`. A queued run of another workflow is not this check's. `now` and
+ * produces it: a wrong check name) and `unread`. A required check with no run that older commits got as a commit
+ * status (`posted`) is not started yet, by the service posting it. A queued run of another workflow is not this check's. `now` and
  * `waitedMin` only word the reason.
  */
-export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), skips = new Map(), waitedMin = 0, readError = "", now = Date.now() }) {
+export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), skips = new Map(), posted = new Set(), waitedMin = 0, readError = "", now = Date.now() }) {
   const short = String(sha).slice(0, 7);
   const list = (xs) => xs.join(", ");
   const mins = (t) => (Number.isFinite(Date.parse(t)) ? Math.max(0, Math.round((now - Date.parse(t)) / 60000)) : null);
@@ -842,6 +856,11 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
         if (w?.status === "pending" || r.status === "pending") started.push({ n, w, by: "concurrency", text: w ? held(w) : `${n} pending behind its concurrency group (the repository's own workflow setting)` });
         else started.push({ n, w, text: `${n} queued ${!w ? "with no runner" : w.status === "completed" ? `after its workflow run ${label(w)} completed${mins(w.updated_at) === null ? "" : ` ${mins(w.updated_at)} min ago`}` : `with no runner in workflow run ${label(w)}`}` });
       } else running.push({ n, w });
+      continue;
+    }
+    // A commit status earlier commits got (`posted`): its service has not posted it here yet.
+    if (posted.has(n)) {
+      started.push({ n, w: null, by: "the service posting it", text: `${n} is a commit status earlier commits got, not posted on this head yet` });
       continue;
     }
     const ids = producers.get(n);

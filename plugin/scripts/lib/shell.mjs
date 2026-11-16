@@ -780,9 +780,6 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     // Every other argument: a path when it is a fixed path-looking string; data otherwise.
     for (let k = 1; k < words.length; k += 1) {
       const w = words[k];
-      // Where the command's output is run, its operands are what runs; an option's value (`-type f`) is not.
-      const before = literal(words[k - 1]) ? words[k - 1].value : "";
-      const operand = !(before.startsWith("-") && before !== "-" && before !== "--" && !before.includes("="));
       const r0 = role.get(w);
       if (r0 === "code" || r0 === "skip" || r0 === "named" || r0 === "global") continue;
       if (!literal(w)) {
@@ -800,7 +797,9 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         }
         // Where its output feeds a shell, an argument is what that shell runs; elsewhere a computed word is a path
         // when Factory resolves it, and data when it cannot.
-        if (mode.feeds && operand) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
+        // Where the command's output is run, every non-option word may be what runs: which options take a value is
+        // not guessed, so `-type f`'s `f` is guarded too (harmless), and `ls -1 hooks | bash` keeps `hooks`.
+        if (mode.feeds) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
         else argWord(w, cwds, mode.spec);
         continue;
       }
@@ -815,7 +814,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         continue;
       }
       if (SPEC.test(v) && !v.includes("/")) continue;
-      if (mode.feeds && operand && !URL_SCHEME.test(v)) execWord(w, cwds, mode.spec);
+      if (mode.feeds && !URL_SCHEME.test(v)) execWord(w, cwds, mode.spec);
       else argWord(w, cwds, mode.spec);
       if (MAYBE_CODE.test(v)) code(v, cwds, { ...mode, spec: true });
     }

@@ -301,8 +301,9 @@ test("commandRefs: a package manager's computed word is unresolved only where a 
   assert.ok(commandRefs("npm --workspace=$W run build").scripts.some((x) => x.pkg === "*" && x.name === "build"));
 });
 
-test("commandRefs: where a command's output is run, an option's value is no run position, only an operand (#387 final)", () => {
-  assert.deepEqual(paths("find scripts -type f | xargs chmod +x"), ["scripts"], "-type f: f is the option's");
-  assert.deepEqual(unresolved('find scripts -name "$N" | xargs bash'), [], "-name's computed value is data");
-  assert.deepEqual(paths("cat setup | bash"), ["setup"], "an operand still is");
+test("commandRefs: where a command's output is run, every non-option word is a run position; which options take a value is not guessed (#387 final)", () => {
+  assert.deepEqual(paths("ls -1 hooks | bash"), ["hooks"], "a word after a flag that takes none is still what runs");
+  assert.deepEqual(paths("find scripts -type f | xargs chmod +x"), ["scripts", "f"], "-type f's f is guarded too: harmless");
+  assert.deepEqual(unresolved('find scripts -name "$N" | xargs bash'), ['"$N"'], "a computed word there may be what runs");
+  assert.deepEqual(paths("cat setup | bash"), ["setup"]);
 });

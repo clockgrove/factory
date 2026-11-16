@@ -7,6 +7,7 @@
 import { addLabels, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
 import { CLOCK_SKEW_MS, blockCauseOf, isSelf, marker, restartedAt, selfLogin, trustedAuthor } from "./logic.mjs";
 import { startTime } from "./objective-trust.mjs";
+import { neverStarted } from "./triage.mjs";
 
 /** How many times a lost stage is relaunched since a person last started the Objective, before it Blocks. */
 export const RELAUNCH_MAX = 2;
@@ -121,11 +122,42 @@ export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
 }
 
 /**
- * Whether a vanished stage left a sign that its network was not what ended it, so it keeps the vanished Block: on the
- * sandbox, a record that says its stage ended (stage.mjs writes `ended`, with `endedBy` for a watchdog's kill: it
- * reached GitHub); on the Action, its last `work (N)` job concluded `cancelled` (a person, or the job's timeout).
+ * GitHub's name for a step that runs Factory's own action with no `name:` of its own: `Run <uses>`, with `uses`
+ * `clockgrove/factory@<ref>` (the `uses` doctor.mjs and local.mjs read as Factory's).
  */
-export const endedNotLost = ({ record = null, job = null }) => record?.state === "ended" || !!record?.endedBy || job?.conclusion === "cancelled";
+const OWN_ACTION_STEP = /^Run clockgrove\/factory@\S+$/;
+
+/**
+ * How a vanished stage ended when its runner or network was not what ended it, so it is not relaunched; null when it
+ * was lost (relaunch it). Decided on structure only, never a log's words:
+ * - `{by: "sandbox"}`: on the sandbox, a record that says its stage ended (stage.mjs writes `ended`, with `endedBy` for
+ *   a watchdog's kill: it reached GitHub);
+ * - on the Action, its last `work (N)` job (stintWorkJob, GitHub's jobs API with its `conclusion` and `steps[]`):
+ *   `{by: "cancelled"}` when the job concluded `cancelled` or `timed_out` (a person, or the job's timeout): a stop;
+ *   `{by: "setup", step}` when GitHub never started it (triage.mjs neverStarted: no step, no runner; `step` null) or a
+ *   step failed before Factory's own ran: GitHub's Set up job (step 1), or any step before the job's last step that
+ *   runs Factory's action (OWN_ACTION_STEP); `step` is that step's name. A set-up failure fails the same way every time.
+ * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), or Factory's own step
+ * failing with no exit written (its network).
+ */
+export function endedNotLost({ record = null, job = null }) {
+  if (record?.state === "ended" || record?.endedBy) return { by: "sandbox" };
+  if (!job) return null;
+  if (job.conclusion === "cancelled" || job.conclusion === "timed_out") return { by: "cancelled" };
+  if (neverStarted(job)) return { by: "setup", step: null };
+  const steps = Array.isArray(job.steps) ? job.steps : [];
+  const factory = steps.filter((x) => OWN_ACTION_STEP.test(String(x?.name ?? ""))).at(-1);
+  const failed = steps.find((x) => x?.conclusion === "failure");
+  if (failed && (failed.number === 1 || (factory && failed.number < factory.number))) return { by: "setup", step: String(failed.name ?? "").slice(0, 120) };
+  return null;
+}
+
+/** The dispatcher's Block reason and cause for a vanished stage endedNotLost placed (`end`), after `note`. */
+export function notLostBlock(end, note = "") {
+  if (end?.by === "setup") return { reason: `worker job failed before Factory ran: ${end.step ? `its step "${end.step}" failed` : "GitHub never started it (no runner was assigned)"}${note}; a set-up failure, so it was not relaunched`, cause: "setup" };
+  if (end?.by === "cancelled") return { reason: `worker job vanished: its work job was cancelled (a person, or its timeout)${note}; a stop, so it was not relaunched`, cause: "factory" };
+  return { reason: `worker job vanished: Running with no job in progress${note}`, cause: "factory" };
+}
 
 /**
  * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that

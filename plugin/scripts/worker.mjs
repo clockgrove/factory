@@ -713,7 +713,7 @@ async function main() {
       model: inputs.model,
       effort: inputs.effort,
       prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
-      // A resume the provider refuses for a rotated credential runs fresh with the whole card (harness.mjs runHarness).
+      // A resume the provider refuses for the session alone runs fresh with the whole card (harness.mjs runHarness).
       freshPrompt: (attempt === 1 && restored?.id && !continued) || rebaseConflict ? conflictPrompt : workPrompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
@@ -727,9 +727,9 @@ async function main() {
     live.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
-    // The restored session ran fresh instead (harness.mjs runHarness: the provider refused it for a rotated credential).
+    // The restored session ran fresh instead (harness.mjs runHarness: the provider refused its resume).
     if (rec.resumeRefused && attempt === 1 && restored?.id) {
-      restored = { ...restored, id: null, reason: "resume refused by the provider (another credential)" };
+      restored = { ...restored, id: null, reason: "resume refused by the provider" };
       reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: restored.reason };
     }
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported

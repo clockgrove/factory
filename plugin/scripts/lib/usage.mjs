@@ -138,7 +138,8 @@ export function jsonLines(text) {
  * (`customer_verification_required`, 403) types, which decide a gateway body that carries no status. A subscription's
  * usage limit (`usage_limit_reached`, a 429) is in it too: a retry on any model of the same subscription meets it again.
  */
-const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
+const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "permission_error", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
+const refusedKind = (r) => REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
 /** The kinds that are a subscription's usage limit: it resets at a known moment (usageReset), unlike a quota or billing refusal. */
 export const USAGE_LIMIT_KINDS = new Set(["usage_limit_reached"]);
 /** Whether a refusal (providerRefusal) is a subscription's usage limit. */
@@ -172,6 +173,10 @@ const epochMs = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? (
 
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
+/** 4xx statuses that mean the provider is busy, not refusing (HTTP's own meaning): a request timeout, too early, too many requests. */
+const BUSY_4XX = new Set([408, 425, 429]);
+/** 4xx statuses that refuse one request as sent (its body: a session's transcript), not the account or its settings. */
+const REQUEST_4XX = new Set([400, 413, 422]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 
 /**
@@ -267,8 +272,9 @@ export function rotatedPin(harness, events) {
 /**
  * A provider's refusal the harness reported as structure, when no retry can pass it: {harness, status, type, code,
  * message}, else null. Decided on the fields alone (an HTTP status in 4xx other than RETRYABLE_4XX, or a REFUSED_KINDS
- * type or code), never on the message's words; a 429 rate limit, a 5xx or a transport error (no status) is null, so
- * the run stays a death or a harness error as before. The parsers ask only for a run that failed. Each harness's structure:
+ * type or code), never on the message's words; a 429 rate limit or a 5xx is null (the provider busy: providerBusy), and
+ * so is a transport error (no status). A resumed pass refused for its request alone (requestRefused) runs once fresh
+ * before its refusal stands (harness.mjs runHarness). The parsers ask only for a run that failed. Each harness's structure:
  *   claude  : the result line with is_error and `api_error_status`; the type is the API error message's `error`
  *   codex   : the last `turn.failed` (else `error`) event, whose `error.message` is the provider's JSON error body
  *             ({status, error: {type, code, message}}), or the AI Gateway's bare body ({error: {type, message}}, no
@@ -283,9 +289,44 @@ export function rotatedPin(harness, events) {
  *             the reset from that snapshot's full window
  *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
-export function providerRefusal(harness, events, { rollout = null, since = null } = {}) {
+export function providerRefusal(harness, events, opts = {}) {
+  const e = providerError(harness, events, opts);
+  if (!e) return null;
+  const { reset, retryAt, ...r } = e;
+  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r)) : refusedKind(r);
+  if (!refused) return null;
+  return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+}
+
+/**
+ * The provider saying it is busy, as structure, on a failed run: {harness, status, type, code, message, retryAt?}, else
+ * null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included), with no refusal
+ * type or code (REFUSED_KINDS: a 429 `insufficient_quota` or `usage_limit_reached` is a refusal). No status (a transport
+ * error, a bare body) is never busy. `retryAt` (ms) is the provider's own word on when to go again, where the harness
+ * reports one: Claude's API error `api_error_params.rate_limit_info.resetsAt`, else its last rejected
+ * `rate_limit_event`; Copilot's last `auto_mode_switch.requested` event's `retryAfterSeconds` from that event's time.
+ * Codex reports none. runHarness waits for it (else the outage doubling) and runs the pass again: no death.
+ */
+export function providerBusy(harness, events, opts = {}) {
+  const e = providerError(harness, events, opts);
+  if (!e || e.status === null || refusedKind(e) || !(BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600))) return null;
+  const { reset, retryAt, ...r } = e;
+  const at = harness === "claude" ? reset : retryAt;
+  return { harness, ...r, ...(Number.isFinite(at) ? { retryAt: at } : {}) };
+}
+
+/**
+ * Whether a refusal refuses only the request a resumed session sends (its transcript), so one fresh pass can tell: a
+ * 400, 413 or 422 (REQUEST_4XX) with no auth, permission, quota or billing type or code (REFUSED_KINDS). runHarness runs
+ * a resumed pass so refused once fresh before the refusal stands.
+ */
+export const requestRefused = (r) => !!r && REQUEST_4XX.has(r.status) && !refusedKind(r);
+
+/** The provider error a failed run ended on, as each harness reports it (providerRefusal's structure), or null. */
+function providerError(harness, events, { rollout = null, since = null } = {}) {
   let r = null;
   let reset = null;
+  let retryAt = null;
   if (harness === "claude") {
     const res = [...events].reverse().find((e) => e?.type === "result");
     const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
@@ -309,11 +350,12 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
     const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
     if (!d || typeof d !== "object") return null;
     r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode), message: str(d.message) };
+    const ask = [...events].reverse().find((e) => e?.type === "auto_mode_switch.requested" && !e.agentId);
+    const after = num(ask?.data?.retryAfterSeconds);
+    const at = Date.parse(ask?.timestamp);
+    if (after !== null && after >= 0 && Number.isFinite(at)) retryAt = at + after * 1000;
   } else return null;
-  const kind = REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
-  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
-  if (!refused) return null;
-  return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+  return { ...r, reset, retryAt };
 }
 
 /**
@@ -377,6 +419,8 @@ export function parseClaude(stdout, model) {
   rec.cache = { first };
   const refusal = providerRefusal("claude", lines);
   if (refusal) rec.refusal = refusal;
+  const busy = refusal ? null : providerBusy("claude", lines);
+  if (busy) rec.busy = busy;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -517,6 +561,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   rec.error = failed;
   const refusal = rec.ok ? null : providerRefusal("codex", events, { rollout, since });
   if (refusal) rec.refusal = refusal;
+  const busy = rec.ok || refusal ? null : providerBusy("codex", events);
+  if (busy) rec.busy = busy;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
   rec.usd = priceCodex(rec.model, rec.tokens);
@@ -672,6 +718,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   const p = priceCredits(a, creditUsd);
   const refusal = rec.ok ? null : providerRefusal("copilot", events);
   if (refusal) rec.refusal = refusal;
+  const busy = rec.ok || refusal ? null : providerBusy("copilot", events);
+  if (busy) rec.busy = busy;
   if (p.aiu !== null) rec.aiu = p.aiu;
   if (p.lowerBound) rec.usdLowerBound = true;
   rec.sessionStartTime = a.sessionStartTime;
@@ -691,12 +739,13 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   return rec;
 }
 
-/** One entry point: harness name to parser. A provider's refusal is the run's error, in its structured fields. */
+/** One entry point: harness name to parser. A provider's refusal, or its busy answer, is the run's error, in its structured fields. */
 export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
   const parse = { claude: () => parseClaude(stdout, model), codex: () => parseCodex(stdout, model, extra), copilot: () => parseCopilot(stdout, model, exitCode, extra) }[harness];
   if (!parse) throw new Error(`unknown harness ${harness}`);
   const rec = parse();
   if (rec.refusal) rec.error = `refused by the provider: ${refusalFields(rec.refusal)}`;
+  else if (rec.busy) rec.error = `the provider was busy: ${refusalFields(rec.busy)}`;
   return rec;
 }
 

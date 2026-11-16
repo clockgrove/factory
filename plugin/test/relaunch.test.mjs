@@ -398,7 +398,7 @@ test("a vanished stage that left a sign it was not the network keeps the vanishe
   );
   const r = await tick(gh);
   assert.deepEqual([r.vanished, r.relaunched], [[7], [9]], "#9's job failed with no word: lost, relaunched");
-  assert.match(gh.blocks(7)[0].body, /worker job vanished: Running with no job in progress\. Fix by/);
+  assert.match(gh.blocks(7)[0].body, /worker job vanished: its work job was cancelled \(a person, or its timeout\); a stop, so it was not relaunched\. Fix by/);
   // The sandbox: #7's stage recorded its end (it reached GitHub); #9's lease ran out with no end.
   const sandboxed = (n, rec) => ({ body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", claim: "c1", at: ago(25 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: ago(25 * MIN) }], ...rec })}` });
   const box = fakeGitHub([
@@ -424,6 +424,31 @@ test("a relaunch whose record cannot be written is tried again next tick, never 
   assert.ok(r.deadlines.some((d) => d.kind === "retry"));
   cfg.failRecord = false;
   assert.deepEqual((await tick(gh)).relaunched.sort(), [7, 8]);
+});
+
+// #390: the work job's own steps (GitHub's jobs API, the read stintWorkJob already makes) tell a set-up failure, which
+// fails the same way every time, from a runner that went away.
+test("a vanished stage whose work job failed at a step before Factory's own Blocks at once with cause setup, naming the step; a lost runner is relaunched", async () => {
+  const since = 20 * MIN;
+  const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
+  const job = (n, steps) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", created_at: ago(since - 30_000), runner_id: 3, runner_name: "GitHub Actions 3", steps });
+  const factory = "Run clockgrove/factory@v0.9";
+  const jobs = [
+    // #7: the checkout failed; Factory's step (the job's last one running Factory's action) never ran.
+    job(7, [step(1, "Set up job", "success"), step(2, factory, "skipped"), step(3, "Run actions/checkout@v7", "failure"), step(4, factory, "skipped"), step(5, "Run actions/upload-artifact@v7", "success"), step(6, "Complete job", "success")]),
+    // #8: GitHub never started it: no step, no runner.
+    { name: "work (8)", status: "completed", conclusion: "failure", created_at: ago(since - 30_000), runner_id: null, runner_name: null, steps: [] },
+    // #9: the runner went away while Factory's step ran: no step of its own failed.
+    job(9, [step(1, "Set up job", "success"), step(2, factory, "skipped"), step(3, "Run actions/checkout@v7", "success"), step(4, factory, null, "in_progress")]),
+  ];
+  const gh = fakeGitHub([7, 8, 9].map((number) => ({ number, labels: [OBJ, "factory:running"], since })), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: jobs } });
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished.sort(), r.relaunched], [[7, 8], [9]]);
+  const seven = gh.blocks(7)[0].body;
+  assert.match(seven, /worker job failed before Factory ran: its step "Run actions\/checkout@\u200b?v7" failed; a set-up failure, so it was not relaunched/);
+  assert.equal(blockCauseOf(seven), "setup");
+  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\)/);
+  assert.equal(blockCauseOf(gh.blocks(8)[0].body), "setup");
 });
 
 test("the cancelled-job sign is found on a busy repository: the run that started the stint, not the ticks after it", async () => {

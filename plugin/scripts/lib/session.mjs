@@ -692,8 +692,9 @@ const REVIEW_AT_START = /^<!-- factory:\d+:review -->/;
 const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
 
 /**
- * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. A
- * provider's refusal (usage.mjs providerRefusal) is no death: the harness answered, and the same request is refused again.
+ * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. The
+ * provider's answer, as the harness reported it, is no death: a refusal (usage.mjs providerRefusal: the same request is
+ * refused again) or the provider busy (usage.mjs providerBusy: runHarness waits it out).
  */
 /**
  * Whether the review's answer pass, resumed and dead, runs once more fresh: not after runHarness already ran it fresh for
@@ -701,7 +702,7 @@ const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
  */
 export const answerFreshAfter = (resumed, rec) => !!resumed && !rec.resumeRefused && crashed(rec);
 
-export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
+export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded && !rec.stopped && !rec.refusal && !rec.busy && (!!rec.signal || (rec.exitCode !== 0 && !rec.subtype && !rec.turns));
 
 /**
  * The card's line on the worker secrets in the worker's shell (lib/worker-secrets.mjs), by name; "" when there are none.

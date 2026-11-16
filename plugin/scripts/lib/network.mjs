@@ -73,8 +73,15 @@ export function spentResetOf(status, headers, message, now = OUTAGE.now()) {
  */
 export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(causeCode(e)));
 
-/** Whether an outage's code is GitHub answering 5xx past the client's retries ("HTTP 500"), not a lost network. */
-export const serverDown = (code) => /^HTTP 5\d\d$/.test(String(code));
+/**
+ * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx
+ * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx: usage.mjs providerBusy) past runHarness's
+ * waits. Not a lost network.
+ */
+export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code));
+
+/** The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
+export const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
 
 /**
  * How an outage of `host` with `code` reads in a reason: GitHub's 5xx (on `endpoint`, the request that met it, when
@@ -100,8 +107,10 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
  * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
  * after). `serverResumeMs`, `serverResumeMaxMs`, `serverResumes`: serve resumes an Objective paused on GitHub answering
- * 5xx past the client's retries (serverDown) after 1, 2, 4… minutes, doubling up to half an hour, since a probe of the
- * host answers while one endpoint fails; six such resumes in a row (an hour in all) and it Blocks (local.mjs). `now`,
+ * 5xx past the client's retries, or on a model provider busy past runHarness's waits (serverDown), after 1, 2, 4…
+ * minutes, doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; six
+ * such resumes in a row (an hour in all) and it Blocks (local.mjs). runHarness waits a busy provider out in place on the
+ * same doubling, at most `serverResumes` times, within the stage's wait. `now`,
  * `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {
@@ -172,7 +181,7 @@ export const originOf = (url) => {
 export class NetworkDown extends Error {
   constructor({ origin, code, since, resetAt = null, key = null }) {
     const spent = Number.isFinite(resetAt);
-    super(spent ? `${limitName(origin, key)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
+    super(spent ? `${limitName(origin, key)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : serverDown(code) ? `${hostOf(origin)} answered ${code} to every try since ${iso(since)}` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
     this.name = "NetworkDown";
     Object.assign(this, { offline: true, transport: true, unsent: true, status: 0, origin, code: spent ? RATE_LIMIT_SPENT : code || "", since, ...(spent ? { resetAt, key } : {}) });
   }

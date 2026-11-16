@@ -1427,7 +1427,7 @@ async function main() {
         ...workerRun(inputs),
         resume,
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
-        // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
+        // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
@@ -1451,7 +1451,7 @@ async function main() {
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
       fed = answerFed({ fresh: true, decisions, listed: listedFor(null), afterPush: afterPush.length > 0 });
-      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider" };
     }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {

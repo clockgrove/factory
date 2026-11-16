@@ -25,10 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, causeCode, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
-
-/** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
-const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
+import { OUTAGE, causeCode, lostText, minutesText, probe as probeHost, serverDown, serverWait, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
@@ -2221,7 +2218,7 @@ export class Local {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = serverDown(off.code) || !off.origin || (await probeHost(off.origin)) === null;
       const reason = serverDown(off.code)
-        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${off.server?.pauses ?? 1} pauses over ${minutesText(now - off.since)}, past Factory's bound of ${OUTAGE.serverResumes} resumes or ${minutesText(OUTAGE.blockMs)} for GitHub failing. Re-apply the label to run it again once GitHub answers that request.`
+        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${off.server?.pauses ?? 1} pauses over ${minutesText(now - off.since)}, past Factory's bound of ${OUTAGE.serverResumes} resumes or ${minutesText(OUTAGE.blockMs)} for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
         : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? `${serverDown(off.code) ? off.host : "The network"} is back: re-apply the label to run it again.` : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {

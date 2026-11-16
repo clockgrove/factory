@@ -29,7 +29,7 @@ import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, notLostBlock, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -721,9 +721,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           continue;
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
-        // unless it left a sign its network was not what ended it (a cancelled job, a sandbox stage that recorded its end).
+        // unless it left a sign its network was not what ended it (relaunch.mjs endedNotLost: a cancelled job, a step
+        // that failed before Factory's own, a sandbox stage that recorded its end).
         // The decision and the day's cap come first, so a held one costs no Actions reads (the job token's hourly budget).
         let note = "";
+        let notLost = null;
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
           const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
@@ -731,7 +733,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           else if (capHold(n)) continue;
           else {
             const job = sandbox ? null : await stintWorkJob(repo, n, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), n)) }).catch(() => null);
-            if (endedNotLost({ record: boxRecord, job })) log(`  #${n}: its ${sandbox ? "sandbox stage recorded its end" : "work job was cancelled"}; not a network loss, so not relaunched`);
+            notLost = endedNotLost({ record: boxRecord, job });
+            if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
             else {
               await relaunchLost(issue, d, "vanished");
               continue;
@@ -742,7 +745,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : `worker job vanished: Running with no job in progress${note}`, hold || local ? "setup" : "factory");
+        const lostEnd = notLostBlock(notLost, note);
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
       }
     }
   }

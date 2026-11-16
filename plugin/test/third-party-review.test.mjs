@@ -264,6 +264,34 @@ test("#303: the dispatcher's read of a wait: held until the review of the head o
   });
 });
 
+test("#402: the wait is the repository's third_party_wait_minutes; its record carries it, so every route ends the wait at that bound", async () => {
+  const waitMs = resolveInputs({ env: { FACTORY_THIRD_PARTY_WAIT_MINUTES: "45" } }).thirdPartyWaitMs;
+  assert.equal(waitMs, 45 * MIN);
+  assert.equal(resolveInputs({ env: {} }).thirdPartyWaitMs, THIRD_PARTY_WAIT_MS, "20 minutes when unset");
+  assert.equal(resolveInputs({ env: { FACTORY_THIRD_PARTY_WAIT_MINUTES: "0" } }).thirdPartyWaitMs, THIRD_PARTY_WAIT_MS, "a wait that is not above 0 is the default");
+  const clock = { t: T0 };
+  const gh = github({ reviews: [], clock: () => clock.t });
+  const said = [];
+  const r = await step(gh, clock, { said, waitMs });
+  assert.deepEqual(r.wait, { missing: [GREPTILE], until: T0 + 45 * MIN });
+  assert.match(gh.comments[0].body, /\nFactory: waiting up to 45 min for greptile-apps\[bot\]/);
+  const pr = { number: 7, state: "open", draft: false, head: { sha: HEAD }, labels: [] };
+  await withGitHub(gh, async () => {
+    const wait = waitOf(gh.comments, 7);
+    assert.equal(wait.waitMs, 45 * MIN);
+    // Past the default's 20 minutes the dispatcher still waits (the reviewer has not reviewed the head); at 45 it resumes.
+    assert.deepEqual(await waitState({ repo, issue: 7, pr, wait, opts: { token: "t" }, now: T0 + 30 * MIN }), { waiting: true, until: T0 + 45 * MIN });
+    assert.deepEqual(await waitState({ repo, issue: 7, pr, wait, opts: { token: "t" }, now: T0 + 45 * MIN }), { resume: "deadline", until: T0 + 45 * MIN });
+  });
+  // The stage that starts again past the default's bound but within the setting's still waits; at the setting's it goes on.
+  clock.t = T0 + 30 * MIN;
+  assert.deepEqual((await step(gh, clock, { waitMs })).wait, { missing: [GREPTILE], until: T0 + 45 * MIN });
+  clock.t = T0 + 45 * MIN;
+  const gone = [];
+  assert.deepEqual(await step(gh, clock, { said: gone, waitMs }), { logins: [GREPTILE], wait: null });
+  assert.deepEqual(gone, [`third-party review: ${GREPTILE} posted no review of ${HEAD.slice(0, 7)} within 45 min; going on without it`]);
+});
+
 test("#303: the record's body keeps its JSON on one line and no text can close the marker", async () => {
   const body = waitBody(7, { sha: HEAD, logins: [GREPTILE], at: "2026-11-15T08:00:00.000Z" });
   assert.ok(body.startsWith(`<!-- factory:7:third-party {"sha":"${HEAD}"`));
@@ -529,6 +557,30 @@ test("#303: the dispatcher leaves a waiting PR as it is, then puts its review la
   t = await waitTick(w);
   assert.deepEqual(t.r.thirdPartyResumed, []);
   assert.ok(!t.writes.some((x) => x.startsWith("POST /issues/12/labels")));
+});
+
+test("#402: a wait record's minutes only times the wake, at most 24 hours; an out-of-range record never stops the dispatcher's tick, and the resuming stage judges by its own setting", async () => {
+  // A writer edits the record to a bound no Date can hold: it is taken as 24 hours, and the tick goes on.
+  const w = waitWorld();
+  const rec = w.state.comments[12][0];
+  rec.body = rec.body.replace(/"minutes":20/, '"minutes":1e12');
+  setSelf(W_SELF);
+  assert.equal(waitOf([rec], 7).waitMs, 24 * 60 * MIN);
+  setSelf(null);
+  let t = await waitTick(w);
+  assert.deepEqual(t.writes, [], "still waiting");
+  assert.equal(Date.parse(t.r.deadlines.find((d) => d.kind === "third-party").at), Date.parse(rec.created_at) + 24 * 60 * MIN + 60_000);
+  // A record whose time no wake can be set for throws in the issue's pass: said, read again next tick, and the tick ends.
+  const far = waitWorld();
+  far.state.comments[12][0].created_at = "+275760-09-13T00:00:00.000Z";
+  t = await waitTick(far);
+  assert.ok(t.r.deadlines.some((d) => d.kind === "retry"), "read again next tick");
+  // The record's minutes never decide for the stage: a record edited to one minute still waits the stage's own 20.
+  const clock = { t: T0 };
+  const gh = github({ reviews: [], clock: () => clock.t });
+  await step(gh, clock, { waitMs: MIN });
+  clock.t = T0 + 5 * MIN;
+  assert.deepEqual((await step(gh, clock)).wait, { missing: [GREPTILE], until: T0 + THIRD_PARTY_WAIT_MS });
 });
 
 test("#303: past the bound the dispatcher puts the label back with no reviews read; a record whose stage already took it up is left to the usual passes", async () => {

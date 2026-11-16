@@ -18,7 +18,7 @@ import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { FACTORY_VERSION, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -41,7 +41,7 @@ import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
 import { TokenType } from "../vendor/@actions/expressions/dist/lexer.js";
 import { dropOwned } from "./lib/fsafe.mjs";
-import { loopCap, machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
+import { limitsLine, loopCap, machineBudget, machineLimits, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -1788,23 +1788,32 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
- * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), who holds its slots (pid,
- * repository, issue and stage), and the machine's load now, with whether loops here hold new starts on it. A budget
- * setting that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the budget (`env`: this shell's over the workflow's)
- * and a saturated machine are WARNs. Read only: doctor removes no slot. `home` and `proc` are a test's own.
+ * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), its limits in force
+ * (machineLimits), who holds its slots (pid, repository, issue and stage), and the machine's load now, with whether loops
+ * here hold new starts on it. A budget setting or limit that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the
+ * budget (`env`: this shell's over the workflow's) and a saturated machine are WARNs. `settings`: what a local stage
+ * reads (doctorSettings `stage`), for the guess when machine.json sets none. Read only: doctor removes no slot. `home`
+ * and `proc` are a test's own.
  */
-export function machineChecks({ env = process.env, local, home = homedir(), proc = "/proc" }) {
+export function machineChecks({ env = process.env, local, home = homedir(), proc = "/proc", settings = env }) {
   if (!local || env.GITHUB_ACTIONS) return [];
   const budget = machineBudget({ home });
   const holders = slotHolders(slotsDir(home), { reap: false });
   const pressure = readPressure({ root: proc });
-  const sat = saturation(pressure);
+  const limits = machineLimits({ home });
+  const sat = saturation(pressure, limits.pressure);
+  const problems = limits.problems.filter((p) => p !== budget.problem);
+  // The guess: machine.json's, else the repository's guess_hours, as a local stage reads it (`settings`, serve's baseEnv).
+  const repoGuess = guessHoursMs(settings.FACTORY_GUESS_HOURS) !== null;
+  const inForce = { ...limits, guessMs: limits.from.guess === "setting" ? limits.guessMs : resolveInputs({ env: settings }).guessMs };
+  const set = `the pressure limits from ${limits.from.pressure === "setting" ? limits.file : `Factory's defaults (set them in ${limits.file})`}, the guess from ${limits.from.guess === "setting" ? limits.file : repoGuess ? "the repository's FACTORY_GUESS_HOURS" : "Factory's default"}`;
   const what = (h) => h.pid === undefined ? `a holder whose record cannot be read yet (${h.file})` : `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
   const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
   const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
   return [
     ...(cap > budget.stages ? [WARN("FACTORY_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Factory loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower FACTORY_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
     budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
+    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Factory's defaults stand for those; in force: ${limitsLine(inForce)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0 and at most ${GUESS_MAX_HOURS}`) : PASS("machine limits", `${limitsLine(inForce)}; ${set}`),
     PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
     sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
   ];
@@ -1913,7 +1922,8 @@ export function localDomainChecks({ inputs, env = process.env, local }) {
  * `varsToken` (local mode's token in local mode, as serve lists them; a token that may not is a WARN with the fix, and
  * the workflow's values stand); this shell wins over both. GitHub's copy unreadable: the checkout's copy if there is
  * one, and one WARN naming the harness that leaves. `committed`: local mode's read of the clone (local.mjs
- * committedWorkflowEnv), or null. Returns {wf, committed, env, inputs, layers, checks}.
+ * committedWorkflowEnv), or null. Returns {wf, committed, env, stage, inputs, layers, checks}: `stage`, the settings a local
+ * stage reads (local.mjs baseEnv: this shell's own settings only, inputs.mjs machineSettings, over the repository's).
  */
 export async function doctorSettings({ args, checkout, repo, token, varsToken = token, committed = null, env = process.env, local = false }) {
   const checks = [];
@@ -1936,7 +1946,10 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
   const settle = (wf, from, more = []) => {
     const layers = env.GITHUB_ACTIONS ? (appliedLayers() ?? settingLayers({ workflow: workflowSettings(env).kept })) : settingLayers({ workflow: workflowSettings(wf).kept, variables, machine: env });
     const merged = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...env };
-    return { wf, committed: from, env: merged, inputs: resolveInputs({ args, env: merged }), layers, checks: [...more, ...checks] };
+    // What a local stage reads, as serve's baseEnv builds it: the repository's settings, under this shell's own
+    // (inputs.mjs machineSettings) only.
+    const stage = env.GITHUB_ACTIONS ? env : { ...settingLayers({ workflow: workflowSettings(wf).kept, variables }).values, ...machineSettings(env) };
+    return { wf, committed: from, env: merged, stage, inputs: resolveInputs({ args, env: merged }), layers, checks: [...more, ...checks] };
   };
   if (env.GITHUB_ACTIONS || args.checkout || (committed && !committed.noClone)) return settle(committed ? committed.wf : readWorkflowEnv(checkout), committed);
   const path = ".github/workflows/factory.yml";
@@ -2015,7 +2028,7 @@ async function main() {
   }
   // The variables are listed as serve lists them: with local mode's token in local mode.
   const varsToken = (local && localToken(repo.full)) || token;
-  const { wf, committed, env, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
+  const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
   const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers)];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
@@ -2027,7 +2040,7 @@ async function main() {
   const declared = local ? loadAccounts({ env: process.env, roots: sandboxRoots(clone) }) : null;
   results.push(...localLoginChecks({ inputs, env: declared?.ok ? accountEnv(process.env, defaultAccount(declared, inputs.harness)) : process.env, local }));
   results.push(...(await localAccountChecks({ env: process.env, local, checkout: clone })));
-  results.push(...machineChecks({ env, local }));
+  results.push(...machineChecks({ env, local, settings: stage }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
   if (local) results.push(...localToolchainRows({ checkout, env: process.env, commands: localCommands(checkout, env) }));

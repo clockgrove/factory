@@ -794,7 +794,13 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   let routeStore;
   const routeHeld = async (issue) => {
     if (backend().name === "local" || !routeAccounts(process.env.FACTORY_ACCOUNTS).declared) return false;
-    routeStore ??= readHolds(repo, opts).then((h) => h.store, () => null);
+    routeStore ??= readHolds(repo, opts).then(
+      (h) => h.store,
+      (e) => {
+        log(`  the account holds could not be read (${String(e?.message || e).slice(0, 120)}); send-backs take no sibling as held this tick`);
+        return null;
+      },
+    );
     const store = await routeStore;
     if (!store) return false;
     const t = Date.now();
@@ -984,7 +990,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
       const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
       // A send-back that waited and now has nothing to rebase (it conflicts no more, a draft, or it Blocks below): its
-      // record and its issue's note go, so a later wait starts its own bound.
+      // record ends as `over` and its issue's note goes; a later conflict starts a bound of its own (overlap.mjs waitStart).
       if (!dryRun && rebaseWait && !rebaseWait.released && (pr?.draft || decision === "stuck" || decision === "limit" || (pr?.mergeable_state && !["dirty", "unknown"].includes(pr.mergeable_state))))
         await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: "over" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
       // Two account labels on these routes (#267): no work stage could start on it, so nothing is sent back to one (a
@@ -1063,7 +1069,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     // merges first, conflicts with it too; that one waits (at most WAIT_MAX_MS, with a note and a wake), since its
     // rebase now would be undone by that merge. With one conflicting PR and no sibling ahead, nothing is merged on trial.
     const cannotMerge = new Set(["red", "queue-red", "held", "threads", "edited", "dropped", "stopped"]);
-    const mergesLate = async (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || !!localHold?.(s) || (await routeHeld(s));
+    // A usage-limit hold slows a sibling only while it still needs a stage: Running, its review label on, or a merge-pass
+    // answer that sends it back to review. A reviewed one waiting on its checks or the merge queue merges with no model.
+    const backToReview = new Set(["re-review", "unread", "code-scanning", "queue-red"]);
+    const needsStage = async (s) => stateOf(s, statuses[s.number] ?? null) === "Running" || backToReview.has(mergeHow[s.number]) || ((await (prOfTick ??= prFinder(repo, opts, prsSeen))(s.number))?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
+    const mergesLate = async (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || ((!!localHold?.(s) || (await routeHeld(s))) && (await needsStage(s)));
     const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { log }) : [];
     for (const { issue, pr, open, recent, already, rebaseWait, wait, since } of sendOrder) {
       if (wait) {

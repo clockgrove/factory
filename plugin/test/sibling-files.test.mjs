@@ -829,8 +829,48 @@ test("#366: every sibling head the server lacks is named in the record, so two o
   forgetFiles();
   const after = await tick(v, { maxConcurrent: 6 });
   assert.deepEqual([after.sentBack, after.rebaseHeld], [[], []]);
-  assert.match(records(v, 22, 32, "sendback-wait")[0].body, /-released -->\nFactory: this Objective's PR no longer waits for #21 to rebase: it conflicts no more, or left review\./);
+  assert.match(records(v, 22, 32, "sendback-wait")[0].body, /-over -->\nFactory: this Objective's PR no longer waits for #21 to rebase: it conflicts no more, or left review\./);
   assert.ok(overlap(v, 22)[0].body.startsWith(marker(22, "overlap", "cleared")), overlap(v, 22)[0].body);
+});
+
+test("#365: a stale head's own lines win when made again on a sibling's base: changes main made between the two bases are no clash of theirs", async (t) => {
+  const { siblingTrials } = await import("../scripts/lib/overlap.mjs");
+  forgetFiles();
+  t.after(() => G.reset());
+  // Main changes line 0 of src/m0.ts; A, from before, changes it too (so A conflicts with main) and line 5 of src/m1.ts.
+  // Then main changes line 10 of src/m2.ts, and B, from main now, changes that line again.
+  const a = G.head("a", { "src/m0.ts": [0], "src/m1.ts": [5] });
+  const a2 = G.head("a2", { "src/m0.ts": [0], "src/m1.ts": [5], "src/m2.ts": [10] });
+  G.advance("main 1", { "src/m0.ts": [0] });
+  G.advance("main 2", { "src/m2.ts": [10] });
+  const b = G.onMain("b", { "src/m2.ts": [10] });
+  const trials = siblingTrials(repoOf(REPO), { token: "t" });
+  try {
+    assert.deepEqual(await trials.conflicts(a, b), { conflict: false, files: [] }, "A and B never change the same lines");
+    assert.deepEqual(await trials.conflicts(b, a), { conflict: false, files: [] });
+    assert.deepEqual(await trials.conflicts(a2, b), { conflict: true, files: ["src/m2.ts"] }, "both change line 10 of src/m2.ts");
+  } finally {
+    trials.close();
+  }
+});
+
+test("#366: a sibling's usage-limit hold slows it only while it needs a stage; a send-back wait that ended with nothing to rebase ends its bound", async () => {
+  const { waitStart } = await import("../scripts/lib/overlap.mjs");
+  forgetFiles();
+  const h21 = G.head("stage 21", { "src/registry.ts": [29] });
+  const h22 = G.head("stage 22", { "src/registry.ts": [29] });
+  // #21 is reviewed and waits for its merge (no review label, no merge record yet): no stage runs on it, so a hold of
+  // its account does not slow it, and #22 waits for it.
+  const w = world([issue(21, ["factory:in-review"], 1), issue(22, ["factory:in-review"], 1)], { comments: { 31: [validated(21, h21)], 32: [validated(22, h22)] }, prs: { 21: { pr: { ...reviewingPr(21, h21).pr, labels: [] }, files: [] }, 22: dirtyPr(22, h22) } });
+  const r = await tick(w, { maxConcurrent: 6 }, { localHold: (i) => (i.number === 21 ? "its account's usage limit is spent" : null) });
+  assert.deepEqual([r.sentBack, r.rebaseHeld], [[], [22]]);
+
+  // A wait that ended `over` (the conflict went away) ends the bound: a new conflict an hour later starts its own, even
+  // with a hand-off wait that ended before it.
+  const now = Date.now();
+  const H = 3600_000;
+  assert.equal(waitStart({ reviewWait: { since: now - 5 * H, released: true, at: now - 3 * H }, rebaseWait: { since: now - 3 * H, released: true, over: true, at: now - H } }, now), Math.floor(now / 1000) * 1000);
+  assert.equal(waitStart({ reviewWait: { since: now - 5 * H, released: true, at: now - 3 * H }, rebaseWait: { since: now - 3 * H, released: true, over: false, at: now - H } }, now), now - 5 * H, "sent back, not over: one bound");
 });
 
 test("#340: a sibling that can run no stage (two account labels) is not ahead; a hold more than 6 h after the Objective's last starts a new wait", async () => {

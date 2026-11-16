@@ -24,10 +24,10 @@ export const PLAN_FILES_KEY = "Files";
 /** At most this many paths are kept per Objective: a plan line or a PR past it is read as its first ones. */
 export const FILES_MAX = 200;
 /**
- * The new trial merges one PR's judgement computes at most (a hand-off, a waiting hand-off's tick, a send-back's tick);
- * a pair of heads already merged in this process is read from its cache and counts nothing. Each PR has its own, so the
- * early ones never use up a later one's. A bound on the git work, not a judgement: past it, a pair is unread. `max` is
- * settable (tests).
+ * The new trial merges one PR's judgement computes at most (a hand-off, a waiting hand-off's tick, a send-back's tick):
+ * a pair of heads already merged in this process is read from its cache and counts nothing, and each PR has its own
+ * bound, so early PRs never use up a later one's. A tick's merges are bounded by the pairs of its PRs, at most once
+ * each (the cache). A bound on one PR's git work, not a judgement: past it, a pair is unread. `max` is settable (tests).
  */
 export const TRIALS = { max: 50 };
 /** The longest a hand-off to review waits for siblings (from its record's start): then the review goes on beside them. */
@@ -170,7 +170,8 @@ export class TrialCap extends Error {}
  * `scope()` is one PR's judgement: its `conflicts(a, b)` resolves to `{conflict, files}` for the two heads against the
  * default branch's head now, from this process's cache when that pair was merged on that head before; it rejects with
  * TrialUnread when the pair cannot be merged (`missing` the heads the server did not have) and with TrialCap past
- * `max` new merges in that scope. `conflicts` itself is one scope's. The caller closes it.
+ * `max` new merges in that scope. `conflicts` itself is one scope's. `max` bounds one PR's judgement; a tick's merges are
+ * bounded by the pairs of its PRs, each merged at most once (the cache). The caller closes it.
  */
 export function siblingTrials(repo, opts, { max = TRIALS.max } = {}) {
   const token = typeof opts?.token === "function" ? opts.token : () => opts?.token ?? null;
@@ -310,7 +311,8 @@ const readFiles = (repo, issue, opts, prOf, log) =>
 /**
  * The PR records of a wait: a hand-off's (reviewHold, `review-wait`) and a send-back's (sendBackOrder, `sendback-wait`).
  * Each is a comment whose first line is `<prefix><on>-<since, epoch s>[-u<sha>] -->` while it waits, with `-released`
- * before ` -->` once its wait is over; `u<sha>[.<sha>...]` names the sibling heads that could not be fetched for a trial
+ * before ` -->` once its wait is over (`-over` instead when a send-back's wait ended with nothing left to rebase: its
+ * bound ends with it); `u<sha>[.<sha>...]` names the sibling heads that could not be fetched for a trial
  * merge, so the next tick that cannot fetch them either goes on without them. Released records stay: they keep the Objective's first wait
  * start (the bound is per Objective), and a released hand-off record marks a PR that went through its wait as ahead of
  * those still waiting.
@@ -321,8 +323,8 @@ const recordPrefix = (n, kind) => marker(n, kind).replace(/ -->$/, ":");
 function waitRecordOf(comments, n, kind) {
   const prefix = recordPrefix(n, kind);
   const c = [...(comments || [])].reverse().find((x) => trustedAuthor(x) && String(x.body || "").startsWith(prefix));
-  const m = c && /^(\d+)-(\d+)(?:-u([0-9a-f]{40}(?:\.[0-9a-f]{40})*))?(-released)? -->/.exec(c.body.slice(prefix.length));
-  return m ? { id: c.id, on: Number(m[1]), since: Number(m[2]) * 1000, unread: m[3] ? m[3].split(".") : [], released: !!m[4], at: Date.parse(c.updated_at || c.created_at) || null } : null;
+  const m = c && /^(\d+)-(\d+)(?:-u([0-9a-f]{40}(?:\.[0-9a-f]{40})*))?(-released|-over)? -->/.exec(c.body.slice(prefix.length));
+  return m ? { id: c.id, on: Number(m[1]), since: Number(m[2]) * 1000, unread: m[3] ? m[3].split(".") : [], released: !!m[4], over: m[4] === "-over", at: Date.parse(c.updated_at || c.created_at) || null } : null;
 }
 
 /**
@@ -335,8 +337,8 @@ export const reviewWaitOf = (comments, n) => waitRecordOf(comments, n, "review-w
 export const rebaseWaitOf = (comments, n) => waitRecordOf(comments, n, "sendback-wait");
 
 /** Write issue `n`'s PR record of `kind` (waitRecordOf's form), over Factory's earlier one. */
-function writeRecord(repo, n, prNumber, kind, { on, since, unread = [], released = false }, text, opts) {
-  return upsertComment(repo, prNumber, recordPrefix(n, kind), text, opts, { head: `${on}-${Math.floor(since / 1000)}${unread?.length ? `-u${unread.join(".")}` : ""}${released ? "-released" : ""} -->` });
+function writeRecord(repo, n, prNumber, kind, { on, since, unread = [], released = false, over = false }, text, opts) {
+  return upsertComment(repo, prNumber, recordPrefix(n, kind), text, opts, { head: `${on}-${Math.floor(since / 1000)}${unread?.length ? `-u${unread.join(".")}` : ""}${over ? "-over" : released ? "-released" : ""} -->` });
 }
 const writeWait = (repo, n, prNumber, wait, text, opts) => writeRecord(repo, n, prNumber, "review-wait", wait, text, opts);
 
@@ -426,12 +428,14 @@ async function aheadOf(repo, { issue, head, key, others, state, stuck = () => fa
 /**
  * When a send-back wait's bound counts from (sendBackOrder), at `now`: the start of the Objective's wait still running
  * (its sendback-wait record not released), else of the last one (a hand-off's or a send-back's record) whose wait ended
- * within WAIT_MAX_MS, so one bound covers a hand-off's wait and the send-back that follows it; else now. `released`
- * says the hand-off record was released this tick.
+ * within WAIT_MAX_MS, so one bound covers a hand-off's wait and the send-back that follows it; else now. A send-back
+ * wait that ended with nothing left to rebase (`over`: the conflict went away) ends the bound too: what ended up to it
+ * counts no more. `released` says the hand-off record was released this tick.
  */
 export function waitStart({ reviewWait = null, rebaseWait = null, released = false }, now = Date.now()) {
   if (rebaseWait && !rebaseWait.released) return rebaseWait.since;
-  const ended = [reviewWait && (released || reviewWait.released) ? { ...reviewWait, at: released ? now : reviewWait.at } : null, rebaseWait].filter((r) => r && r.at && now - r.at < WAIT_MAX_MS);
+  const cut = rebaseWait?.over ? rebaseWait.at ?? now : -Infinity;
+  const ended = [reviewWait && (released || reviewWait.released) ? { ...reviewWait, at: released ? now : reviewWait.at } : null, rebaseWait?.over ? null : rebaseWait].filter((r) => r && r.at && now - r.at < WAIT_MAX_MS && r.at > cut);
   // A new wait starts at the second its record can name.
   return ended.length ? Math.min(...ended.map((r) => r.since)) : Math.floor(now / 1000) * 1000;
 }
@@ -523,7 +527,7 @@ export async function sayRebaseWait(repo, { issue, prNumber, wait, record }, opt
  */
 export async function clearRebaseWait(repo, { issue, prNumber, record, how = "sent" }, opts, { log = () => {} } = {}) {
   const text = { sent: `this Objective's rebase no longer waits for #${record.on}; it rebases now`, gaveUp: `this Objective's rebase stopped waiting for #${record.on} after ${hours} h, the longest Factory holds one for a sibling; it rebases now`, over: `this Objective's PR no longer waits for #${record.on} to rebase: it conflicts no more, or left review` }[how];
-  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true }, `Factory: ${text}.`, opts);
+  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true, over: how === "over" }, `Factory: ${text}.`, opts);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
   if (old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", `Factory: ${text}.`, opts, log);
 }

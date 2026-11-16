@@ -1394,10 +1394,11 @@ export class TrialUnread extends Error {
  * one of them has merged into the default branch `main`, and the paths (sorted; none when git names none). When both
  * heads merge cleanly into `main`, that is exact: the two merged trees are merged with `main` as their base. When one
  * does not (it conflicts with `main` and will be rebased whatever its siblings do), the two heads' own changes (each
- * since its merge base with `main`) are merged on one base: one head's base, the other's changes made again there when
- * they apply cleanly, so a head on an old base does not conflict with a sibling over a change of `main`'s, and git's
- * merge follows renames and line regions on both sides. When neither's changes apply on the other's base (both overlap
- * `main`'s changes between the two), whether they clash cannot be told: it is a conflict. Rejects with
+ * since its merge base with `main`) are merged on one base: one head's base, the other's changes made again there (its
+ * own lines winning over `main`'s changes between the two bases), so a head on an old base does not conflict with a
+ * sibling over a change of `main`'s, and git's merge follows renames and line regions on both sides. When neither's
+ * changes can be made on the other's base (a file deleted or renamed against a change), whether they clash cannot be
+ * told: it is a conflict, naming those files. Rejects with
  * TrialUnread when a commit cannot be had or git cannot merge them. `close()` removes the mirror.
  */
 export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
@@ -1457,12 +1458,14 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
     });
   // A head's merge base with main: where its own changes start.
   const baseOf = (h) => once(`base:${h}`, () => must(["merge-base", main, h], `${h.slice(0, 7)} has no history in common with the default branch`));
-  // Head `h`'s own changes (since `from`) made again on `onto`: the commit, or null when they do not apply there cleanly.
+  // Head `h`'s own changes (since `from`) made again on `onto`, its own lines winning where `onto` changed the same ones
+  // (-X theirs): {commit}, or {files} when they cannot be made there (a file one side deleted or renamed that the other
+  // changed, which no side's lines settle).
   const replay = (h, from, onto) =>
     once(`replay:${h}:${onto}`, async () => {
-      if (from === onto) return h;
-      const m = await mergeTree([`--merge-base=${from}`, onto, h], `${h.slice(0, 7)}'s changes onto ${onto.slice(0, 7)}`);
-      return m.code === 0 ? must(["commit-tree", m.tree, "-p", onto, "-m", "trial"], "a trial merge could not be written") : null;
+      if (from === onto) return { commit: h };
+      const m = await mergeTree(["-X", "theirs", `--merge-base=${from}`, onto, h], `${h.slice(0, 7)}'s changes onto ${onto.slice(0, 7)}`);
+      return m.code === 0 ? { commit: await must(["commit-tree", m.tree, "-p", onto, "-m", "trial"], "a trial merge could not be written") } : { files: m.files };
     });
   return {
     /** The default branch's head this mirror judges against (fetched at the first call). */
@@ -1481,16 +1484,19 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
       // One conflicts with main: its own changes and the other's, on one base. Each base in turn: the other head's own
       // changes made again there; a head on that base already stays as it is. git's merge finds renames on either side.
       const [ba, bb] = [await baseOf(a), await baseOf(b)];
+      const unmade = new Set();
       for (const [x, bx, y, by] of [[a, ba, b, bb], [b, bb, a, ba]]) {
         const y2 = await replay(y, by, bx);
-        if (!y2) continue;
-        const m = await mergeTree([`--merge-base=${bx}`, x, y2], `${a.slice(0, 7)} and ${b.slice(0, 7)}'s own changes`);
+        if (!y2.commit) {
+          for (const f of y2.files) unmade.add(f);
+          continue;
+        }
+        const m = await mergeTree([`--merge-base=${bx}`, x, y2.commit], `${a.slice(0, 7)} and ${b.slice(0, 7)}'s own changes`);
         return { conflict: m.code === 1, files: m.files, main };
       }
-      // Neither's changes apply on the other's base: they overlap main's changes between the two, so whether they clash
-      // with each other cannot be told; taken as a conflict (a bounded wait), with the files a merge of the two names.
-      const m = await mergeTree([a, b], `${a.slice(0, 7)} and ${b.slice(0, 7)}`);
-      return { conflict: true, files: m.files, main };
+      // Neither's changes can be made on the other's base (a delete or a rename against a change, both ways): whether
+      // they clash cannot be told, so it is a conflict (a bounded wait), naming the files that could not be carried over.
+      return { conflict: true, files: [...unmade].sort(), main };
     },
     close() {
       if (dir) rmSync(dir, { recursive: true, force: true });

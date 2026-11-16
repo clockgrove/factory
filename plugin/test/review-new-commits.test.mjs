@@ -524,7 +524,7 @@ test("#367: only_asked covers only at triage's confidence floor; a file git diff
     for (const low of [0.69, null]) {
       const g = await at(low);
       assert.deepEqual([g.review, g.verdict], [true, "only_asked"]);
-      assert.match(g.why, low === null ? /no stated confidence, under 0\.7/ : /confidence 0\.69, under 0\.7/);
+      assert.match(g.why, low === null ? /no stated confidence, under the default floor 0\.7/ : /confidence 0\.69, under the default floor 0\.7/);
     }
     // One NUL byte makes a text file binary to git: "Binary files … differ", its content unseen by any model.
     mkdirSync(join(r.work, "src"), { recursive: true });

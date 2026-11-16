@@ -773,7 +773,8 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Factory answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
  * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * reply other than Factory's own answer exists (logic.mjs factoryReply) or the root is Factory's placeholder; named once a
+ * reply by someone who can push (trustedAuthor) other than Factory's own answer exists (logic.mjs factoryReply) or the
+ * root is Factory's placeholder; named once a
  * person's reply answers it (logic.mjs answersComment). Factory's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
@@ -805,7 +806,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => !factoryReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
+    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => trustedAuthor(r) && !factoryReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
     return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
   });
 }

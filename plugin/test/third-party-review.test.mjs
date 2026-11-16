@@ -368,7 +368,8 @@ test("#331: code scanning's open comments reach the answer pass marked as untrus
   // included (#339's review had findings of its own and the comment was still left out).
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
   assert.match(src, /const thirdParty = answeredReviewers\(third\.logins\);/);
-  assert.match(src, /const toAnswer = answerList\(await unaddressedReviewComments\(repo, pr\.number, reviewerLogin, \{ \.\.\.token, reviewIds: await factoryReviewIds\(\), thirdParty \}\), \{ placeholder, first: scope\.first \}\);/);
+  assert.match(src, /const listedOpen = await unaddressedReviewComments\(repo, pr\.number, reviewerLogin, \{ \.\.\.token, reviewIds: await factoryReviewIds\(\), thirdParty \}\);/);
+  assert.match(src, /const toAnswer = answerList\(again\.length \? await unaddressedReviewComments\(repo, pr\.number, reviewerLogin, \{ \.\.\.token, reviewIds: await factoryReviewIds\(\), thirdParty \}\) : listedOpen, \{ placeholder, first: scope\.first \}\)/);
   // A first review that found nothing leaves code scanning's and the named reviewers' comments to answer.
   assert.deepEqual(answerList([{ id: 11 }, { id: codeql.comment.id, from: CODE_SCANNING }], { placeholder: true, first: true }).map((c) => c.id), [codeql.comment.id]);
   assert.match(src, /resolveFactoryThreads\(repo, pr\.number, issue, token, \{ thirdParty \}\)/);

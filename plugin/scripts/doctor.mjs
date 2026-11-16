@@ -31,7 +31,7 @@ import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
-import { triageKey } from "./lib/triage.mjs";
+import { triageKey, triageKeyState } from "./lib/triage.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
@@ -503,6 +503,16 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
   return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/factory@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
 }
 
+/**
+ * The finding check (lib/finding-check.mjs) as doctor says it: on with a decision model's key; without one a WARN, since
+ * Factory's reply then answers a reviewer finding unjudged. Read from triage's key (triage.mjs triageKeyState).
+ */
+export function findingCheckRow({ inputs, env = process.env, home } = {}) {
+  const { key, code } = triageKeyState({ inputs, env, ...(home ? { home } : {}) });
+  if (key) return PASS("finding check", "an AI Gateway key: the decision model judges each answer to a reviewer finding before its thread is resolved");
+  return WARN("finding check", `off (${code}): reviewer findings are not judged; Factory's reply answers each one`, env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4)");
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -517,6 +527,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
   // Local red-check triage (a usable gateway key) reruns flaky reds with this token: doctor checks it may (not in a stage).
   if (local && !job && token && triageKey({ inputs, env })) out.push(await probeRerun({ repo, token }));
+  // Where the key is in reach (local mode's file, the job's input): whether reviewer findings are judged.
+  if (local || job) out.push(findingCheckRow({ inputs, env }));
 
   // The workflow as the default branch on GitHub has it (what the next run uses), not a local copy that may be behind.
   const repoData = await getRepo(repo, { token });

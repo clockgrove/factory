@@ -72,8 +72,10 @@ import {
   progressReporter,
   remainingMs,
   unaddressedReviewComments,
-  answerDiffs,
+  answerDiff,
+  checkState,
   openFindingsExit,
+  readAnswerRounds,
   validationLoop,
   writeUsage,
   questionRaisedAt,
@@ -1381,7 +1383,32 @@ async function main() {
   // Factory's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
   // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
   // comments too.
-  const toAnswer = answerList(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), { placeholder, first: scope.first });
+  // The finding check (#368): what it judges each answer by, and its answers the gateway gave no verdict on (`unjudged`,
+  // over this stage). The repository's rules: AGENTS.md at the head, the protected paths and the validation commands.
+  const findingCheck = openFindingCheck({ inputs });
+  const unjudged = [];
+  const findingRules = async (head) => {
+    const agents = head ? await outbox.git(["show", `${head}:AGENTS.md`], { maxBytes: 64 * 1024 }).catch(() => null) : null;
+    return [agents?.code === 0 ? `AGENTS.md:\n${agents.stdout}` : "", `Protected paths (no pass may change them): ${protectedList.join(", ")}`, inputs.validation.length ? `Validation commands: ${inputs.validation.join("; ")}` : ""].filter(Boolean).join("\n\n");
+  };
+  const judgeAnswers = async (findings, repliesText) => {
+    const head = outbox.expected() || pr.head.sha;
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [] }));
+    unjudged.push(...r.unjudged);
+  };
+  // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
+  // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
+  const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty });
+  // A stage started only to judge them (no answer round: checkState judgeOnly) gives the worker none of them, so a gateway
+  // failure never buys an answer pass past the rounds; one read as not resolved waits for the round the exit takes.
+  const lastCheck = findingCheck.judge && listedOpen.some((c) => c.earlier) ? checkState(await readAnswerRounds(repo, { issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel }, token).catch(() => null)) : { unjudged: [] };
+  const again = listedOpen.filter((c) => c.earlier && lastCheck.unjudged.some((id) => String(id) === String(c.id)));
+  if (again.length) {
+    await progress(`finding check: judging again ${again.length} answer(s) the last stage got no verdict on`);
+    await judgeAnswers(again, JSON.stringify(again.map((c) => ({ id: c.id, body: c.earlier }))));
+  }
+  const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
+  const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   // A red required check the stage held (heldRed: the checks the reviewer ran beside, or the merge queue's run) is the
@@ -1540,11 +1567,9 @@ async function main() {
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
 
   // The finding check (#368): each finding the answer pass replied to is judged by the decision model against the reply and
-  // what the passes wrote to its file; only a yes resolves its thread (finding-check.mjs). Not after a refused push.
-  if (repliesPosted && !outbox.failed) {
-    const answeredTo = outbox.expected() || answerTo;
-    await checkAnswers({ repo, issue, prNumber: pr.number, findings: toAnswer, repliesText: repliesPosted, check: openFindingCheck({ inputs }), diffsOf: (paths) => answerDiffs(outbox.git, { base: outbox.base, from: answerFrom, head: answeredTo, paths }), issueBody: issueData.body || "", opts: token, progress }).catch((e) => log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`));
-  }
+  // what the PR changed since the finding was raised; only a yes resolves its thread (finding-check.mjs). Not after a
+  // refused push.
+  if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);
   // Threads a person answered (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR. Not after a refused push: the answers never reached the branch.
   const resolvedThreads = outbox.failed
@@ -1560,7 +1585,8 @@ async function main() {
   const after = await observe(repo, outbox, { branch, prNumber: pr.number }, token);
   pr = after.pr;
   // A named reviewer's comment counts only when the answer pass was given it (third-party-review.mjs exitUnaddressed).
-  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), toAnswer.map((c) => c.id));
+  // And one whose answer the finding check is still to judge.
+  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), [...toAnswer.map((c) => c.id), ...again.map((c) => c.id), ...unjudged.map((u) => u.id)]);
   // The answer pass's own result counts: one that failed while applying maintainers' decisions Blocks even on green
   // validation (green proves the old code, not the change asked for); one that only answered findings is judged as
   // the worker's run is, where green validation outweighs a late harness error.
@@ -1605,7 +1631,7 @@ async function main() {
   await dropLabel();
   // Findings still open after the answer pass (no answer, or one the finding check did not read as resolving them), with
   // the rest of the exit delivered: another answer round within the bound, else the Block names them (session.mjs).
-  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen }, token);
+  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged }, token);
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally the Question stands: logic.mjs answerDuring). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
   // applies the answer (or, with nothing new since the Question, makes it a Question again). Either alone, or

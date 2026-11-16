@@ -855,10 +855,11 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }
-  // `findingsOpen`: the review stage gives them another answer round within its bound before this Block stands.
-  if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) still open after the answer pass`, cause: "work", findingsOpen: true };
-  if (record?.exit === "blocked") return workerBlocked(record);
   const open = question !== undefined ? question : record?.exit === "question";
+  // A Question the answer pass raised stands with findings still open: it carries them to a maintainer. Otherwise
+  // `findingsOpen`: the review stage gives them another answer round within its bound before this Block stands.
+  if (reviewUnaddressed > 0 && !open) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) still open after the answer pass`, cause: "work", findingsOpen: true };
+  if (record?.exit === "blocked") return workerBlocked(record);
   if (open) return openQuestion(record);
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error", cause: "factory" };
   return { exit: "delivered", reason: "" };
